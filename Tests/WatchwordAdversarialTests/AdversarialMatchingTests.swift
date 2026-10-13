@@ -55,11 +55,11 @@ struct AdversarialMatchingTests {
         #expect(ranking.isEmpty)
     }
 
-    static let malformedDomains = [
+    static let malformedDomainInputs = [
         "amazon.com/", "amazon.com@x", "amazon.com:443", "ama zon.com", "amazon..com", ".amazon.com", "amazon.com%2F",
     ]
 
-    @Test("hosts with embedded control characters or separators are refused", arguments: malformedDomains)
+    @Test("hosts with embedded control characters or separators are refused", arguments: malformedDomainInputs)
     func malformedDomains(_ host: String) {
         let (ranking, error) = ItemRanker.rank(items: Self.items, identifier: ServiceIdentifier(host, kind: .domain))
         #expect(ranking.isEmpty)
