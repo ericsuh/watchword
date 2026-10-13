@@ -18,26 +18,30 @@ struct AdversarialMatchingTests {
     )
     static let items = [amazon, aws]
 
-    @Test("user-info trick never yields a credential", arguments: [
+    static let userInfoURLs = [
         "https://amazon.com@evil.example/",
         "https://amazon.com:password@evil.example/",
         "http://user@amazon.com.evil.example/",
-    ])
+    ]
+
+    @Test("user-info trick never yields a credential", arguments: userInfoURLs)
     func userInfo(_ url: String) {
         let (ranking, error) = ItemRanker.rank(items: Self.items, identifier: ServiceIdentifier(url, kind: .url))
         #expect(ranking.isEmpty)
         #expect(error != nil)
     }
 
-    @Test("look-alike hosts do not match", arguments: [
+    static let lookAlikeHosts = [
         "amazon.com.evil.example",
         "evil-amazon.com",
         "amazon.co",
         "amazoncom",
-        "xn--mazon-1nf.com",    // IDN encoding of a homograph
-        "аmazon.com",           // Cyrillic 'а'
-        "amazon.com\u{200B}",   // zero-width space
-    ])
+        "xn--mazon-1nf.com",  // IDN encoding of a homograph
+        "аmazon.com",  // Cyrillic 'а'
+        "amazon.com\u{200B}",  // zero-width space
+    ]
+
+    @Test("look-alike hosts do not match", arguments: lookAlikeHosts)
     func lookAlikes(_ host: String) {
         let ranking = ItemRanker.rank(items: Self.items, host: host)
         #expect(ranking.isEmpty, "\(host) matched \(ranking.primary.map(\.item.title))")
@@ -51,9 +55,11 @@ struct AdversarialMatchingTests {
         #expect(ranking.isEmpty)
     }
 
-    @Test("hosts with embedded control characters or separators are refused", arguments: [
+    static let malformedDomains = [
         "amazon.com/", "amazon.com@x", "amazon.com:443", "ama zon.com", "amazon..com", ".amazon.com", "amazon.com%2F",
-    ])
+    ]
+
+    @Test("hosts with embedded control characters or separators are refused", arguments: malformedDomains)
     func malformedDomains(_ host: String) {
         let (ranking, error) = ItemRanker.rank(items: Self.items, identifier: ServiceIdentifier(host, kind: .domain))
         #expect(ranking.isEmpty)

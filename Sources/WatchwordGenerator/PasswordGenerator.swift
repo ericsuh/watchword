@@ -18,9 +18,11 @@ public struct PasswordGenerator<RNG: RandomNumberGenerator> {
     public mutating func generate(_ policy: RandomPasswordPolicy) throws -> String {
         try policy.validate()
         let alphabet = try policy.alphabet()
-        let requiredClasses = policy.requireEachClass
-            ? policy.classes.members.map { Set(policy.characters(in: $0)) }.filter { !$0.isEmpty }
-            : []
+        var requiredClasses: [Set<Character>] = []
+        if policy.requireEachClass {
+            let classSets = policy.classes.members.map { Set(policy.characters(in: $0)) }
+            requiredClasses = classSets.filter { !$0.isEmpty }
+        }
 
         for _ in 0..<maxAttempts {
             var chars: [Character] = []

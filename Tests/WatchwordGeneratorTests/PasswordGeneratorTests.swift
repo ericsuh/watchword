@@ -11,13 +11,15 @@ struct PasswordGeneratorTests {
         #expect(password.count == length)
     }
 
-    @Test("uses only the selected classes", arguments: [
-        CharacterClasses.lowercase,
+    static let classCombinations: [CharacterClasses] = [
+        .lowercase,
         [.lowercase, .uppercase],
         [.digits],
         [.uppercase, .digits, .symbols],
         .all,
-    ])
+    ]
+
+    @Test("uses only the selected classes", arguments: classCombinations)
     func classesRespected(_ classes: CharacterClasses) throws {
         var generator = PasswordGenerator(rng: SeededGenerator(seed: 2))
         let policy = RandomPasswordPolicy(length: 32, classes: classes, requireEachClass: false)

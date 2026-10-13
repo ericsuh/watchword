@@ -73,9 +73,9 @@ public enum HostNormalizer {
             candidate = String(candidate.dropFirst().dropLast())
         }
         if candidate.contains(":") {
-            let looksLikeIPv6 = candidate.allSatisfy { $0.isHexDigit || $0 == ":" || $0 == "." }
-                && candidate.filter { $0 == ":" }.count >= 2
-            guard looksLikeIPv6 else { throw HostNormalizationError.invalidHost(raw) }
+            let hexOrSeparator = candidate.allSatisfy { $0.isHexDigit || $0 == ":" || $0 == "." }
+            let colonCount = candidate.filter { $0 == ":" }.count
+            guard hexOrSeparator, colonCount >= 2 else { throw HostNormalizationError.invalidHost(raw) }
             return candidate
         }
 

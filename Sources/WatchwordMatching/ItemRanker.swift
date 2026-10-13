@@ -41,20 +41,19 @@ public enum ItemRanker {
             return ItemRanking(primary: [], shadowed: [])
         }
 
-        let primary = matched
-            .filter { $0.match.specificity == top }
-            .sorted { $0.item.title < $1.item.title }
-            .map { RankedMatch(item: $0.item, match: $0.match, isShadowed: false) }
+        let atTop = matched.filter { $0.match.specificity == top }
+        let belowTop = matched.filter { $0.match.specificity < top }
 
-        let shadowed = matched
-            .filter { $0.match.specificity < top }
-            .sorted {
-                if $0.match.specificity != $1.match.specificity {
-                    return $0.match.specificity > $1.match.specificity
-                }
-                return $0.item.title < $1.item.title
+        let primarySorted = atTop.sorted { $0.item.title < $1.item.title }
+        let primary = primarySorted.map { RankedMatch(item: $0.item, match: $0.match, isShadowed: false) }
+
+        let shadowedSorted = belowTop.sorted { lhs, rhs in
+            if lhs.match.specificity != rhs.match.specificity {
+                return lhs.match.specificity > rhs.match.specificity
             }
-            .map { RankedMatch(item: $0.item, match: $0.match, isShadowed: true) }
+            return lhs.item.title < rhs.item.title
+        }
+        let shadowed = shadowedSorted.map { RankedMatch(item: $0.item, match: $0.match, isShadowed: true) }
 
         return ItemRanking(primary: primary, shadowed: shadowed)
     }
