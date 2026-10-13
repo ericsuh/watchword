@@ -14,7 +14,7 @@ final class ItemRankerTests: XCTestCase {
         let ranking = ItemRanker.rank(items: ScenarioFixtures.all, host: "signin.aws.amazon.com")
         XCTAssertEqual(ranking.primary.map(\.item.title), ["AWS root"])
         XCTAssertEqual(ranking.shadowed.map(\.item.title), ["Amazon"])
-        XCTAssertTrue(ranking.shadowed.allSatisfy(\.isShadowed))
+        XCTAssertTrue(ranking.shadowed.allSatisfy { $0.isShadowed })
     }
 
     func testAWSConsoleSubdomainStillPrefersAWS() {

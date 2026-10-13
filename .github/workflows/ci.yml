@@ -13,6 +13,12 @@ concurrency:
 permissions:
   contents: read
 
+# `bash` as the default shell runs with `-eo pipefail`, so a failing `swift test` is not masked
+# by the `| tee` that captures its output.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   package-tests:
     name: Package tests (${{ matrix.name }})
@@ -50,6 +56,14 @@ jobs:
       # `swift test` runs both the Swift Testing suites and the XCTest suites in the package.
       - name: Test (Swift Testing + XCTest)
         run: swift test --parallel --enable-code-coverage 2>&1 | tee test-output.log
+
+      # Belt and braces: both frameworks must have executed tests, not merely compiled.
+      - name: Verify both test frameworks ran
+        run: |
+          grep -Eq "Test run with [1-9][0-9]* tests?" test-output.log \
+            || { echo "::error::No Swift Testing tests were executed"; exit 1; }
+          grep -Eq "Test Case .* passed|Executed [1-9][0-9]* tests?" test-output.log \
+            || { echo "::error::No XCTest tests were executed"; exit 1; }
 
       - name: Export coverage
         if: always()

@@ -137,7 +137,7 @@ struct PassphraseTests {
         var generator = PasswordGenerator(rng: SeededGenerator(seed: 9))
         let pin = try generator.generatePIN(digits: digits)
         #expect(pin.count == digits)
-        #expect(pin.allSatisfy(\.isNumber))
+        #expect(pin.allSatisfy { $0.isNumber })
     }
 
     @Test("empty wordlist is an error")

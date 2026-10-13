@@ -52,7 +52,7 @@ struct AdversarialGeneratorTests {
         var generator = PasswordGenerator(rng: AllOnes())
         let policy = RandomPasswordPolicy(length: 16, classes: .digits, requireEachClass: false)
         let password = try generator.generate(policy)
-        #expect(password.allSatisfy(\.isNumber))
+        #expect(password.allSatisfy { $0.isNumber })
     }
 
     @Test("entropy estimate never exceeds the unconstrained bound")
