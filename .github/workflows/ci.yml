@@ -62,7 +62,8 @@ jobs:
         run: |
           grep -Eq "Test run with [1-9][0-9]* tests?" test-output.log \
             || { echo "::error::No Swift Testing tests were executed"; exit 1; }
-          grep -Eq "Test Case .* passed|Executed [1-9][0-9]* tests?" test-output.log \
+          # XCTest under `swift test --parallel` prints one "[n/m] Testing Target.Class/test" line per test.
+          grep -Eq "\[[0-9]+/[1-9][0-9]*\] Testing [A-Za-z]+Tests\.|Test Case .* passed|Executed [1-9][0-9]* tests?" test-output.log \
             || { echo "::error::No XCTest tests were executed"; exit 1; }
 
       - name: Export coverage

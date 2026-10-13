@@ -4,11 +4,16 @@ import Testing
 
 @Suite("Adversarial: password generator", .tags(.adversarial))
 struct AdversarialGeneratorTests {
-    @Test("unsatisfiable policies fail fast instead of looping forever")
+    @Test("a degenerate RNG cannot make rejection sampling loop forever")
     func unsatisfiable() {
-        var generator = PasswordGenerator()
-        // Four required classes cannot fit in three characters.
-        let policy = RandomPasswordPolicy(length: 3, classes: .all, requireEachClass: true)
+        struct Constant: RandomNumberGenerator {
+            mutating func next() -> UInt64 { UInt64.max }
+        }
+        // A constant RNG always yields the same character, so "require each class" can never be
+        // satisfied; the generator must give up after `maxAttempts` rather than spin.
+        var generator = PasswordGenerator(rng: Constant())
+        generator.maxAttempts = 100
+        let policy = RandomPasswordPolicy(length: 8, classes: .all, requireEachClass: true)
         #expect(throws: PasswordGenerationError.unsatisfiablePolicy) { try generator.generate(policy) }
     }
 
