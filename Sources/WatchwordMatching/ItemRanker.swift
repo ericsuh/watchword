@@ -1,0 +1,83 @@
+import Foundation
+import WatchwordModel
+
+/// One item that matched the requested host, with the best of its scope matches.
+public struct RankedMatch: Sendable, Hashable {
+    public let item: Item
+    public let match: ScopeMatch
+    /// `true` when another item matched the same host with a strictly higher specificity.
+    /// Shadowed items are listed under "other accounts on this site" and are never pre-selected.
+    public let isShadowed: Bool
+}
+
+public struct ItemRanking: Sendable, Hashable {
+    /// Items with the top specificity, sorted by title. These are the suggestions to offer.
+    public let primary: [RankedMatch]
+    /// Items that matched less specifically, sorted by specificity descending then title.
+    public let shadowed: [RankedMatch]
+
+    public var isEmpty: Bool { primary.isEmpty && shadowed.isEmpty }
+}
+
+/// Implements the ranking rule of PRD F6.6 / architecture §9: the most specific scope wins, less
+/// specific matches are shadowed. This is what keeps an Amazon retail login off the AWS console
+/// sign-in page even though both live under `amazon.com`.
+public enum ItemRanker {
+    public static func rank(items: [Item], host: String) -> ItemRanking {
+        var matched: [(item: Item, match: ScopeMatch)] = []
+        for item in items {
+            var best: ScopeMatch?
+            for scope in item.scopes {
+                guard let candidate = ScopeMatcher.match(scope, host: host) else { continue }
+                if let current = best, candidate.specificity <= current.specificity { continue }
+                best = candidate
+            }
+            if let best {
+                matched.append((item, best))
+            }
+        }
+
+        guard let top = matched.map({ $0.match.specificity }).max() else {
+            return ItemRanking(primary: [], shadowed: [])
+        }
+
+        let primary = matched
+            .filter { $0.match.specificity == top }
+            .sorted { $0.item.title < $1.item.title }
+            .map { RankedMatch(item: $0.item, match: $0.match, isShadowed: false) }
+
+        let shadowed = matched
+            .filter { $0.match.specificity < top }
+            .sorted {
+                if $0.match.specificity != $1.match.specificity {
+                    return $0.match.specificity > $1.match.specificity
+                }
+                return $0.item.title < $1.item.title
+            }
+            .map { RankedMatch(item: $0.item, match: $0.match, isShadowed: true) }
+
+        return ItemRanking(primary: primary, shadowed: shadowed)
+    }
+
+    /// Convenience: normalize the OS-provided identifier, then rank. Any normalization failure
+    /// yields an empty ranking (fail closed) and the error for logging.
+    public static func rank(
+        items: [Item],
+        identifier: ServiceIdentifier
+    ) -> (ItemRanking, HostNormalizationError?) {
+        do {
+            let host = try HostNormalizer.normalize(identifier)
+            return (rank(items: items, host: host), nil)
+        } catch let error as HostNormalizationError {
+            return (ItemRanking(primary: [], shadowed: []), error)
+        } catch {
+            return (ItemRanking(primary: [], shadowed: []), .invalidHost(identifier.identifier))
+        }
+    }
+
+    /// Defence in depth for the AutoFill request handler: before returning a credential for
+    /// `item`, confirm the item actually matches the requested host and is not shadowed.
+    public static func isSelectable(_ item: Item, for host: String, among items: [Item]) -> Bool {
+        rank(items: items, host: host).primary.contains { $0.item.id == item.id }
+    }
+}

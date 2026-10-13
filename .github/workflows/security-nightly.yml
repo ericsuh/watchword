@@ -1,0 +1,58 @@
+name: Security nightly
+
+on:
+  schedule:
+    # 03:17 UTC daily; off the hour to avoid the top-of-hour rush.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  long-adversarial:
+    # Longer randomised runs of the sync/sharing simulations and adversarial suites
+    # (docs/04-test-plan.md §1). WATCHWORD_LONG_TESTS lets tests opt into more iterations.
+    name: Long randomised adversarial runs
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "^26.1"
+      - name: Run with extended iteration budget
+        env:
+          WATCHWORD_LONG_TESTS: "1"
+          WATCHWORD_TEST_SEED: ${{ github.run_id }}
+        run: swift test --parallel --filter 'WatchwordAdversarialTests|LongRunning'
+
+  fuzz:
+    # libFuzzer harnesses for parsers and the envelope decoder (docs/04-test-plan.md §6.7).
+    # Each executable target under Fuzz/ is built with -sanitize=fuzzer and run for a bounded
+    # time. Skips cleanly until the first harness exists.
+    name: Fuzz parsers
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "^26.1"
+      - name: Fuzz
+        run: |
+          if [ ! -d Fuzz ]; then
+            echo "::notice::No Fuzz/ directory yet; nothing to fuzz"
+            exit 0
+          fi
+          swift build -c release -Xswiftc -sanitize=fuzzer -Xswiftc -parse-as-library --product WatchwordFuzz
+          mkdir -p corpus artifacts
+          "$(swift build -c release --show-bin-path)/WatchwordFuzz" corpus \
+            -max_total_time=1800 -artifact_prefix=artifacts/ -rss_limit_mb=4096
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: artifacts
+          if-no-files-found: ignore
