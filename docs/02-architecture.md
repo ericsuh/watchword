@@ -184,7 +184,15 @@ before the 2^32 random-nonce limit. Callers that know their record is small pass
 (wrapped keys use 1 KiB), so a hostile store cannot make a 113-byte keyset cost tens of megabytes to
 reject.
 
-Plaintext payloads are canonical CBOR documents with a `schemaVersion`. Item payload:
+Plaintext payloads carry a `schemaVersion` (bound into the AAD, so a record relabelled with another
+schema fails closed). The item payload is JSON with sorted keys (`WatchwordKit.ItemCodec`), not
+canonical CBOR: it is decrypted and decoded but never signed or compared, so it needs no canonical
+form, and decoding it needs a parser for strings and nested structures, which `CBORValue`
+deliberately lacks so that attacker-supplied CBOR never reaches a parser of ours. Authentication
+proves only that a holder of the vault key wrote the payload — from milestone 4 any member of a
+shared vault (A4) — so the decoder still treats it as hostile: a 1 MiB cap before decoding, and the
+decoded `id`, `vaultID` and `version` must equal the storage location's or the record is refused
+(`VaultError.recordMismatch`). Item payload:
 
 ```
 Item { id, vaultID, title, scopes: [ServiceScope], fields: [Field], tags, notes,
@@ -200,14 +208,34 @@ extension build its in-memory index after unlock without decrypting every full i
 plaintext index of its own; AutoFill QuickType suggestions are instead published to the OS-managed
 `ASCredentialIdentityStore`, which the OS protects and which is cleared when the extension is
 disabled. That store is still a metadata disclosure outside our control — see the threat model —
-so F6.8 allows per-item exclusion.
+so F6.8 allows per-item exclusion. The index record is built with the AutoFill extension (milestone 5);
+milestone 2 stores full item records only.
 
 ## 6. Local storage
 
-- SQLite in the App Group container, accessed through a thin, audited wrapper (no ORM). Tables:
-  `records(recordID, vaultID, kind, keyID, envelope BLOB, lamport, deviceID, deletedAt)`,
-  `changelog(deviceID, seq, envelope BLOB, pushed)`, `sync_state`, `hibp_cache(prefix, fetchedAt,
-  suffixes BLOB)`.
+- SQLite in the App Group container, accessed through a thin, audited wrapper (no ORM;
+  `SecureMemory.SQLiteConnection`, which only binds parameters and never interpolates). Milestone 2
+  tables, both `STRICT` with length checks on every UUID column: `account` (one row: account ID,
+  device ID, personal vault and key IDs, KDF parameters, salt, AUK key ID, the wrapped keyset and
+  its version, the credential generation, Emergency Kit confirmation) and `records(record_id, kind,
+  vault_id, key_id, version, device_id, envelope BLOB)` keyed by `(record_id, kind)`. Still to come:
+  `changelog(deviceID, seq, envelope BLOB, pushed)` and `sync_state` (milestone 3), `hibp_cache`
+  (milestone 6), and tombstones (`deletedAt`) once deletions have to sync. The schema version is
+  `PRAGMA user_version`; a newer one is refused, not misread.
+- The file is untrusted input (A8 can edit it while the app is locked; a restored backup is anyone's).
+  The connection is opened with `SQLITE_OPEN_NOFOLLOW` (the database path is resolved first, since
+  `/var` is itself a link), `trusted_schema = OFF`, `cell_size_check = ON` and `secure_delete = ON`;
+  every row is re-validated when read and reported as `malformedRow` rather than repaired; reads are
+  capped at 64 MiB per value. Versions only move forward (`versionRegression`), and creating an
+  account can never overwrite one.
+- Every column except `envelope` is the record's storage location: readers rebuild the expected
+  `EnvelopeContext` from the columns, so editing a row's vault, record ID, key ID, kind or version
+  makes it unreadable before decryption (adversarial suite "local vault store"). One unreadable
+  record is listed as such (`ItemListing.unreadable`), never hidden, repaired or overwritten.
+- Known limit until sync: an attacker who can write the file can roll an item back to an *older*
+  ciphertext together with its older version column, which is self-consistent. Detecting that needs
+  a version high-water mark outside the file; the sync layer's monotonic check (milestone 3) is the
+  planned answer.
 - File protection: `completeUntilFirstUserAuthentication` for the ciphertext store (needed so the
   AutoFill extension and background sync can read ciphertext while the device is locked after first
   unlock); key material is never in this file.
@@ -215,9 +243,16 @@ so F6.8 allows per-item exclusion.
   - `secretKey` — `WhenPasscodeSetThisDeviceOnly`, no access-control prompt (unlock already requires
     the password).
   - `quickUnlockKey` — a random 256-bit Local Unlock Key (LUK) that wraps AUK; access control
-    `biometryCurrentSet` (iOS) or `biometryCurrentSet .or .watch` / `.companion` (macOS, F5.3),
-    `WhenPasscodeSetThisDeviceOnly`. Enrolment change invalidates it automatically. Its creation time
-    and failure counter live alongside so F5.4 can expire it.
+    `biometryCurrentSet` (iOS) or `biometryCurrentSet .or .companion` (`.watch` before macOS 15)
+    (macOS, F5.3), `WhenPasscodeSetThisDeviceOnly`; never `.userPresence`, `.devicePasscode` or
+    `.biometryAny`, which would let a known passcode or a newly enrolled face release it. Enrolment
+    change invalidates it automatically. A fresh LUK is generated on every password unlock.
+  - `quickUnlockState` — the policy inputs of F5.4 (password-unlock time, failure counter, app
+    version, credential generation, biometric domain state) and the AUK sealed under the LUK as an
+    `.accountHeader` envelope bound to the AUK's key ID and the credential generation. Kept in the
+    Keychain rather than the database so the failure counter cannot be reset by editing a file.
+  - All items: `kSecUseDataProtectionKeychain` (iOS semantics on macOS), non-synchronisable,
+    accessed through `WatchwordPlatform.SystemKeychainStore`.
   - `deviceSigningKey` — Secure Enclave P-256 key used to sign this device's change-log segments
     in addition to the account Ed25519 key (lets other devices distinguish which device wrote what).
 
@@ -373,11 +408,36 @@ Quick-unlock policy (`UnlockPolicy`) is a pure function of (now, lastPasswordUnl
 failedAttempts, appVersion, enrolmentChanged, settings) → `.allowed | .requirePassword(reason)`,
 which makes F5.4 unit-testable. The extension uses the same policy with its own `LAContext`.
 
+As built in milestone 2 (`WatchwordKit.VaultSession`):
+
+- **No boolean anywhere.** `BiometricGate` reports only enrolment; it cannot authorise. The
+  biometric check *is* the Keychain read of the LUK, and unlocking needs that LUK to open the wrapped
+  AUK, and the AUK to open the keyset. A gate that says yes without the Keychain releasing the key
+  unlocks nothing (adversarial suite "unlock and quick unlock").
+- **Refusal destroys.** When the policy refuses, the LUK is deleted rather than merely ignored, so a
+  later bug cannot revive an expired enrolment; a biometric re-enrolment also forgets the state.
+  After `maximumFailedAttempts` the LUK is deleted and no further prompt is shown. Bytes from the
+  Keychain that fail to open the wrapped AUK destroy the enrolment.
+- **Clock.** Elapsed time is wall-clock; a clock that reads earlier than the last password unlock
+  is treated as expired, not as zero. Winding the clock back *within* the window is not detected
+  (no trusted time source); it still needs the enrolled biometric, so the interval is about
+  re-practising the password, not about stopping a thief.
+- **Lock wins.** `VaultSession` is an actor and actors are re-entrant across `await`. A lock epoch
+  is checked after every suspension, so a `lock()` that lands during an unlock discards the derived
+  keys (`lockedDuringUnlock`) and one that lands during a save fails it (`locked`) instead of sealing
+  with a zeroised key.
+- **Auto-lock** (`AutoLockPolicy`, F5.5) is likewise pure: idle timeout, background grace (default
+  zero: backgrounding locks at once), screen lock/sleep, and a clock that moved backwards locks.
+
 ## 11. Secure memory
 
 `SecureMemory` is the only module allowed to use unsafe pointers. It provides `SecureBytes`, the
 `SymmetricKey` bridging for CryptoKit, `ConstantTime` comparison, and the CommonCrypto PBKDF2 call
 (which needs raw pointers, and reads the password from and writes the key into protected storage).
+From milestone 2 it also holds the four system bindings whose signatures are pointer-typed
+(ADR 0001, milestone 2 amendment): the SQLite wrapper, `SecItemCopyMatching` (which returns
+Keychain data straight into `SecureBytes`), `LAContext.canEvaluatePolicy` and the PDF
+`CGContext` initializer. Each is one small file with a safe API.
 `SecureBytes`:
 
 - heap storage that is page-aligned and a whole number of pages, so `mlock` (best effort; the result
@@ -460,12 +520,15 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordEnvelope     envelope format, AAD context, KDF parameter validation
   Sources/WatchwordCrypto       2SKD, keyset, vault keys, HPKE wrap  (CryptoKit)   [milestone 1, done]
   Sources/SecureMemory          SecureBytes (only unsafe code)                      [milestone 1, done]
-  Sources/WatchwordStore        SQLite ciphertext store                            [milestone 2]
+  Sources/WatchwordStore        record-store port, in-memory and SQLite stores     [milestone 2, done]
   Sources/WatchwordSync         change log, merge, SyncTransport protocol          [milestone 3]
   Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
   Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 6]
   Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
-  Sources/WatchwordKit          VaultSession façade used by all UI targets         [milestone 2+]
+  Sources/WatchwordKit          VaultSession façade, UnlockPolicy, AutoLockPolicy,
+                                ports (KeychainStore, BiometricGate, WallClock)     [milestone 2, done]
+  Sources/WatchwordPlatform     Apple adapters: SystemKeychainStore,
+                                LocalAuthenticationGate, Emergency Kit PDF          [milestone 2, done]
   Sources/WatchwordTestSupport  seeded/broken generators (milestone 1); fakes for every port and
                                 scenario builders as the ports arrive
 Apps/ (Xcode project generated with XcodeGen from project.yml)
@@ -473,8 +536,12 @@ Apps/ (Xcode project generated with XcodeGen from project.yml)
 ```
 
 Ports (protocols) injected into the core: `KeychainStore`, `BiometricGate`, `RandomSource`,
-`Clock`, `HTTPClient`, `SyncTransport`, `CredentialIdentityPublisher`, `FileAccess`. Production
-adapters live in `Apps/`; fakes live in `WatchwordTestSupport`.
+`Clock`, `HTTPClient`, `SyncTransport`, `CredentialIdentityPublisher`, `FileAccess`. Milestone 2
+has `RecordStore`, `KeychainStore`, `BiometricGate` and `WallClock`; randomness is an injected
+`RandomNumberGenerator`. Production adapters live in the package (`WatchwordPlatform`,
+`SQLiteRecordStore`) rather than `Apps/`, so the strict-memory-safety job, the unsafe tripwire,
+lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live in
+`WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`).
 
 ## 16. Open questions tracked as ADR candidates
 
@@ -486,4 +553,6 @@ adapters live in `Apps/`; fakes live in `WatchwordTestSupport`.
 - A device registry signed by existing devices (review finding D9). Today every device holds the
   account Ed25519 key, so a lost device cannot be excluded without rotating the account key.
   Needed before sync ships.
-- OS QuickType behaviour with overlapping domain identities (verify on device, milestone 2).
+- OS QuickType behaviour with overlapping domain identities. Planned for milestone 2 but not yet
+  verified: it needs a physical device with the AutoFill extension publishing identities, which
+  arrives with milestone 5. Carried to milestone 5's on-device QA.

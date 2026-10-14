@@ -47,3 +47,27 @@ public struct Field: Hashable, Codable, Sendable, Identifiable {
         self.meta = meta
     }
 }
+
+/// 2FA recovery codes (PRD F1.2, scenario S2): `value` holds one code per line and `meta["used"]` the zero-based
+/// indices of spent codes, comma-separated.
+extension Field {
+    static let usedCodesKey = "used"
+
+    public var recoveryCodes: [String] {
+        guard kind == .recoveryCodes else { return [] }
+        return value.split(whereSeparator: \.isNewline).map(String.init)
+    }
+
+    public var usedRecoveryCodeIndices: Set<Int> {
+        guard kind == .recoveryCodes, let used = meta[Field.usedCodesKey] else { return [] }
+        return Set(used.split(separator: ",").compactMap { Int($0) }.filter { recoveryCodes.indices.contains($0) })
+    }
+
+    /// Marks the code at `index` as spent (or unspent). Out-of-range indices are ignored.
+    public mutating func markRecoveryCode(at index: Int, used: Bool) {
+        guard kind == .recoveryCodes, recoveryCodes.indices.contains(index) else { return }
+        var indices = usedRecoveryCodeIndices
+        if used { indices.insert(index) } else { indices.remove(index) }
+        meta[Field.usedCodesKey] = indices.sorted().map(String.init).joined(separator: ",")
+    }
+}

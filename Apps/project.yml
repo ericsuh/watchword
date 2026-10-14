@@ -1,0 +1,217 @@
+# Watchword apps (docs/02-architecture.md §15, docs/03-implementation-plan.md milestone 2).
+#
+# Generate with `xcodegen generate --spec Apps/project.yml --project Apps` (CI does the same). The generated
+# Watchword.xcodeproj is not committed. All security-relevant logic lives in the Swift package one directory up; the
+# targets here are UI and OS glue only.
+name: Watchword
+options:
+  bundleIdPrefix: com.ericsuh
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # SE-0458 for the app and extension code too (Xcode 26+; older Xcodes ignore the setting). The
+    # package targets get the same check from the strict-memory-safety CI job.
+    SWIFT_STRICT_MEMORY_SAFETY: YES
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    DEAD_CODE_STRIPPING: YES
+    # Identifiers the app reads at run time from its Info.plist (AppEnvironment.swift).
+    WATCHWORD_APP_GROUP_IOS: group.com.ericsuh.Watchword
+    WATCHWORD_APP_GROUP_MACOS: $(TeamIdentifierPrefix)com.ericsuh.Watchword
+    WATCHWORD_KEYCHAIN_GROUP: $(AppIdentifierPrefix)com.ericsuh.Watchword.shared
+packages:
+  Watchword:
+    path: ..
+
+targetTemplates:
+  WatchwordApp:
+    type: application
+    sources:
+      - path: Shared
+    dependencies:
+      - package: Watchword
+        product: WatchwordKit
+      - package: Watchword
+        product: WatchwordPlatform
+      - package: Watchword
+        product: WatchwordStore
+      - package: Watchword
+        product: WatchwordModel
+      - package: Watchword
+        product: WatchwordMatching
+      - package: Watchword
+        product: WatchwordGenerator
+    settings:
+      base:
+        PRODUCT_NAME: Watchword
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.Watchword
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Watchword
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSFaceIDUsageDescription: Watchword uses Face ID to unlock your vault without typing your account password.
+
+targets:
+  Watchword-iOS:
+    templates: [WatchwordApp]
+    platform: iOS
+    sources:
+      - path: iOS
+    info:
+      path: iOS/Info.plist
+      properties:
+        WatchwordAppGroup: $(WATCHWORD_APP_GROUP_IOS)
+        WatchwordKeychainGroup: $(WATCHWORD_KEYCHAIN_GROUP)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    entitlements:
+      path: iOS/Watchword.entitlements
+      properties:
+        com.apple.security.application-groups: [$(WATCHWORD_APP_GROUP_IOS)]
+        keychain-access-groups: [$(WATCHWORD_KEYCHAIN_GROUP)]
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+    dependencies:
+      - target: AutoFillExtension-iOS
+        embed: true
+
+  Watchword-macOS:
+    templates: [WatchwordApp]
+    platform: macOS
+    sources:
+      - path: macOS
+    info:
+      path: macOS/Info.plist
+      properties:
+        WatchwordAppGroup: $(WATCHWORD_APP_GROUP_MACOS)
+        WatchwordKeychainGroup: $(WATCHWORD_KEYCHAIN_GROUP)
+    entitlements:
+      path: macOS/Watchword.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-write: true
+        com.apple.security.application-groups: [$(WATCHWORD_APP_GROUP_MACOS)]
+        keychain-access-groups: [$(WATCHWORD_KEYCHAIN_GROUP)]
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+    settings:
+      base:
+        ENABLE_HARDENED_RUNTIME: YES
+    dependencies:
+      - target: AutoFillExtension-macOS
+        embed: true
+
+  # AutoFill credential provider shells. Requests are answered in milestone 5; until then the extension explains that
+  # and cancels, so enabling it in Settings is harmless.
+  AutoFillExtension-iOS:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: AutoFill
+        excludes: ["*.plist", "*.entitlements"]
+    info:
+      path: AutoFill/Info-iOS.plist
+      properties:
+        CFBundleDisplayName: Watchword
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CredentialProviderViewController
+          NSExtensionAttributes:
+            ASCredentialProviderExtensionCapabilities:
+              ProvidesPasswords: true
+    entitlements:
+      path: AutoFill/AutoFill-iOS.entitlements
+      properties:
+        com.apple.security.application-groups: [$(WATCHWORD_APP_GROUP_IOS)]
+        keychain-access-groups: [$(WATCHWORD_KEYCHAIN_GROUP)]
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.Watchword.AutoFill
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  AutoFillExtension-macOS:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: AutoFill
+        excludes: ["*.plist", "*.entitlements"]
+    info:
+      path: AutoFill/Info-macOS.plist
+      properties:
+        CFBundleDisplayName: Watchword
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CredentialProviderViewController
+          NSExtensionAttributes:
+            ASCredentialProviderExtensionCapabilities:
+              ProvidesPasswords: true
+    entitlements:
+      path: AutoFill/AutoFill-macOS.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [$(WATCHWORD_APP_GROUP_MACOS)]
+        keychain-access-groups: [$(WATCHWORD_KEYCHAIN_GROUP)]
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.Watchword.AutoFill
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_HARDENED_RUNTIME: YES
+
+  WatchwordUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests/Shared, UITests/iOS]
+    dependencies:
+      - target: Watchword-iOS
+    settings:
+      base:
+        TEST_TARGET_NAME: Watchword-iOS
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.WatchwordUITests
+
+  WatchwordMacUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [UITests/Shared, UITests/macOS]
+    dependencies:
+      - target: Watchword-macOS
+    settings:
+      base:
+        TEST_TARGET_NAME: Watchword-macOS
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.WatchwordMacUITests
+
+schemes:
+  Watchword-iOS:
+    build:
+      targets:
+        Watchword-iOS: all
+        WatchwordUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [WatchwordUITests]
+  Watchword-macOS:
+    build:
+      targets:
+        Watchword-macOS: all
+        WatchwordMacUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [WatchwordMacUITests]

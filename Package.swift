@@ -14,6 +14,9 @@ let package = Package(
         .library(name: "WatchwordEnvelope", targets: ["WatchwordEnvelope"]),
         .library(name: "SecureMemory", targets: ["SecureMemory"]),
         .library(name: "WatchwordCrypto", targets: ["WatchwordCrypto"]),
+        .library(name: "WatchwordStore", targets: ["WatchwordStore"]),
+        .library(name: "WatchwordKit", targets: ["WatchwordKit"]),
+        .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
     ],
     targets: [
         // Pure data types shared by every other module.
@@ -35,9 +38,29 @@ let package = Package(
         // Secret Key, 2SKD, keyset, vault keys, HPKE grants, signatures, record sealing (§4, §5; milestone 1).
         .target(name: "WatchwordCrypto", dependencies: ["SecureMemory", "WatchwordEnvelope"]),
 
+        // Local ciphertext store: the port, an in-memory implementation and the SQLite database (§6; milestone 2).
+        .target(name: "WatchwordStore", dependencies: ["SecureMemory", "WatchwordEnvelope"]),
+
+        // VaultSession façade, unlock and auto-lock policies, and the ports the UI and adapters plug into (§10, §15).
+        .target(
+            name: "WatchwordKit",
+            dependencies: [
+                "WatchwordModel", "WatchwordMatching", "WatchwordEnvelope", "WatchwordCrypto", "WatchwordStore",
+                "SecureMemory",
+            ]
+        ),
+
+        // Apple-framework adapters for the WatchwordKit ports: Keychain, LocalAuthentication, the App Group container
+        // and the Emergency Kit PDF. In the package rather than Apps/ so the strict-memory-safety job, the unsafe
+        // tripwire, lint and `swift test` all cover them.
+        .target(name: "WatchwordPlatform", dependencies: ["WatchwordKit", "WatchwordStore", "SecureMemory"]),
+
         // Seeded and deliberately broken generators and vector helpers, for test targets only (§15). Not a product,
         // and no production target may depend on it.
-        .target(name: "WatchwordTestSupport"),
+        .target(
+            name: "WatchwordTestSupport",
+            dependencies: ["WatchwordKit", "WatchwordStore", "WatchwordEnvelope", "SecureMemory"]
+        ),
 
         // XCTest suite.
         .testTarget(name: "WatchwordMatchingTests", dependencies: ["WatchwordMatching", "WatchwordModel"]),
@@ -51,12 +74,28 @@ let package = Package(
             dependencies: ["WatchwordCrypto", "SecureMemory", "WatchwordEnvelope", "WatchwordTestSupport"]
         ),
 
+        .testTarget(
+            name: "WatchwordStoreTests",
+            dependencies: ["WatchwordStore", "WatchwordEnvelope", "SecureMemory", "WatchwordTestSupport"]
+        ),
+        .testTarget(
+            name: "WatchwordKitTests",
+            dependencies: [
+                "WatchwordKit", "WatchwordModel", "WatchwordMatching", "WatchwordStore", "WatchwordCrypto",
+                "WatchwordEnvelope", "SecureMemory", "WatchwordTestSupport",
+            ]
+        ),
+        .testTarget(
+            name: "WatchwordPlatformTests",
+            dependencies: ["WatchwordPlatform", "WatchwordKit", "SecureMemory", "WatchwordTestSupport"]
+        ),
+
         // Adversarial security suite (Swift Testing, tag .adversarial, run as its own CI job).
         .testTarget(
             name: "WatchwordAdversarialTests",
             dependencies: [
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
-                "SecureMemory", "WatchwordTestSupport",
+                "SecureMemory", "WatchwordStore", "WatchwordKit", "WatchwordPlatform", "WatchwordTestSupport",
             ]
         ),
     ],

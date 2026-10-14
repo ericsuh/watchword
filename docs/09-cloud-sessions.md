@@ -29,8 +29,10 @@ So the boundary is not a configuration choice, it is the platform:
 
 Two consequences for how this repository is organised, both of which already pointed this way:
 
-- The current four modules import nothing but `Foundation`, `Testing` and `XCTest`, which is exactly
-  why they build on Linux. That portability is a property worth keeping, not an accident — it is the
+- The four milestone-0 modules import nothing but `Foundation`, `Testing` and `XCTest`, which is exactly
+  why they build on Linux. Milestone 2 keeps the ports and policies portable too (`RecordStore`,
+  `InMemoryRecordStore`, `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`); `SQLiteRecordStore`, `VaultSession` and
+  `WatchwordPlatform` compile out, so their suites are absent rather than red on Linux. That portability is a property worth keeping, not an accident — it is the
   same discipline that keeps `WatchwordMatching` from importing AuthenticationServices.
 - The modules still to come that *do* touch Apple frameworks — `WatchwordCrypto`, `SecureMemory`, and
   any Keychain or LocalAuthentication adapter (`02-architecture.md` §15) — are not reviewable in a
