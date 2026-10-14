@@ -40,6 +40,29 @@ server there. Those environments use the plain `swift build` / `swift test` / `x
 above, which is why every workflow step stays expressible as shell. Keep it that way: an
 MCP-only step is a step CI cannot run.
 
+### Cloud sessions run on Linux, so some of this repository is invisible there
+
+A Claude Code cloud session (claude.ai/code, `claude --cloud`, routines) is a fresh **Ubuntu 24.04
+x86\_64** VM. `docs/09-cloud-sessions.md` is the setup runbook; the part that matters while working
+is what the platform excludes. There is no Xcode, no simulator, no Apple SDK, and no Xcode MCP
+server, and the base image cannot be replaced. So in a cloud session:
+
+- `swift build`, `swift test`, the adversarial suite, `-strict-memory-safety` and `swift format`
+  all work — four of the five `ci.yml` jobs. Run `.github/scripts/cloud-verify.sh` for the lot.
+- Anything importing CryptoKit, Security.framework, CommonCrypto or LocalAuthentication does not
+  compile, and `xcodebuild` is absent. `WatchwordCrypto`, `SecureMemory` and the Keychain adapters
+  (`docs/02-architecture.md` §15) can be drafted there but **not** built or tested. Say so rather
+  than reporting a layer as verified; the adversarial test such a change owes has to run on macOS.
+- The toolchain is Swift 6.4, newer than the Xcode 16.4 CI leg. A clean cloud build is not evidence
+  that leg passes.
+
+If an agent needs the real toolchain, the answer is Remote Control on a Mac (`claude
+--remote-control`), not a cloud session — that is the only arrangement with `xcodebuild`, a
+simulator and the Xcode MCP server.
+
+The current four modules import only `Foundation`, `Testing` and `XCTest`, which is the sole reason
+any of this is testable on Linux. Treat that portability as a property to keep.
+
 ## Architecture
 
 Read `docs/02-architecture.md` before changing anything security-relevant; its section numbers are
