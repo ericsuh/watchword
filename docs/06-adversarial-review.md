@@ -132,7 +132,7 @@ Accepted as a property of a serverless design — there is no always-on componen
 Documented: F4.3 now specifies the ordering and states that revocation completes on the owner's
 next unlock, with the UI showing a pending-rotation state.
 
-### D7 (Low) — XOR to combine the two secrets
+### D7 (Low) — XOR to combine the two secrets (resolved in milestone 1: HKDF, see ADR 0003 amendment)
 `AUK = Kp ⊕ Ks` follows 1Password. XOR of two independent secrets is sound here, and neither input
 alone yields the AUK. `HKDF(Kp || Ks)` would be marginally more robust against future changes
 (e.g. if one input ever became partly predictable) at no cost. Tracked as a milestone-1 decision in
@@ -154,7 +154,7 @@ sensitive.
 | --- | --- | --- | --- |
 | D9 | Medium | Every device holds the account Ed25519 signing key (it is in the AUK-wrapped keyset), so a lost device cannot be excluded without rotating the account key. No device registry. | Add a device registry signed by existing devices; milestone 3, before sync ships. |
 | D10 | Medium | Vault-key rotation re-encrypts every item: O(items) work and O(items) upload on every membership change. | Per-item keys wrapped by the vault key make rotation O(members). Already an open question in §16; promoted to a milestone-4 decision. |
-| D11 | Medium | Test plan claims AAD-binding and ciphertext-tamper coverage that cannot exist yet — there is no crypto layer. Current envelope tests cover the header only. | `04-test-plan.md` §6.1 now marks which tests arrive with milestone 1. Honest status beats implied coverage. |
+| D11 | Medium | Test plan claims AAD-binding and ciphertext-tamper coverage that cannot exist yet — there is no crypto layer. Current envelope tests cover the header only. | **Resolved in milestone 1**: the tests exist (`AdversarialCryptoTests`, §F below). |
 | D12 | Medium | No backup story. If CloudKit returns `CKErrorUserDidResetEncryptedDataKey` *and* the only device is lost, data is gone. | Add scheduled encrypted archive export (F8.4 exists; make it schedulable) as a milestone-7 requirement. |
 | D13 | Low | KDF calibration to ≥300 ms on the *creating* device can make unlock slow on the person's oldest device. | Calibrate against a floor, cap by the slowest enrolled device class; ADR 0003 note. |
 | D14 | Low | N1 says 250–500 ms for derivation; ADR 0003 and §4 say ≥300 ms. | Harmonised to 300–500 ms in the PRD. |
@@ -189,3 +189,33 @@ Local validation ran on Swift 6.4 / Xcode 27; CI runs Xcode 16.4 (Swift 6.0) and
 Green locally is therefore not a substitute for CI — the macro-expansion and `#expect` differences
 that produced three of the five CI failures on this branch's history were toolchain-specific. Both
 matter; neither alone is sufficient.
+
+---
+
+## F. Milestone 1 review (cryptographic core)
+
+Review date: 2026-10-14, by a separate reviewer of the milestone-1 change (`SecureMemory`,
+`WatchwordCrypto`, the full envelope), before the pull request was opened. Method as above: each
+claim was reproduced against a toolchain where possible — the bypasses in R1 and the weaknesses in
+R2–R7 were demonstrated with probe tests or builds (Swift 6.3.2 and 6.4.1, swift-crypto standing in
+for CryptoKit on Linux) before being reported. No Critical or High findings.
+
+| ID | Severity | Finding and threat | Disposition |
+| --- | --- | --- | --- |
+| R1 | Medium | The unsafe-confinement gate keyed on the token `unsafe`. A malicious contributor could write arbitrary memory with `@_silgen_name("memset")` and integer parameters (compiles under `-strict-memory-safety -warnings-as-errors`), hide marked code behind a symlink (`grep -r` skips symlinks, SwiftPM compiles them), or add a C target or custom `path:`. | **Fixed.** `assert-unsafe-confined.sh` also rejects `@unchecked`, underscored attributes and `@exclusivity`/`@extern` outside `SecureMemory`, hand-bound foreign symbols anywhere, symlinks under `Sources/`/`Tests/`, and non-Swift files under `Sources/`; `assert-no-dependencies.sh` checks the resolved manifest for target types, custom paths and compiler-relaxing settings. Docs say "tripwire", not "proof". Each bypass was re-run against the new checks and fails them. |
+| R2 | Medium | `VaultKeyGrant.open` returned the grant's own vault and key IDs. A4 (an admin of vault S1 only) could file a grant labelled S2, carrying a key A4 knows, in S1's table; a caller indexing by the label would install it as S2's key, giving A4 read and inject on S2. The HPKE `info` binding does not help: any legitimate signer can seal a fresh grant under any label. | **Fixed.** `open(as:from:vaultID:keyID:)` takes the storage location and refuses a mismatch before verifying or decrypting. Tests: `grantFiledUnderAnotherVault`, `vaultKeyWrapMoved`. |
+| R3 | Medium | The nonce-reuse guard lived in a per-call `RecordSealer` struct, so it never spanned key wraps (each made a fresh sealer) or copies of a sealer. With a repeating RNG, two vault keys wrapped under one Ksym got the same nonce: `ct1 ⊕ ct2 = vk1 ⊕ vk2`, so a former member (A5) holding one learns the other, and GCM's authentication key leaks. | **Fixed.** The ledger belongs to the key (`EncryptionKey.nonceLedger`, a thread-safe `NonceLedger` in `SecureMemory`), shared by every copy and every caller; `RecordSealer` is gone in favour of `RecordCipher.seal`. Test: `nonceReuseAcrossWraps`. A per-record derived key was considered and not adopted: with a repeating RNG the derivation salt repeats too, so it does not remove the dependence on the generator. |
+| R4 | Low | Small-order Ed25519 signing keys were accepted. With the identity key, the 64-byte "universal signature" (R = identity, S = 0) verified for every message on swift-crypto/BoringSSL, so a member publishing such a key (it passes fingerprint confirmation, the fingerprint covers it) makes their membership records, log segments and grants forgeable by anyone. | **Fixed.** `Signatures.verify` (and so `PublicKeyBundle.init`) rejects the seven small-order encodings with either sign bit, each checked independently to satisfy 8·P = O. Test: `smallOrderSigningKeys`. |
+| R5 | Low | `CBORValue.text` compared by canonical equivalence (`"é" == "e\u{301}"`) but encoded the bytes as given, so "equal values encode equally" was false. Unused today; a trap for item payloads. | **Fixed** by removing `.text`; a future format adds text with an explicit normalisation rule. |
+| R6 | Low | `SecureBytes` is a `Collection`, so `Array(s)`, `Data(s)` and the non-constant-time `elementsEqual` compile without any explicit call. | **Partly fixed, partly accepted.** The conformance stays because CryptoKit's sealing APIs take `DataProtocol`, and a separate view type would be equally copyable. Added the named `unprotectedCopy()`, moved the two production copy-outs (salts) to it, and corrected the docs that implied copying out was impossible. |
+| R7 | Low | `NSRecursiveLock` let a same-thread `zeroise()` inside a read proceed, so the reader saw zeros instead of a trap. | **Fixed.** A reader count makes that zeroise trap. Exit test (Swift 6.2+): `zeroiseDuringReadTraps`. |
+| R8 | Low | Secret Key parsing left unwiped copies (the digit arrays, and freed buffers from array growth). | **Fixed.** Capacity reserved once and never grown; every intermediate array wiped. |
+| R9 | Low | One 64 MiB cap for every envelope kind, so a hostile store could make a 113-byte keyset cost ~150–200 MiB of copies to reject, enough to kill a memory-capped AutoFill extension. | **Fixed.** `Envelope.parse`/`RecordCipher.open` take a per-call cap; key wraps use 1 KiB. Test: `perKindSizeCap`. |
+| R10 | Low | Nothing enforced "no production target depends on `WatchwordTestSupport`" (seeded and broken RNGs). | **Fixed** in `assert-no-dependencies.sh`. |
+| R11 | Low | Adversarial gaps: no tests for moved vault-key wraps, grant location confusion, cross-wrap nonce reuse or weak Ed25519 keys; byte-flip and truncation tests accepted any error, so a regression in *which* layer rejects a flip would pass. | **Fixed.** Tests above, and flips/truncations now assert `EnvelopeError` for header positions and `authenticationFailed` for nonce, ciphertext and tag. |
+| R12 | Info | A stray test log was committed; the implementation plan still said "XOR"; dead store in `init(randomCount:)`. NFKD normalisation can differ across OS Unicode versions for code points unassigned on the older one; each `SecureBytes` occupies a whole locked page (16 KiB on Apple silicon); calibration maps a 0 ns probe to the floor but 1 ns to the ceiling. | Log removed and `*.log` ignored; plan and dead store fixed. Unicode-version stability is **tracked** for the password-setting UI (milestone 2: reject unassigned code points, as PRECIS does). Page cost is **accepted** for keys and noted for milestone 2, where decrypted item payloads should not each hold a locked page for long. The calibration asymmetry is **accepted**: both ends stay within the two-sided bounds, and a probe that truly took 1 ns would justify the ceiling. |
+
+Not adopted from the review: a CODEOWNERS entry for `Sources/SecureMemory/`. It belongs with the
+other repository-settings steps in `08-repository-hardening.md` §6, which the owner applies; the
+suggested line is `/Sources/SecureMemory/ @ericsuh`.
+

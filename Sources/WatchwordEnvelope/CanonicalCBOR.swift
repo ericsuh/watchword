@@ -9,10 +9,13 @@ import Foundation
 ///
 /// There is deliberately no decoder here. Authenticated data is compared, never parsed, so attacker-supplied CBOR
 /// never reaches a parser.
+///
+/// There is deliberately no text string case either. Swift `String` equality is canonical equivalence, so `"é"` and
+/// `"e\u{301}"` would compare equal yet encode differently, breaking "equal values encode equally" (review finding
+/// R5). A format that needs text adds it with an explicit normalisation rule and byte-based equality.
 public indirect enum CBORValue: Sendable, Hashable {
     case unsigned(UInt64)
     case bytes([UInt8])
-    case text(String)
     case array([CBORValue])
     /// Maps are keyed by small unsigned integers, which is all the record formats need.
     case map([UInt64: CBORValue])
@@ -34,10 +37,6 @@ public indirect enum CBORValue: Sendable, Hashable {
         case .bytes(let bytes):
             CBORValue.appendHead(major: 2, argument: UInt64(bytes.count), to: &out)
             out.append(contentsOf: bytes)
-        case .text(let string):
-            let utf8 = Array(string.utf8)
-            CBORValue.appendHead(major: 3, argument: UInt64(utf8.count), to: &out)
-            out.append(contentsOf: utf8)
         case .array(let elements):
             CBORValue.appendHead(major: 4, argument: UInt64(elements.count), to: &out)
             for element in elements {

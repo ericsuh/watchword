@@ -130,9 +130,9 @@ jobs:
           done
 
   strict-memory-safety:
-    # Proves there are no unsafe constructs outside SecureMemory (ADR 0001, SE-0458). SecureMemory is not exempted:
-    # it marks each unsafe construct with an `unsafe` expression, so this job also proves none of its pointer uses is
-    # unmarked. Any unsafe construct in another module fails the build.
+    # Fails on any construct the compiler classifies as unsafe and that is not marked `unsafe` (ADR 0001, SE-0458).
+    # SecureMemory is not exempted: it marks each one. Marked constructs compile anywhere, and the compiler does not
+    # classify everything (e.g. `@_silgen_name` bindings), so the confinement script below backs this up.
     name: Strict memory safety
     runs-on: macos-26
     timeout-minutes: 20

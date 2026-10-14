@@ -108,7 +108,9 @@ closes.
 **Implemented in milestone 1** (`AdversarialCryptoTests`, suite "Adversarial: crypto core", and the
 context-binding tests added to `AdversarialEnvelopeTests`):
 - Flip every byte position of a sealed record (two bit masks each; sampled for a 200 KB record) →
-  open throws; nothing is returned. Truncation at every length → throws.
+  open throws for the right reason: header fields by an `EnvelopeError` before decryption, nonce,
+  ciphertext and tag by `CryptoError.authenticationFailed`; nothing is returned. Truncation at every
+  length likewise. A 1 MB envelope offered where a wrapped key is expected is refused by size first.
 - Copy a record into another vault's slot → `EnvelopeError.contextMismatch` before decryption.
   Rewrite the embedded AAD to match the new slot → still fails, because the AEAD authenticates
   the whole header.
@@ -117,13 +119,18 @@ context-binding tests added to `AdversarialEnvelopeTests`):
 - Replay of an *older* version presented as itself → the sync layer's monotonic check
   (milestone 3); presenting it as newer is rejected now.
 - Nonce uniqueness over 1e5 encryptions under one key (1e6 when `WATCHWORD_LONG_TESTS=1`), and a
-  generator that repeats is caught by the sealer's nonce guard before the second encryption.
+  generator that repeats is caught by the key's nonce ledger before the second encryption — including
+  across two separate key wraps under the same Ksym, and across copies of the key value.
 - HPKE grant to a substituted recipient key is unopenable by the real recipient; a grant signed by
-  anyone but the expected sender, or with any field altered, is rejected; a correctly re-signed
-  grant relabelled to another vault still fails HPKE (info binding). "Signed by a non-*admin*"
+  anyone but the expected sender, or with any field altered, is rejected; a validly signed grant
+  found in another vault's or key's slot is refused before decryption (entitlement is per vault);
+  a vault-key wrap moved to another slot likewise. A re-signed grant relabelled to another vault
+  also fails HPKE (info binding), a narrower layer against a party that can sign but not decrypt. "Signed by a non-*admin*"
   needs the membership chain (milestone 4); "signed by an unexpected key" is tested now.
-- Published keys: low-order X25519 points (libsodium's blocklist) and substituted keys under the
-  original self-signature are rejected; a re-signed substitute shows a different fingerprint.
+- Published keys: low-order X25519 points (libsodium's blocklist), small-order Ed25519 keys with
+  either sign bit (for which the identity "universal signature" would verify everything), and
+  substituted keys under the original self-signature are rejected; a re-signed substitute shows a
+  different fingerprint.
 - Signatures for one domain never verify for another, nor without the domain prefix.
 - Keyset wrap opens only under its own AUK, account ID and version; wrong password or wrong Secret
   Key → `authenticationFailed`; tampered KDF parameters and salt-length mismatch are refused
@@ -133,7 +140,8 @@ context-binding tests added to `AdversarialEnvelopeTests`):
   shared CI runners would be noise.
 - Zeroisation: after `zeroise()`, every buffer of a keyset, vault key and Secret Key reads as
   all-zero across its whole allocation; `deinit` wipes before release (observed through a probe,
-  since freed memory cannot be read).
+  since freed memory cannot be read); reading after zeroise, and zeroising during a same-thread
+  read, trap (exit tests, Swift 6.2+ only).
 
 Known-answer tests (`PrimitiveKnownAnswerTests`, `PBKDF2Tests`, `TwoSecretKeyDerivationTests`,
 `SecretKeyTests`, `CanonicalCBORTests`) use RFC 5869, 7748, 7914, 8032 and 8949 vectors and the GCM

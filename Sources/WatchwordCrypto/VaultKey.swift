@@ -5,9 +5,11 @@
     import WatchwordEnvelope
 
     /// A vault's 256-bit record key (docs/02-architecture.md §4). Item records are sealed under it with
-    /// `RecordSealer(key: vaultKey.key)`; a rotation creates a new `VaultKey` with a new key ID.
+    /// `RecordCipher.seal(_:context:key:)`; a rotation creates a new `VaultKey` with a new key ID.
     public struct VaultKey: Sendable {
         public static let schemaVersion: UInt64 = 1
+        /// Generous upper bound on a wrapped vault key envelope, enforced before parsing (SEC9).
+        static let maximumWrappedLength = 1024
 
         public let vaultID: UUID
         public let key: EncryptionKey
@@ -41,11 +43,11 @@
 
         /// Wraps this key for the account that owns it (the personal vault, and an owner's copy of a shared vault's key).
         public func wrap<R: RandomNumberGenerator>(for keyset: Keyset, using generator: inout R) throws -> [UInt8] {
-            var sealer = RecordSealer(key: keyset.symmetricKey)
-            return try sealer.seal(
+            try RecordCipher.seal(
                 key.material,
                 context: VaultKey.wrapContext(
                     vaultID: vaultID, keyID: key.keyID, keysetKeyID: keyset.symmetricKey.keyID),
+                key: keyset.symmetricKey,
                 using: &generator
             )
         }
@@ -62,7 +64,8 @@
             let material = try RecordCipher.open(
                 envelope,
                 context: wrapContext(vaultID: vaultID, keyID: keyID, keysetKeyID: keyset.symmetricKey.keyID),
-                key: keyset.symmetricKey
+                key: keyset.symmetricKey,
+                maximumLength: maximumWrappedLength
             )
             return VaultKey(vaultID: vaultID, key: try EncryptionKey(keyID: keyID, material: material))
         }

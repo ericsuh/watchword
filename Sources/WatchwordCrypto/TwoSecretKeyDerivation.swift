@@ -76,7 +76,7 @@
             )
             return try PBKDF2.sha256(
                 password: passwordBytes,
-                salt: Array(SecureBytes(copying: accountSalt)),
+                salt: SecureBytes(copying: accountSalt).unprotectedCopy(),
                 iterations: parameters.iterations,
                 outputByteCount: EncryptionKey.byteCount
             )

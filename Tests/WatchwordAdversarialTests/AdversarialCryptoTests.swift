@@ -25,21 +25,33 @@
                 keyID: key.keyID,
                 recordVersion: 5)
             let plaintext = (0..<size).map { UInt8(truncatingIfNeeded: $0) }
-            var sealer = RecordSealer(key: key)
-            return (key, context, try sealer.seal(plaintext, context: context, using: &generator), plaintext)
+            return (
+                key, context, try RecordCipher.seal(plaintext, context: context, key: key, using: &generator), plaintext
+            )
         }
 
         // MARK: Tampering
 
-        @Test("flipping any byte of a sealed record makes it fail to open; nothing is returned")
+        /// Each region fails for its own reason: header fields by a parser check before decryption, and the nonce, the
+        /// ciphertext and the tag by AEAD authentication. Asserting the specific error catches a regression in which layer
+        /// rejects what (review finding R11).
+        @Test("flipping any byte of a sealed record makes it fail to open, for the right reason; nothing is returned")
         func everyByteFlip() throws {
             let (key, context, bytes, _) = try Self.sealedRecord()
+            let nonceRange = 23..<35
+            let payloadStart = EnvelopeHeader.fixedPrefixLength + context.canonicalAAD().count
             for position in bytes.indices {
                 for mask: UInt8 in [0x01, 0x80] {
                     var mutated = bytes
                     mutated[position] ^= mask
-                    #expect(throws: (any Error).self, "flip \(mask) at byte \(position) opened") {
-                        _ = try RecordCipher.open(mutated, context: context, key: key)
+                    if nonceRange.contains(position) || position >= payloadStart {
+                        #expect(throws: CryptoError.authenticationFailed, "flip \(mask) at byte \(position)") {
+                            _ = try RecordCipher.open(mutated, context: context, key: key)
+                        }
+                    } else {
+                        #expect(throws: EnvelopeError.self, "flip \(mask) at byte \(position)") {
+                            _ = try RecordCipher.open(mutated, context: context, key: key)
+                        }
                     }
                 }
             }
@@ -59,13 +71,33 @@
             }
         }
 
-        @Test("truncating a sealed record at any length fails closed")
+        @Test("truncating a sealed record at any length fails closed, before decryption until a tag's worth remains")
         func truncation() throws {
             let (key, context, bytes, _) = try Self.sealedRecord(size: 16)
+            let payloadStart = EnvelopeHeader.fixedPrefixLength + context.canonicalAAD().count
             for length in 0..<bytes.count {
-                #expect(throws: (any Error).self) {
-                    _ = try RecordCipher.open(Array(bytes[0..<length]), context: context, key: key)
+                let truncated = Array(bytes[0..<length])
+                if length < payloadStart + Envelope.tagLength {
+                    #expect(throws: EnvelopeError.self) {
+                        _ = try RecordCipher.open(truncated, context: context, key: key)
+                    }
+                } else {
+                    #expect(throws: CryptoError.authenticationFailed) {
+                        _ = try RecordCipher.open(truncated, context: context, key: key)
+                    }
                 }
+            }
+        }
+
+        @Test("a key-sized record refuses an oversized envelope before parsing it")
+        func perKindSizeCap() throws {
+            let keyset = Keyset.generate(accountID: UUID())
+            let huge = [UInt8](repeating: 0, count: 1_000_000)
+            #expect(throws: EnvelopeError.tooLarge(huge.count)) {
+                _ = try VaultKey.unwrap(huge, vaultID: Self.vaultA, keyID: UUID(), with: keyset)
+            }
+            #expect(throws: EnvelopeError.tooLarge(huge.count)) {
+                _ = try Keyset.unwrap(huge, accountID: UUID(), with: keyset.symmetricKey)
             }
         }
 
@@ -127,15 +159,14 @@
             }
         }
 
-        @Test("a sealer refuses a context naming a different key")
+        @Test("sealing refuses a context naming a different key")
         func sealerKeyMismatch() throws {
             var generator = SeededGenerator(seed: 9)
             let key = EncryptionKey.generate(using: &generator)
-            var sealer = RecordSealer(key: key)
             let context = EnvelopeContext(
                 recordID: UUID(), vaultID: UUID(), schemaVersion: 1, kind: .item, keyID: UUID())
             #expect(throws: CryptoError.keyMismatch(expected: key.keyID, actual: context.keyID)) {
-                _ = try sealer.seal([1], context: context, using: &generator)
+                _ = try RecordCipher.seal([1], context: context, key: key, using: &generator)
             }
         }
 
@@ -145,14 +176,13 @@
         func repeatingGeneratorDetected() throws {
             var generator = RepeatingGenerator(words: [0xDEAD_BEEF, 0xFEED_FACE])
             let key = try EncryptionKey(keyID: UUID(), material: SecureBytes(copying: Array(0..<32)))
-            var sealer = RecordSealer(key: key)
             let context = EnvelopeContext(
                 recordID: UUID(), vaultID: UUID(), schemaVersion: 1, kind: .item, keyID: key.keyID)
-            _ = try sealer.seal([1], context: context, using: &generator)
+            _ = try RecordCipher.seal([1], context: context, key: key, using: &generator)
             #expect(throws: CryptoError.nonceReuseDetected) {
-                _ = try sealer.seal([2], context: context, using: &generator)
+                _ = try RecordCipher.seal([2], context: context, key: key, using: &generator)
             }
-            #expect(sealer.sealCount == 1)
+            #expect(key.sealCount == 1)
         }
 
         @Test("nonces are unique across many encryptions under one key")
@@ -160,14 +190,14 @@
             let count = TestEnvironment.iterations(standard: 100_000, long: 1_000_000)
             var generator = SystemRandomNumberGenerator()
             let key = EncryptionKey.generate(using: &generator)
-            var sealer = RecordSealer(key: key)
             let context = EnvelopeContext(
                 recordID: UUID(), vaultID: UUID(), schemaVersion: 1, kind: .item, keyID: key.keyID)
             var nonces = Set<[UInt8]>()
             nonces.reserveCapacity(count)
             let nonceRange = 23..<35
             for _ in 0..<count {
-                nonces.insert(Array(try sealer.seal([], context: context, using: &generator)[nonceRange]))
+                nonces.insert(
+                    Array(try RecordCipher.seal([], context: context, key: key, using: &generator)[nonceRange]))
             }
             #expect(nonces.count == count)
         }
@@ -294,7 +324,10 @@
             let attacker = Keyset.generate(accountID: member.accountID)
             let vaultKey = VaultKey.generate(vaultID: Self.vaultA)
             let grant = try VaultKeyGrant.seal(vaultKey, to: attacker.publicKeyBundle(), from: owner)
-            #expect(throws: CryptoError.grantMismatch) { _ = try grant.open(as: member, from: owner.publicKeyBundle()) }
+            #expect(throws: CryptoError.grantMismatch) {
+                _ = try grant.open(
+                    as: member, from: owner.publicKeyBundle(), vaultID: Self.vaultA, keyID: vaultKey.key.keyID)
+            }
         }
 
         @Test("a grant signed by anyone but the expected sender is rejected")
@@ -305,14 +338,15 @@
             let grant = try VaultKeyGrant.seal(
                 VaultKey.generate(vaultID: Self.vaultA), to: member.publicKeyBundle(), from: impostor)
             #expect(throws: CryptoError.signatureInvalid) {
-                _ = try grant.open(as: member, from: owner.publicKeyBundle())
+                _ = try grant.open(as: member, from: owner.publicKeyBundle(), vaultID: Self.vaultA, keyID: grant.keyID)
             }
 
             let stranger = Keyset.generate(accountID: UUID())
             let unrelated = try VaultKeyGrant.seal(
                 VaultKey.generate(vaultID: Self.vaultA), to: member.publicKeyBundle(), from: stranger)
             #expect(throws: CryptoError.grantMismatch) {
-                _ = try unrelated.open(as: member, from: owner.publicKeyBundle())
+                _ = try unrelated.open(
+                    as: member, from: owner.publicKeyBundle(), vaultID: Self.vaultA, keyID: unrelated.keyID)
             }
         }
 
@@ -346,14 +380,19 @@
                     recipientAccountID: g.recipientAccountID, recipientAgreementKey: g.recipientAgreementKey,
                     encapsulatedKey: g.encapsulatedKey, ciphertext: g.ciphertext, signature: flip(g.signature)),
             ]
+            // Each is opened at the location its own label claims, so what is exercised is the signature, not the
+            // location check (which `grantFiledUnderAnotherVault` covers).
             for grant in tampered {
-                #expect(throws: CryptoError.signatureInvalid) { _ = try grant.open(as: member, from: ownerBundle) }
+                #expect(throws: CryptoError.signatureInvalid) {
+                    _ = try grant.open(as: member, from: ownerBundle, vaultID: grant.vaultID, keyID: grant.keyID)
+                }
             }
         }
 
-        /// Defence in depth below the signature: even a grant its sender legitimately signs cannot be relabelled to
-        /// another vault or key epoch, because HPKE's `info` binds both.
-        @Test("a signed grant relabelled to another vault still fails HPKE authentication")
+        /// A narrow layer: someone who can sign but not decrypt (a stolen signing key without the vault key) cannot
+        /// relabel an existing grant, because HPKE's `info` binds vault and key. It is no defence against a legitimate
+        /// signer, who can seal a fresh grant under any label; the location check is (see `grantFiledUnderAnotherVault`).
+        @Test("a re-signed grant relabelled to another vault fails HPKE authentication")
         func grantRelabelFailsHPKE() throws {
             let owner = Keyset.generate(accountID: UUID())
             let member = Keyset.generate(accountID: UUID())
@@ -370,7 +409,84 @@
                 encapsulatedKey: relabelled.encapsulatedKey, ciphertext: relabelled.ciphertext,
                 signature: try owner.sign(relabelled.signedContent, domain: .vaultKeyGrant))
             #expect(throws: CryptoError.authenticationFailed) {
-                _ = try resigned.open(as: member, from: owner.publicKeyBundle())
+                _ = try resigned.open(
+                    as: member, from: owner.publicKeyBundle(), vaultID: Self.vaultB, keyID: resigned.keyID)
+            }
+        }
+
+        /// Review finding R2: entitlement is per vault, so the vault a grant installs a key into must be the vault whose
+        /// grant table it was found in, never the grant's own label.
+        @Test("a validly signed grant filed under another vault's or key's slot is refused before decryption")
+        func grantFiledUnderAnotherVault() throws {
+            let adminOfA = Keyset.generate(accountID: UUID())
+            let member = Keyset.generate(accountID: UUID())
+            let attackerKnownKey = VaultKey.generate(vaultID: Self.vaultB)
+            let grant = try VaultKeyGrant.seal(attackerKnownKey, to: member.publicKeyBundle(), from: adminOfA)
+            let sender = try adminOfA.publicKeyBundle()
+            #expect(throws: CryptoError.grantMismatch) {
+                _ = try grant.open(as: member, from: sender, vaultID: Self.vaultA, keyID: grant.keyID)
+            }
+            #expect(throws: CryptoError.grantMismatch) {
+                _ = try grant.open(as: member, from: sender, vaultID: Self.vaultB, keyID: UUID())
+            }
+            let opened = try grant.open(as: member, from: sender, vaultID: Self.vaultB, keyID: grant.keyID)
+            #expect(opened.vaultID == Self.vaultB)
+        }
+
+        @Test("a vault-key wrap moved to another vault's or key's slot is refused before decryption")
+        func vaultKeyWrapMoved() throws {
+            var generator = SeededGenerator(seed: 41)
+            let keyset = Keyset.generate(accountID: UUID(), using: &generator)
+            let vaultKey = VaultKey.generate(vaultID: Self.vaultA, using: &generator)
+            let wrapped = try vaultKey.wrap(for: keyset, using: &generator)
+            #expect(throws: EnvelopeError.contextMismatch) {
+                _ = try VaultKey.unwrap(wrapped, vaultID: Self.vaultB, keyID: vaultKey.key.keyID, with: keyset)
+            }
+            #expect(throws: EnvelopeError.contextMismatch) {
+                _ = try VaultKey.unwrap(wrapped, vaultID: Self.vaultA, keyID: UUID(), with: keyset)
+            }
+        }
+
+        /// Review finding R3: the nonce guard belongs to the key, so it spans separate wraps and copies of the key value,
+        /// not just one sealer's lifetime. Without that, two vault keys wrapped under one Ksym with a repeated nonce would
+        /// satisfy ct1 ⊕ ct2 = vk1 ⊕ vk2, and a former member holding one would learn the other.
+        @Test("a repeated nonce across two key wraps under the same Ksym is refused")
+        func nonceReuseAcrossWraps() throws {
+            let keyset = Keyset.generate(accountID: UUID())
+            let first = VaultKey.generate(vaultID: Self.vaultA)
+            let second = VaultKey.generate(vaultID: Self.vaultB)
+            var generator = RepeatingGenerator(words: [0x0123_4567_89AB_CDEF, 0x0F1E_2D3C])
+            var replay = generator
+            _ = try first.wrap(for: keyset, using: &generator)
+            #expect(throws: CryptoError.nonceReuseDetected) { _ = try second.wrap(for: keyset, using: &replay) }
+
+            let copy = keyset.symmetricKey
+            #expect(copy.sealCount == 1, "copies of a key share its nonce ledger")
+        }
+
+        /// Every small-order encoding, with the sign bit both clear and set.
+        static let smallOrderKeyEncodings: [[UInt8]] =
+            Signatures.smallOrderEncodings
+            + Signatures.smallOrderEncodings.map { key -> [UInt8] in
+                var flipped = key
+                flipped[31] |= 0x80
+                return flipped
+            }
+
+        @Test(
+            "small-order Ed25519 signing keys are rejected, including the universal-signature identity key",
+            arguments: smallOrderKeyEncodings)
+        func smallOrderSigningKeys(_ key: [UInt8]) throws {
+            // R = identity, S = 0: verifies for every message under a lax verifier when the key is the identity.
+            let universal = [UInt8(1)] + [UInt8](repeating: 0, count: 63)
+            #expect(throws: CryptoError.weakSigningKey) {
+                try Signatures.verify(universal, for: Array("anything".utf8), domain: .membership, signingKey: key)
+            }
+            let honest = try Keyset.generate(accountID: UUID()).publicKeyBundle()
+            #expect(throws: CryptoError.weakSigningKey) {
+                _ = try PublicKeyBundle(
+                    accountID: honest.accountID, agreementKey: honest.agreementKey, signingKey: key,
+                    selfSignature: universal)
             }
         }
 

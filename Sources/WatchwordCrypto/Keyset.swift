@@ -19,6 +19,8 @@
         public static let formatVersion: UInt8 = 1
         public static let schemaVersion: UInt64 = 1
         static let serializedLength = 1 + 16 + 32 + 32 + 32
+        /// Generous upper bound on a wrapped keyset envelope, enforced before parsing (SEC9).
+        static let maximumWrappedLength = 1024
 
         public let accountID: UUID
         public let symmetricKey: EncryptionKey
@@ -108,11 +110,11 @@
                 signingSeed,
             ])
             defer { plaintext.zeroise() }
-            var sealer = RecordSealer(key: unlockKey)
-            return try sealer.seal(
+            return try RecordCipher.seal(
                 plaintext,
                 context: Keyset.wrapContext(
                     accountID: accountID, unlockKeyID: unlockKey.keyID, recordVersion: recordVersion),
+                key: unlockKey,
                 using: &generator
             )
         }
@@ -133,7 +135,8 @@
             let plaintext = try RecordCipher.open(
                 envelope,
                 context: wrapContext(accountID: accountID, unlockKeyID: unlockKey.keyID, recordVersion: recordVersion),
-                key: unlockKey
+                key: unlockKey,
+                maximumLength: maximumWrappedLength
             )
             defer { plaintext.zeroise() }
             guard plaintext.count == serializedLength else { throw CryptoError.malformedKeyset }
@@ -151,8 +154,9 @@
     /// An account's published public keys with a self-signature (docs/02-architecture.md §4).
     ///
     /// Constructing one validates it: lengths, that the X25519 key is not a low-order point (whose shared secret with
-    /// anyone is all zeros, so a vault key "wrapped" to it would be readable by whoever substituted it), and the
-    /// self-signature. A `PublicKeyBundle` value has therefore passed all three. The self-signature proves possession of
+    /// anyone is all zeros, so a vault key "wrapped" to it would be readable by whoever substituted it), that the Ed25519
+    /// key is not of small order (for which one signature verifies for every message), and the self-signature. A
+    /// `PublicKeyBundle` value has therefore passed all four. The self-signature proves possession of
     /// the signing key, not identity; identity is the out-of-band `fingerprint` comparison (F4.2).
     public struct PublicKeyBundle: Sendable, Hashable {
         public let accountID: UUID

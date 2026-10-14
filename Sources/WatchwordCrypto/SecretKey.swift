@@ -55,24 +55,33 @@ public struct SecretKey: Sendable {
     }
 
     public init(parsing text: String) throws {
-        var symbols: [UInt8] = []
-        defer { SecretKey.wipe(&symbols) }
-        for scalar in text.unicodeScalars where scalar != "-" && scalar != " " {
-            guard scalar.isASCII, SecretKey.value(ofSymbol: SecretKey.uppercased(UInt8(scalar.value))) != nil else {
-                throw SecretKeyError.invalidCharacter(position: symbols.count)
-            }
-            symbols.append(SecretKey.uppercased(UInt8(scalar.value)))
-        }
         let prefix = Array(SecretKey.prefix.utf8)
         let expectedLength = prefix.count + SecretKey.dataCharacterCount + SecretKey.checksumCharacterCount
-        guard symbols.count == expectedLength else { throw SecretKeyError.wrongLength(symbols.count) }
-        guard Array(symbols[0..<prefix.count]) == prefix else { throw SecretKeyError.missingPrefix }
+        // Reserved once and never grown, so no reallocation leaves a freed, unwiped copy of part of the key behind
+        // (review finding R8). Symbols past the expected length are counted, not stored.
+        var symbols: [UInt8] = []
+        symbols.reserveCapacity(expectedLength)
+        defer { SecretKey.wipe(&symbols) }
+        var significant = 0
+        for scalar in text.unicodeScalars where scalar != "-" && scalar != " " {
+            guard scalar.isASCII, SecretKey.value(ofSymbol: SecretKey.uppercased(UInt8(scalar.value))) != nil else {
+                throw SecretKeyError.invalidCharacter(position: significant)
+            }
+            if significant < expectedLength {
+                symbols.append(SecretKey.uppercased(UInt8(scalar.value)))
+            }
+            significant += 1
+        }
+        guard significant == expectedLength else { throw SecretKeyError.wrongLength(significant) }
+        guard symbols[0..<prefix.count].elementsEqual(prefix) else { throw SecretKeyError.missingPrefix }
 
-        var digits = symbols[prefix.count...].map { SecretKey.value(ofSymbol: $0)! }
-        defer { SecretKey.wipe(&digits) }
-        let data = Array(digits[0..<SecretKey.dataCharacterCount])
+        var data = symbols[prefix.count..<(prefix.count + SecretKey.dataCharacterCount)].map {
+            SecretKey.value(ofSymbol: $0)!
+        }
+        defer { SecretKey.wipe(&data) }
+        var given = symbols[(prefix.count + SecretKey.dataCharacterCount)...].map { SecretKey.value(ofSymbol: $0)! }
+        defer { SecretKey.wipe(&given) }
         let (c1, c2) = SecretKey.checksum(data)
-        let given = Array(digits[SecretKey.dataCharacterCount...])
         guard ConstantTime.equal([c1, c2], given) else { throw SecretKeyError.checksumMismatch }
 
         var raw = try SecretKey.bytes(fromDigits: data)

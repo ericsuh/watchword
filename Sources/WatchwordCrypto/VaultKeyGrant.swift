@@ -12,9 +12,12 @@
     /// - The sender's Ed25519 signature (domain `.vaultKeyGrant`) covers every field, including the encapsulated key and
     ///   ciphertext. Base mode does not authenticate the sender; the signature does.
     ///
-    /// Opening checks, in order and before any decryption: the claimed sender is the expected one; the signature verifies
-    /// under that sender's (fingerprint-verified) key; the grant is addressed to this account and to its current X25519
-    /// key. A grant to a substituted key, from a substituted sender, or with any field altered fails closed.
+    /// Opening checks, in order and before any decryption: the grant's vault and key IDs are those of the storage location
+    /// it was found in; the claimed sender is the expected one; the signature verifies under that sender's
+    /// (fingerprint-verified) key; the grant is addressed to this account and to its current X25519 key. A grant filed
+    /// under the wrong vault, to a substituted key, from a substituted sender, or with any field altered fails closed.
+    /// The HPKE `info` binding is a further layer only against someone who can sign but not decrypt: any legitimate
+    /// signer can seal a fresh grant under any label, which is why the location check exists.
     public struct VaultKeyGrant: Sendable, Hashable {
         public let vaultID: UUID
         public let keyID: UUID
@@ -110,9 +113,20 @@
             )
         }
 
-        /// `expectedSender` is the fingerprint-verified bundle of whoever is entitled to grant this key. Which accounts
-        /// are entitled (admins as of the previous membership state) is decided by the membership chain, milestone 4.
-        public func open(as recipient: Keyset, from expectedSender: PublicKeyBundle) throws -> VaultKey {
+        /// Opens a grant found at the storage location of `vaultID`'s key `keyID`.
+        ///
+        /// `vaultID` and `keyID` come from where the grant was found, never from the grant (the rule `VaultKey.unwrap`
+        /// follows too). Entitlement is per vault: without this check, a sender entitled to grant keys for one vault
+        /// could file a grant labelled with another vault, where they have no say, and a caller indexing by the grant's
+        /// own label would install an attacker-known key there (review finding R2).
+        ///
+        /// `expectedSender` is the fingerprint-verified bundle of whoever is entitled to grant keys for `vaultID`. Which
+        /// accounts are entitled (admins as of the previous membership state) is decided by the membership chain,
+        /// milestone 4.
+        public func open(as recipient: Keyset, from expectedSender: PublicKeyBundle, vaultID: UUID, keyID: UUID) throws
+            -> VaultKey
+        {
+            guard self.vaultID == vaultID, self.keyID == keyID else { throw CryptoError.grantMismatch }
             guard senderAccountID == expectedSender.accountID else { throw CryptoError.grantMismatch }
             try Signatures.verify(
                 signature, for: signedContent, domain: .vaultKeyGrant, signingKey: expectedSender.signingKey)

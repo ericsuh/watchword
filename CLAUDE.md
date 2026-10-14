@@ -119,10 +119,16 @@ directions are tested; keep both when adjusting constants.
   plaintext comes back as `Data`; convert with `SecureBytes(wiping:)`.
 - Decryption and HPKE failures all surface as `CryptoError.authenticationFailed` — never distinguish a
   wrong password from tampering.
-- `RecordSealer` remembers its nonces and throws `nonceReuseDetected` on a repeat. It is a struct: give
-  each key one sealer and keep it.
-- Every signature is domain-separated (`SignatureDomain`); `PublicKeyBundle.init` validates (lengths,
-  low-order X25519, self-signature), so a bundle value is always a checked one.
+- Every nonce is claimed in the key's `NonceLedger` (shared by all copies of an `EncryptionKey`) and a
+  repeat throws `nonceReuseDetected`. Seal only through `RecordCipher.seal`.
+- Every signature is domain-separated (`SignatureDomain`), and `Signatures.verify` rejects small-order
+  Ed25519 keys; `PublicKeyBundle.init` validates (lengths, low-order X25519, small-order Ed25519,
+  self-signature), so a bundle value is always a checked one.
+- Anything unwrapped or opened takes its identity (vault ID, key ID, account ID) from the storage
+  location the caller passes in, never from the record or grant itself — `VaultKey.unwrap`,
+  `Keyset.unwrap` and `VaultKeyGrant.open(as:from:vaultID:keyID:)` all follow this.
+- Production code never copies key material out with `Array(secureBytes)`; use `unprotectedCopy()` for
+  non-secret values so every escape is searchable.
 - Files that need CryptoKit or CommonCrypto are wrapped in `#if canImport(CryptoKit)` (and
   `&& canImport(CommonCrypto)`), so `swift build`/`swift test` still work on Linux; those suites only run
   on the macOS CI matrix. `SecretKey`, `SecureBytes` and the envelope layer are platform-independent and
@@ -136,8 +142,10 @@ directions are tested; keep both when adjusting constants.
 - **No third-party dependencies, ever, without an ADR.** `.github/scripts/assert-no-dependencies.sh`
   fails CI on any `.package(`, `.binaryTarget`, `.plugin(`, `unsafeFlags`, or non-empty
   `Package.resolved`. Crypto comes only from CryptoKit, Security.framework and CommonCrypto.
-- **No unsafe constructs** outside `SecureMemory` — enforced by the `strict-memory-safety` job plus
-  `.github/scripts/assert-unsafe-confined.sh` (a marked construct would compile anywhere). Inside
+- **No unsafe constructs** outside `SecureMemory` — enforced by the `strict-memory-safety` job plus the
+  `.github/scripts/assert-unsafe-confined.sh` tripwire (a marked construct would compile anywhere, and
+  `@_silgen_name`-style bindings are not flagged by the compiler at all). No symlinks or non-Swift files
+  under `Sources/`, no custom target paths, no experimental features (`assert-no-dependencies.sh`). Inside
   `SecureMemory`, every unsafe construct is marked `unsafe (expression)` — **with the space**: Swift 6.2+
   parses it as the keyword, and on Swift 6.0/6.1 it is a call to the stand-in in `UnsafeMarker.swift`.
   An outer `unsafe` does not cover closure bodies; mark each level. Calls to stdlib `withUnsafe*` are

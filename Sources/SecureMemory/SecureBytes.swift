@@ -21,7 +21,11 @@ import Foundation
 /// - **Excluded from core dumps** on Linux (`MADV_DONTDUMP`). Darwin has no equivalent.
 /// - **Nothing prints.** `description`, `debugDescription` and the reflection mirror are redacted, so `print`,
 ///   `dump` and string interpolation cannot show the contents. There is deliberately no `Codable`, `Hashable` or
-///   `Equatable`: persisting or comparing key material must be an explicit call.
+///   `Equatable`.
+/// - **Copying out is possible, and should be named.** The type is a `Collection` only because CryptoKit's sealing
+///   APIs take `DataProtocol`, so `Array(bytes)`, `Data(bytes)` and `elementsEqual` (which is not constant-time) do
+///   compile. Production code must not use them: use `unprotectedCopy()` for the rare non-secret copy-out (a salt),
+///   so every escape is searchable, and `constantTimeEquals` to compare (review finding R6).
 ///
 /// Contents are fixed at initialisation; `zeroise()` is the only mutation. All access goes through a lock, so the
 /// type is safe to share across concurrency domains.
@@ -39,6 +43,10 @@ public final class SecureBytes: @unchecked Sendable {
     private let capacity: Int
     private let lock = NSRecursiveLock()
     private var zeroised = false
+    /// Reads in progress. The lock is recursive, so without this a `zeroise()` on the same thread as a read (a lock
+    /// handler run synchronously from inside a CryptoKit call) would wipe the bytes under the reader instead of
+    /// trapping (review finding R7).
+    private var activeReaders = 0
     let zeroisationProbe: ZeroisationProbe?
 
     static let pageSize = Int(getpagesize())
@@ -116,12 +124,11 @@ public final class SecureBytes: @unchecked Sendable {
         unsafe (initializeStorage { destination in
             var offset = 0
             while offset < count {
-                var word = generator.next()
+                let word = generator.next()
                 let take = Swift.min(8, count - offset)
                 for i in 0..<take {
                     unsafe (destination[offset + i] = UInt8(truncatingIfNeeded: word >> (8 * i)))
                 }
-                word = 0
                 offset += take
             }
         })
@@ -153,6 +160,12 @@ public final class SecureBytes: @unchecked Sendable {
         return result
     }
 
+    /// An ordinary array with the same bytes, which cannot be zeroised. For values that are not secret (a salt) or
+    /// that must leave protected storage by design; named so that every such escape is searchable.
+    public func unprotectedCopy() -> [UInt8] {
+        unsafe (withLiveBytes { unsafe (Array($0)) })
+    }
+
     /// Compares contents without an early exit on the first differing byte (`ConstantTime`).
     public func constantTimeEquals(_ other: SecureBytes) -> Bool {
         if self === other { return unsafe (withLiveBytes { _ in true }) }
@@ -164,10 +177,12 @@ public final class SecureBytes: @unchecked Sendable {
             })
     }
 
-    /// Overwrites the storage with zeros. Idempotent; any later read traps.
+    /// Overwrites the storage with zeros. Idempotent; any later read traps, and so does zeroising during a read on the
+    /// same thread. (Another thread's `zeroise()` waits for the read to finish.)
     public func zeroise() {
         lock.lock()
         defer { lock.unlock() }
+        precondition(activeReaders == 0, "SecureBytes zeroised while being read")
         wipeStorage()
         zeroised = true
     }
@@ -191,6 +206,8 @@ public final class SecureBytes: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         precondition(!zeroised, "SecureBytes read after zeroise(); refusing to hand out an all-zero key")
+        activeReaders += 1
+        defer { activeReaders -= 1 }
         return try unsafe (body(UnsafeRawBufferPointer(start: base, count: count)))
     }
 

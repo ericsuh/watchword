@@ -39,7 +39,7 @@
         ) throws -> KDFParameters where C.Duration == Duration {
             var generator = SystemRandomNumberGenerator()
             let password = SecureBytes(randomCount: 32, using: &generator)
-            let salt = Array(SecureBytes(randomCount: saltLength, using: &generator))
+            let salt = SecureBytes(randomCount: saltLength, using: &generator).unprotectedCopy()
             let elapsed = try clock.measure {
                 try PBKDF2.sha256(password: password, salt: salt, iterations: probeIterations, outputByteCount: 32)
                     .zeroise()

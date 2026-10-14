@@ -38,8 +38,16 @@ public struct Envelope: Sendable, Hashable {
     ///
     /// Order: size, magic, version, kind (in `EnvelopeHeader.parse`), key ID, full authenticated-data comparison,
     /// ciphertext length. Every one of these fails before any decryption is attempted.
-    public static func parse(_ bytes: [UInt8], expecting context: EnvelopeContext) throws -> Envelope {
-        guard bytes.count <= maximumLength else { throw EnvelopeError.tooLarge(bytes.count) }
+    ///
+    /// `maximumLength` defaults to the global cap; callers that know their record kind is small pass a tighter one,
+    /// so a hostile store cannot make a 113-byte keyset cost tens of megabytes to reject (SEC9).
+    public static func parse(
+        _ bytes: [UInt8],
+        expecting context: EnvelopeContext,
+        maximumLength: Int = Envelope.maximumLength
+    ) throws -> Envelope {
+        let limit = min(maximumLength, Envelope.maximumLength)
+        guard bytes.count <= limit else { throw EnvelopeError.tooLarge(bytes.count) }
         let (header, payloadOffset) = try EnvelopeHeader.parse(bytes, expecting: context.kind)
         guard header.keyID == context.keyID else {
             throw EnvelopeError.keyMismatch(expected: context.keyID, actual: header.keyID)

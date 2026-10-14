@@ -29,7 +29,15 @@ intended.
 - **[enforced]** `.github/scripts/assert-no-dependencies.sh` fails the build if `Package.swift`
   gains a `.package(`, a `.binaryTarget`, a `.plugin(`, or `unsafeFlags`, or if `Package.resolved`
   pins anything. Adding a dependency therefore requires editing the guard in the same pull request,
-  which is visible in review.
+  which is visible in review. It also checks the resolved manifest (`swift package dump-package`):
+  only plain Swift source and test targets, each at its conventional path (a custom `path:` could
+  compile files no other check scans), no experimental features or C++ interop, and the test-only
+  `WatchwordTestSupport` (seeded and deliberately broken RNGs) linked only into test targets.
+- **[enforced]** `.github/scripts/assert-unsafe-confined.sh` (strict-memory-safety job) fails on
+  unsafe constructs, `@unchecked`, or underscored attributes outside `Sources/SecureMemory`, on
+  hand-bound foreign symbols (`@_silgen_name`, `@_cdecl`, `@_extern`) anywhere, and on symlinks or
+  non-Swift files under `Sources/`. It is a tripwire for a malicious or careless contribution
+  (milestone-1 review finding R1), with review as the backstop.
 - **[convention]** Any new dependency requires an ADR covering: why no first-party API suffices,
   the maintenance and audit story, and the pin-and-vendor plan. ADR 0001 already forbids
   third-party cryptography outright.

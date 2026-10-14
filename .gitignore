@@ -74,3 +74,6 @@ fastlane/test_output
 
 # Local agent session state (GSD handoff checkpoints, not project content).
 .planning/
+
+# Local test output (e.g. `swift test | tee test-output.log`); CI uploads its own as artifacts.
+*.log

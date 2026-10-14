@@ -134,7 +134,8 @@ Rationale and parameters:
 - **Keyset.** Ksym wraps vault keys the person owns; X25519 receives HPKE-wrapped vault keys from
   others; Ed25519 signs membership records and change-log segments so a sync store cannot forge
   them. Public keys are published in the account record together with a self-signature
-  (`PublicKeyBundle`, whose initializer rejects low-order X25519 points and bad self-signatures).
+  (`PublicKeyBundle`, whose initializer rejects low-order X25519 points, small-order Ed25519 keys —
+  for which one signature verifies for every message — and bad self-signatures).
   Every signature covers `"WW-sig-v1" ‖ 0x00 ‖ domain ‖ message`, with one domain per purpose
   (key bundle, key grant, membership, log segment), so no signature verifies for another purpose.
   The keyset is wrapped under AUK as an `accountHeader` envelope bound to the account ID.
@@ -142,7 +143,9 @@ Rationale and parameters:
   wrapped to each member with HPKE base mode (DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM),
   info = `"WW-vaultkey-v1"||vaultID||keyID`, associated data binding sender, recipient and the
   recipient's X25519 key, and the whole wrap (`VaultKeyGrant`) signed by the sender's Ed25519 key.
-  The recipient checks sender, signature and addressing before decrypting.
+  The recipient checks, before decrypting, that the grant's vault and key IDs are those of the
+  storage location it was found in (entitlement is per vault, so a sender entitled for one vault
+  must not be able to install a key into another), then sender, signature and addressing.
 - **Records.** Each item version is one AES-GCM ciphertext under the current VK with the AAD above.
   A key rotation produces a new `keyID`; old ciphertexts are re-encrypted lazily by the first
   writer and eagerly on membership removal.
@@ -174,9 +177,12 @@ expected key; the AAD re-derived from the storage location and compared byte for
 embedded AAD (a record found in vault B claiming vault A fails closed, as does one relabelled as a
 newer version or another schema); a ciphertext shorter than the tag rejected — all before
 decryption. Decryption either returns the whole plaintext, into `SecureBytes`, or fails with one
-undifferentiated error. Nonces are 96 random bits per encryption; each `RecordSealer` also remembers
-the nonces it issued and refuses a repeat, a tripwire for a broken generator, and keys are rotated
-well before the 2^32 random-nonce limit.
+undifferentiated error. Nonces are 96 random bits per encryption. Each key also carries a ledger of
+every nonce sealed under it, shared by every copy of the key and every caller (record seals and key
+wraps alike), and a repeat is refused: a tripwire for a broken generator. Keys are rotated well
+before the 2^32 random-nonce limit. Callers that know their record is small pass a tighter size cap
+(wrapped keys use 1 KiB), so a hostile store cannot make a 113-byte keyset cost tens of megabytes to
+reject.
 
 Plaintext payloads are canonical CBOR documents with a `schemaVersion`. Item payload:
 
@@ -381,13 +387,22 @@ which makes F5.4 unit-testable. The extension uses the same policy with its own 
   `deinit`; reading a zeroised buffer **traps**, because an all-zero key read back by a racing
   encryption would seal records under a key everyone knows;
 - excluded from core dumps on Linux (`MADV_DONTDUMP`);
+- a zeroise during a read on the same thread (the lock is recursive) traps rather than wiping the
+  bytes under the reader;
 - redacted `description`, `debugDescription` and reflection mirror, and no `Codable`, `Hashable` or
-  `Equatable`, so printing, logging, persisting or comparing key material is always deliberate.
+  `Equatable`. It is a `Collection`, because CryptoKit's sealing APIs take `DataProtocol`, so
+  `Array(bytes)` and the non-constant-time `elementsEqual` compile; production code uses the named
+  `unprotectedCopy()` for the rare non-secret copy-out and `constantTimeEquals` to compare.
 
 Every unsafe construct in the module is marked with an `unsafe` expression, and the
-`strict-memory-safety` CI job builds all modules with warnings as errors, so an unmarked pointer use
-anywhere fails the build; a separate CI check fails if any marked construct appears outside
-`SecureMemory` (`adr/0001-memory-safe-language.md`).
+`strict-memory-safety` CI job builds all modules with warnings as errors, so any construct the
+compiler classifies as unsafe must be marked. The compiler does not classify everything: an
+`@_silgen_name` declaration with integer parameters binds `memset` with no pointer type in sight.
+So a separate CI tripwire (`assert-unsafe-confined.sh`) fails on `unsafe` in any form, `@unchecked`
+and underscored attributes outside `SecureMemory`, on hand-bound foreign symbols anywhere, and on
+symlinks or non-Swift files under `Sources/`; and `assert-no-dependencies.sh` rejects custom target
+paths, non-Swift target types and compiler-relaxing settings in the manifest. These are tripwires,
+not proofs; review of `Sources/SecureMemory` is the backstop (`adr/0001-memory-safe-language.md`).
 
 ## 12. Password generation (`WatchwordGenerator`)
 

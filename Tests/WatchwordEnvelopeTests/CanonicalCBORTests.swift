@@ -13,13 +13,13 @@ struct CanonicalCBORTests {
             [
                 CBORValue.unsigned(0), .unsigned(23), .unsigned(24), .unsigned(100), .unsigned(1000),
                 .unsigned(1_000_000), .unsigned(1_000_000_000_000), .unsigned(UInt64.max), .bytes([]),
-                .bytes([1, 2, 3, 4]), .text(""), .text("IETF"), .text("\u{00FC}"), .array([]),
+                .bytes([1, 2, 3, 4]), .array([]),
                 .array([.unsigned(1), .unsigned(2), .unsigned(3)]), .map([:]),
                 .map([1: .unsigned(2), 3: .unsigned(4)]),
             ],
             [
                 "00", "17", "1818", "1864", "1903e8", "1a000f4240", "1b000000e8d4a51000", "1bffffffffffffffff", "40",
-                "4401020304", "60", "6449455446", "62c3bc", "80", "83010203", "a0", "a201020304",
+                "4401020304", "80", "83010203", "a0", "a201020304",
             ]
         ))
     func rfcExamples(_ value: CBORValue, _ expected: String) {

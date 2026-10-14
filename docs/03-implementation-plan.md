@@ -18,7 +18,7 @@ obligations are in `04-test-plan.md`.
 - `SecureMemory`: `SecureBytes` with zeroisation, page locking where available, every unsafe
   construct marked `unsafe`.
 - `WatchwordCrypto`: Secret Key generation/formatting/checksum; 2SKD (`PBKDF2` via CommonCrypto,
-  `HKDF` via CryptoKit, XOR); keyset creation and wrapping; vault key creation; HPKE wrap/unwrap;
+  `HKDF` via CryptoKit, combined with HKDF rather than XOR — ADR 0003 amendment); keyset creation and wrapping; vault key creation; HPKE wrap/unwrap;
   Ed25519 signing of membership and log segments; KDF calibration.
 - `WatchwordEnvelope`: full encoder/decoder with AAD binding and version/kind/key checks.
 - Exit: known-answer tests for every primitive, property tests for round-trips, adversarial tests

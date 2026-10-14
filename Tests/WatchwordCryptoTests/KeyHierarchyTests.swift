@@ -31,12 +31,11 @@
             var generator = SeededGenerator(seed: UInt64(size) + 1)
             let key = EncryptionKey.generate(using: &generator)
             let plaintext = (0..<size).map { UInt8(truncatingIfNeeded: $0 &* 31) }
-            var sealer = RecordSealer(key: key)
             let context = Fixtures.itemContext(key: key)
-            let envelope = try sealer.seal(plaintext, context: context, using: &generator)
+            let envelope = try RecordCipher.seal(plaintext, context: context, key: key, using: &generator)
             #expect(envelope.count == EnvelopeHeader.fixedPrefixLength + context.canonicalAAD().count + size + 16)
             #expect(Array(try RecordCipher.open(envelope, context: context, key: key)) == plaintext)
-            #expect(sealer.sealCount == 1)
+            #expect(key.sealCount == 1)
         }
 
         @Test("the same seed reproduces the same envelope; a different one does not")
@@ -44,8 +43,8 @@
             func seal(seed: UInt64) throws -> [UInt8] {
                 var generator = SeededGenerator(seed: seed)
                 let key = EncryptionKey.generate(using: &generator)
-                var sealer = RecordSealer(key: key)
-                return try sealer.seal(Array("x".utf8), context: Fixtures.itemContext(key: key), using: &generator)
+                return try RecordCipher.seal(
+                    Array("x".utf8), context: Fixtures.itemContext(key: key), key: key, using: &generator)
             }
             #expect(try seal(seed: 1) == seal(seed: 1))
             #expect(try seal(seed: 1) != seal(seed: 2))
@@ -216,13 +215,13 @@
             let member = Keyset.generate(accountID: UUID())
             let vaultKey = VaultKey.generate(vaultID: Fixtures.vaultID)
             let grant = try VaultKeyGrant.seal(vaultKey, to: member.publicKeyBundle(), from: owner)
-            let received = try grant.open(as: member, from: owner.publicKeyBundle())
+            let received = try grant.open(
+                as: member, from: owner.publicKeyBundle(), vaultID: Fixtures.vaultID, keyID: vaultKey.key.keyID)
             #expect(received.key.keyID == vaultKey.key.keyID)
             #expect(received.key.material.constantTimeEquals(vaultKey.key.material))
 
-            var sealer = RecordSealer(key: vaultKey.key)
             let context = Fixtures.itemContext(key: vaultKey.key)
-            let record = try sealer.seal(Array("shared bank PIN".utf8), context: context)
+            let record = try RecordCipher.seal(Array("shared bank PIN".utf8), context: context, key: vaultKey.key)
             #expect(
                 Array(try RecordCipher.open(record, context: context, key: received.key))
                     == Array("shared bank PIN".utf8))

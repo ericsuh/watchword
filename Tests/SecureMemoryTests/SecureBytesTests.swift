@@ -120,6 +120,65 @@ struct SecureBytesTests {
     }
 }
 
+@Suite("Secure bytes: misuse traps and copy-out")
+struct SecureBytesMisuseTests {
+    @Test("unprotectedCopy is the named way out")
+    func unprotectedCopy() {
+        #expect(SecureBytes(copying: [7, 8, 9]).unprotectedCopy() == [7, 8, 9])
+    }
+
+    // Exit tests need Swift 6.2; on older toolchains the traps are covered by review only.
+    #if compiler(>=6.2)
+        @Test("reading after zeroise traps rather than returning zeros")
+        func readAfterZeroiseTraps() async {
+            await #expect(processExitsWith: .failure) {
+                let bytes = SecureBytes(copying: [1, 2, 3])
+                bytes.zeroise()
+                _ = bytes[0]
+            }
+        }
+
+        /// Review finding R7: the lock is recursive, so a same-thread zeroise inside a read must trap, not wipe.
+        @Test("zeroising during a read on the same thread traps")
+        func zeroiseDuringReadTraps() async {
+            await #expect(processExitsWith: .failure) {
+                let bytes = SecureBytes(copying: [1, 2, 3])
+                bytes.withUnsafeBytes { _ in bytes.zeroise() }
+            }
+        }
+    #endif
+}
+
+@Suite("Nonce ledger")
+struct NonceLedgerTests {
+    @Test("a nonce is fresh once, then reused; distinct nonces are independent")
+    func claims() {
+        let ledger = NonceLedger()
+        let nonce = [UInt8](repeating: 0xAB, count: 12)
+        #expect(ledger.claim(nonce) == .fresh)
+        #expect(ledger.claim(nonce) == .reused)
+        var other = nonce
+        other[11] ^= 1
+        #expect(ledger.claim(other) == .fresh)
+        other[0] ^= 1
+        #expect(ledger.claim(other) == .fresh, "every byte is part of the identity")
+        #expect(ledger.count == 3)
+    }
+
+    @Test("concurrent claims of one nonce succeed exactly once")
+    func concurrentClaims() async {
+        let ledger = NonceLedger()
+        let nonce = [UInt8](repeating: 1, count: 12)
+        let fresh = await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<64 {
+                group.addTask { ledger.claim(nonce) == .fresh }
+            }
+            return await group.reduce(0) { $0 + ($1 ? 1 : 0) }
+        }
+        #expect(fresh == 1)
+    }
+}
+
 #if canImport(CryptoKit)
     import CryptoKit
 
