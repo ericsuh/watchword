@@ -101,6 +101,51 @@ gh api -X PUT repos/ericsuh/watchword/vulnerability-alerts
 `automated-security-fixes` is deliberately **not** enabled: it opens auto-merging dependency PRs,
 and `07-supply-chain.md` requires a human to read the diff between two pins.
 
+### 3.1 Code scanning (CodeQL default setup)
+
+Already enabled, and the only CI that runs without a workflow file in the tree. It surfaces on
+pull requests as the `Analyze (swift)` check. Confirm the configuration rather than assuming it:
+
+```sh
+gh api repos/ericsuh/watchword/code-scanning/default-setup
+# Expect: state "configured", languages ["swift"], query_suite "default",
+#         threat_model "remote", schedule "weekly".
+```
+
+To change the query suite — `security-extended` trades more findings for more false positives,
+which is usually the right trade on a password manager:
+
+```sh
+gh api -X PATCH repos/ericsuh/watchword/code-scanning/default-setup --input - <<'JSON'
+{ "state": "configured", "query_suite": "extended" }
+JSON
+```
+
+Read findings from the CLI so a review does not depend on the web UI:
+
+```sh
+gh api repos/ericsuh/watchword/code-scanning/alerts \
+  --jq '.[] | {rule: .rule.id, severity: .rule.security_severity_level, state,
+               path: .most_recent_instance.location.path}'
+```
+
+**`Analyze (swift)` is not in the step 5 required-check list, and that is a live choice rather than
+a settled one.** Arguments both ways, since this is exactly the sort of thing that gets decided by
+accident:
+
+- *For requiring it:* it does real work, so it is not the "passes by doing nothing" case that keeps
+  `App tests` off the list. A memory-safety or injection finding landing on `main` is the kind of
+  regression this project cares about most.
+- *Against:* the queries are versioned by GitHub, so a query-pack update can turn a green `main`
+  red without any change here — a different failure mode from the rest of the list, where a red
+  check always means a commit broke something. It also blocks merges on an analysis that has no
+  pinned version (`07-supply-chain.md` §3.4).
+
+Recommendation: leave it advisory until the first month of alerts shows the false-positive rate,
+then require it. If you do require it, add `"Analyze (swift)"` to `contexts` in step 5 **and** to
+the expected-count sentence in step 9 — and re-check both after ever enabling a second language,
+because the context name is derived from the language set.
+
 ## 4. Merge hygiene
 
 ```sh
@@ -249,14 +294,21 @@ gh api repos/ericsuh/watchword/actions/permissions/workflow
 echo "— security features —"
 gh api repos/ericsuh/watchword --jq '.security_and_analysis'
 
+echo "— code scanning (no workflow file; settings only) —"
+gh api repos/ericsuh/watchword/code-scanning/default-setup \
+  --jq '{state, languages, query_suite, schedule}'
+
 echo "— rulesets —"
 gh api repos/ericsuh/watchword/rulesets --jq '.[] | {name, target, enforcement}'
 ```
 
 Expected: five contexts with `strict: true`, `admins: true`, no force-push, no deletions,
 `allowed_actions: "selected"` with `github_owned_allowed: true` and an empty `patterns_allowed`,
-`default_workflow_permissions: "read"`, secret scanning and push protection `enabled`, and one
-active tag ruleset.
+`default_workflow_permissions: "read"`, secret scanning and push protection `enabled`, code
+scanning `configured` for `["swift"]`, and one active tag ruleset.
+
+Five contexts is correct only while `Analyze (swift)` stays advisory (step 3.1). If that decision
+is revisited, this sentence is the second place to update.
 
 ## Optional: Dependabot for action pins
 

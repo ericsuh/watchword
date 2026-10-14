@@ -148,6 +148,22 @@ claiming a layer is covered.
 runs, libFuzzer harnesses under `Fuzz/` (self-skipping), and an audit that every `uses:` is a 40-hex
 commit SHA.
 
+One check on every PR has **no workflow file**: `Analyze (swift)`, from CodeQL *default setup*,
+which GitHub configures in repository settings and runs on a generated workflow you cannot see in
+the tree. Don't go looking for it in `.github/`, and don't add a `codeql.yml` to "fix" its absence —
+that would run CodeQL twice. Inspect it instead:
+
+```sh
+gh api repos/ericsuh/watchword/code-scanning/default-setup   # state, languages, query suite
+gh api repos/ericsuh/watchword/code-scanning/alerts --jq '.[] | {rule: .rule.id, state, path: .most_recent_instance.location.path}'
+```
+
+Two consequences worth knowing. It is the one piece of CI that does **not** follow the
+SHA-pinning rule, because the queries are versioned by GitHub rather than by this repository — an
+accepted exception, recorded in `docs/07-supply-chain.md` §3.4, not an oversight. And its check
+name is derived from the configured language set, so enabling a second language renames it and
+silently drops it from any branch-protection list that named the old one.
+
 Supply-chain rules that apply to edits in `.github/`:
 
 - **Pin actions to full commit SHAs**, never tags; add the `# v4`-style comment and the mapping in the
