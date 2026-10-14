@@ -84,18 +84,28 @@ authenticate to, and the GitHub proxy handles git.
 
 [`.github/scripts/cloud-setup.sh`](../.github/scripts/cloud-setup.sh), in order:
 
-1. Locates the checkout by looking for a `Package.swift` naming `Watchword`.
-2. Installs the apt dependencies swift.org publishes for Ubuntu 24.04 **and** downloads
-   [swiftly](https://www.swift.org/install/linux/) concurrently — the five-minute budget below is the
-   reason for the `&`/`wait`.
-3. Installs the toolchain with swiftly, pinned to the version in [`.swift-version`](../.swift-version)
-   (`6.4.1`). Falls back to the release tarball at `download.swift.org` if swiftly fails.
+1. Locates the checkout by looking for a `Package.swift` naming `Watchword`, and reads the version
+   pin from [`.swift-version`](../.swift-version) (`6.4.1`).
+2. Installs the apt dependencies swift.org publishes for Ubuntu 24.04 **and** downloads the
+   [swiftly](https://www.swift.org/install/linux/) installer concurrently — the five-minute budget
+   below is the reason for the `&`/`wait`.
+3. Installs the toolchain, trying two methods in order and judging both by whether a `swift` binary
+   actually appears:
+   - **The release tarball**, verified with GPG against the pinned Swift signing key
+     `52BB7E3D…B47A981F` before anything is extracted. A toolchain is compile-time code execution on
+     every later build, so it is verified rather than trusted (`07-supply-chain.md`, T3).
+   - **swiftly**, as the second opinion if the URL layout has moved. Both subcommands pass
+     `--assume-yes`: a setup script has no TTY, and `swiftly install` prompts.
 4. Symlinks `swift`, `swiftc`, `swift-format` and `sourcekit-lsp` into `/usr/local/bin` and writes
    `/etc/profile.d/swift.sh`. The Bash tool does not run a login shell, so the symlinks are what
    actually make the toolchain reachable; only the drivers are linked, because symlinking the whole
    toolchain would shadow the system `clang` for everything else on the VM.
 5. Warms `.build` with `swift build --build-tests`, bounded by `timeout 150`.
-6. Prints `swift --version` and warns if `swift format` is missing.
+6. Verifies, and **announces its own failure**: everything is logged to
+   `/var/log/watchword-cloud-setup.log`, and if no toolchain is present at the end the script appends
+   a note to root's `CLAUDE.md`, which the session loads as user instructions. A setup script cannot
+   fail a session start, so the alternative is an agent discovering `swift: command not found` much
+   later with no idea why — which is precisely what the first version of this script produced.
 
 Two hosting constraints it is written around, and which any edit must preserve:
 
@@ -127,14 +137,28 @@ That script is the honest subset of `ci.yml`: the four jobs expressible as plain
 says so in its own summary line, and it names the Xcode-only gates it did not run, so a green result
 is never mistaken for a green CI.
 
-If `swift` is missing, the setup script did not run or did not finish. Check in this order:
+If `swift` is missing, read the log first — it names the failure:
+
+```sh
+cat /var/log/watchword-cloud-setup.log
+```
+
+A successful run ends with `SUCCESS: swift is on PATH at …`. Note that a setup script that *fails*
+still reports success to the session-start UI, because it is required to exit 0; "initialised without
+error" is therefore not evidence that anything installed. Causes, in likelihood order:
 
 1. **Network access is `Trusted`, not `Custom`.** The most common cause; `download.swift.org` is
-   unreachable and both the installer and the tarball fallback fail.
-2. **The setup script field is empty**, or holds a stale copy from before an edit.
+   unreachable and both install methods fail. The log shows the probe failing.
+2. **The setup script field is empty**, or holds a stale copy from before an edit. Nothing syncs the
+   pasted copy to this file.
 3. **A cached snapshot predates your change.** The setup script does not re-run when an idle VM is
-   restored. Start a new session, or ask Claude to run the install commands in the current one.
-4. **Setup overran five minutes**, so nothing was cached and a slow session start repeats it.
+   restored, so edits reach only new sessions. Recover in place by running the script from the
+   checkout: `.github/scripts/cloud-setup.sh` (it is idempotent and safe to re-run as root).
+4. **Setup overran five minutes**, so nothing was cached and every session repeats the whole install.
+
+GPG needs `keyserver.ubuntu.com` to fetch the signing key; it is covered by the `*.ubuntu.com` entry
+in the Trusted defaults, which is one more reason to keep **"Also include default list of common
+package managers"** ticked in step 2.
 
 Mind the compiler-version gap: a cloud session builds with Swift 6.4, while `ci.yml` also runs the
 Xcode 16.4 leg on macOS 15. Something can compile cleanly in a cloud session and still fail that
