@@ -34,6 +34,10 @@ extension Array where Element == UInt8 {
     }
 
     public var hex: String {
-        map { String(format: "%02x", $0) }.joined()
+        map { byte in
+            // Not String(format:), whose C varargs count as unsafe under strict memory safety on Darwin.
+            let digits = String(byte, radix: 16)
+            return byte < 0x10 ? "0" + digits : digits
+        }.joined()
     }
 }
