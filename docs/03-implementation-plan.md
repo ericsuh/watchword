@@ -2,7 +2,51 @@
 
 Version 0.1 (draft). Milestones are ordered so that every security-relevant layer exists, with its
 tests, before any UI depends on it. Each milestone lists its exit criteria; the matching test
-obligations are in `04-test-plan.md`.
+obligations are in `04-test-plan.md`. Each milestone from 2 onwards also records the environment
+it has to be built in — a Mac with Xcode, or a remote/Linux session — summarised in the table
+below.
+
+## Where each milestone is built
+
+Two execution environments are available, and the split between them is not a preference. It is the
+Apple SDK boundary described in `09-cloud-sessions.md` §1.
+
+- **Local macOS session** (or Remote Control into one): full Xcode, simulators, `xcodebuild`, the
+  Xcode MCP server, and every Apple framework. The only environment in which the `app-tests`,
+  XCUITest and AutoFill suites can run at all.
+- **Remote/Linux session** (cloud session, `claude --cloud`, routines): `swift build`, `swift test`,
+  both test frameworks, the adversarial suite, `-strict-memory-safety` and `swift format` — the four
+  `ci.yml` jobs that `.github/scripts/cloud-verify.sh` reproduces. No Apple SDKs, ever.
+
+| Milestone | Remote/Linux with no loss of verification | Needs a Mac, and for what |
+| --- | --- | --- |
+| 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
+| 1 — cryptographic core (done) | Builds, but the crypto suites are compiled out, not run | CryptoKit, CommonCrypto, Security.framework |
+| 2 — local vault and unlock | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
+| 3 — sync | The change log, Lamport merge and multi-client simulation — if signing and encryption arrive through a port | `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
+| 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
+| 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
+| 6 — hygiene | HIBP client, scheduling, strength estimator, reuse/age/2FA checks | the Watchtower-style report UI and its snapshot tests |
+| 7 — interchange | Parsers, adversarial parser tests, and the fuzz targets — a better host for them | Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive |
+| 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
+
+Four rules this split implies, all of which outlive the milestones they came from:
+
+1. **A remote session can draft Apple-framework code; it cannot verify it.** Pair such a session with
+   a Mac one that runs the suites before the pull request opens. The adversarial-test obligation in
+   the working agreements below is discharged on the Mac, not in the session that wrote the test.
+2. **`#if canImport(CryptoKit)` fails silently.** On Linux the crypto suites are *absent*, not red:
+   `swift test` goes green with whole files never compiled. Count tests rather than reading the exit
+   code, and treat Linux green as a signal, never as the gate (`09-cloud-sessions.md` §4).
+3. **Remote-capability is a design lever, not a fact about a milestone.** Milestone 3's merge logic is
+   portable exactly as long as segment signing stays behind a port with a fake in
+   `WatchwordTestSupport`; the moment `WatchwordSync` imports CryptoKit, the whole milestone becomes
+   Mac-only. The ports list in `02-architecture.md` §15 is what keeps the boundary movable, and the
+   same reasoning already keeps `WatchwordMatching` free of AuthenticationServices.
+4. **No step may exist only as an Xcode MCP call.** The MCP server is a local-macOS convenience over
+   the same toolchain CI uses; every milestone step must stay expressible as shell, or CI cannot run
+   it (`CLAUDE.md`, and `09-cloud-sessions.md` §1 on Remote Control as the only way an agent reaches
+   `xcodebuild`).
 
 ## Milestone 0 — Repository, toolchain, CI (done)
 
@@ -46,6 +90,11 @@ Status: delivered as specified, with these scoping notes.
 - Exit: scenario tests S1–S4 pass against `VaultSession` with in-memory ports; XCUITest smoke test
   of onboarding and unlock on both platforms; on-device verification of QuickType behaviour with
   overlapping domain identities (document the result in `02-architecture.md` §9).
+- Environment: **Mac with Xcode.** Everything new here is Apple-framework-bound — Keychain,
+  LocalAuthentication, the App Group container, Emergency Kit PDF generation — and this is the
+  milestone in which `Apps/` first exists, so `xcodebuild`, the simulators and the Xcode MCP server
+  become usable (and necessary). A remote session can draft the `WatchwordStore` schema and the
+  `VaultSession` state machine, but cannot run S1–S4: those need real keysets.
 
 ## Milestone 3 — Sync
 
@@ -56,6 +105,11 @@ Status: delivered as specified, with these scoping notes.
 - Exit: multi-client simulation tests (N clients, random partitions, concurrent edits) converge;
   CloudKit integration test against a development container runs in a manually triggered
   workflow with repository secrets; transport contract tests prove no plaintext leaves the core.
+- Environment: **split, and worth keeping that way.** The change-log segments, snapshots, Lamport
+  merge, `InMemorySyncTransport` and the N-client partition simulation are pure logic and belong in a
+  remote session — provided segment signing and record encryption reach them through a port with a
+  fake, so nothing in `WatchwordSync` imports CryptoKit. `CloudKitTransport` and the iCloud Drive
+  `FileTransport` are Mac-only, as is the manually triggered CloudKit integration workflow.
 
 ## Milestone 4 — Sharing
 
@@ -65,6 +119,11 @@ Status: delivered as specified, with these scoping notes.
 - Exit: S3 and S4 pass end-to-end with two simulated users over `InMemorySyncTransport` and over
   CloudKit (manual workflow); adversarial tests for forged membership, stale-admin signatures,
   key substitution by the server, and post-revocation access.
+- Environment: **Mac.** Membership records are Ed25519-signed and wrap vault keys with HPKE, so even
+  the chain-walking logic cannot be tested on Linux; the adversarial tests named above — forged
+  membership, stale-admin signatures, key substitution, post-revocation access — are precisely the
+  ones that need real primitives rather than fakes. `CKShare` and the sharing controllers add the UI
+  half.
 
 ## Milestone 5 — AutoFill
 
@@ -75,6 +134,9 @@ Status: delivered as specified, with these scoping notes.
 - Exit: extension view-model tests cover every request type with fakes; manual AutoFill QA
   checklist executed on device for S1 and S2; best-effort XCUITest that enables the provider in
   Settings on the simulator runs as a non-blocking job.
+- Environment: **Mac with Xcode, plus a physical device.** The strongest Mac case of the nine: every
+  request type is an AuthenticationServices entry point, the targets are app extensions, and the exit
+  criteria name simulator and on-device QA. This is the milestone the Xcode MCP server exists for.
 
 ## Milestone 6 — Hygiene
 
@@ -82,6 +144,11 @@ Status: delivered as specified, with these scoping notes.
   zxcvbn-class estimator (vendored); reuse/age/2FA checks; Watchtower-style report UI.
 - Exit: HIBP client tests against recorded fixtures including padded and malformed responses;
   scheduling tests with a fake clock; UI report snapshot tests.
+- Environment: **mostly remote/Linux.** The HIBP range client (recorded fixtures, no live calls, so
+  nothing to add to a session allowlist), the scheduler against `FakeClock`, the vendored estimator
+  and the reuse/age/2FA checks are all portable; add `import FoundationNetworking` under
+  `#if canImport` where URLSession needs it on Linux. Only the report UI and its snapshot tests need
+  a Mac.
 
 ## Milestone 7 — Interchange
 
@@ -89,11 +156,19 @@ Status: delivered as specified, with these scoping notes.
   integration on iOS 26/macOS 26; encrypted Watchword archive; in-app instructions.
 - Exit: fixture-based round-trip tests; adversarial parser tests (zip-slip, bomb, formula
   injection, oversized rows); fuzz targets registered in the nightly workflow.
+- Environment: **mostly remote/Linux, and the better fuzzing host.** The parsers and their
+  adversarial tests (zip-slip, bomb, formula injection, oversized rows) are pure, and libFuzzer with
+  the sanitisers on Linux x86\_64 is more comfortable than the macOS nightly leg — so keep the `Fuzz/`
+  harnesses free of Apple imports and either host can run them. Credential Exchange on iOS 26/macOS
+  26 and the encrypted Watchword archive (crypto) are Mac-only.
 
 ## Milestone 8 — Hardening and release
 
 - External review of `WatchwordCrypto`, `WatchwordEnvelope`, `WatchwordSharing`.
 - Performance (N1, N2) and accessibility (N4) passes; App Store privacy manifest; TestFlight.
+- Environment: **Mac.** The external crypto review reads source anywhere, but the performance (N1,
+  N2) and accessibility (N4) passes measure a running app, and the privacy manifest and TestFlight
+  submission go through Xcode and App Store Connect.
 
 ## Working agreements
 

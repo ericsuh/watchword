@@ -171,3 +171,5 @@ older leg. Cloud-session green is a signal, not the gate — `ci.yml` is the gat
 - `02-architecture.md` §15 — which future modules are Apple-framework-bound, and therefore outside
   what a cloud session can verify.
 - `04-test-plan.md` — the requirement-to-test map a cloud session can only partly exercise.
+- `03-implementation-plan.md`, "Where each milestone is built" — this boundary applied milestone by
+  milestone: which remaining work a remote session can finish and verify, and which needs a Mac.
