@@ -115,6 +115,29 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
   Accepted deliberately — simulator AutoFill automation is unreliable — and it is scoped to a
   single `-only-testing` invocation so it cannot mask the rest of the suite.
 
+### 3.4 CodeQL default setup, and why it is exempt from SHA pinning
+
+Code scanning runs as GitHub's **default setup** rather than a committed workflow: `state:
+configured`, `languages: ["swift"]`, `query_suite: default`, `threat_model: remote`, weekly plus
+every pull request. The check appears as `Analyze (swift)` and has no file in `.github/workflows/`,
+which is worth stating plainly because "every CI step is in the tree" is otherwise true here.
+
+This is a deliberate exception to §3.1. The analysis runs on a GitHub-generated workflow using a
+GitHub-versioned query pack, so there is no `uses:` for the nightly audit to check and no SHA for
+us to pin; the trust base is the same GitHub-owned surface the actions policy already admits. The
+alternative — an advanced-setup `codeql.yml` with pinned `github/codeql-action` SHAs — buys a pin
+on the action but not on the queries, and adds a workflow that can drift from the default suite.
+Revisit if the repository ever needs custom queries or a pinned query pack version.
+
+Two properties to keep in mind:
+
+- **The check name tracks the language set.** `Analyze (swift)` becomes a different context if a
+  second language is enabled, so a branch-protection list naming the old one stops gating without
+  failing. Re-verify §9 of `08-repository-hardening.md` after any language change.
+- **Default setup can be reconfigured from the web UI** by anyone with admin, including turning it
+  off, and that leaves no diff in the repository. Treat `code-scanning/default-setup` as part of
+  the settings surface to re-verify, not as something the tree protects.
+
 ## 4. Repository and release integrity (T5, T6)
 
 **[planned]** — these require repository-admin settings, not code. The `gh` commands,
@@ -131,6 +154,8 @@ in an order that does not lock you out, are in `08-repository-hardening.md`:
   with required reviewers, or better, in a hardware-backed keychain used only for release builds —
   never in a secret readable by a PR-triggered workflow.
 - Secret scanning and push protection enabled.
+- **[done]** CodeQL code scanning enabled via default setup (§3.4). Whether `Analyze (swift)`
+  joins the required-check list is an open choice, recorded in `08-repository-hardening.md` §3.1.
 
 ## 5. Developer machines (T7)
 
