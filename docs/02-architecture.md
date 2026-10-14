@@ -463,8 +463,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordStore        SQLite ciphertext store                            [milestone 2]
   Sources/WatchwordSync         change log, merge, SyncTransport protocol          [milestone 3]
   Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
-  Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 5]
-  Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 6]
+  Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 6]
+  Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
   Sources/WatchwordKit          VaultSession façade used by all UI targets         [milestone 2+]
   Sources/WatchwordTestSupport  seeded/broken generators (milestone 1); fakes for every port and
                                 scenario builders as the ports arrive
