@@ -7,12 +7,6 @@ struct RootView: View {
 
     var body: some View {
         content
-            .overlay {
-                // Hides vault contents from the app-switcher snapshot (PRD F5.7).
-                if scenePhase != .active && model.phase == .unlocked {
-                    PrivacyCover()
-                }
-            }
             .onChange(of: scenePhase) { _, phase in
                 Task {
                     switch phase {
@@ -22,16 +16,8 @@ struct RootView: View {
                     }
                 }
             }
-            .task(id: model.phase) {
-                // Idle check while unlocked; time comes from the session's clock, this only schedules the checks.
-                while model.phase == .unlocked, !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(15))
-                    await model.handle(.tick)
-                }
-            }
-            .onReceive(PlatformLifecycle.sleepNotifications) { _ in
-                Task { await model.handle(.systemSleep) }
-            }
+            // A window that (re)appears checks the timeout at once rather than waiting for the next tick.
+            .onAppear { Task { await model.handle(.tick) } }
     }
 
     @ViewBuilder private var content: some View {

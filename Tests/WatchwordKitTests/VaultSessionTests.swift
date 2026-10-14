@@ -128,7 +128,7 @@
         func deleteAccount() async throws {
             let vault = TestVault()
             try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             await #expect(throws: CryptoError.authenticationFailed) {
                 try await vault.session.deleteAccount(password: "wrong password!")
             }
@@ -145,7 +145,7 @@
         func quickUnlock() async throws {
             let vault = TestVault()
             try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             await vault.session.lock()
             #expect(try await vault.session.status().quickUnlock == .allowed)
             try await vault.session.quickUnlock(prompt: "Unlock your vault")
@@ -153,24 +153,26 @@
             #expect(await vault.keychain.prompts == ["Unlock your vault"])
         }
 
-        @Test("a cancelled prompt is not a failed attempt")
+        @Test("a cancelled prompt counts as a failed attempt, and still surfaces as a cancel")
         func cancel() async throws {
             let vault = TestVault()
             try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             await vault.session.lock()
-            await vault.keychain.script(.cancel, .cancel, .cancel, .cancel)
-            for _ in 0..<4 {
+            await vault.keychain.script(.cancel, .cancel, .cancel)
+            for _ in 0..<3 {
                 await #expect(throws: KeychainError.userCancelled) { try await vault.session.quickUnlock() }
             }
-            try await vault.session.quickUnlock()
+            await #expect(throws: VaultError.quickUnlockRefused(.tooManyFailedAttempts)) {
+                try await vault.session.quickUnlock()
+            }
         }
 
         @Test("a success resets the failure count")
         func successResets() async throws {
             let vault = TestVault()
             try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             await vault.session.lock()
             await vault.keychain.script(.fail, .fail, .succeed, .fail, .fail, .succeed)
             for _ in 0..<2 {
@@ -193,15 +195,25 @@
             let vault = TestVault(biometrics: FakeBiometricGate(.unavailable))
             try await vault.createAccount()
             await #expect(throws: VaultError.quickUnlockRefused(.biometryUnavailable)) {
-                try await vault.session.enableQuickUnlock()
+                try await vault.session.enableQuickUnlock(password: TestVault.password)
             }
+        }
+
+        @Test("enabling quick unlock needs the account password")
+        func needsPassword() async throws {
+            let vault = TestVault()
+            try await vault.createAccount()
+            await #expect(throws: CryptoError.authenticationFailed) {
+                try await vault.session.enableQuickUnlock(password: "not the password")
+            }
+            #expect(try await vault.session.status().quickUnlock == nil)
         }
 
         @Test("a password unlock after expiry re-enrols quick unlock with a fresh key")
         func reenrol() async throws {
             let vault = TestVault()
             let kit = try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             let firstKey = try #require(await vault.keychain.raw(.quickUnlockKey(accountID: kit.accountID)))
             await vault.session.lock()
             await vault.clock.advance(by: 15 * 86_400)
@@ -219,7 +231,7 @@
         func disable() async throws {
             let vault = TestVault()
             let kit = try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             try await vault.session.disableQuickUnlock()
             #expect(!(await vault.keychain.contains(.quickUnlockKey(accountID: kit.accountID))))
             #expect(!(await vault.keychain.contains(.quickUnlockState(accountID: kit.accountID))))

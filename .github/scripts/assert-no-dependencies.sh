@@ -57,6 +57,29 @@ sys.exit(1 if problems else 0)
   fail=1
 fi
 
+# Apps/project.yml can add the same things through XcodeGen: a remote package, a build script that runs arbitrary
+# shell, prebuilt frameworks, or settings that switch off what the compiler enforces. Text checks, like the rest of this
+# script: a tripwire, with review as the backstop.
+if [ -f Apps/project.yml ]; then
+  spec=Apps/project.yml
+  if grep -nE '^[[:space:]]*(url|github|from|exactVersion|minorVersion|majorVersion|branch|revision):' "$spec"; then
+    echo "::error file=$spec::A remote package was added to the app project. This requires an ADR; see docs/07-supply-chain.md."
+    fail=1
+  fi
+  if awk '/^packages:/{p=1;next} /^[^[:space:]#]/{p=0} p && /path:/ && $2 != ".."' "$spec" | grep -q .; then
+    echo "::error file=$spec::Local packages other than the repository's own (path: ..) are not permitted."
+    fail=1
+  fi
+  if grep -nE '(pre|post)BuildScripts|postCompileScripts|buildToolPlugins|buildRules|^[[:space:]]*(carthage|framework|sdk|bundle):' "$spec"; then
+    echo "::error file=$spec::Build scripts, build rules, plugins and prebuilt or SDK dependencies are not permitted in the app project."
+    fail=1
+  fi
+  if grep -nE 'OTHER_SWIFT_FLAGS|OTHER_LDFLAGS|OTHER_CFLAGS|SWIFT_OBJC_BRIDGING_HEADER|SWIFT_STRICT_MEMORY_SAFETY:[[:space:]]*(NO|false)|SWIFT_TREAT_WARNINGS_AS_ERRORS:[[:space:]]*(NO|false)|unsafeFlags' "$spec"; then
+    echo "::error file=$spec::Compiler-relaxing settings and bridging headers are not permitted in the app project."
+    fail=1
+  fi
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "No third-party dependencies, binary targets, build plugins, custom target paths, or compiler-relaxing settings."
 fi

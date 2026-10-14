@@ -46,8 +46,12 @@ struct ItemDetailView: View {
                 if field.kind.isSecret && !revealed.contains(field.id) {
                     Text("••••••••").accessibilityLabel("Hidden")
                 } else {
-                    Text(field.value).font(field.kind.isSecret ? .system(.body, design: .monospaced) : .body)
-                        .textSelection(.enabled)
+                    // Secrets are not selectable: a system Copy would bypass the expiring, local-only clipboard (F5.6).
+                    if field.kind.isSecret {
+                        Text(field.value).font(.system(.body, design: .monospaced)).textSelection(.disabled)
+                    } else {
+                        Text(field.value).textSelection(.enabled)
+                    }
                 }
             }
             Spacer()

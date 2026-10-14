@@ -5,6 +5,8 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var kit: EmergencyKit?
+    @State private var askingPassword = false
+    @State private var password = ""
 
     var body: some View {
         NavigationStack {
@@ -14,7 +16,13 @@ struct SettingsView: View {
                         "Unlock with biometrics",
                         isOn: Binding(
                             get: { model.quickUnlockEnabled },
-                            set: { enabled in Task { await model.setQuickUnlock(enabled) } })
+                            set: { enabled in
+                                if enabled {
+                                    askingPassword = true
+                                } else {
+                                    Task { await model.disableQuickUnlock() }
+                                }
+                            })
                     )
                     .accessibilityIdentifier("settings.quickUnlock")
                     Text(
@@ -31,6 +39,17 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .alert("Enter your account password", isPresented: $askingPassword) {
+                SecureField("Account password", text: $password)
+                Button("Turn On") {
+                    let entered = password
+                    password = ""
+                    Task { await model.enableQuickUnlock(password: entered) }
+                }
+                Button("Cancel", role: .cancel) { password = "" }
+            } message: {
+                Text("Quick unlock starts a new 14-day period before your password is asked for again.")
+            }
             .sheet(item: $kit) { kit in
                 EmergencyKitView(kit: kit, isOnboarding: false)
             }

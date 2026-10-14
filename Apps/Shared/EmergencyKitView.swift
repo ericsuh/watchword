@@ -4,7 +4,8 @@ import WatchwordKit
 import WatchwordPlatform
 
 /// Shows the Secret Key and saves the Emergency Kit PDF where the person chooses (PRD F5.1). The PDF is generated in
-/// memory and handed to the system file exporter; the app never writes it to its own container.
+/// memory and handed to the system file exporter; the app does not write it anywhere itself, though the system's
+/// export machinery may stage a temporary copy while the save is in progress.
 struct EmergencyKitView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss

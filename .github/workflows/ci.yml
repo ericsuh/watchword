@@ -191,8 +191,8 @@ jobs:
             echo "::notice::Apps/project.yml not found; app tests skipped"
           fi
 
-      # XcodeGen is a build-time dependency fetched from Homebrew. See docs/07-supply-chain.md:
-      # the plan is to commit a generated project and drop this step.
+      # XcodeGen is a build-time dependency fetched from Homebrew, unpinned (docs/07-supply-chain.md §3.3): the plan is
+      # a pinned release archive with a verified SHA-256, or a committed project with a drift check.
       - name: Install XcodeGen
         if: steps.detect.outputs.present == 'true'
         run: brew install --quiet xcodegen

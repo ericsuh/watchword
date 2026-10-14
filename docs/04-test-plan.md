@@ -181,6 +181,11 @@ specification, plus vectors from independent Python implementations for HPKE wit
 - `AdversarialKeychainAttributeTests` ("Adversarial: Keychain item protection"): every item is
   device-only, non-synchronisable and in the shared access group; the LUK requires the current
   biometric set with no passcode or any-biometry fallback.
+- Added by the milestone-2 review (`06-adversarial-review.md` §G): a quick-unlocked session cannot
+  restart the password interval; cancels count towards the failure limit; activity after the idle
+  timeout locks; a committed password change reports success even if the vault locks; a planted
+  vault-key row does not block unlock; a planted trigger, view, table or index makes the store refuse
+  to open; erasing leaves no ciphertext in the write-ahead log; SQLite refuses oversized values.
 
 ### 6.3 AutoFill matching (milestone 2/5)
 - Service identifiers with user-info (`https://amazon.com@evil.example/`), ports, trailing dots,

@@ -28,7 +28,7 @@ public actor InMemoryRecordStore: RecordStore {
         if let newAccount = change.newAccount {
             account = newAccount
         }
-        for key in change.deletions {
+        for key in change.allDeletions {
             rows[key] = nil
         }
         for record in change.upserts {

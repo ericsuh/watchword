@@ -38,9 +38,11 @@ final class AppModel {
     }
 
     var personalVaultID: UUID?
+    private var monitoring = false
 
     func start() async {
         guard let session else { return }
+        startMonitoring()
         do {
             let status = try await session.status()
             personalVaultID = await session.personalVaultID
@@ -49,11 +51,42 @@ final class AppModel {
             switch status.state {
             case .noAccount: phase = .onboarding
             case .locked: phase = .locked
-            case .unlocked: try await reload()
+            case .unlocked: try await enterVault()
             }
         } catch {
             show(error)
         }
+    }
+
+    /// Auto-lock checks and sleep/screen-lock observers live here, with the session, rather than in a view: on macOS
+    /// the app outlives its window, and a view-owned timer would stop while the vault stayed unlocked (F5.5).
+    private func startMonitoring() {
+        guard !monitoring else { return }
+        monitoring = true
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                guard let self else { return }
+                await self.handle(.tick)
+            }
+        }
+        Task { [weak self] in
+            for await _ in PlatformLifecycle.sleepNotifications.map({ _ in () }).values {
+                guard let self else { return }
+                await self.handle(.systemSleep)
+            }
+        }
+        PlatformLifecycle.installPrivacyShield()
+    }
+
+    /// After an unlock: the vault, unless the Emergency Kit was never confirmed, in which case the kit again (F5.1).
+    private func enterVault() async throws {
+        guard let session else { return }
+        if try await !session.status().emergencyKitConfirmed {
+            phase = .emergencyKit(try await session.emergencyKit())
+            return
+        }
+        try await reload()
     }
 
     // MARK: Account
@@ -83,7 +116,7 @@ final class AppModel {
         guard let session else { return }
         await perform {
             try await session.unlock(password: password)
-            try await self.reload()
+            try await self.enterVault()
         }
     }
 
@@ -91,29 +124,42 @@ final class AppModel {
         guard let session else { return }
         await perform {
             try await session.quickUnlock(prompt: "Unlock your Watchword vault")
-            try await self.reload()
+            try await self.enterVault()
         }
         await refreshStatus()
     }
 
-    func setQuickUnlock(_ enabled: Bool) async {
+    /// Turning quick unlock on needs the account password (it restarts the F5.4 password interval).
+    func enableQuickUnlock(password: String) async {
         guard let session else { return }
-        await perform {
-            if enabled { try await session.enableQuickUnlock() } else { try await session.disableQuickUnlock() }
-        }
+        await perform { try await session.enableQuickUnlock(password: password) }
+        await refreshStatus()
+    }
+
+    func disableQuickUnlock() async {
+        guard let session else { return }
+        await perform { try await session.disableQuickUnlock() }
         await refreshStatus()
     }
 
     func lock() async {
         await session?.lock()
-        didLock()
+        didLock(.requested)
     }
 
-    private func didLock() {
+    /// Drops everything decrypted and shows the unlock screen, from any phase that showed vault contents or the
+    /// Secret Key. The clipboard is cleared on every lock except backgrounding, which on iOS is how a person switches
+    /// to the app they are pasting into; the copy still expires after 60 s (F5.6).
+    private func didLock(_ reason: LockReason) {
         items = []
         unreadableCount = 0
-        phase = .locked
-        Clipboard.clearIfOurs()
+        switch phase {
+        case .unlocked, .emergencyKit: phase = .locked
+        default: break
+        }
+        if reason != .backgrounded {
+            Clipboard.clearIfOurs()
+        }
         Task { await refreshStatus() }
     }
 
@@ -128,14 +174,16 @@ final class AppModel {
     /// Activity is recorded on navigation and actions (selection, search, reveal, copy, edit, save) rather than on
     /// every touch: a root-level tap gesture would swallow `Button` taps inside SwiftUI lists on iOS.
     func recordActivity() {
-        guard phase == .unlocked, let session else { return }
-        Task { await session.recordActivity() }
+        guard let session else { return }
+        Task {
+            if let reason = await session.recordActivity() { didLock(reason) }
+        }
     }
 
     func handle(_ event: AutoLockEvent) async {
         guard let session else { return }
-        if await session.handle(event) != nil, phase == .unlocked {
-            didLock()
+        if let reason = await session.handle(event) {
+            didLock(reason)
         }
     }
 
@@ -194,7 +242,7 @@ final class AppModel {
 
     private func show(_ error: Error) {
         if case VaultError.locked = error {
-            didLock()
+            didLock(.requested)
         }
         errorMessage = Self.message(for: error)
     }

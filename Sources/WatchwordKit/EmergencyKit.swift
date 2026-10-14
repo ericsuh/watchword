@@ -37,6 +37,13 @@ public struct EmergencyKit: Sendable, Hashable {
     }
 }
 
+/// Redacted, so the Secret Key never reaches a log, `print`, `dump` or a crash report's mirror by accident.
+extension EmergencyKit: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "EmergencyKit(account: \(accountID), secretKey: redacted)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["accountID": accountID], displayStyle: .struct) }
+}
+
 /// The plain-language warnings the kit and onboarding carry (F10.2: "the UI must say so at setup").
 public enum EmergencyKitText {
     public static let title = "Watchword Emergency Kit"

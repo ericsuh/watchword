@@ -58,6 +58,12 @@
                 throw Failure.open(code: code)
             }
             handleAddress = UInt(bitPattern: opened)
+            // SQLite's own cap on any string, blob or row, so a tampered file cannot make a read allocate far beyond
+            // `maximumValueLength` before the check below ever sees the length (the default limit is about 1 GB). A
+            // row may carry a full-size envelope plus its storage-location columns, hence the small margin.
+            _ = unsafe (sqlite3_limit(opened, SQLITE_LIMIT_LENGTH, Int32(Self.maximumValueLength + (1 << 20))))
+            // The app and the AutoFill extension share the file; wait for the other's write lock rather than failing.
+            _ = unsafe (sqlite3_busy_timeout(opened, 2_000))
             do {
                 try execute(
                     """

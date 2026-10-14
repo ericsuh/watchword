@@ -42,48 +42,81 @@
             #endif
         }
 
+        /// The exact schema this code creates. Each statement is stored by SQLite verbatim in `sqlite_schema`, which is
+        /// how `verifySchema()` recognises it.
+        static let accountTable = """
+            CREATE TABLE account (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                account_id BLOB NOT NULL CHECK (length(account_id) = 16),
+                device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+                personal_vault_id BLOB NOT NULL CHECK (length(personal_vault_id) = 16),
+                personal_vault_key_id BLOB NOT NULL CHECK (length(personal_vault_key_id) = 16),
+                kdf_algorithm TEXT NOT NULL,
+                kdf_iterations INTEGER NOT NULL,
+                kdf_salt_length INTEGER NOT NULL,
+                kdf_output_length INTEGER NOT NULL,
+                salt BLOB NOT NULL,
+                unlock_key_id BLOB NOT NULL CHECK (length(unlock_key_id) = 16),
+                wrapped_keyset BLOB NOT NULL,
+                keyset_version INTEGER NOT NULL,
+                credential_generation INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                emergency_kit_confirmed_at REAL
+            ) STRICT
+            """
+        static let recordsTable = """
+            CREATE TABLE records (
+                record_id BLOB NOT NULL CHECK (length(record_id) = 16),
+                kind INTEGER NOT NULL,
+                vault_id BLOB NOT NULL CHECK (length(vault_id) = 16),
+                key_id BLOB NOT NULL CHECK (length(key_id) = 16),
+                version INTEGER NOT NULL,
+                device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+                envelope BLOB NOT NULL,
+                PRIMARY KEY (record_id, kind)
+            ) STRICT
+            """
+        static let recordsIndex = "CREATE INDEX records_by_vault ON records (vault_id, kind)"
+
+        /// `(type, name, table, sql)` for every entry `sqlite_schema` may hold.
+        static let expectedSchema: Set<[SQLiteValue]> = [
+            [.text("table"), .text("account"), .text("account"), .text(accountTable)],
+            [.text("table"), .text("records"), .text("records"), .text(recordsTable)],
+            [.text("index"), .text("records_by_vault"), .text("records"), .text(recordsIndex)],
+            [.text("index"), .text("sqlite_autoindex_records_1"), .text("records"), .null],
+        ]
+
         private func migrate() throws {
             try connection.transaction {
                 let version = try Self.int(connection.query("PRAGMA user_version").first?.first)
-                guard version <= Self.schemaVersion else {
+                guard version >= 0, version <= Self.schemaVersion else {
                     throw RecordStoreError.unsupportedSchemaVersion(Int(version))
                 }
                 if version < 1 {
-                    try connection.execute(
-                        """
-                        CREATE TABLE account (
-                            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                            account_id BLOB NOT NULL CHECK (length(account_id) = 16),
-                            device_id BLOB NOT NULL CHECK (length(device_id) = 16),
-                            personal_vault_id BLOB NOT NULL CHECK (length(personal_vault_id) = 16),
-                            personal_vault_key_id BLOB NOT NULL CHECK (length(personal_vault_key_id) = 16),
-                            kdf_algorithm TEXT NOT NULL,
-                            kdf_iterations INTEGER NOT NULL,
-                            kdf_salt_length INTEGER NOT NULL,
-                            kdf_output_length INTEGER NOT NULL,
-                            salt BLOB NOT NULL,
-                            unlock_key_id BLOB NOT NULL CHECK (length(unlock_key_id) = 16),
-                            wrapped_keyset BLOB NOT NULL,
-                            keyset_version INTEGER NOT NULL,
-                            credential_generation INTEGER NOT NULL,
-                            created_at REAL NOT NULL,
-                            emergency_kit_confirmed_at REAL
-                        ) STRICT;
-                        CREATE TABLE records (
-                            record_id BLOB NOT NULL CHECK (length(record_id) = 16),
-                            kind INTEGER NOT NULL,
-                            vault_id BLOB NOT NULL CHECK (length(vault_id) = 16),
-                            key_id BLOB NOT NULL CHECK (length(key_id) = 16),
-                            version INTEGER NOT NULL,
-                            device_id BLOB NOT NULL CHECK (length(device_id) = 16),
-                            envelope BLOB NOT NULL,
-                            PRIMARY KEY (record_id, kind)
-                        ) STRICT;
-                        CREATE INDEX records_by_vault ON records (vault_id, kind);
-                        PRAGMA user_version = 1;
-                        """)
+                    try connection.execute(Self.accountTable)
+                    try connection.execute(Self.recordsTable)
+                    try connection.execute(Self.recordsIndex)
+                    try connection.execute("PRAGMA user_version = 1")
                 }
+                try verifySchema()
             }
+        }
+
+        /// Refuses a database whose schema is anything but exactly what `migrate()` creates.
+        ///
+        /// `trusted_schema = OFF` stops schema objects from calling functions with side effects, but ordinary triggers
+        /// still run: one planted `BEFORE DELETE … RAISE(IGNORE)` makes every deletion (and `eraseAll`) report success
+        /// while erasing nothing, and an `AFTER INSERT` trigger can roll every update back to an old, validly sealed
+        /// envelope. So the file is untrusted down to its schema, and any extra trigger, view, table, index or altered
+        /// definition fails closed (review finding S1).
+        private func verifySchema() throws {
+            let rows = try connection.query("SELECT type, name, tbl_name, sql FROM sqlite_schema")
+            for row in rows where !Self.expectedSchema.contains(row) {
+                let name: String
+                if case .text(let text) = row.count > 1 ? row[1] : .null { name = text } else { name = "?" }
+                throw RecordStoreError.unexpectedSchema(name)
+            }
+            guard rows.count == Self.expectedSchema.count else { throw RecordStoreError.unexpectedSchema("missing") }
         }
 
         // MARK: - RecordStore
@@ -168,7 +201,7 @@
                             account.emergencyKitConfirmedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
                         ])
                 }
-                for key in change.deletions {
+                for key in change.allDeletions {
                     try connection.query(
                         "DELETE FROM records WHERE record_id = ? AND kind = ?",
                         [Self.value(key.recordID), .integer(Int64(key.kind.rawValue))])
@@ -187,14 +220,29 @@
                         ])
                 }
             }
+            if case .update = change.account {
+                try? checkpoint(required: false)
+            }
         }
 
         public func eraseAll() throws {
             try connection.transaction {
                 try connection.execute("DELETE FROM records; DELETE FROM account;")
             }
-            // secure_delete overwrote the rows; VACUUM also drops the freed pages and rewrites the WAL.
+            // secure_delete overwrote the rows in the main file and VACUUM drops the freed pages, but in WAL mode the
+            // old pages (every superseded envelope and account header) are still in `-wal` until a checkpoint resets
+            // it. TRUNCATE copies back and empties it; a reader holding the log (the AutoFill extension) makes it
+            // report busy, which is an error here rather than a silent partial erase (review finding S2).
             try connection.execute("VACUUM")
+            try checkpoint(required: true)
+        }
+
+        /// `PRAGMA wal_checkpoint(TRUNCATE)`. Also run, best effort, after a password change, so the previous wrapped
+        /// keyset does not linger in the log.
+        private func checkpoint(required: Bool) throws {
+            let result = try connection.query("PRAGMA wal_checkpoint(TRUNCATE)")
+            let busy = result.first.flatMap { $0.first } ?? .integer(1)
+            if required, busy != .integer(0) { throw RecordStoreError.checkpointIncomplete }
         }
 
         /// The physical path of a directory. `URL.resolvingSymlinksInPath()` cannot be used: it deliberately turns

@@ -120,9 +120,49 @@
                 "UPDATE records SET envelope = ? WHERE kind = 1 AND record_id = ?",
                 [item[0][0], Self.blob(account.personalVaultKeyID)])
             await f.vault.session.lock()
-            await #expect(throws: EnvelopeError.kindMismatch(expected: .vaultKeyWrap, actual: .item)) {
+            // The kind byte is checked before any payload is touched; the session reports a tampered key wrap, not a
+            // wrong password.
+            await #expect(throws: VaultError.vaultKeyUnreadable(vaultID: f.vaultID)) {
                 try await f.vault.session.unlock(password: TestVault.password)
             }
+            let rows = try f.raw.query(
+                "SELECT envelope FROM records WHERE kind = 1 AND record_id = ?", [Self.blob(account.personalVaultKeyID)]
+            )
+            guard case .blob(let planted) = rows[0][0] else { return }
+            let keys = VaultKey.wrapContext(
+                vaultID: f.vaultID, keyID: account.personalVaultKeyID, keysetKeyID: UUID())
+            #expect(throws: EnvelopeError.kindMismatch(expected: .vaultKeyWrap, actual: .item)) {
+                _ = try Envelope.parse(planted, expecting: keys)
+            }
+        }
+
+        /// Threat: a planted extra key-wrap row. A8 (or a restored backup) adds a well-formed wrap under a new record
+        /// ID, sealed with a random key that merely claims Ksym's key ID. Before review finding U2 the first wrap that
+        /// failed to open failed the whole unlock as "incorrect password" and destroyed quick unlock: one row, total
+        /// denial of service. Only the personal vault's current key is required; other wraps that fail are skipped.
+        @Test("a planted, unopenable vault-key row does not block unlock or quick unlock")
+        func plantedKeyWrap() async throws {
+            let f = try await Self.fixture()
+            try await f.vault.session.enableQuickUnlock(password: TestVault.password)
+            let keys = try #require(await f.vault.session.keys)
+            let ksymID = keys.keyset.symmetricKey.keyID
+            var generator = SeededGenerator(seed: 4242)
+            let fake = try EncryptionKey(keyID: ksymID, material: SecureBytes(randomCount: 32, using: &generator))
+            let plantedID = UUID()
+            let envelope = try RecordCipher.seal(
+                SecureBytes(randomCount: 32, using: &generator),
+                context: VaultKey.wrapContext(vaultID: f.vaultID, keyID: plantedID, keysetKeyID: ksymID),
+                key: fake, using: &generator)
+            try f.raw.query(
+                "INSERT INTO records (record_id, kind, vault_id, key_id, version, device_id, envelope) "
+                    + "VALUES (?, 1, ?, ?, 1, randomblob(16), ?)",
+                [Self.blob(plantedID), Self.blob(f.vaultID), Self.blob(ksymID), .blob(envelope)])
+            await f.vault.session.lock()
+            try await f.vault.session.unlock(password: TestVault.password)
+            #expect(try await f.vault.session.items().items.count == 2)
+            await f.vault.session.lock()
+            try await f.vault.session.quickUnlock()
+            #expect(try await f.vault.session.state() == .unlocked)
         }
 
         /// Threat: deleting the vault key wrap to provoke a "repair" that generates a fresh key and silently orphans the
@@ -161,7 +201,7 @@
         /// Threat: header substitution. A different salt, or the wrapped keyset of another account (or of this account
         /// before a password change), must fail exactly like a wrong password: no oracle about which part was changed.
         @Test(
-            "a substituted salt, keyset or key ID fails like a wrong password",
+            "a substituted salt, keyset, keyset version or account ID fails closed without decrypting anything",
             arguments: [
                 "UPDATE account SET salt = randomblob(32)",
                 "UPDATE account SET wrapped_keyset = randomblob(length(wrapped_keyset))",
@@ -216,6 +256,58 @@
             try f.raw.execute("UPDATE account SET kdf_algorithm = 'MD5'")
             await #expect(throws: RecordStoreError.malformedRow("account.kdf_algorithm")) {
                 try await f.vault.store.loadAccount()
+            }
+        }
+
+        /// Threat: a schema planted in the file (A8 or a restored backup). `trusted_schema = OFF` does not stop plain
+        /// triggers: a `BEFORE DELETE … RAISE(IGNORE)` makes every deletion and `eraseAll` report success while erasing
+        /// nothing, and an `AFTER INSERT` trigger can roll every update back to an old, validly sealed envelope, turning
+        /// a one-off rollback into a permanent one (review finding S1). The store refuses any schema but its own.
+        @Test(
+            "a database with a planted trigger, view, table or index is refused",
+            arguments: [
+                "CREATE TRIGGER keep BEFORE DELETE ON records BEGIN SELECT RAISE(IGNORE); END",
+                "CREATE TRIGGER rollback AFTER INSERT ON records BEGIN UPDATE records SET version = 1; END",
+                "CREATE VIEW v AS SELECT * FROM records",
+                "CREATE TABLE extra (x INTEGER)",
+                "CREATE INDEX extra_index ON records (envelope)",
+            ])
+        func plantedSchema(_ sql: String) async throws {
+            let f = try await Self.fixture()
+            try f.raw.execute(sql)
+            #expect(throws: RecordStoreError.self) { _ = try SQLiteRecordStore(url: f.url) }
+        }
+
+        /// Threat: forensic recovery after "erase all data" (F10.3) by A2 after first unlock, or from a device backup. In
+        /// WAL mode, deleted rows' old pages stay in `-wal` until a checkpoint resets it, so every superseded envelope
+        /// and account header would survive the erase (review finding S2). Scanned without checkpointing first.
+        @Test("erasing the account leaves no ciphertext in the database or its write-ahead log")
+        func eraseLeavesNothing() async throws {
+            let f = try await Self.fixture()
+            let row = try f.raw.query("SELECT envelope FROM records WHERE record_id = ?", [Self.blob(f.first.id)])
+            guard case .blob(let envelope) = row[0][0] else { return }
+            let needle = Array(envelope.suffix(48))
+            try await f.vault.store.eraseAll()
+            for suffix in ["", "-wal", "-shm"] {
+                guard let data = FileManager.default.contents(atPath: f.url.path + suffix) else { continue }
+                let bytes = [UInt8](data)
+                let found =
+                    bytes.count >= needle.count
+                    && (0...(bytes.count - needle.count)).contains {
+                        bytes[$0..<($0 + needle.count)].elementsEqual(needle)
+                    }
+                #expect(!found, "ciphertext survives in Watchword.sqlite\(suffix)")
+            }
+        }
+
+        /// Threat: a tampered file holding a huge value (A8) running the memory-limited AutoFill extension out of memory
+        /// before any length check of ours runs. SQLite itself is capped near the envelope limit (review finding S5).
+        @Test("SQLite refuses to materialise a value beyond the envelope cap")
+        func lengthLimit() async throws {
+            let f = try await Self.fixture()
+            #expect(throws: SQLiteConnection.Failure.self) {
+                try f.raw.query(
+                    "SELECT zeroblob(?)", [.integer(Int64(SQLiteConnection.maximumValueLength + (2 << 20)))])
             }
         }
 

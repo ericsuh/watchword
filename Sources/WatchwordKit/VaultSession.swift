@@ -115,7 +115,8 @@
         private var lockEpoch: UInt64 = 0
         private var lastActivity: Date?
         private var backgroundedAt: Date?
-        private var highestVersionSeen: UInt64 = 0
+        /// Lamport high-water mark per vault, so one record with an absurd version cannot freeze writes elsewhere.
+        private var highestVersionSeen: [UUID: UInt64] = [:]
 
         /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
         public init(
@@ -356,16 +357,20 @@
                 throw VaultError.quickUnlockRefused(reason)
             }
 
+            // Every prompt that does not end in the key counts, cancels included. With `biometryCurrentSet` and no
+            // passcode fallback, the system prompt retries a face or finger internally and a run of failures usually
+            // ends in Cancel (`errSecUserCanceled`), not in `errSecAuthFailed`; counting only the latter would let
+            // someone who can clear the OS lockout with the device passcode keep trying indefinitely (F5.4).
             let releasedKey: SecureBytes?
             do {
                 releasedKey = try await keychain.read(.quickUnlockKey(accountID: accountID), prompt: prompt)
-            } catch KeychainError.authenticationFailed {
+            } catch let error as KeychainError where error == .authenticationFailed || error == .userCancelled {
                 state.failedAttempts += 1
                 try await saveQuickUnlockState(state, accountID: accountID)
                 if state.failedAttempts >= configuration.quickUnlock.maximumFailedAttempts {
                     try await suspendQuickUnlock(accountID: accountID, forget: false)
                 }
-                throw VaultError.biometricAuthenticationFailed
+                throw error == .userCancelled ? error : VaultError.biometricAuthenticationFailed
             }
             guard let releasedKey else {
                 // Gone: the OS invalidated it after a biometric enrolment change, or it was deleted.
@@ -373,7 +378,11 @@
                 throw VaultError.quickUnlockRefused(.enrolmentChanged)
             }
 
-            let newKeys: UnlockedKeys
+            // The LUK → AUK → keyset chain. A failure here means what the Keychain released does not lead to the keyset,
+            // so the enrolment is destroyed and never retried. Failures after the keyset opens (a bad vault-key row in
+            // the store) are not the enrolment's fault and leave it alone.
+            let unlockKey: EncryptionKey
+            let keyset: Keyset
             do {
                 let localKey = try EncryptionKey(keyID: state.unlockKeyID, material: releasedKey)
                 defer { localKey.zeroise() }
@@ -384,20 +393,26 @@
                     key: localKey,
                     maximumLength: 1024
                 )
-                let unlockKey = try EncryptionKey(keyID: state.accountUnlockKeyID, material: unlockKeyMaterial)
+                unlockKey = try EncryptionKey(keyID: state.accountUnlockKeyID, material: unlockKeyMaterial)
                 guard unlockKey.keyID == record.unlockKeyID else {
                     unlockKey.zeroise()
                     throw VaultError.quickUnlockRefused(.credentialsChanged)
                 }
                 do {
-                    newKeys = try await openKeys(unlockKey: unlockKey, account: record)
+                    keyset = try unwrapKeyset(unlockKey: unlockKey, account: record)
                 } catch {
                     unlockKey.zeroise()
                     throw error
                 }
             } catch {
-                // Whatever the Keychain released did not lead to the keyset: never retry with it.
                 try? await suspendQuickUnlock(accountID: accountID, forget: true)
+                throw error
+            }
+            let newKeys: UnlockedKeys
+            do {
+                newKeys = try await openVaultKeys(unlockKey: unlockKey, keyset: keyset, account: record)
+            } catch {
+                unlockKey.zeroise()
                 throw error
             }
             guard epoch == lockEpoch, keys == nil else {
@@ -426,16 +441,35 @@
         /// Unwraps the keyset under `unlockKey`, then every vault key wrap. Identities come from the storage location
         /// (the account header and each row), never from the wraps (§4).
         private func openKeys(unlockKey: EncryptionKey, account: AccountRecord) async throws -> UnlockedKeys {
-            let keyset = try Keyset.unwrap(
+            let keyset = try unwrapKeyset(unlockKey: unlockKey, account: account)
+            return try await openVaultKeys(unlockKey: unlockKey, keyset: keyset, account: account)
+        }
+
+        private func unwrapKeyset(unlockKey: EncryptionKey, account: AccountRecord) throws -> Keyset {
+            try Keyset.unwrap(
                 account.wrappedKeyset, accountID: account.accountID, with: unlockKey,
                 recordVersion: account.keysetVersion)
+        }
+
+        /// Only the personal vault's current key is required. Any other wrap that fails to open (a row planted in the
+        /// file) is skipped, so one bad row cannot block every unlock. A failure of the required key is reported as
+        /// `vaultKeyUnreadable`, never as `authenticationFailed`: the password was already proven by the keyset.
+        private func openVaultKeys(unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord) async throws
+            -> UnlockedKeys
+        {
             do {
                 let rows = try await store.records(in: account.personalVaultID, kind: .vaultKeyWrap)
                 var vaultKeys: [UUID: VaultKey] = [:]
                 for row in rows {
-                    let vaultKey = try VaultKey.unwrap(
-                        row.envelope, vaultID: row.vaultID, keyID: row.recordID, with: keyset)
-                    vaultKeys[row.recordID] = vaultKey
+                    do {
+                        vaultKeys[row.recordID] = try VaultKey.unwrap(
+                            row.envelope, vaultID: row.vaultID, keyID: row.recordID, with: keyset)
+                    } catch  where row.recordID == account.personalVaultKeyID {
+                        for key in vaultKeys.values { key.zeroise() }
+                        throw VaultError.vaultKeyUnreadable(vaultID: account.personalVaultID)
+                    } catch {
+                        continue
+                    }
                 }
                 guard vaultKeys[account.personalVaultKeyID] != nil else {
                     for key in vaultKeys.values { key.zeroise() }
@@ -465,9 +499,23 @@
             backgroundedAt = nil
         }
 
-        /// Call on user interaction; resets the idle timer.
-        public func recordActivity() async {
-            lastActivity = await clock.now()
+        /// Call on user interaction. Resets the idle timer — unless the timeout has already passed, in which case it
+        /// locks instead: activity must never revive a session that should already have ended (a timer that did not
+        /// fire because the window was closed or the app was napping is not a reason to stay open).
+        @discardableResult
+        public func recordActivity() async -> LockReason? {
+            let now = await clock.now()
+            guard keys != nil else { return nil }
+            if let lastActivity,
+                let reason = AutoLockPolicy.decide(
+                    event: .tick, now: now, lastActivity: lastActivity, backgroundedAt: nil,
+                    settings: configuration.autoLock)
+            {
+                lock()
+                return reason
+            }
+            lastActivity = now
+            return nil
         }
 
         /// Applies the auto-lock policy to `event`. Returns why it locked, if it did.
@@ -493,9 +541,20 @@
 
         /// Enrols quick unlock: a fresh Local Unlock Key, bound by the OS to the current biometric enrolment, wraps the
         /// AUK. Requires the vault to be unlocked.
-        public func enableQuickUnlock() async throws {
+        ///
+        /// The password is required, and re-verified against the stored header: enrolment starts the F5.4 password
+        /// interval, so a session opened by quick unlock must not be able to restart it, or someone who can present the
+        /// enrolled biometric but does not know the password could keep quick unlock alive forever.
+        public func enableQuickUnlock(password: String) async throws {
+            let epoch = lockEpoch
             _ = try requireKeys()
             guard let record = try await loadAccount() else { throw VaultError.noAccount }
+            let secretKey = try await storedSecretKey(accountID: record.accountID)
+            defer { secretKey.zeroise() }
+            let verified = try deriveUnlockKey(password: password, secretKey: secretKey, account: record)
+            defer { verified.zeroise() }
+            try unwrapKeyset(unlockKey: verified, account: record).zeroise()
+            _ = try requireKeys(since: epoch)
             try await enrolQuickUnlock(account: record, now: await clock.now(), carrying: nil)
         }
 
@@ -631,9 +690,11 @@
                 throw error
             }
             account = updated
+            // The new password is committed: from here on, report success whatever happens to the session. Telling the
+            // person "nothing changed" now would leave them believing the old password still works (F10.2).
             guard epoch == lockEpoch, keys === oldKeys else {
                 newUnlockKey.zeroise()
-                throw VaultError.locked
+                return
             }
             keys = UnlockedKeys(accountUnlockKey: newUnlockKey, keyset: oldKeys.keyset, vaultKeys: oldKeys.vaultKeys)
             oldKeys.accountUnlockKey.zeroise()
@@ -652,13 +713,21 @@
             ).zeroise()
             lock()
             try await store.eraseAll()
+            account = nil
+            // Every item is attempted even if one fails, so a Keychain error cannot leave the Secret Key behind just
+            // because an earlier deletion threw; anything left over is reported.
+            var leftovers: [KeychainItem] = []
             for item in [
                 KeychainItem.secretKey(accountID: record.accountID), .quickUnlockKey(accountID: record.accountID),
                 .quickUnlockState(accountID: record.accountID),
             ] {
-                try await keychain.delete(item)
+                do {
+                    try await keychain.delete(item)
+                } catch {
+                    leftovers.append(item)
+                }
             }
-            account = nil
+            if !leftovers.isEmpty { throw VaultError.keychainCleanupIncomplete(leftovers.count) }
         }
 
         private func storedSecretKey(accountID: UUID) async throws -> SecretKey {
@@ -762,7 +831,9 @@
             let item = try await item(id: id)
             guard item.isTrashed else { throw VaultError.itemNotTrashed(id) }
             _ = try requireKeys()
-            try await store.commit(StoreChange(deletions: [RecordKey(recordID: id, kind: .item)]))
+            // Conditional on the version just read, so a restore that lands in between is not silently undone.
+            try await store.commit(
+                StoreChange(conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
         }
 
         /// Deletes items that have been in the trash for 30 days (PRD F1.5). Run after every unlock.
@@ -773,7 +844,10 @@
                 return now.timeIntervalSince(trashedAt) >= VaultConfiguration.trashRetention
             }
             guard !expired.isEmpty else { return }
-            try await store.commit(StoreChange(deletions: expired.map { RecordKey(recordID: $0.id, kind: .item) }))
+            try await store.commit(
+                StoreChange(
+                    conditionalDeletions: Dictionary(
+                        uniqueKeysWithValues: expired.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
         }
 
         /// Read-modify-write of one item: the version moves forward, the history is pruned, and the record is sealed
@@ -806,11 +880,12 @@
             item.vaultID = targetVault
             item.modifiedAt = now
             item.history = Self.pruned(item.history, now: now)
-            let base = max(highestVersionSeen, existing?.version ?? 0)
+            let base = max(highestVersionSeen[targetVault] ?? 0, existing?.version ?? 0)
             guard base < UInt64.max else { throw VaultError.versionOverflow }
             item.version = base + 1
 
             let plaintext = try ItemCodec.encode(item)
+            defer { plaintext.zeroise() }
             let row = StoredRecord(
                 recordID: item.id, kind: .item, vaultID: targetVault, keyID: vaultKey.key.keyID, version: item.version,
                 deviceID: record.deviceID, envelope: [])
@@ -818,7 +893,7 @@
             sealed.envelope = try RecordCipher.seal(
                 plaintext, context: Self.itemContext(row), key: vaultKey.key, using: &random)
             try await store.commit(StoreChange(upserts: [sealed]))
-            highestVersionSeen = max(highestVersionSeen, item.version)
+            highestVersionSeen[targetVault] = max(highestVersionSeen[targetVault] ?? 0, item.version)
             return item
         }
 
@@ -830,13 +905,12 @@
                 row.envelope, context: Self.itemContext(row), key: vaultKey.key,
                 maximumLength: ItemCodec.maximumPayloadLength + 4096)
             defer { plaintext.zeroise() }
-            // Decoded fields become Strings, which cannot be zeroised anyway (PRD SEC4); the copy is named so it is
-            // searchable.
-            let item = try ItemCodec.decode(plaintext.unprotectedCopy())
+            // Decoded fields become Strings, which cannot be zeroised (PRD SEC4); the codec wipes its own buffers.
+            let item = try ItemCodec.decode(plaintext)
             guard item.id == row.recordID, item.vaultID == row.vaultID, item.version == row.version else {
                 throw VaultError.recordMismatch(row.recordID)
             }
-            highestVersionSeen = max(highestVersionSeen, item.version)
+            highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, item.version)
             return item
         }
 

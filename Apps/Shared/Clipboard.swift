@@ -23,15 +23,12 @@ enum Clipboard {
             ourChangeCount = UIPasteboard.general.changeCount
         #else
             let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            // `org.nspasteboard.ConcealedType` asks clipboard managers not to record it; `TransientType` asks them not
-            // to keep it (nspasteboard.org conventions).
-            pasteboard.declareTypes(
-                [
-                    .string, NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
-                    NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
-                ], owner: nil)
+            // `.currentHostOnly` keeps it off Universal Clipboard. `org.nspasteboard.ConcealedType` asks clipboard
+            // managers not to record it; `TransientType` asks them not to keep it (nspasteboard.org conventions).
+            pasteboard.prepareForNewContents(with: .currentHostOnly)
             pasteboard.setString(value, forType: .string)
+            pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+            pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
             let changeCount = pasteboard.changeCount
             ourChangeCount = changeCount
             Task { @MainActor in

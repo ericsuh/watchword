@@ -225,8 +225,11 @@ milestone 2 stores full item records only.
 - The file is untrusted input (A8 can edit it while the app is locked; a restored backup is anyone's).
   The connection is opened with `SQLITE_OPEN_NOFOLLOW` (the database path is resolved first, since
   `/var` is itself a link), `trusted_schema = OFF`, `cell_size_check = ON` and `secure_delete = ON`;
-  every row is re-validated when read and reported as `malformedRow` rather than repaired; reads are
-  capped at 64 MiB per value. Versions only move forward (`versionRegression`), and creating an
+  every row is re-validated when read and reported as `malformedRow` rather than repaired; SQLite
+  itself caps any value near 64 MiB (`SQLITE_LIMIT_LENGTH`). On open the schema must equal exactly
+  what this code creates — `trusted_schema = OFF` does not stop plain triggers, and a planted one
+  could silently undo writes or deletions. Erasing the account truncates the write-ahead log, which
+  otherwise keeps the old pages. Versions only move forward (`versionRegression`), and creating an
   account can never overwrite one.
 - Every column except `envelope` is the record's storage location: readers rebuild the expected
   `EnvelopeContext` from the columns, so editing a row's vault, record ID, key ID, kind or version
@@ -416,8 +419,13 @@ As built in milestone 2 (`WatchwordKit.VaultSession`):
   unlocks nothing (adversarial suite "unlock and quick unlock").
 - **Refusal destroys.** When the policy refuses, the LUK is deleted rather than merely ignored, so a
   later bug cannot revive an expired enrolment; a biometric re-enrolment also forgets the state.
-  After `maximumFailedAttempts` the LUK is deleted and no further prompt is shown. Bytes from the
-  Keychain that fail to open the wrapped AUK destroy the enrolment.
+  After `maximumFailedAttempts` prompts that did not end in the key — cancels included, because the
+  system prompt retries internally and a run of failures usually ends in Cancel — the LUK is deleted
+  and no further prompt is shown. Bytes from the Keychain that fail to open the wrapped AUK, or an
+  AUK that fails to open the keyset, destroy the enrolment; a bad vault-key row does not.
+- **Enrolment needs the password.** `enableQuickUnlock(password:)` re-verifies the password against
+  the stored header, because enrolment starts the 14-day interval: a quick-unlocked session must not
+  be able to restart it.
 - **Clock.** Elapsed time is wall-clock; a clock that reads earlier than the last password unlock
   is treated as expired, not as zero. Winding the clock back *within* the window is not detected
   (no trusted time source); it still needs the enrolled biometric, so the interval is about

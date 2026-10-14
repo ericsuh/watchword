@@ -26,7 +26,7 @@
         static func enrolled() async throws -> (TestVault, EmergencyKit) {
             let vault = TestVault()
             let kit = try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             await vault.session.lock()
             return (vault, kit)
         }
@@ -39,12 +39,18 @@
         /// them may unlock, and no key material may appear in the session.
         @Test(
             "a gate that says yes is not enough: without the Keychain releasing the key, nothing unlocks",
-            arguments: [FakeKeychain.BiometricOutcome.fail, .cancel, .invalidated])
-        func gateAloneNeverUnlocks(_ outcome: FakeKeychain.BiometricOutcome) async throws {
+            arguments: zip(
+                [FakeKeychain.BiometricOutcome.fail, .cancel, .invalidated],
+                [
+                    "\(VaultError.biometricAuthenticationFailed)", "\(KeychainError.userCancelled)",
+                    "\(VaultError.quickUnlockRefused(.enrolmentChanged))",
+                ]))
+        func gateAloneNeverUnlocks(_ outcome: FakeKeychain.BiometricOutcome, _ expected: String) async throws {
             let (vault, _) = try await Self.enrolled()
             #expect(try await vault.session.status().quickUnlock == .allowed)
             await vault.keychain.script(outcome)
-            await #expect(throws: (any Error).self) { try await vault.session.quickUnlock() }
+            let error = await #expect(throws: (any Error).self) { try await vault.session.quickUnlock() }
+            #expect(error.map { "\($0)" } == expected)
             #expect(try await vault.session.state() == .locked)
             #expect(await vault.session.keys == nil)
         }
@@ -55,13 +61,16 @@
         /// destroyed so the same trick cannot be retried.
         @Test(
             "bytes other than the enrolled Local Unlock Key fail authentication and destroy the enrolment",
-            arguments: [
-                [UInt8](repeating: 0, count: 32), [UInt8](repeating: 0xA5, count: 32), [UInt8](repeating: 1, count: 31),
-            ])
-        func wrongKeyMaterial(_ bytes: [UInt8]) async throws {
+            arguments: zip(
+                [
+                    [UInt8](repeating: 0, count: 32), [UInt8](repeating: 0xA5, count: 32),
+                    [UInt8](repeating: 1, count: 31),
+                ],
+                [CryptoError.authenticationFailed, .authenticationFailed, .invalidKeyLength(31)]))
+        func wrongKeyMaterial(_ bytes: [UInt8], _ expected: CryptoError) async throws {
             let (vault, kit) = try await Self.enrolled()
             await vault.keychain.script(.releaseBytes(bytes))
-            await #expect(throws: (any Error).self) { try await vault.session.quickUnlock() }
+            await #expect(throws: expected) { try await vault.session.quickUnlock() }
             #expect(try await vault.session.state() == .locked)
             #expect(!(await vault.keychain.contains(.quickUnlockKey(accountID: kit.accountID))))
             #expect(!(await vault.keychain.contains(.quickUnlockState(accountID: kit.accountID))))
@@ -71,14 +80,18 @@
         /// Threat: A3 guessing at the biometric sensor (or a look-alike face). After the configured number of failures
         /// the Local Unlock Key is deleted, not merely ignored, so even a later policy bug cannot revive it; only the
         /// password brings quick unlock back (F5.4).
-        @Test("after three failed biometric attempts the key is destroyed and the password is required")
-        func failureLimit() async throws {
+        ///
+        /// Cancels count too (review finding U3): with `biometryCurrentSet` and no passcode fallback, the system prompt
+        /// retries internally and a run of unrecognised faces usually ends in Cancel, so a counter of hard failures only
+        /// would never trip for someone who can clear the OS lockout with the device passcode.
+        @Test(
+            "after three failed or cancelled biometric attempts the key is destroyed and the password is required",
+            arguments: [FakeKeychain.BiometricOutcome.fail, .cancel])
+        func failureLimit(_ outcome: FakeKeychain.BiometricOutcome) async throws {
             let (vault, kit) = try await Self.enrolled()
-            await vault.keychain.script(.fail, .fail, .fail)
+            await vault.keychain.script(outcome, outcome, outcome)
             for _ in 0..<3 {
-                await #expect(throws: VaultError.biometricAuthenticationFailed) {
-                    try await vault.session.quickUnlock()
-                }
+                await #expect(throws: (any Error).self) { try await vault.session.quickUnlock() }
             }
             #expect(!(await vault.keychain.contains(.quickUnlockKey(accountID: kit.accountID))))
             await #expect(throws: VaultError.quickUnlockRefused(.tooManyFailedAttempts)) {
@@ -88,6 +101,25 @@
             try await vault.session.unlock(password: TestVault.password)
             await vault.session.lock()
             try await vault.session.quickUnlock()
+        }
+
+        /// Threat: someone who can present the enrolled biometric but does not know the password (a look-alike, a
+        /// coerced or sleeping owner) quick-unlocks just before the 14-day interval ends and re-enables quick unlock to
+        /// restart it, forever (review finding U1). Enabling needs the password, re-verified against the stored header,
+        /// so the interval still ends 14 days after the password was last entered.
+        @Test("a quick-unlocked session cannot restart the password interval")
+        func cannotExtendInterval() async throws {
+            let (vault, _) = try await Self.enrolled()
+            await vault.clock.advance(by: 13 * 86_400)
+            try await vault.session.quickUnlock()
+            await #expect(throws: CryptoError.authenticationFailed) {
+                try await vault.session.enableQuickUnlock(password: "a guess at the password")
+            }
+            await vault.session.lock()
+            await vault.clock.advance(by: 2 * 86_400)
+            await #expect(throws: VaultError.quickUnlockRefused(.passwordIntervalExpired)) {
+                try await vault.session.quickUnlock()
+            }
         }
 
         // MARK: Expiry (F5.4)
@@ -161,7 +193,7 @@
         func replayAfterPasswordChange() async throws {
             let vault = TestVault()
             let kit = try await vault.createAccount()
-            try await vault.session.enableQuickUnlock()
+            try await vault.session.enableQuickUnlock(password: TestVault.password)
             let oldKey = try #require(await vault.keychain.raw(.quickUnlockKey(accountID: kit.accountID)))
             let oldStateBytes = try #require(await vault.keychain.raw(.quickUnlockState(accountID: kit.accountID)))
             try await vault.session.changePassword(current: TestVault.password, new: "a different long password")
@@ -184,7 +216,8 @@
         // MARK: Password path
 
         /// Threat: an oracle. A thief (A3) or a sync-store attacker (A1) who can tell "wrong password" from "wrong Secret
-        /// Key" from "tampered header" learns which secret to attack. All three must surface as the same error.
+        /// Key" learns which secret to attack; both must surface as the same error. Tampered headers are covered by the
+        /// store suite's header-substitution test.
         @Test("a wrong password and a wrong Secret Key are indistinguishable")
         func noOracle() async throws {
             let vault = TestVault()
@@ -244,6 +277,22 @@
             #expect(keys.isZeroised)
         }
 
+        /// Threat: an app whose idle timer did not fire — its window was closed (macOS keeps running), it was napping, or
+        /// the timer task was suspended — and someone then touches it. Activity after the timeout must lock, not reset
+        /// the timer and keep alive a session that should already have ended (review finding A1).
+        @Test("activity after the idle timeout locks instead of extending the session")
+        func lateActivityLocks() async throws {
+            let vault = TestVault()
+            try await vault.createAccount()
+            let keys = try #require(await vault.session.keys)
+            await vault.clock.advance(by: 4 * 60)
+            #expect(await vault.session.recordActivity() == nil)
+            await vault.clock.advance(by: 11 * 60)
+            #expect(await vault.session.recordActivity() == .idleTimeout)
+            #expect(try await vault.session.state() == .locked)
+            #expect(keys.isZeroised)
+        }
+
         /// Threat: the "lock" button (or a screen lock) pressed while an unlock is still deriving keys. Actors are
         /// re-entrant, so without care the unlock would finish *after* the lock and leave the vault open. The lock must
         /// win and the derived keys must be zeroised.
@@ -283,6 +332,28 @@
             #expect(try await vault.session.items().items.isEmpty)
         }
 
+        /// Threat: a lock (screen lock, idle timer) landing between a password change being committed and the session
+        /// swapping keys. Reporting failure then would tell the person the old password still works when only the new
+        /// one does: a lock-out by misinformation, unrecoverable by design (F10.2; review finding U4).
+        @Test("a password change that was committed reports success even if the vault locks in between")
+        func lockDuringPasswordChange() async throws {
+            let gated = GatedRecordStore()
+            let vault = TestVault(store: gated)
+            try await vault.createAccount()
+            await gated.holdAfterNextCommit()
+            let change = Task {
+                try await vault.session.changePassword(current: TestVault.password, new: "the brand new password")
+            }
+            await gated.waitUntilHeld()
+            await vault.session.lock()
+            await gated.release()
+            try await change.value
+            await #expect(throws: CryptoError.authenticationFailed) {
+                try await vault.session.unlock(password: TestVault.password)
+            }
+            try await vault.session.unlock(password: "the brand new password")
+        }
+
         /// Threat: deleting someone's vault from an unlocked-but-unattended device. Account deletion re-checks the
         /// password against the stored header and leaves everything intact when it is wrong.
         @Test("account deletion with the wrong password changes nothing")
@@ -305,7 +376,10 @@
         private var heldWaiters: [CheckedContinuation<Void, Never>] = []
         private var isHolding = false
 
+        private var holdCommit = false
+
         func holdNextVaultKeyRead() { holdKind = .vaultKeyWrap }
+        func holdAfterNextCommit() { holdCommit = true }
         func holdNextItemRead() { holdKind = .item }
 
         func waitUntilHeld() async {
@@ -340,7 +414,16 @@
             return try await inner.records(in: vaultID, kind: kind)
         }
 
-        func commit(_ change: StoreChange) async throws { try await inner.commit(change) }
+        func commit(_ change: StoreChange) async throws {
+            try await inner.commit(change)
+            guard holdCommit else { return }
+            holdCommit = false
+            isHolding = true
+            for waiter in heldWaiters { waiter.resume() }
+            heldWaiters = []
+            await withCheckedContinuation { held = $0 }
+            isHolding = false
+        }
         func eraseAll() async throws { try await inner.eraseAll() }
     }
 #endif

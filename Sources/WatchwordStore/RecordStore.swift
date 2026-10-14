@@ -10,10 +10,18 @@ public enum RecordStoreError: Error, Equatable, Sendable {
     /// A write that would lower or repeat a record's version. Versions only move forward (SEC2); the sync layer's
     /// monotonic check (milestone 3) builds on the same rule.
     case versionRegression(recordID: UUID, stored: UInt64, attempted: UInt64)
+    /// A conditional deletion found a different version (or no record) from the one the caller read: someone changed
+    /// it in between, and deleting it now would silently undo that change.
+    case versionConflict(recordID: UUID)
     /// A row whose columns cannot be what this code wrote (wrong UUID length, unknown kind). Reported, never repaired.
     case malformedRow(String)
     /// The database was written by a newer schema; this build refuses to touch it rather than misread it.
     case unsupportedSchemaVersion(Int)
+    /// The database holds a table, index, trigger or view this code did not create, or a changed definition of one it
+    /// did. Planted triggers can silently undo writes and deletions, so the store refuses to open.
+    case unexpectedSchema(String)
+    /// The write-ahead log could not be emptied (another process is reading it), so erased data may still be on disk.
+    case checkpointIncomplete
 }
 
 /// How a commit changes the account header.
@@ -30,11 +38,22 @@ public struct StoreChange: Sendable, Hashable {
     public var account: AccountWrite?
     public var upserts: [StoredRecord]
     public var deletions: [RecordKey]
+    /// Deletions that apply only if the record is still at the given version.
+    public var conditionalDeletions: [RecordKey: UInt64]
 
-    public init(account: AccountWrite? = nil, upserts: [StoredRecord] = [], deletions: [RecordKey] = []) {
+    public init(
+        account: AccountWrite? = nil, upserts: [StoredRecord] = [], deletions: [RecordKey] = [],
+        conditionalDeletions: [RecordKey: UInt64] = [:]
+    ) {
         self.account = account
         self.upserts = upserts
         self.deletions = deletions
+        self.conditionalDeletions = conditionalDeletions
+    }
+
+    /// Every key this change deletes.
+    var allDeletions: [RecordKey] {
+        deletions + conditionalDeletions.keys
     }
 }
 
@@ -68,6 +87,9 @@ extension StoreChange {
             }
         case nil:
             break
+        }
+        for (key, expected) in conditionalDeletions where try existingVersion(key) != expected {
+            throw RecordStoreError.versionConflict(recordID: key.recordID)
         }
         for record in upserts {
             if let stored = try existingVersion(record.key), record.version <= stored {

@@ -17,6 +17,9 @@ public enum VaultError: Error, Equatable, Sendable {
     /// The Secret Key entered belongs to another account (its setup code names a different account ID).
     case secretKeyForAnotherAccount
     case vaultKeyMissing(vaultID: UUID)
+    /// The vault key's wrap is present but does not open, although the keyset (and so the password) did: the record
+    /// was tampered with. Deliberately not `authenticationFailed`, which would tell the person their password is wrong.
+    case vaultKeyUnreadable(vaultID: UUID)
     case quickUnlockRefused(QuickUnlockRefusal)
     case biometricAuthenticationFailed
     case itemNotFound(UUID)
@@ -30,4 +33,6 @@ public enum VaultError: Error, Equatable, Sendable {
     case recordMismatch(UUID)
     case itemNotTrashed(UUID)
     case versionOverflow
+    /// The account was erased but some Keychain items could not be deleted.
+    case keychainCleanupIncomplete(Int)
 }
