@@ -19,6 +19,7 @@ first pure modules and the CI scaffolding that will grow with them.
 | [docs/05-anti-phishing.md](docs/05-anti-phishing.md) | Why refusing to fill is not enough, and the six layers that keep a credential off a look-alike site |
 | [docs/06-adversarial-review.md](docs/06-adversarial-review.md) | Adversarial code and design review: findings, severities, and what was fixed, accepted, or tracked |
 | [docs/07-supply-chain.md](docs/07-supply-chain.md) | Supply-chain controls for the app code and for the GitHub/tooling/dev layer |
+| [docs/08-repository-hardening.md](docs/08-repository-hardening.md) | `gh` runbook for branch protection, actions policy, signing, tag rulesets, and secret scanning |
 | [docs/adr/](docs/adr/) | Architecture decision records |
 
 ## Repository layout

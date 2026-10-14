@@ -117,7 +117,8 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
 
 ## 4. Repository and release integrity (T5, T6)
 
-**[planned]** — these require repository-admin settings, not code:
+**[planned]** — these require repository-admin settings, not code. The `gh` commands,
+in an order that does not lock you out, are in `08-repository-hardening.md`:
 
 - Branch protection on `main`: require `package-tests` (both runners), `adversarial-tests`,
   `strict-memory-safety`, and `lint`; require review; no force-push; no deletion.

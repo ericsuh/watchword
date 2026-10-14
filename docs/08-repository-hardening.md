@@ -1,0 +1,280 @@
+# Watchword — Repository hardening runbook
+
+The controls `07-supply-chain.md` §4 lists as `[planned]` need repository-admin access rather than
+code. This is the procedure, as `gh` commands, in an order that does not lock you out.
+
+Context these commands assume, verified 2026-10-13: `ericsuh/watchword` is **public** and
+**user-owned**, default branch `main`. Public repos get branch protection, rulesets, and secret
+scanning on every plan, so none of this needs a paid plan. A user-owned repo has no teams, which
+changes the review settings in step 4.
+
+> These are composed from the GitHub REST API contracts, not executed here — `gh` is not
+> authenticated in the environment the rest of this work was validated in. Run them yourself and
+> check step 9's verification output.
+
+## Read this first: two ways to lock yourself out
+
+**1. Required signatures with no signing set up.** As of this writing `git log --format='%G?'`
+reports `N` (unsigned) for every commit on this branch, and `commit.gpgsign` is unset. Turning on
+required signatures before step 2 means your next push is rejected.
+
+**2. Required signatures while PR #1 is open.** Protection requiring signatures rejects a merge
+whose commits are unsigned. PR #1's commits are unsigned. So either merge PR #1 first and enable
+signatures after (simplest), or re-sign its commits:
+
+```sh
+# Only on a branch nobody else has checked out.
+git rebase --exec 'git commit --amend --no-edit -S' main
+git push --force-with-lease
+```
+
+Steps 1–7 are safe to run with PR #1 open. Step 8 (signatures) is the one to defer.
+
+## 1. Make the default token read-only and allow only GitHub-owned actions
+
+The highest-value pair, and it pairs directly with the SHA pinning in `07-supply-chain.md` §3.1.
+With `setup-xcode` removed, the only actions in use are `actions/checkout` and
+`actions/upload-artifact`, both GitHub-owned — so the allowlist can be closed completely.
+
+```sh
+# Default GITHUB_TOKEN is read-only; workflows cannot approve PRs.
+gh api -X PUT repos/ericsuh/watchword/actions/permissions/workflow \
+  -f default_workflow_permissions=read \
+  -F can_approve_pull_request_reviews=false
+
+# Actions are enabled, but only a selected set may run.
+gh api -X PUT repos/ericsuh/watchword/actions/permissions \
+  -F enabled=true -f allowed_actions=selected
+
+# That selected set is: GitHub-owned only. No third-party, not even "verified creator".
+gh api -X PUT repos/ericsuh/watchword/actions/permissions/selected-actions \
+  --input - <<'JSON'
+{
+  "github_owned_allowed": true,
+  "verified_allowed": false,
+  "patterns_allowed": []
+}
+JSON
+```
+
+If a third-party action is ever genuinely needed, add it to `patterns_allowed` **pinned to a SHA**
+(`owner/repo@<40-hex>`), which also keeps the nightly `action-pinning-audit` job happy.
+
+## 2. Set up commit signing locally (prerequisite for step 8)
+
+SSH signing is the least friction on macOS if you already have an SSH key.
+
+```sh
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+
+# Register the SAME key again, as a signing key. An authentication key does not
+# make commits show as Verified; this is a separate key type on GitHub.
+gh ssh-key add ~/.ssh/id_ed25519.pub --type signing --title "watchword commit signing"
+
+# Confirm: the new commit should report "G".
+git commit --allow-empty -m "signing check" && git log --format='%h %G?' -1
+git reset --hard HEAD~1
+```
+
+## 3. Enable secret scanning and push protection
+
+Free on public repos. Push protection is the one that matters — it blocks a credential at
+`git push` instead of telling you about it afterwards.
+
+```sh
+gh api -X PATCH repos/ericsuh/watchword --input - <<'JSON'
+{
+  "security_and_analysis": {
+    "secret_scanning": { "status": "enabled" },
+    "secret_scanning_push_protection": { "status": "enabled" },
+    "secret_scanning_validity_checks": { "status": "enabled" }
+  }
+}
+JSON
+
+gh api -X PUT repos/ericsuh/watchword/vulnerability-alerts
+```
+
+`automated-security-fixes` is deliberately **not** enabled: it opens auto-merging dependency PRs,
+and `07-supply-chain.md` requires a human to read the diff between two pins.
+
+## 4. Merge hygiene
+
+```sh
+gh api -X PATCH repos/ericsuh/watchword --input - <<'JSON'
+{
+  "allow_squash_merge": true,
+  "allow_rebase_merge": true,
+  "allow_merge_commit": false,
+  "delete_branch_on_merge": true,
+  "allow_auto_merge": false,
+  "web_commit_signoff_required": true
+}
+JSON
+```
+
+`allow_auto_merge: false` is deliberate: auto-merge lands a PR the moment checks go green, which
+removes the human read of the diff that is the actual control.
+
+## 5. Branch protection on `main`
+
+Check names must match the job names exactly, including the matrix expansion. These are the five
+required; `App tests (macOS + iOS simulator)` is omitted on purpose because it currently succeeds
+by skipping, and a check that passes by doing nothing is not a gate. Add it in milestone 2 when it
+runs real tests.
+
+```sh
+gh api -X PUT repos/ericsuh/watchword/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "Package tests (Xcode 16.4 / macOS 15)",
+      "Package tests (Xcode 26 / macOS 26)",
+      "Adversarial security tests",
+      "Strict memory safety",
+      "swift-format lint"
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 0,
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false,
+    "require_last_push_approval": false
+  },
+  "restrictions": null,
+  "required_linear_history": false,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "block_creations": false,
+  "required_conversation_resolution": true,
+  "lock_branch": false,
+  "allow_fork_syncing": true
+}
+JSON
+```
+
+Three choices worth understanding rather than copying:
+
+- **`required_approving_review_count: 0`.** GitHub does not let you approve your own pull request.
+  On a solo repo any value ≥ 1 means you can never merge your own work without a second account.
+  Zero still forces every change through a PR with passing checks; it only drops the approval
+  click. Raise it to 1 and set `require_code_owner_reviews: true` the day a second person joins —
+  that is also when `.github/CODEOWNERS` (step 6) gains teeth.
+- **`enforce_admins: true`.** The rules apply to you too, which is the point, but it means an
+  emergency fix needs protection temporarily lifted:
+  `gh api -X DELETE repos/ericsuh/watchword/branches/main/protection/enforce_admins`, then
+  `-X POST` the same path to restore it. Prefer a PR.
+- **`strict: true`** requires a branch to be up to date with `main` before merging. It is the
+  setting that stops two independently-green PRs from combining into a red `main`.
+
+`required_linear_history` is left `false` so that resolving a conflict by merging `main` into a
+feature branch stays possible. Set it to `true` if you would rather always rebase.
+
+## 6. CODEOWNERS
+
+A workflow edit is code execution in CI, so `.github/` deserves a named owner. Commit this:
+
+```sh
+mkdir -p .github && cat > .github/CODEOWNERS <<'EOF'
+# A change under .github/ is code execution in CI, and Package.swift can execute code at
+# build time (Swift macros, plugins). Both get a named reviewer.
+/.github/        @ericsuh
+/Package.swift   @ericsuh
+/docs/0*-*.md    @ericsuh
+EOF
+```
+
+On a solo repo this is documentation and routing, not enforcement — see the note in step 5.
+
+## 7. Protect release tags
+
+The classic tag-protection endpoint (`/repos/{owner}/{repo}/tags/protection`) is deprecated;
+rulesets replace it. This prevents a published release tag from being **moved or deleted** while
+still letting you create new ones.
+
+```sh
+gh api -X POST repos/ericsuh/watchword/rulesets --input - <<'JSON'
+{
+  "name": "Protect release tags",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": { "include": ["refs/tags/v*"], "exclude": [] }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" }
+  ],
+  "bypass_actors": []
+}
+JSON
+```
+
+A moved release tag is how a reviewed commit gets swapped for an unreviewed one after the fact,
+which is exactly what the build-provenance attestation in `07-supply-chain.md` §4 is meant to
+make detectable.
+
+## 8. Require signed commits — last, and only after steps 2 and the PR #1 note
+
+```sh
+gh api -X POST repos/ericsuh/watchword/branches/main/protection/required_signatures
+```
+
+To undo if it bites: `gh api -X DELETE .../required_signatures`.
+
+## 9. Verify
+
+```sh
+echo "— branch protection —"
+gh api repos/ericsuh/watchword/branches/main/protection \
+  --jq '{checks: .required_status_checks.contexts,
+         strict: .required_status_checks.strict,
+         admins: .enforce_admins.enabled,
+         reviews: .required_pull_request_reviews.required_approving_review_count,
+         force_push: .allow_force_pushes.enabled,
+         deletions: .allow_deletions.enabled,
+         signatures: .required_signatures.enabled,
+         conversations: .required_conversation_resolution.enabled}'
+
+echo "— actions policy —"
+gh api repos/ericsuh/watchword/actions/permissions --jq '{enabled, allowed_actions}'
+gh api repos/ericsuh/watchword/actions/permissions/selected-actions
+gh api repos/ericsuh/watchword/actions/permissions/workflow
+
+echo "— security features —"
+gh api repos/ericsuh/watchword --jq '.security_and_analysis'
+
+echo "— rulesets —"
+gh api repos/ericsuh/watchword/rulesets --jq '.[] | {name, target, enforcement}'
+```
+
+Expected: five contexts with `strict: true`, `admins: true`, no force-push, no deletions,
+`allowed_actions: "selected"` with `github_owned_allowed: true` and an empty `patterns_allowed`,
+`default_workflow_permissions: "read"`, secret scanning and push protection `enabled`, and one
+active tag ruleset.
+
+## Optional: Dependabot for action pins
+
+Keeps the SHA pins from going stale. Opens PRs; **do not** pair it with auto-merge, because the
+control is a human reading the diff between the old and new SHA.
+
+```sh
+mkdir -p .github && cat > .github/dependabot.yml <<'EOF'
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    # Keep SHA pins: Dependabot rewrites the pin and updates the trailing version comment.
+    open-pull-requests-limit: 3
+EOF
+```
+
+There is deliberately no `swift` ecosystem entry: the package has no dependencies, and
+`07-supply-chain.md` §2 enforces that in CI.
