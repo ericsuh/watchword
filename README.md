@@ -20,6 +20,7 @@ first pure modules and the CI scaffolding that will grow with them.
 | [docs/06-adversarial-review.md](docs/06-adversarial-review.md) | Adversarial code and design review: findings, severities, and what was fixed, accepted, or tracked |
 | [docs/07-supply-chain.md](docs/07-supply-chain.md) | Supply-chain controls for the app code and for the GitHub/tooling/dev layer |
 | [docs/08-repository-hardening.md](docs/08-repository-hardening.md) | `gh` runbook for branch protection, actions policy, signing, tag rulesets, and secret scanning |
+| [docs/09-cloud-sessions.md](docs/09-cloud-sessions.md) | Running Claude Code cloud sessions against this package: Swift on the Linux VM, and which gates Xcode's absence puts out of reach |
 | [docs/adr/](docs/adr/) | Architecture decision records |
 
 ## Repository layout
