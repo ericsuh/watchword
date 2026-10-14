@@ -51,7 +51,8 @@ that a test target may contain both as long as a single test does not mix their 
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
-| SEC1–SEC7 | Section 6 below |
+| F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
+| SEC1–SEC10 | Section 6 below |
 
 ## 4. End-to-end scenario tests (normative)
 
@@ -91,14 +92,27 @@ These are mandatory, live in `Tests/WatchwordAdversarialTests` (and later per-mo
 build. Each bullet is a test or test group that must exist before the corresponding milestone
 closes.
 
-### 6.1 Envelope and crypto (milestone 1)
+### 6.1 Envelope and crypto
+
+**Implemented now** (header-level; there is no crypto layer yet, so these are the only ones that
+can exist — the test plan says so rather than implying coverage it lacks):
+- Change `kind` byte, unknown kind, wrong magic, version 0/2/0xFFFF → rejected before any payload
+  is touched.
+- Truncation at every offset in the header → rejected.
+- A declared AAD length longer than the data → rejected.
+- Every single-byte flip in the header is either rejected or changes a bound field.
+- Downgrade: `iterations` below `KDFParameters.minimumIterations`, short salt, unknown algorithm,
+  non-32-byte output → rejected, including at `Decodable` init so a tampered header cannot decode.
+- Ceiling: `iterations` above `KDFParameters.maximumIterations` and absurd salt lengths → rejected
+  (availability; review finding C3).
+
+**Arrives with milestone 1** (needs `WatchwordCrypto`):
 - Flip every byte position of a ciphertext (sampled for long records) → decryption fails; no
   partial plaintext is returned.
-- Swap a record's envelope into another vault's slot → rejected by AAD check before decryption.
+- Swap a record's envelope into another vault's slot → rejected by AAD comparison before
+  decryption. The header already carries the AAD; the comparison against re-derived context is
+  what does not exist yet.
 - Replay an older version of a record → rejected by Lamport/signature chain; history unaffected.
-- Change `kind` byte → rejected before decryption.
-- Downgrade: header with `iterations` below `KDFParameters.minimum`, unknown algorithm, or
-  `version` 0/2 → rejected.
 - Nonce uniqueness over 1e6 encryptions under one key (statistical) and never-reused after
   restart (seeded fake RNG that repeats is detected by the encryptor's nonce guard).
 - HPKE wrap with a substituted recipient key fails to unwrap; wrap signed by a non-admin is
@@ -147,7 +161,49 @@ closes.
   fake).
 - With keys absent, the scheduler performs no hashing and persists nothing derived from passwords.
 
-### 6.7 Fuzzing (nightly)
+### 6.7 Phishing resistance (PRD F11)
+
+Implemented in `Tests/WatchwordAdversarialTests/AdversarialPhishingTests.swift`. Two distinct
+guarantees, tested separately, because passing one and failing the other still harms the person:
+
+*Nothing is released on a look-alike host.* For each of `arnazon.com`, `amaz0n.com`,
+`аmazon.com` (Cyrillic), `amazon.com.evil.example`, `secure-amazon.example`,
+`amazon-login.example`, `amazom.com`, `xn--mazon-1nf.com`, `firstbank.co.uk.evil.example`,
+`firstbamk.co.uk`:
+- `AutoFillGate.decide` does not return `.fill`;
+- `AutoFillGate.authorize` refuses for *every* item, including when a (hypothetically buggy) UI
+  asks for one explicitly;
+- `authorizeOneTimeCode` refuses, so a replayable TOTP is never released.
+
+*The person is warned rather than left in silence.* The same hosts must assess as `.suspicious`
+with at least one signal; the nine that resemble a specific saved site must also name their target
+via `impersonatesSavedSite`, so the warning can say which site is being imitated. Punycode is
+flagged with the weaker, unnamed warning because it cannot be decoded without an IDNA table.
+
+*Warnings stay credible.* `example.com`, `wikipedia.org`, `news.bbc.co.uk`, `some-startup.io`
+assess as `.unrecognized`; `amazon.de` and `amazon.co.jp` are not flagged against a saved
+`amazon.com`. A false-positive regression fails the build just as a false negative does — a
+warning people learn to dismiss is not a control.
+
+*Machinery.* Skeleton equivalence for confusables and digraphs; per-label mixed-script detection
+(the whole-host version flagged every legitimate IDN and was caught by test, review finding C4);
+distinctive-label extraction across public suffixes; bounded edit distance.
+
+*Scope policy.* `com`, `co.uk`, `github.io`, `herokuapp.com`, `localhost`, `appspot.com` refused;
+`amazon.com`, `firstbank.co.uk`, `signin.aws.amazon.com`, `tenant.github.io` accepted. One test
+asserts the matcher *would* have matched an over-broad scope, so the policy test keeps its meaning
+if the matcher changes.
+
+*Normalisation (F11.6).* In `HostNormalizerTests`: ASCII percent-escapes rejected, non-ASCII
+escapes accepted, zero-width/bidi/soft-hyphen rejected, over-long hosts and labels rejected,
+user-info rejected, and the IDNA compatibility mapping asserted as honoured so a future
+"hardening" change cannot silently break legitimate matching.
+
+*Still to come:* a UI test that the AutoFill extension presents no override affordance on a
+suspicious host (milestone 5), and that adding a mismatched host as a scope requires the
+confirmation in F11.7 (milestone 2).
+
+### 6.8 Fuzzing (nightly)
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
   `otpauth://` parser, and `HostMatcher.normalize`.
 

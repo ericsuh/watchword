@@ -36,12 +36,19 @@ Field values (passwords, TOTP secrets, passkey private keys, answers, codes), it
 | A3 Thief with an unlocked device, app locked | App sandbox, pasteboard | Vault contents | Auto-lock, zeroised memory, pasteboard expiry, password required after interval |
 | A4 Malicious household member (current) | Vault key for shared vaults, their own devices | Items in vaults they are not a member of; ability to impersonate the owner | Per-vault keys, signed membership changes, owner-only admin operations |
 | A5 Former member | Old vault key, items synced before removal | Items created/changed after removal | Vault key rotation and re-encryption on removal (F4.3) |
-| A6 Malicious web page / app | Control of the page requesting AutoFill | Credentials for a different service | Service-scope matching (SEC6), OS-provided service identifiers, no auto-submit of shadowed matches |
+| A6 Malicious web page / app | Control of the page requesting AutoFill | Credentials for a different service | Service-scope matching enforced by type and one authorization chokepoint (SEC6), scope policy against over-broad scopes, normalisation that cannot invent a match, no auto-fill of ambiguous or shadowed matches, look-alike warning (§9.1) |
 | A7 Malicious import file | Crafted CSV/1PUX/CXF | Code execution, resource exhaustion, data exfiltration | Hardened parsers (SEC7) |
 | A8 Local malware with user privileges (macOS) | Can read process memory of unlocked app in the worst case | Long-lived plaintext after lock | Out of scope while unlocked (OS boundary); minimised by zeroisation and short lock timers |
 
+Also disclosed by design, and therefore worth naming rather than discovering later: enabling
+QuickType publishes item hosts and usernames to the OS-managed `ASCredentialIdentityStore`. That
+is a plaintext index of *metadata* outside this app's control (never secrets), which is the price
+of QuickType; F6.8 lets a person exclude an item from it.
+
 Explicitly out of scope: a compromised OS or jailbroken device while the vault is unlocked,
-side-channel attacks on the Secure Enclave, and coercion of the person.
+side-channel attacks on the Secure Enclave, and coercion of the person. Also out of scope, but
+only because it is unachievable rather than unimportant: zeroising decrypted field values that
+have become Swift `String`s (PRD SEC4).
 
 ## 3. System overview
 
@@ -160,10 +167,11 @@ Field { id, kind, label, value(secret or plain), order, meta }   // kinds listed
 
 Titles and hosts are inside the ciphertext. A separate **index record** per item (also encrypted,
 but with a different, smaller payload: `id, vaultID, hosts, usernames, title`) lets the AutoFill
-extension build its in-memory index after unlock without decrypting every full item. There is no
-plaintext index on disk; AutoFill QuickType suggestions are instead published to the OS-managed
-`ASCredentialIdentityStore`, which the OS protects, and which is cleared when the extension is
-disabled.
+extension build its in-memory index after unlock without decrypting every full item. Watchword writes no
+plaintext index of its own; AutoFill QuickType suggestions are instead published to the OS-managed
+`ASCredentialIdentityStore`, which the OS protects and which is cleared when the extension is
+disabled. That store is still a metadata disclosure outside our control — see the threat model —
+so F6.8 allows per-item exclusion.
 
 ## 6. Local storage
 
@@ -279,6 +287,38 @@ Scenario S1: retail item scoped `amazon.com` (subdomains on); AWS item scoped
 `signin.aws.amazon.com`, both match but AWS scores higher and retail is shadowed. The person can add
 `aws.amazon.com` to the retail item's `excludedHosts` to hide it entirely.
 
+Normalisation is stricter than "lower-case and compare", because two Foundation behaviours
+verified against the real toolchain would otherwise widen matching:
+
+- `URLComponents.host` returns a **percent-decoded** host, so `https://x.amazon%2Ecom/` yields
+  `x.amazon.com` and would match an `amazon.com` scope. The normaliser inspects
+  `percentEncodedHost` and rejects ASCII escapes, while allowing the non-ASCII escapes that
+  represent an IDN host.
+- `trimmingCharacters(in: .whitespacesAndNewlines)` strips U+200B, so `amazon.com\u{200B}` was
+  trimmed into a match. Trimming is ASCII-only.
+
+Conversely, Foundation's IDNA compatibility mapping is *honoured*: fullwidth `ＡMAZON.com` and
+Kelvin-sign `amazonK.com` arrive folded to `amazon.com`, which is what a browser resolves.
+Characters IDNA keeps distinct (Cyrillic `а`) stay distinct and never match an ASCII scope.
+
+Types carry the guarantee: `ScopeMatcher` and `ItemRanker` accept only a `NormalizedHost`, whose
+initializer is internal to the module, so the only way to obtain one is through the normaliser.
+`AutoFillGate` is the single function through which a secret may reach the OS, and it re-checks
+`isSelectable` even when the person chose the item explicitly.
+
+### 9.1 Anti-phishing
+
+Full design in `05-anti-phishing.md`. Three additions beyond matching:
+
+1. **Scope policy.** `ScopePolicy`/`PublicSuffix` refuse single-label and public-suffix scopes at
+   creation, edit, and import. Without this, a `com` scope becomes the top-ranked match on an
+   attacker's domain.
+2. **Look-alike warning.** `PhishingDetector` turns "no match" into a named warning for hosts that
+   resemble a saved scope — visual skeleton, edit-distance near-miss, saved name out of position,
+   per-label mixed script, punycode. Silence is what pushes a person to copy a password by hand.
+3. **Ambiguity is surfaced, not resolved.** `ItemRanking.isAmbiguous` forces a choice when items
+   tie, so the extension never fills the first of a tied set.
+
 Published identities: for QuickType we publish one `ASPasswordCredentialIdentity` per
 (item, scope host, username) with `rank` set from specificity, one `ASPasskeyCredentialIdentity`
 per passkey, and (iOS 18+) one `ASOneTimeCodeCredentialIdentity` per TOTP field. Whether the OS
@@ -319,6 +359,10 @@ accepted set. Entropy is reported as `length × log2(alphabetSize)` for random m
 reduced by the rejection constraint), `words × log2(7776)` for passphrases with the EFF large list,
 and `digits × log2(10)` for PINs. Site password rules from `ASGeneratePasswordsRequest` are mapped
 to generator options.
+
+The generator returns a Swift `String`, which cannot be zeroised; see PRD SEC4 for why that is
+accepted and what bounds the exposure. A `SecureBytes`-returning variant is worth adding if a
+future flow needs a generated password to outlive a single UI interaction.
 
 ## 13. Hygiene (`WatchwordHygiene`)
 
@@ -381,6 +425,10 @@ adapters live in `Apps/`; fakes live in `WatchwordTestSupport`.
 
 - Whether to offer iCloud Keychain storage of the Secret Key as an opt-in convenience (`adr/0004`).
 - Argon2id adoption path (`adr/0003`).
-- Whether per-item keys (wrapped by VK) are worth the complexity to make rotation O(members)
-  instead of O(items); deferred until vault sizes justify it.
+- Per-item keys (wrapped by VK) to make rotation O(members) instead of O(items), including
+  re-upload. Promoted from "deferred" to a milestone-4 decision by the review (finding D10):
+  rotation runs on every membership change, so its cost is not a tail case.
+- A device registry signed by existing devices (review finding D9). Today every device holds the
+  account Ed25519 key, so a lost device cannot be excluded without rotating the account key.
+  Needed before sync ships.
 - OS QuickType behaviour with overlapping domain identities (verify on device, milestone 2).

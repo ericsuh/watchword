@@ -19,6 +19,38 @@ struct AdversarialEnvelopeTests {
         #expect(throws: expected) { try params.validate() }
     }
 
+    /// A compromised sync store setting an absurd iteration count would make every unlock grind
+    /// for hours. Availability is a security property too (threat model A1).
+    @Test(
+        "KDF: iterations above the ceiling are rejected",
+        arguments: [KDFParameters.maximumIterations + 1, 100_000_000, UInt32.max])
+    func kdfIterationsAboveMaximumRejected(_ iterations: UInt32) {
+        let params = KDFParameters(iterations: iterations)
+        let expected = KDFValidationError.iterationsAboveMaximum(iterations, maximum: KDFParameters.maximumIterations)
+        #expect(throws: expected) { try params.validate() }
+    }
+
+    @Test("KDF: a header with a hostile iteration count never decodes")
+    func kdfCeilingEnforcedAtDecode() {
+        let json = #"{"algorithm":"PBKDF2-HMAC-SHA256","iterations":4294967295,"saltLength":32,"outputLength":32}"#
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(KDFParameters.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test("KDF: an absurd salt length is rejected", arguments: [1025, 1_000_000])
+    func kdfSaltCeiling(_ saltLength: Int) {
+        let params = KDFParameters(iterations: KDFParameters.minimumIterations, saltLength: saltLength)
+        let expected = KDFValidationError.saltTooLong(saltLength, maximum: KDFParameters.maximumSaltLength)
+        #expect(throws: expected) { try params.validate() }
+    }
+
+    @Test("KDF: the ceiling leaves real headroom above the floor")
+    func kdfCeilingIsNotTooTight() throws {
+        #expect(KDFParameters.maximumIterations > KDFParameters.minimumIterations * 10)
+        try KDFParameters(iterations: KDFParameters.minimumIterations * 10).validate()
+    }
+
     @Test("KDF downgrade: short salt is rejected", arguments: [0, 1, 8, 15])
     func kdfDowngradeSalt(_ saltLength: Int) {
         let params = KDFParameters(iterations: KDFParameters.minimumIterations, saltLength: saltLength)

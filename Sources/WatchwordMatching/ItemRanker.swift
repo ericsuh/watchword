@@ -17,13 +17,17 @@ public struct ItemRanking: Sendable, Hashable {
     public let shadowed: [RankedMatch]
 
     public var isEmpty: Bool { primary.isEmpty && shadowed.isEmpty }
+
+    /// `true` when more than one item ties for the top specificity, so the UI must let the person
+    /// choose rather than filling the first one (PRD F6.6, F11.5).
+    public var isAmbiguous: Bool { primary.count > 1 }
 }
 
 /// Implements the ranking rule of PRD F6.6 / architecture §9: the most specific scope wins, less
 /// specific matches are shadowed. This is what keeps an Amazon retail login off the AWS console
 /// sign-in page even though both live under `amazon.com`.
 public enum ItemRanker {
-    public static func rank(items: [Item], host: String) -> ItemRanking {
+    public static func rank(items: [Item], host: NormalizedHost) -> ItemRanking {
         var matched: [(item: Item, match: ScopeMatch)] = []
         for item in items {
             var best: ScopeMatch?
@@ -58,8 +62,8 @@ public enum ItemRanker {
         return ItemRanking(primary: primary, shadowed: shadowed)
     }
 
-    /// Convenience: normalize the OS-provided identifier, then rank. Any normalization failure
-    /// yields an empty ranking (fail closed) and the error for logging.
+    /// Normalize the OS-provided identifier, then rank. Any normalization failure yields an empty
+    /// ranking (fail closed) and the error for logging.
     public static func rank(
         items: [Item],
         identifier: ServiceIdentifier
@@ -76,7 +80,7 @@ public enum ItemRanker {
 
     /// Defence in depth for the AutoFill request handler: before returning a credential for
     /// `item`, confirm the item actually matches the requested host and is not shadowed.
-    public static func isSelectable(_ item: Item, for host: String, among items: [Item]) -> Bool {
+    public static func isSelectable(_ item: Item, for host: NormalizedHost, among items: [Item]) -> Bool {
         rank(items: items, host: host).primary.contains { $0.item.id == item.id }
     }
 }

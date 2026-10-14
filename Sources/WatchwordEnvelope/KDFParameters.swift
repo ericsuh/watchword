@@ -7,7 +7,11 @@ public enum KDFAlgorithm: String, Codable, Sendable, Hashable {
 
 public enum KDFValidationError: Error, Equatable, Sendable {
     case iterationsBelowMinimum(UInt32, minimum: UInt32)
+    /// A header asking for far more work than any device would calibrate to is an availability
+    /// attack: a compromised sync store sets it and every unlock afterwards hangs.
+    case iterationsAboveMaximum(UInt32, maximum: UInt32)
     case saltTooShort(Int, minimum: Int)
+    case saltTooLong(Int, maximum: Int)
     case outputLengthUnsupported(Int)
 }
 
@@ -15,7 +19,11 @@ public enum KDFValidationError: Error, Equatable, Sendable {
 /// weakening key derivation (PRD SEC5).
 public struct KDFParameters: Codable, Sendable, Hashable {
     public static let minimumIterations: UInt32 = 650_000
+    /// Roughly 40x the floor: enough headroom for calibration on fast hardware and for raising
+    /// the floor over time, while bounding a hostile header to seconds rather than hours.
+    public static let maximumIterations: UInt32 = 25_000_000
     public static let minimumSaltLength = 16
+    public static let maximumSaltLength = 1024
     public static let outputLength = 32
 
     public var algorithm: KDFAlgorithm
@@ -42,8 +50,14 @@ public struct KDFParameters: Codable, Sendable, Hashable {
         if iterations < KDFParameters.minimumIterations {
             throw KDFValidationError.iterationsBelowMinimum(iterations, minimum: KDFParameters.minimumIterations)
         }
+        if iterations > KDFParameters.maximumIterations {
+            throw KDFValidationError.iterationsAboveMaximum(iterations, maximum: KDFParameters.maximumIterations)
+        }
         if saltLength < KDFParameters.minimumSaltLength {
             throw KDFValidationError.saltTooShort(saltLength, minimum: KDFParameters.minimumSaltLength)
+        }
+        if saltLength > KDFParameters.maximumSaltLength {
+            throw KDFValidationError.saltTooLong(saltLength, maximum: KDFParameters.maximumSaltLength)
         }
         if outputLength != KDFParameters.outputLength {
             throw KDFValidationError.outputLengthUnsupported(outputLength)

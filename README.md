@@ -16,6 +16,9 @@ first pure modules and the CI scaffolding that will grow with them.
 | [docs/02-architecture.md](docs/02-architecture.md) | Threat model, key hierarchy, envelope format, sync, sharing, AutoFill matching, module layout |
 | [docs/03-implementation-plan.md](docs/03-implementation-plan.md) | Milestones and exit criteria |
 | [docs/04-test-plan.md](docs/04-test-plan.md) | Test architecture, end-to-end scenarios, mandatory adversarial tests, CI |
+| [docs/05-anti-phishing.md](docs/05-anti-phishing.md) | Why refusing to fill is not enough, and the six layers that keep a credential off a look-alike site |
+| [docs/06-adversarial-review.md](docs/06-adversarial-review.md) | Adversarial code and design review: findings, severities, and what was fixed, accepted, or tracked |
+| [docs/07-supply-chain.md](docs/07-supply-chain.md) | Supply-chain controls for the app code and for the GitHub/tooling/dev layer |
 | [docs/adr/](docs/adr/) | Architecture decision records |
 
 ## Repository layout
@@ -23,11 +26,13 @@ first pure modules and the CI scaffolding that will grow with them.
 ```
 Package.swift              Swift package (Swift 6 language mode)
 Sources/WatchwordModel     item, field and service-scope types
-Sources/WatchwordMatching  host normalisation, scope scoring, shadowing (Amazon vs AWS)
+Sources/WatchwordMatching  host normalisation, scope scoring, shadowing (Amazon vs AWS),
+                           scope policy, phishing detection, the AutoFill authorization gate
 Sources/WatchwordGenerator password, passphrase and PIN generation with entropy estimates
-Sources/WatchwordEnvelope  envelope header and KDF parameter validation (anti-downgrade)
-Tests/                     Swift Testing suites, XCTest suites, adversarial suite
+Sources/WatchwordEnvelope  envelope header and KDF parameter validation (two-sided bounds)
+Tests/                     Swift Testing suites, XCTest suites, adversarial + phishing suites
 .github/workflows          macOS CI: package tests, adversarial job, strict memory safety, lint
+.github/scripts            Xcode selection and the zero-dependency guard (no third-party actions)
 ```
 
 ## Building and testing
@@ -44,6 +49,9 @@ swift test --filter Adversarial            # security suite only
 
 - Two secrets (account password + device-held Secret Key) are required to unlock or sync.
 - Transports (CloudKit, iCloud Drive, Dropbox via the Files app) carry ciphertext only.
-- Native UI, memory-safe Swift, no third-party cryptography.
+- Native UI, memory-safe Swift, no third-party cryptography, and zero runtime dependencies
+  (enforced in CI).
+- A credential is never released on a host an item is not scoped to, and a look-alike site gets a
+  warning rather than silence.
 - Every security flow is testable in-process with injected fakes, and adversarial tests are a
   required part of CI.

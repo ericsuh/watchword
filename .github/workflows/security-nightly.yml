@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
+# Pinned to full commit SHAs, not tags (docs/07-supply-chain.md).
+#   actions/checkout        v4 -> 11d5960a326750d5838078e36cf38b85af677262
+#   actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
+
 jobs:
   long-adversarial:
     # Longer randomised runs of the sync/sharing simulations and adversarial suites
@@ -16,11 +24,14 @@ jobs:
     name: Long randomised adversarial runs
     runs-on: macos-26
     timeout-minutes: 120
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          xcode-version: "^26.1"
+          persist-credentials: false
+      - name: Select Xcode
+        run: .github/scripts/select-xcode.sh 26.6
       - name: Run with extended iteration budget
         env:
           WATCHWORD_LONG_TESTS: "1"
@@ -28,17 +39,20 @@ jobs:
         run: swift test --parallel --filter 'WatchwordAdversarialTests|LongRunning'
 
   fuzz:
-    # libFuzzer harnesses for parsers and the envelope decoder (docs/04-test-plan.md §6.7).
+    # libFuzzer harnesses for parsers and the envelope decoder (docs/04-test-plan.md §6.8).
     # Each executable target under Fuzz/ is built with -sanitize=fuzzer and run for a bounded
     # time. Skips cleanly until the first harness exists.
     name: Fuzz parsers
     runs-on: macos-26
     timeout-minutes: 90
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          xcode-version: "^26.1"
+          persist-credentials: false
+      - name: Select Xcode
+        run: .github/scripts/select-xcode.sh 26.6
       - name: Fuzz
         run: |
           if [ ! -d Fuzz ]; then
@@ -51,8 +65,32 @@ jobs:
             -max_total_time=1800 -artifact_prefix=artifacts/ -rss_limit_mb=4096
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-artifacts
           path: artifacts
           if-no-files-found: ignore
+
+  action-pinning-audit:
+    # A tag can be moved; a SHA cannot. This fails if any workflow starts referencing an action
+    # by tag or branch, which is the quiet way a supply-chain foothold gets introduced.
+    name: Audit action pinning
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Every `uses:` must be a 40-hex SHA
+        run: |
+          bad=$(grep -rhoE '^\s*-?\s*uses:\s*\S+' .github/workflows \
+                | sed -E 's/.*uses:\s*//' \
+                | grep -vE '@[0-9a-f]{40}$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::These actions are not pinned to a commit SHA:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "All actions pinned to commit SHAs."

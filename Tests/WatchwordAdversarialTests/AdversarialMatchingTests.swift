@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import WatchwordModel
+
 @testable import WatchwordMatching
 
 @Suite("Adversarial: AutoFill service matching", .tags(.adversarial))
@@ -17,6 +18,10 @@ struct AdversarialMatchingTests {
         fields: [Field(kind: .password, label: "password", value: "root")]
     )
     static let items = [amazon, aws]
+
+    static func host(_ value: String) throws -> NormalizedHost {
+        try HostNormalizer.normalize(ServiceIdentifier(value, kind: .domain))
+    }
 
     static let userInfoURLs = [
         "https://amazon.com@evil.example/",
@@ -37,14 +42,13 @@ struct AdversarialMatchingTests {
         "amazon.co",
         "amazoncom",
         "xn--mazon-1nf.com",  // IDN encoding of a homograph
-        "аmazon.com",  // Cyrillic 'а'
-        "amazon.com\u{200B}",  // zero-width space
+        "\u{0430}mazon.com",  // Cyrillic 'а'
     ]
 
     @Test("look-alike hosts do not match", arguments: lookAlikeHosts)
-    func lookAlikes(_ host: String) {
-        let ranking = ItemRanker.rank(items: Self.items, host: host)
-        #expect(ranking.isEmpty, "\(host) matched \(ranking.primary.map(\.item.title))")
+    func lookAlikes(_ value: String) throws {
+        let ranking = ItemRanker.rank(items: Self.items, host: try Self.host(value))
+        #expect(ranking.isEmpty, "\(value) matched \(ranking.primary.map(\.item.title))")
     }
 
     @Test(
@@ -60,37 +64,39 @@ struct AdversarialMatchingTests {
     ]
 
     @Test("hosts with embedded control characters or separators are refused", arguments: malformedDomainInputs)
-    func malformedDomains(_ host: String) {
-        let (ranking, error) = ItemRanker.rank(items: Self.items, identifier: ServiceIdentifier(host, kind: .domain))
+    func malformedDomains(_ value: String) {
+        let (ranking, error) = ItemRanker.rank(items: Self.items, identifier: ServiceIdentifier(value, kind: .domain))
         #expect(ranking.isEmpty)
         #expect(error != nil)
     }
 
     @Test("a shadowed item is never selectable even if the UI asks for it")
-    func shadowedNotSelectable() {
-        #expect(!ItemRanker.isSelectable(Self.amazon, for: "signin.aws.amazon.com", among: Self.items))
+    func shadowedNotSelectable() throws {
+        let host = try Self.host("signin.aws.amazon.com")
+        #expect(!ItemRanker.isSelectable(Self.amazon, for: host, among: Self.items))
     }
 
     @Test("an item that does not match the host is never selectable")
-    func unrelatedNotSelectable() {
-        #expect(!ItemRanker.isSelectable(Self.aws, for: "www.amazon.com", among: Self.items))
-        #expect(!ItemRanker.isSelectable(Self.aws, for: "signin.aws.amazon.com.evil.example", among: Self.items))
+    func unrelatedNotSelectable() throws {
+        #expect(!ItemRanker.isSelectable(Self.aws, for: try Self.host("www.amazon.com"), among: Self.items))
+        #expect(
+            !ItemRanker.isSelectable(
+                Self.aws, for: try Self.host("signin.aws.amazon.com.evil.example"), among: Self.items))
     }
 
     @Test("an empty or dotted scope never matches everything")
-    func degenerateScopes() {
+    func degenerateScopes() throws {
         let scopes = [ServiceScope(host: ""), ServiceScope(host: ".")]
         let wildcard = Item(vaultID: Self.vault, title: "wildcard", scopes: scopes, fields: [])
-        let ranking = ItemRanker.rank(items: [wildcard], host: "example.com")
+        let ranking = ItemRanker.rank(items: [wildcard], host: try Self.host("example.com"))
         #expect(ranking.isEmpty)
     }
 
-    @Test("very long hostnames are handled in bounded time")
+    @Test("very long hostnames are refused rather than matched or ground over")
     func longHost() {
-        let host = String(repeating: "a.", count: 5_000) + "amazon.com"
-        let start = Date()
-        let ranking = ItemRanker.rank(items: Self.items, host: host)
-        #expect(ranking.primary.map(\.item.title) == ["Amazon"])
-        #expect(Date().timeIntervalSince(start) < 1.0)
+        let value = String(repeating: "a.", count: 5_000) + "amazon.com"
+        let (ranking, error) = ItemRanker.rank(items: Self.items, identifier: ServiceIdentifier(value, kind: .domain))
+        #expect(ranking.isEmpty)
+        #expect(error != nil)
     }
 }

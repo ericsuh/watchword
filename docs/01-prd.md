@@ -141,8 +141,11 @@ Requirement IDs are stable and referenced from the test plan.
 - F4.2 On accepting an invitation the invitee must verify the owner's key fingerprint (short safety
   number or QR) out of band before the vault key is accepted; the owner likewise verifies the
   invitee's before wrapping the vault key to them.
-- F4.3 The owner (or an admin) can remove a member at any time. Removal rotates the vault key,
-  re-encrypts all items, and re-wraps the new key to the remaining members. The app must state
+- F4.3 The owner (or an admin) can remove a member at any time. Removal happens in this order:
+  (a) the member is removed from the transport share, which takes effect immediately server-side;
+  (b) the vault key is rotated, all items re-encrypted, and the new key re-wrapped to the remaining
+  members. Step (b) requires the owner's device to be online and unlocked, so it may complete later
+  than step (a); until it does, the UI shows the vault as pending rotation. The app must state
   plainly that the removed member may have retained copies of items they had already synced.
 - F4.4 A member can leave a vault; the same rotation occurs.
 - F4.5 Read-only is enforced by the transport (CloudKit `readOnly` participant permission) and by
@@ -185,6 +188,10 @@ Requirement IDs are stable and referenced from the test plan.
   never pre-selected (S1).
 - F6.7 Handle relying-party credential-update reports (unused password, renamed passkey, unknown
   credential) by updating or flagging the item.
+- F6.8 A per-item "exclude from AutoFill suggestions" toggle. Publishing an identity hands the
+  item's host and username to the OS-managed credential identity store, which is a disclosure
+  surface outside the app's control; items the person marks sensitive are reachable only by opening
+  the app.
 
 ### 5.7 Sync (F7)
 
@@ -227,7 +234,36 @@ Requirement IDs are stable and referenced from the test plan.
   scopes. Results surface in a "Watchtower"-style report and per-item badges.
 - F9.4 Optional: breached-account lookup by email address with a person-supplied HIBP API key.
 
-### 5.10 Recovery and account lifecycle (F10)
+### 5.10 Anti-phishing (F11)
+
+Design in `05-anti-phishing.md`. Scope matching alone is insufficient: when the app silently offers
+nothing on a look-alike site, the person's workaround is to copy the password by hand, which is
+exactly what the attacker wants.
+
+- F11.1 A credential, one-time code, or passkey assertion is released only for a host the item is
+  scoped to. Every release passes through one authorization function, which re-checks even when the
+  person explicitly selected the item.
+- F11.2 Scopes that span unrelated owners cannot be created, edited into existence, or imported:
+  single-label hosts and public suffixes (`com`, `co.uk`, `github.io`, `herokuapp.com`) are
+  refused with an explanation.
+- F11.3 When a host resembles a saved site but does not match it, the app says so — naming the
+  resembled site and the reason — instead of showing an empty result. Detection covers visual
+  confusables (Cyrillic/Greek/leetspeak), `rn`/`vv` digraphs, edit-distance near-misses,
+  the saved site's name in a non-authoritative label, per-label mixed script, and punycode.
+- F11.4 One-time codes are withheld on a mismatched host rather than warned about: a TOTP entered
+  on a look-alike site is immediately replayable. There is no "copy anyway" affordance in the
+  AutoFill extension.
+- F11.5 When several items tie as the most specific match, the person chooses; the app never fills
+  the first of an ambiguous set.
+- F11.6 Host normalisation must never invent a match. Parsing that would widen matching — ASCII
+  percent-escapes, zero-width and bidi characters, user-info, trailing-whitespace tricks — is
+  rejected rather than normalised away.
+- F11.7 Using a mismatched host requires adding it as a scope inside the unlocked app, with a
+  confirmation naming the item. The AutoFill extension offers no override.
+- F11.8 Passkeys are promoted as the phishing-resistant option: conditional upgrade where a site
+  supports it, and password-only items flagged in the hygiene report.
+
+### 5.11 Recovery and account lifecycle (F10)
 
 - F10.1 Changing the account password re-wraps the keyset; changing the Secret Key regenerates the
   Emergency Kit and requires re-enrolling other devices.
@@ -239,7 +275,7 @@ Requirement IDs are stable and referenced from the test plan.
 ## 6. Non-functional requirements
 
 - N1. Unlock to interactive in under 1 s on a 2020-era device after key derivation; key derivation
-  itself targets 250–500 ms on the slowest supported hardware.
+  itself targets 300–500 ms on the slowest supported hardware.
 - N2. AutoFill extension produces a credential list in under 300 ms for 5,000 items.
 - N3. Offline-first; every feature except sync, sharing invitations and HIBP works with no network.
 - N4. Accessibility: full VoiceOver, Dynamic Type, keyboard navigation on macOS.
@@ -255,15 +291,27 @@ Requirement IDs are stable and referenced from the test plan.
   and key ID so records cannot be swapped, replayed across vaults, or downgraded.
 - SEC3. Vault keys are wrapped to members with HPKE (X25519/HKDF-SHA256/AES-256-GCM); member public
   keys are verified out of band.
-- SEC4. Key material lives in `SecureMemory` buffers that are zeroised on lock; nothing in the
-  key hierarchy is ever written to disk in plaintext, including logs and crash reports.
+- SEC4. Key material lives in `SecureMemory` buffers that are zeroised on lock, and nothing in the
+  key hierarchy is ever written to disk in plaintext, including logs and crash reports. The
+  zeroisation guarantee is scoped to `SecureMemory`: decrypted field values and generated passwords
+  become Swift `String`s at the UI boundary, which cannot be reliably zeroised, so copies may
+  persist in freed memory while the process lives. Mitigated by short auto-lock timers, not
+  eliminated; an adversary with code execution in an unlocked process is out of scope (A8).
 - SEC5. KDF parameters are versioned and have enforced minimums; a stored header below the minimum
   is rejected, not silently accepted.
 - SEC6. The AutoFill extension never returns a credential to a service identifier the item is not
-  scoped to.
+  scoped to. Enforced by type (matching accepts only a normalised host) and by a single
+  authorization chokepoint, not by convention across view controllers.
 - SEC7. Import parsers treat input as hostile (size limits, zip-slip and zip-bomb protection,
   CSV formula-injection neutralisation on export).
-- SEC8. Adversarial tests for SEC1–SEC7 run in CI (`04-test-plan.md`, section 6).
+- SEC8. Host normalisation and scope policy fail closed: an input that cannot be unambiguously
+  resolved to a hostname, or a scope that spans unrelated owners, is rejected rather than
+  interpreted generously.
+- SEC9. Validation bounds are two-sided. A parameter with a security floor (KDF iterations) also
+  has a ceiling, because a hostile value at either end is an attack — one on confidentiality, the
+  other on availability.
+- SEC10. Adversarial tests for SEC1–SEC9 run in CI (`04-test-plan.md`, section 6), as their own
+  required check.
 
 ## 8. Success metrics (for a first release)
 

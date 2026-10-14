@@ -10,9 +10,12 @@ public struct ScopeMatch: Sendable, Hashable {
 }
 
 public enum ScopeMatcher {
-    /// Returns a match if `host` (already normalized) falls inside `scope`, honouring exclusions.
-    public static func match(_ scope: ServiceScope, host: String) -> ScopeMatch? {
-        let host = ServiceScope.canonicalHost(host)
+    /// Returns a match if `host` falls inside `scope`, honouring exclusions.
+    ///
+    /// Takes a `NormalizedHost` so that an un-normalised, attacker-influenced string cannot reach
+    /// the comparison (PRD SEC6).
+    public static func match(_ scope: ServiceScope, host: NormalizedHost) -> ScopeMatch? {
+        let host = host.value
         guard !host.isEmpty, !scope.host.isEmpty else { return nil }
 
         if isExcluded(host, by: scope) { return nil }
