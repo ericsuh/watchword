@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-end encrypted and
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
-phase**: `docs/` is the primary deliverable, and `Sources/` holds only milestone-0 pure modules plus
-CI scaffolding. There is no app project yet (`Apps/project.yml` does not exist; the `app-tests` CI
+phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
+milestone-1 cryptographic core, and CI scaffolding. There is no app project yet (`Apps/project.yml` does not exist; the `app-tests` CI
 job self-skips until it does).
 
 ## Commands
@@ -69,16 +69,23 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Four shipped modules, dependency-ordered:
+Six shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
 - **`WatchwordGenerator`** — password/passphrase/PIN generation, generic over `RandomNumberGenerator`.
-- **`WatchwordEnvelope`** — record header layout and KDF parameter validation.
+- **`WatchwordEnvelope`** — envelope format, canonical CBOR, `EnvelopeContext` (the AAD), every check that
+  can run before decryption, and KDF parameter validation. Does no cryptography itself.
+- **`SecureMemory`** — `SecureBytes` (zeroising, page-locked key buffers), `ConstantTime`, and the
+  CommonCrypto PBKDF2 call. The only module allowed unsafe code.
+- **`WatchwordCrypto`** — Secret Key, 2SKD, KDF calibration, keyset, vault keys, HPKE grants, signatures,
+  fingerprints, record sealing. Depends on `SecureMemory` and `WatchwordEnvelope`.
+- **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs. Test
+  targets only; not a product, and no production target may depend on it.
 
-`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordCrypto`, `SecureMemory`,
-`WatchwordStore`, `WatchwordSync`, `WatchwordSharing`, `WatchwordHygiene`, `WatchwordInterchange`,
-`WatchwordKit`, `WatchwordTestSupport`) and which milestone each belongs to.
+`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordStore`, `WatchwordSync`,
+`WatchwordSharing`, `WatchwordHygiene`, `WatchwordInterchange`, `WatchwordKit`) and which milestone each
+belongs to.
 
 ### The matching pipeline is the whole point of `WatchwordMatching`
 
@@ -115,10 +122,40 @@ entry and note the tradeoff, or escalate to the ADR.
 
 `EnvelopeHeader` is the authenticated prefix `magic(4) version(2) kind(1) keyID(16) nonce(12)
 aadLength(2) aad ciphertext`. Kind, version and magic are checked *before* any payload is touched, so
-record-swap and kind-confusion attacks fail without decryption. `KDFParameters` enforces two-sided
-bounds: a floor against downgrade (650k PBKDF2 iterations, 16-byte salt) and a ceiling against a
-tampered header turning every unlock into a hang (25M iterations). Both directions are tested; keep
-both when adjusting constants.
+record-swap and kind-confusion attacks fail without decryption. `Envelope.parse(_:expecting:)` then
+checks the key ID and compares the embedded `aad` byte-for-byte with `EnvelopeContext.canonicalAAD()`
+re-derived from the storage location (record, vault, schema, kind, key, record version); only then does
+`RecordCipher.open` decrypt, with the *whole* serialized header as the AEAD's associated data. Callers
+build the expected context from where they found the record, never from the record.
+
+`KDFParameters` enforces two-sided bounds: a floor against downgrade (650k PBKDF2 iterations, 16-byte
+salt) and a ceiling against a tampered header turning every unlock into a hang (25M iterations). Both
+directions are tested; keep both when adjusting constants.
+
+### The cryptographic core
+
+`docs/02-architecture.md` §4 is the spec; the code cites it. Invariants worth knowing before editing:
+
+- Key bytes live in `SecureBytes`, not in CryptoKit key objects: `EncryptionKey`, `Keyset` and `SecretKey`
+  hold `SecureBytes` and build `SymmetricKey`/`Curve25519` keys per operation, so `zeroise()` on lock is
+  real. Reading a zeroised buffer traps on purpose (an all-zero key is the worst key). CryptoKit
+  plaintext comes back as `Data`; convert with `SecureBytes(wiping:)`.
+- Decryption and HPKE failures all surface as `CryptoError.authenticationFailed` — never distinguish a
+  wrong password from tampering.
+- Every nonce is claimed in the key's `NonceLedger` (shared by all copies of an `EncryptionKey`) and a
+  repeat throws `nonceReuseDetected`. Seal only through `RecordCipher.seal`.
+- Every signature is domain-separated (`SignatureDomain`), and `Signatures.verify` rejects small-order
+  Ed25519 keys; `PublicKeyBundle.init` validates (lengths, low-order X25519, small-order Ed25519,
+  self-signature), so a bundle value is always a checked one.
+- Anything unwrapped or opened takes its identity (vault ID, key ID, account ID) from the storage
+  location the caller passes in, never from the record or grant itself — `VaultKey.unwrap`,
+  `Keyset.unwrap` and `VaultKeyGrant.open(as:from:vaultID:keyID:)` all follow this.
+- Production code never copies key material out with `Array(secureBytes)`; use `unprotectedCopy()` for
+  non-secret values so every escape is searchable.
+- Files that need CryptoKit or CommonCrypto are wrapped in `#if canImport(CryptoKit)` (and
+  `&& canImport(CommonCrypto)`), so `swift build`/`swift test` still work on Linux; those suites only run
+  on the macOS CI matrix. `SecretKey`, `SecureBytes` and the envelope layer are platform-independent and
+  run everywhere.
 
 ## Conventions
 
@@ -128,9 +165,15 @@ both when adjusting constants.
 - **No third-party dependencies, ever, without an ADR.** `.github/scripts/assert-no-dependencies.sh`
   fails CI on any `.package(`, `.binaryTarget`, `.plugin(`, `unsafeFlags`, or non-empty
   `Package.resolved`. Crypto comes only from CryptoKit, Security.framework and CommonCrypto.
-- **No unsafe constructs** outside the future `SecureMemory` module — enforced by the
-  `strict-memory-safety` job. If `SecureMemory` needs an exemption, use a per-target setting rather
-  than relaxing the job.
+- **No unsafe constructs** outside `SecureMemory` — enforced by the `strict-memory-safety` job plus the
+  `.github/scripts/assert-unsafe-confined.sh` tripwire (a marked construct would compile anywhere, and
+  `@_silgen_name`-style bindings are not flagged by the compiler at all). No symlinks or non-Swift files
+  under `Sources/`, no custom target paths, no experimental features (`assert-no-dependencies.sh`). Inside
+  `SecureMemory`, every unsafe construct is marked `unsafe (expression)` — **with the space**: Swift 6.2+
+  parses it as the keyword, and on Swift 6.0/6.1 it is a call to the stand-in in `UnsafeMarker.swift`.
+  An outer `unsafe` does not cover closure bodies; mark each level. Calls to stdlib `withUnsafe*` are
+  flagged by Swift 6.3 but not 6.4, so pass a method reference (`src.withUnsafeBytes(dst.copyMemory(from:))`)
+  to keep the marker necessary on both.
 - `WatchwordMatching` deliberately does not import AuthenticationServices; it mirrors
   `ASCredentialServiceIdentifier` with its own `ServiceIdentifier` so the logic is testable under
   plain `swift test`. Keep core modules platform-independent; adapters belong in `Apps/`.
@@ -150,16 +193,18 @@ both when adjusting constants.
 - **Adversarial suites** live in `Tests/WatchwordAdversarialTests`, are named `Adversarial…`, and
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
-  `"phishing resistance"`), so **renaming a suite breaks CI deliberately** — update the grep list in
+  `"phishing resistance"`, `"crypto core"`), so **renaming a suite breaks CI deliberately** — update the grep list in
   `.github/workflows/ci.yml` alongside it.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
   adapter must add or update an adversarial test (`docs/03-implementation-plan.md`, working
   agreements).
 - Randomness is injected: production uses `SystemRandomNumberGenerator`, tests use the SplitMix64
-  `SeededGenerator`. Never make production code reach for a seeded generator, and never sleep in a
+  `SeededGenerator` from `WatchwordTestSupport`. Never make production code reach for a seeded generator, and never sleep in a
   test — time will come from an injected `Clock`.
 - `WATCHWORD_LONG_TESTS=1` and `WATCHWORD_TEST_SEED` are the nightly workflow's knobs for extended
-  randomised runs; new long-running tests should honour them.
+  randomised runs; new long-running tests should honour them via `TestEnvironment`.
+- Known-answer vectors come from the RFC that defines the primitive, or from an independent
+  implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 
 `docs/04-test-plan.md` maps every requirement to its obligated tests and is the place to check before
 claiming a layer is covered.

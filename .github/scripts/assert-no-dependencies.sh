@@ -26,7 +26,38 @@ if [ -f Package.resolved ]; then
   fi
 fi
 
+# Structural checks on the resolved manifest rather than its text, so formatting cannot hide anything:
+# - only plain Swift source and test targets (no binary, plugin, macro, system-library or C targets);
+# - every target at its conventional path (a custom `path:`/`sources:` could compile files no other check scans);
+# - no settings that change what the compiler enforces (unsafeFlags, experimental features, C++ interop);
+# - WatchwordTestSupport (seeded and deliberately broken RNGs) linked only into test targets.
+if ! swift package dump-package | python3 -I -c '
+import json, sys
+manifest = json.load(sys.stdin)
+problems = []
+forbidden_settings = {"unsafeFlags", "enableExperimentalFeature", "interoperabilityMode"}
+for target in manifest["targets"]:
+    name, kind = target["name"], target["type"]
+    if kind not in ("regular", "test"):
+        problems.append(f"{name}: target type {kind} is not permitted")
+    if target.get("path") is not None or target.get("sources") is not None:
+        problems.append(f"{name}: custom path/sources are not permitted")
+    for setting in target.get("settings", []):
+        for key in setting.get("kind", {}):
+            if key in forbidden_settings:
+                problems.append(f"{name}: setting {key} is not permitted")
+    for dependency in target["dependencies"]:
+        names = [v[0] for v in dependency.values() if isinstance(v, list) and v]
+        if kind != "test" and "WatchwordTestSupport" in names:
+            problems.append(f"{name}: production target depends on WatchwordTestSupport")
+for problem in problems:
+    print("::error file=Package.swift::" + problem)
+sys.exit(1 if problems else 0)
+'; then
+  fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
-  echo "No third-party dependencies, binary targets, or build plugins. "
+  echo "No third-party dependencies, binary targets, build plugins, custom target paths, or compiler-relaxing settings."
 fi
 exit "$fail"

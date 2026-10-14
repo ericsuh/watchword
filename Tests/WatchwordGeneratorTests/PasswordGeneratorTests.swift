@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import WatchwordTestSupport
+
 @testable import WatchwordGenerator
 
 @Suite("Random password generation")

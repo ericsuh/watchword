@@ -89,11 +89,11 @@ alongside the ciphertext.
 ```
 Account password (user)            Secret Key SK (128-bit random, Emergency Kit)
         │                                   │
-        │ PBKDF2-HMAC-SHA256                │ HKDF-SHA256
-        │ (salt = HKDF(saltA, "WW-salt", accountID), iterations ≥ 650 000)
-        ▼                                   ▼
+        │ PBKDF2-HMAC-SHA256 over NFKD(password)
+        │ (salt = HKDF(ikm = saltA, salt = accountID, info = "WW-salt-v1"), iterations ≥ 650 000)
+        ▼                                   ▼ HKDF-SHA256
    Kp (256-bit)                         Ks (256-bit) = HKDF(SK, salt = accountID, info = "WW-2SKD-v1")
-        └───────────────── XOR ─────────────┘
+        └──── HKDF(Kp ‖ Ks, salt = accountID, info = "WW-AUK-v1") ────┘
                            ▼
                  Account Unlock Key AUK (256-bit)
                            │ AES-GCM wrap
@@ -111,9 +111,12 @@ Account password (user)            Secret Key SK (128-bit random, Emergency Kit)
 
 Rationale and parameters:
 
-- **Secret Key.** 128 bits of CSPRNG output, displayed as `WW` + `-` + 26 characters from a
-  31-character alphabet (no `0`, `1`, `I`, `O`, `L`), with a checksum group, mirroring 1Password's
-  format so that entropy is a "tad over 128 bits". Stored in the Keychain
+- **Secret Key.** 128 bits of CSPRNG output, displayed as `WW-XXXXXX-XXXXX-XXXXX-XXXXX-XXXXX-CC`:
+  26 data characters from a 31-character alphabet (no `0`, `1`, `I`, `O`, `L`) carrying the value in
+  base 31 (31^26 ≈ 2^128.8, so every key fits and anything ≥ 2^128 is rejected), plus a two-character
+  check group. The check characters are `c₁ = Σ dᵢ·3^(i+1)` and `c₂ = Σ dᵢ·3^(2(i+1))` mod 31 (3 is a
+  primitive root mod 31), which detects every one- or two-character error, including every adjacent
+  transposition. It is a typo check, not a MAC. Implemented in `WatchwordCrypto.SecretKey`. Stored in the Keychain
   (`kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, non-synchronisable, Keychain access group
   shared with the extension), additionally wrapped by a Secure Enclave P-256 key where available.
   It is never placed in iCloud Keychain by default (`adr/0004-secret-key-storage.md`).
@@ -124,14 +127,25 @@ Rationale and parameters:
   carries an algorithm tag so Argon2id can be added when an audited memory-safe implementation is
   adopted (`adr/0003-kdf.md`). Because SK contributes 128 bits, PBKDF2 hardness protects only
   against an attacker who already has SK, i.e. a device-level compromise.
-- **Combining.** XOR of two independent 256-bit keys, as in 1Password; neither input alone yields
-  AUK.
+- **Combining.** `AUK = HKDF-SHA256(ikm = Kp ‖ Ks, salt = accountID, info = "WW-AUK-v1")`. 1Password
+  XORs the two; neither construction lets one input alone yield AUK, but HKDF has no catastrophic case
+  if the inputs are ever equal or related (XOR of equal inputs is the all-zero key). Decided in
+  milestone 1, settling review finding D7 (ADR 0003). The password is NFKD-normalised and not trimmed.
 - **Keyset.** Ksym wraps vault keys the person owns; X25519 receives HPKE-wrapped vault keys from
   others; Ed25519 signs membership records and change-log segments so a sync store cannot forge
-  them. Public keys are published in the account record together with a self-signature.
+  them. Public keys are published in the account record together with a self-signature
+  (`PublicKeyBundle`, whose initializer rejects low-order X25519 points, small-order Ed25519 keys —
+  for which one signature verifies for every message — and bad self-signatures).
+  Every signature covers `"WW-sig-v1" ‖ 0x00 ‖ domain ‖ message`, with one domain per purpose
+  (key bundle, key grant, membership, log segment), so no signature verifies for another purpose.
+  The keyset is wrapped under AUK as an `accountHeader` envelope bound to the account ID.
 - **Vault keys.** One per vault; the Personal vault key is wrapped with Ksym; shared vault keys are
-  wrapped to each member with HPKE base mode, `Curve25519_SHA256_AES_GCM_256`, info =
-  `"WW-vaultkey-v1"||vaultID||keyID`, and the wrap is signed by the sender's Ed25519 key.
+  wrapped to each member with HPKE base mode (DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM),
+  info = `"WW-vaultkey-v1"||vaultID||keyID`, associated data binding sender, recipient and the
+  recipient's X25519 key, and the whole wrap (`VaultKeyGrant`) signed by the sender's Ed25519 key.
+  The recipient checks, before decrypting, that the grant's vault and key IDs are those of the
+  storage location it was found in (entitlement is per vault, so a sender entitled for one vault
+  must not be able to install a key into another), then sender, signature and addressing.
 - **Records.** Each item version is one AES-GCM ciphertext under the current VK with the AAD above.
   A key rotation produces a new `keyID`; old ciphertexts are re-encrypted lazily by the first
   writer and eagerly on membership removal.
@@ -145,15 +159,30 @@ Envelope v1 (binary, little-endian; also expressible as JSON for debugging)
   kind         u8    (0 = item, 1 = vault-key-wrap, 2 = membership, 3 = account-header, 4 = log-segment)
   keyID        16 B  (UUID of the key that encrypted this record)
   nonce        12 B
-  aadLength    u16, aad bytes  (canonical CBOR: recordID, vaultID, schemaVersion, kind, keyID)
+  aadLength    u16, aad bytes  (canonical CBOR map {1: recordID, 2: vaultID, 3: schemaVersion,
+                                4: kind, 5: keyID, 6: recordVersion})
   ciphertext   remaining bytes (AES-GCM, tag appended)
 ```
 
-Rules enforced by the decoder (and by adversarial tests): unknown `version` rejected; `kind`
-mismatch with the caller's expectation rejected before decryption; AAD fields are re-derived from
-the storage location and compared to the embedded AAD before decryption (a record found in vault B
-claiming vault A fails closed); nonces are never reused because they are random per encryption and
-keys are rotated well before 2^32 encryptions.
+The AES-GCM associated data is the **entire serialized header**, not only the `aad` field, so a byte
+changed anywhere before the ciphertext fails authentication even if no parser check covers it.
+`recordVersion` is the record's Lamport version: binding it means a sync store cannot present an old
+ciphertext as a newer version (presenting it as its true older version is the sync layer's monotonic
+check, milestone 3).
+
+Rules enforced by the decoder (`Envelope.parse`, then `RecordCipher.open`; all covered by
+adversarial tests), in order: envelopes over 64 MiB rejected before any copy; magic; unknown
+`version` rejected; `kind` mismatch with the caller's expectation rejected; key ID compared with the
+expected key; the AAD re-derived from the storage location and compared byte for byte with the
+embedded AAD (a record found in vault B claiming vault A fails closed, as does one relabelled as a
+newer version or another schema); a ciphertext shorter than the tag rejected — all before
+decryption. Decryption either returns the whole plaintext, into `SecureBytes`, or fails with one
+undifferentiated error. Nonces are 96 random bits per encryption. Each key also carries a ledger of
+every nonce sealed under it, shared by every copy of the key and every caller (record seals and key
+wraps alike), and a repeat is refused: a tripwire for a broken generator. Keys are rotated well
+before the 2^32 random-nonce limit. Callers that know their record is small pass a tighter size cap
+(wrapped keys use 1 KiB), so a hostile store cannot make a 113-byte keyset cost tens of megabytes to
+reject.
 
 Plaintext payloads are canonical CBOR documents with a `schemaVersion`. Item payload:
 
@@ -254,8 +283,10 @@ VK, so merge is deferred until unlock. The AutoFill extension works from the las
 1. Owner O creates vault V, VK, and a membership record `M0 = sign(O, {vaultID, epoch 0, members:
    [O: admin]})`.
 2. O invites U: transport share is sent (CloudKit share URL or folder share). O fetches U's
-   published X25519/Ed25519 public keys and shows U's fingerprint (`SHA-256(pkX||pkEd)` rendered as
-   a 60-digit safety number and QR). U sees O's fingerprint on acceptance. Both must confirm (F4.2).
+   published X25519/Ed25519 public keys and shows U's fingerprint
+   (`SHA-512("WW-fingerprint-v1"||accountID||pkX||pkEd)` truncated to 60 bytes and rendered as a
+   60-digit safety number in twelve groups of five, and as a QR; SHA-512 because 60 digits need 60
+   bytes of digest). U sees O's fingerprint on acceptance. Both must confirm (F4.2).
 3. O writes `W = HPKE.seal(pk_U, VK, info)` plus `M1 = sign(O, {epoch 1, members: [O, U(role)]})`.
 4. U's device verifies M1's signature against O's verified key, unwraps VK, and stores it wrapped
    under its own Ksym.
@@ -344,11 +375,34 @@ which makes F5.4 unit-testable. The extension uses the same policy with its own 
 
 ## 11. Secure memory
 
-`SecureMemory` is the only module allowed to use unsafe pointers. It provides `SecureBytes`
-(heap buffer, `mlock`-style page locking where permitted, explicit `zeroise()` on `lock()` and in
-`deinit`, no `CustomStringConvertible`) and `SymmetricKey` bridging for CryptoKit. All other
-modules compile with `-strict-memory-safety` warnings promoted to errors in CI
-(`adr/0001-memory-safe-language.md`).
+`SecureMemory` is the only module allowed to use unsafe pointers. It provides `SecureBytes`, the
+`SymmetricKey` bridging for CryptoKit, `ConstantTime` comparison, and the CommonCrypto PBKDF2 call
+(which needs raw pointers, and reads the password from and writes the key into protected storage).
+`SecureBytes`:
+
+- heap storage that is page-aligned and a whole number of pages, so `mlock` (best effort; the result
+  is reported, not assumed) never shares a page between two buffers — `mlock` does not nest, so a
+  shared page would be unlocked when either buffer was released;
+- `zeroise()` with `memset_s`/`explicit_bzero`, which the optimiser may not elide, on lock and in
+  `deinit`; reading a zeroised buffer **traps**, because an all-zero key read back by a racing
+  encryption would seal records under a key everyone knows;
+- excluded from core dumps on Linux (`MADV_DONTDUMP`);
+- a zeroise during a read on the same thread (the lock is recursive) traps rather than wiping the
+  bytes under the reader;
+- redacted `description`, `debugDescription` and reflection mirror, and no `Codable`, `Hashable` or
+  `Equatable`. It is a `Collection`, because CryptoKit's sealing APIs take `DataProtocol`, so
+  `Array(bytes)` and the non-constant-time `elementsEqual` compile; production code uses the named
+  `unprotectedCopy()` for the rare non-secret copy-out and `constantTimeEquals` to compare.
+
+Every unsafe construct in the module is marked with an `unsafe` expression, and the
+`strict-memory-safety` CI job builds all modules with warnings as errors, so any construct the
+compiler classifies as unsafe must be marked. The compiler does not classify everything: an
+`@_silgen_name` declaration with integer parameters binds `memset` with no pointer type in sight.
+So a separate CI tripwire (`assert-unsafe-confined.sh`) fails on `unsafe` in any form, `@unchecked`
+and underscored attributes outside `SecureMemory`, on hand-bound foreign symbols anywhere, and on
+symlinks or non-Swift files under `Sources/`; and `assert-no-dependencies.sh` rejects custom target
+paths, non-Swift target types and compiler-relaxing settings in the manifest. These are tripwires,
+not proofs; review of `Sources/SecureMemory` is the backstop (`adr/0001-memory-safe-language.md`).
 
 ## 12. Password generation (`WatchwordGenerator`)
 
@@ -403,16 +457,17 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordModel        pure data types, Codable/CBOR, scopes, fields
   Sources/WatchwordMatching     host normalisation, scope scoring, shadowing
   Sources/WatchwordGenerator    password / passphrase / PIN generation, entropy
-  Sources/WatchwordEnvelope     envelope format, KDF parameter validation
-  Sources/WatchwordCrypto       2SKD, keyset, vault keys, HPKE wrap  (CryptoKit)   [milestone 1]
-  Sources/SecureMemory          SecureBytes (only unsafe code)                      [milestone 1]
+  Sources/WatchwordEnvelope     envelope format, AAD context, KDF parameter validation
+  Sources/WatchwordCrypto       2SKD, keyset, vault keys, HPKE wrap  (CryptoKit)   [milestone 1, done]
+  Sources/SecureMemory          SecureBytes (only unsafe code)                      [milestone 1, done]
   Sources/WatchwordStore        SQLite ciphertext store                            [milestone 2]
   Sources/WatchwordSync         change log, merge, SyncTransport protocol          [milestone 3]
   Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
   Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 5]
   Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 6]
   Sources/WatchwordKit          VaultSession façade used by all UI targets         [milestone 2+]
-  Sources/WatchwordTestSupport  in-memory fakes for every port, scenario builders
+  Sources/WatchwordTestSupport  seeded/broken generators (milestone 1); fakes for every port and
+                                scenario builders as the ports arrive
 Apps/ (Xcode project generated with XcodeGen from project.yml)
   Watchword (iOS/iPadOS), Watchword (macOS), AutoFillExtension (iOS), AutoFillExtension (macOS)
 ```
