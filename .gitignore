@@ -60,3 +60,17 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# Agent and editor configuration
+#
+# docs/07-supply-chain.md §5: a committed agent or editor config is an instruction
+# channel into every contributor's tooling, so it stays local. CLAUDE.md is the
+# deliberate exception — repository guidance, reviewed like any other document.
+.claude/
+.cursor/
+.cursorrules
+.codex/
+.gemini/
+
+# Local agent session state (GSD handoff checkpoints, not project content).
+.planning/
