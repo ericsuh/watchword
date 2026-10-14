@@ -22,10 +22,16 @@
 # logged to $LOG, and a session that ends up without a toolchain is told so through root's
 # CLAUDE.md (§8). Exiting 0 on a broken toolchain and saying nothing is the one outcome this script
 # must never produce — it was the original failure mode of this file.
+#
+# Every outbound request goes over HTTPS on port 443. The session's egress proxy carries nothing
+# else: a gpg keyserver lookup (hkp on 11371, or hkps via dirmngr, which ignores $HTTPS_PROXY)
+# timed out or returned no data, and that alone left an earlier version of this script with no
+# toolchain even though download.swift.org was reachable the whole time.
 set -uo pipefail
 
 readonly FALLBACK_VERSION="6.4.1"   # used only when .swift-version is missing or unreadable
 readonly SWIFTLY_URL="https://download.swift.org/swiftly/linux/swiftly-x86_64.tar.gz"
+readonly SWIFT_KEYS_URL="https://www.swift.org/keys/all-keys.asc"
 readonly WORK="/tmp/watchword-cloud-setup"
 readonly LOG="/var/log/watchword-cloud-setup.log"
 
@@ -105,6 +111,30 @@ find_toolchain_bin() {
 # how the wrong URL survived review.
 readonly SWIFT_SIGNING_KEY="52BB7E3DE28A71BE22EC05FFEF80A866B47A981F"
 
+# A toolchain is compile-time code execution on every later build, so it is verified rather than
+# trusted (docs/07-supply-chain.md, T3).
+#
+# The key material comes from swift.org's published bundle over HTTPS, because that is the only
+# route the session proxy carries (see the header). The bundle holds every Swift signing key —
+# nine of them, including the one that signs swiftly — so `gpg --verify` exiting 0 proves only that
+# *some* key in it signed the file. The pin is therefore enforced on gpg's machine-readable status
+# output: the last field of VALIDSIG is the signer's primary-key fingerprint, and it must equal
+# SWIFT_SIGNING_KEY. A substituted bundle can add keys but cannot make one of them that key.
+#
+# A private GNUPGHOME keeps the bundle out of root's keyring and makes a re-run start clean.
+verify_pinned_signature() {
+    local sig="$1" file="$2" gnupg="$WORK/gnupg"
+    rm -rf "$gnupg"
+    mkdir -m 700 "$gnupg"
+    curl -fsSL --retry 3 -o "$WORK/swift-keys.asc" "$SWIFT_KEYS_URL" || {
+        log "could not fetch $SWIFT_KEYS_URL"
+        return 1
+    }
+    GNUPGHOME="$gnupg" gpg --batch --quiet --import "$WORK/swift-keys.asc" 2>/dev/null
+    GNUPGHOME="$gnupg" gpg --batch --status-fd 1 --verify "$sig" "$file" 2>/dev/null \
+        | awk -v pin="$SWIFT_SIGNING_KEY" '$2 == "VALIDSIG" && $NF == pin { ok = 1 } END { exit !ok }'
+}
+
 install_via_tarball() {
     local tag dir arch_suffix url sig_url
     tag="swift-${version}-RELEASE"
@@ -125,12 +155,8 @@ install_via_tarball() {
         log "tarball download FAILED"
         return 1
     }
-    # A toolchain is compile-time code execution on every later build, so it is verified rather
-    # than trusted (docs/07-supply-chain.md, T3). The fingerprint is pinned here; only the key
-    # material comes from the keyserver, so a hostile keyserver cannot substitute a different key.
     if curl -fsSL --retry 3 -o "$WORK/swift.tar.gz.sig" "$sig_url" \
-        && gpg --batch --quiet --keyserver keyserver.ubuntu.com --recv-keys "$SWIFT_SIGNING_KEY" \
-        && gpg --batch --verify "$WORK/swift.tar.gz.sig" "$WORK/swift.tar.gz"; then
+        && verify_pinned_signature "$WORK/swift.tar.gz.sig" "$WORK/swift.tar.gz"; then
         log "signature verified against $SWIFT_SIGNING_KEY"
     else
         log "SIGNATURE VERIFICATION FAILED; discarding the download"
@@ -143,13 +169,16 @@ install_via_tarball() {
         log "tarball did not extract"
         return 1
     }
+    # The archive is over a gigabyte and the snapshot keeps files; don't cache it twice.
+    rm -f "$WORK/swift.tar.gz"
     return 0
 }
 
 # swiftly resolves release URLs itself, so it is the second opinion when the URL layout above has
-# moved. Default install locations are used deliberately: swiftly's proxy binaries find their home
-# directory from $HOME, and the session runs as the same root user, so /root/.local resolves in
-# both. Overriding SWIFTLY_HOME_DIR here would break those proxies at session time.
+# moved. It verifies the toolchain signature on its own ("Verifying toolchain signature..."). Default
+# install locations are used deliberately: swiftly's proxy binaries find their home directory from
+# $HOME, and the session runs as the same root user, so /root/.local resolves in both. Overriding
+# SWIFTLY_HOME_DIR here would break those proxies at session time.
 #
 # --assume-yes on BOTH subcommands is the whole point. `swiftly install` prompts for confirmation,
 # and a setup script has no TTY: without the flag it fails on EOF, which is exactly how this script
@@ -162,9 +191,20 @@ install_via_swiftly() {
     "$WORK/swiftly" init --assume-yes --no-modify-profile --skip-install --overwrite \
         || log "swiftly init reported a failure; trying install anyway"
 
-    local swiftly_bin="$HOME/.local/bin/swiftly"
-    [ -x "$swiftly_bin" ] || swiftly_bin="$WORK/swiftly"
-    "$swiftly_bin" install "$version" --assume-yes --use || {
+    # `init` *moves* itself into its bin directory: afterwards $WORK/swiftly no longer exists, and
+    # the binary is in $SWIFTLY_BIN_DIR, which defaults to ~/.local/share/swiftly/bin — not
+    # ~/.local/bin. Guessing the latter is how the previous version of this script failed with
+    # "No such file or directory" after a successful init.
+    local swiftly_bin
+    for swiftly_bin in "${SWIFTLY_BIN_DIR:-$HOME/.local/share/swiftly/bin}/swiftly" \
+        "$HOME/.local/bin/swiftly" "$WORK/swiftly"; do
+        [ -x "$swiftly_bin" ] && break
+    done
+    [ -x "$swiftly_bin" ] || { log "swiftly binary not found after init"; return 1; }
+
+    # Run from $WORK: `--use` updates a .swift-version in the working directory when it finds one,
+    # and this script must never edit the checkout.
+    ( cd "$WORK" && "$swiftly_bin" install "$version" --assume-yes --use ) || {
         log "swiftly could not install $version"
         return 1
     }
@@ -204,7 +244,8 @@ fi
 
 # ----------------------------------------------------------------------------- 6. warm the caches
 # The environment snapshot keeps files, so a build done here is a build no later session repeats.
-# Bounded and optional: busting the five-minute cache window would cost more than it saves.
+# Bounded and optional: busting the five-minute cache window would cost more than it saves. A cold
+# `swift build --build-tests` of milestone 0 takes about 20 seconds on this VM.
 if [ -n "$repo" ] && command -v swift > /dev/null 2>&1; then
     log "warming the build cache"
     ( cd "$repo" && timeout 150 swift build --build-tests ) > "$WORK/build.log" 2>&1 \
@@ -227,22 +268,28 @@ fi
 # A setup script cannot fail a session start, so a silent failure reaches the agent as a confusing
 # "swift: command not found" much later. Root's CLAUDE.md is loaded as user instructions in the
 # session, which makes it the one channel that reports this at the top rather than on first use.
+#
+# The note is fenced by begin/end markers so removing it does not depend on its line count. The
+# second sed removes the unfenced seven-line note an earlier version wrote, so a snapshot that
+# still carries one is cleaned up on the next successful run.
 note="/root/.claude/CLAUDE.md"
 mkdir -p "$(dirname "$note")"
-sed -i '/<!-- watchword-cloud-setup -->/,+6d' "$note" 2>/dev/null || true
+sed -i -e '/<!-- watchword-cloud-setup:begin -->/,/<!-- watchword-cloud-setup:end -->/d' \
+    -e '/^<!-- watchword-cloud-setup -->$/,+6d' "$note" 2>/dev/null || true
 
 if [ "$ok" -eq 1 ]; then
     log "SUCCESS: swift is on PATH at $(command -v swift)"
 else
     log "FAILURE: no working Swift toolchain. Session will be told via $note"
     cat >> "$note" <<EOF
-<!-- watchword-cloud-setup -->
+<!-- watchword-cloud-setup:begin -->
 The cloud environment's setup script could not install a Swift toolchain, so \`swift\`,
 \`swift build\`, \`swift test\` and \`swift format\` are all unavailable in this session. Read
-$LOG for the reason before trying to build anything, and tell the user what it says. The usual
-cause is that the environment's network access is \`Trusted\` rather than \`Custom\` with
-\`download.swift.org\` allowed; see docs/09-cloud-sessions.md §4. To retry inside this session, run
-\`.github/scripts/cloud-setup.sh\`.
+$LOG for the reason before trying to build anything, and tell the user what it says; the
+log names the step that failed. If a download was refused, the environment's network access may
+not allow \`download.swift.org\` and \`www.swift.org\` (docs/09-cloud-sessions.md §4). To retry
+inside this session, run \`.github/scripts/cloud-setup.sh\`.
+<!-- watchword-cloud-setup:end -->
 EOF
 fi
 
