@@ -23,6 +23,16 @@ language. Candidates: Swift, Rust (as 1Password uses for its core), or a mix.
   clients become a goal, a Rust core behind a generated (UniFFI-style) binding is the planned path,
   and the module boundaries in `02-architecture.md` §15 are drawn to make that swap possible.
 
+## Amendment (2026-10-14, milestone 1): marking rather than exempting
+
+`SecureMemory` is not exempted from the strict-memory-safety build. Each unsafe construct in it is
+marked with an `unsafe` expression, so the CI job proves every pointer use is marked, and a separate
+check (`.github/scripts/assert-unsafe-confined.sh`) proves the markers appear nowhere else. Swift
+6.0/6.1 do not know the keyword; `unsafe (expression)`, written with a space, parses as the keyword
+on 6.2+ and as a call to an identity function on older compilers (`UnsafeMarker.swift`). This
+avoids both a per-target exemption, which would hide unmarked uses inside the module, and raising
+the tools version, which would drop the Xcode 16 leg of the CI matrix.
+
 ## Consequences
 - Developers must justify any new `unsafe` use in review and place it in `SecureMemory`.
 - Argon2id is unavailable without third-party code; see ADR 0003.

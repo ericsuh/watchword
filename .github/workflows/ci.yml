@@ -123,14 +123,16 @@ jobs:
       # pass silently as "fewer tests ran".
       - name: Verify each adversarial area is covered
         run: |
-          for suite in "envelope and KDF" "AutoFill service matching" "password generator" "phishing resistance"; do
+          for suite in "envelope and KDF" "AutoFill service matching" "password generator" "phishing resistance" \
+                       "crypto core"; do
             grep -Fq "$suite" adversarial.log \
               || { echo "::error::Adversarial suite missing: $suite"; exit 1; }
           done
 
   strict-memory-safety:
-    # Proves there are no unsafe constructs outside SecureMemory (ADR 0001, SE-0458).
-    # When SecureMemory lands, exclude it with a per-target setting rather than relaxing this job.
+    # Proves there are no unsafe constructs outside SecureMemory (ADR 0001, SE-0458). SecureMemory is not exempted:
+    # it marks each unsafe construct with an `unsafe` expression, so this job also proves none of its pointer uses is
+    # unmarked. Any unsafe construct in another module fails the build.
     name: Strict memory safety
     runs-on: macos-26
     timeout-minutes: 20
@@ -144,6 +146,9 @@ jobs:
         run: .github/scripts/select-xcode.sh 26.6
       - name: Build with -strict-memory-safety and warnings as errors
         run: swift build -v -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors
+      # A marked `unsafe` expression compiles in any module, so confinement to SecureMemory is checked separately.
+      - name: Assert unsafe code is confined to SecureMemory
+        run: .github/scripts/assert-unsafe-confined.sh
 
   lint:
     name: swift-format lint

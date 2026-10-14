@@ -4,7 +4,7 @@ Version 0.1 (draft). Milestones are ordered so that every security-relevant laye
 tests, before any UI depends on it. Each milestone lists its exit criteria; the matching test
 obligations are in `04-test-plan.md`.
 
-## Milestone 0 — Repository, toolchain, CI (this change)
+## Milestone 0 — Repository, toolchain, CI (done)
 
 - SwiftPM package `Watchword` with the first pure modules (`WatchwordModel`, `WatchwordMatching`,
   `WatchwordGenerator`, `WatchwordEnvelope`) and both Swift Testing and XCTest targets.
@@ -13,15 +13,28 @@ obligations are in `04-test-plan.md`.
   an Xcode app-test job that activates when the app project lands.
 - Exit: CI green on the pull request; docs in `docs/`.
 
-## Milestone 1 — Cryptographic core
+## Milestone 1 — Cryptographic core (done)
 
-- `SecureMemory`: `SecureBytes` with zeroisation, page locking where available, `@unsafe` marked.
+- `SecureMemory`: `SecureBytes` with zeroisation, page locking where available, every unsafe
+  construct marked `unsafe`.
 - `WatchwordCrypto`: Secret Key generation/formatting/checksum; 2SKD (`PBKDF2` via CommonCrypto,
   `HKDF` via CryptoKit, XOR); keyset creation and wrapping; vault key creation; HPKE wrap/unwrap;
   Ed25519 signing of membership and log segments; KDF calibration.
 - `WatchwordEnvelope`: full encoder/decoder with AAD binding and version/kind/key checks.
 - Exit: known-answer tests for every primitive, property tests for round-trips, adversarial tests
   for tamper/swap/replay/downgrade, KDF calibration test (≥300 ms on CI hardware is informational).
+
+Status: delivered as specified, with these scoping notes.
+- Signing is delivered as domain-separated primitives (`SignatureDomain.membership`, `.logSegment`).
+  The membership-record and log-segment *formats* that use them belong to milestones 4 and 3.
+- Replay of a record's *older* version is rejected by the sync layer's monotonic check
+  (milestone 3); milestone 1 binds the version into the AAD so an old ciphertext cannot be
+  presented as a newer one.
+- `VaultKeyGrant` has no persisted encoding yet; it arrives with the membership records it travels
+  in (milestone 4).
+- Secure Enclave wrapping of the Secret Key is part of the Keychain adapter (milestone 2).
+- Crypto tests need CryptoKit and run on the macOS CI matrix; the files are wrapped in
+  `#if canImport(CryptoKit)` so the package still builds and tests on Linux.
 
 ## Milestone 2 — Local vault and unlock
 

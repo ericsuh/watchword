@@ -94,8 +94,7 @@ closes.
 
 ### 6.1 Envelope and crypto
 
-**Implemented now** (header-level; there is no crypto layer yet, so these are the only ones that
-can exist — the test plan says so rather than implying coverage it lacks):
+**Implemented in milestone 0** (header-level):
 - Change `kind` byte, unknown kind, wrong magic, version 0/2/0xFFFF → rejected before any payload
   is touched.
 - Truncation at every offset in the header → rejected.
@@ -106,21 +105,40 @@ can exist — the test plan says so rather than implying coverage it lacks):
 - Ceiling: `iterations` above `KDFParameters.maximumIterations` and absurd salt lengths → rejected
   (availability; review finding C3).
 
-**Arrives with milestone 1** (needs `WatchwordCrypto`):
-- Flip every byte position of a ciphertext (sampled for long records) → decryption fails; no
-  partial plaintext is returned.
-- Swap a record's envelope into another vault's slot → rejected by AAD comparison before
-  decryption. The header already carries the AAD; the comparison against re-derived context is
-  what does not exist yet.
-- Replay an older version of a record → rejected by Lamport/signature chain; history unaffected.
-- Nonce uniqueness over 1e6 encryptions under one key (statistical) and never-reused after
-  restart (seeded fake RNG that repeats is detected by the encryptor's nonce guard).
-- HPKE wrap with a substituted recipient key fails to unwrap; wrap signed by a non-admin is
-  rejected.
-- Timing: constant-time comparison for fingerprints and checksums (test uses the CryptoKit
-  `==` on `Digest`/`HMAC` outputs and asserts the code path, with a micro-benchmark as a nightly
-  informational check).
-- Zeroisation: after `lock()`, `SecureBytes` storage reads as all-zero; `deinit` zeroises.
+**Implemented in milestone 1** (`AdversarialCryptoTests`, suite "Adversarial: crypto core", and the
+context-binding tests added to `AdversarialEnvelopeTests`):
+- Flip every byte position of a sealed record (two bit masks each; sampled for a 200 KB record) →
+  open throws; nothing is returned. Truncation at every length → throws.
+- Copy a record into another vault's slot → `EnvelopeError.contextMismatch` before decryption.
+  Rewrite the embedded AAD to match the new slot → still fails, because the AEAD authenticates
+  the whole header.
+- Relabel a record as another record ID, a newer `recordVersion`, another schema version, another
+  kind or another key ID → rejected before decryption.
+- Replay of an *older* version presented as itself → the sync layer's monotonic check
+  (milestone 3); presenting it as newer is rejected now.
+- Nonce uniqueness over 1e5 encryptions under one key (1e6 when `WATCHWORD_LONG_TESTS=1`), and a
+  generator that repeats is caught by the sealer's nonce guard before the second encryption.
+- HPKE grant to a substituted recipient key is unopenable by the real recipient; a grant signed by
+  anyone but the expected sender, or with any field altered, is rejected; a correctly re-signed
+  grant relabelled to another vault still fails HPKE (info binding). "Signed by a non-*admin*"
+  needs the membership chain (milestone 4); "signed by an unexpected key" is tested now.
+- Published keys: low-order X25519 points (libsodium's blocklist) and substituted keys under the
+  original self-signature are rejected; a re-signed substitute shows a different fingerprint.
+- Signatures for one domain never verify for another, nor without the domain prefix.
+- Keyset wrap opens only under its own AUK, account ID and version; wrong password or wrong Secret
+  Key → `authenticationFailed`; tampered KDF parameters and salt-length mismatch are refused
+  before deriving.
+- Timing: checksums, fingerprints and `SecureBytes` comparisons go through `ConstantTime.equal`
+  (no early exit); this is asserted by code review, not measured — a timing micro-benchmark on
+  shared CI runners would be noise.
+- Zeroisation: after `zeroise()`, every buffer of a keyset, vault key and Secret Key reads as
+  all-zero across its whole allocation; `deinit` wipes before release (observed through a probe,
+  since freed memory cannot be read).
+
+Known-answer tests (`PrimitiveKnownAnswerTests`, `PBKDF2Tests`, `TwoSecretKeyDerivationTests`,
+`SecretKeyTests`, `CanonicalCBORTests`) use RFC 5869, 7748, 7914, 8032 and 8949 vectors and the GCM
+specification, plus vectors from independent Python implementations for HPKE with associated data,
+2SKD, the Secret Key format, fingerprints and the canonical AAD.
 
 ### 6.2 Unlock (milestone 2)
 - Quick unlock refused after enrolment change, after N failures, after interval expiry, after app
@@ -205,7 +223,8 @@ confirmation in F11.7 (milestone 2).
 
 ### 6.8 Fuzzing (nightly)
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
-  `otpauth://` parser, and `HostMatcher.normalize`.
+  `otpauth://` parser, and `HostMatcher.normalize`. None exists yet; the envelope decoder
+  (`Envelope.parse`) is the first candidate now that it is complete.
 
 ## 7. CI implementation
 

@@ -17,6 +17,15 @@ public enum EnvelopeError: Error, Equatable, Sendable {
     case truncated
     case badNonceLength(Int)
     case aadTooLong(Int)
+    /// The header names a different key from the one the storage location says the record is under.
+    case keyMismatch(expected: UUID, actual: UUID)
+    /// The embedded authenticated data differs from the context re-derived from the storage location: the record was
+    /// moved, relabelled, replayed as a newer version, or downgraded (SEC2).
+    case contextMismatch
+    /// Shorter than an AEAD tag, so it cannot be a ciphertext.
+    case ciphertextTooShort(Int)
+    /// Larger than `Envelope.maximumLength`; rejected before any copy (SEC9).
+    case tooLarge(Int)
 }
 
 /// The authenticated, unencrypted prefix of every record (architecture §5).
@@ -24,9 +33,10 @@ public enum EnvelopeError: Error, Equatable, Sendable {
 /// Layout (little-endian):
 /// `magic(4) version(2) kind(1) keyID(16) nonce(12) aadLength(2) aad(aadLength) ciphertext(...)`.
 ///
-/// `aad` carries the canonical encoding of record ID, vault ID, schema version, kind and key ID.
-/// The decryptor re-derives the expected AAD from where it found the record and compares before
-/// decrypting, so a record moved between vaults or key epochs fails closed.
+/// `aad` carries `EnvelopeContext.canonicalAAD()`: record ID, vault ID, schema version, kind, key ID and record
+/// version. `Envelope.parse` re-derives the expected AAD from where it found the record and compares before
+/// decrypting, so a record moved between vaults or key epochs fails closed. The AEAD then authenticates the whole
+/// serialized header, not only `aad`.
 public struct EnvelopeHeader: Sendable, Hashable {
     public static let magic: [UInt8] = Array("WWE1".utf8)
     public static let currentVersion: UInt16 = 1
