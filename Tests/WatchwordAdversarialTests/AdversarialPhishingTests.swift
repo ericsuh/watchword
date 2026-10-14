@@ -150,17 +150,18 @@ struct AdversarialPhishingTests {
 
     // MARK: - Skeleton and script machinery
 
-    @Test(
-        "visual skeletons collapse confusables",
-        arguments: [
-            ("arnazon.com", "amazon.com"),
-            ("amaz0n.com", "amazon.com"),
-            ("\u{0430}mazon.com", "amazon.com"),
-            ("paypa1.com", "paypal.com"),
-            ("vvhatsapp.com", "whatsapp.com"),
-        ])
-    func skeletons(_ pair: (String, String)) {
-        #expect(PhishingDetector.skeleton(pair.0) == PhishingDetector.skeleton(pair.1))
+    static let lookAlikeSpellings = [
+        "arnazon.com", "amaz0n.com", "\u{0430}mazon.com", "paypa1.com", "vvhatsapp.com",
+    ]
+    static let genuineSpellings = [
+        "amazon.com", "amazon.com", "amazon.com", "paypal.com", "whatsapp.com",
+    ]
+
+    /// Uses the documented two-collection `zip` form rather than an array of tuples, which keeps
+    /// the test compiling across the Swift Testing versions in the CI matrix.
+    @Test("visual skeletons collapse confusables", arguments: zip(lookAlikeSpellings, genuineSpellings))
+    func skeletons(_ lookAlike: String, _ genuine: String) {
+        #expect(PhishingDetector.skeleton(lookAlike) == PhishingDetector.skeleton(genuine))
     }
 
     @Test("mixed-script hosts are detected")
