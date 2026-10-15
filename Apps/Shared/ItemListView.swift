@@ -31,6 +31,7 @@ struct ItemListView: View {
             }
             .searchable(text: $search)
             .navigationTitle("Watchword")
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260)
             .toolbar {
                 ToolbarItem {
                     Button {
@@ -42,30 +43,23 @@ struct ItemListView: View {
                     }
                     .accessibilityIdentifier("items.add")
                 }
-                ToolbarItem {
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Label("Settings", systemImage: "gearshape")
-                    }
-                    .accessibilityIdentifier("items.settings")
-                }
-                ToolbarItem {
-                    Button {
-                        Task { await model.lock() }
-                    } label: {
-                        Label("Lock", systemImage: "lock")
-                    }
-                    .keyboardShortcut("l", modifiers: [.command, .control])
-                    .accessibilityIdentifier("items.lock")
-                }
+                #if os(iOS)
+                    vaultItems
+                #endif
             }
         } detail: {
-            if let item = model.items.first(where: { $0.id == selection }) {
-                ItemDetailView(item: item, onEdit: { editing = item })
-            } else {
-                ContentUnavailableView("No item selected", systemImage: "key")
+            Group {
+                if let item = model.items.first(where: { $0.id == selection }) {
+                    ItemDetailView(item: item, onEdit: { editing = item })
+                } else {
+                    ContentUnavailableView("No item selected", systemImage: "key")
+                }
             }
+            #if os(macOS)
+                // The sidebar's share of a macOS toolbar is only as wide as the sidebar, so anything past the first
+                // item there lands in the overflow menu. Settings and Lock go on the detail side, which has room.
+                .toolbar { vaultItems }
+            #endif
         }
         .onChange(of: selection) { model.recordActivity() }
         .onChange(of: search) { model.recordActivity() }
@@ -75,6 +69,26 @@ struct ItemListView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
+        }
+    }
+
+    @ToolbarContentBuilder private var vaultItems: some ToolbarContent {
+        ToolbarItem {
+            Button {
+                showingSettings = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .accessibilityIdentifier("items.settings")
+        }
+        ToolbarItem {
+            Button {
+                Task { await model.lock() }
+            } label: {
+                Label("Lock", systemImage: "lock")
+            }
+            .keyboardShortcut("l", modifiers: [.command, .control])
+            .accessibilityIdentifier("items.lock")
         }
     }
 

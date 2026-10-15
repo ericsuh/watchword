@@ -34,7 +34,8 @@ final class OnboardingAndUnlockTests: XCTestCase {
         // Emergency Kit: the Secret Key is shown and Continue needs the confirmation.
         let secretKey = app.staticTexts["kit.secretKey"]
         XCTAssertTrue(secretKey.waitForExistence(timeout: 30))
-        XCTAssertTrue(secretKey.label.hasPrefix("WW-"), "unexpected Secret Key format")
+        let shown = secretKey.displayedText
+        XCTAssertTrue(shown.hasPrefix("WW-"), "unexpected Secret Key format: \(shown)")
         XCTAssertFalse(app.buttons["kit.continue"].isEnabled)
         app.switches["kit.confirmSaved"].toggleOn()
         app.buttons["kit.continue"].click()
@@ -55,6 +56,7 @@ final class OnboardingAndUnlockTests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["items.row.Library"].waitForExistence(timeout: 10))
 
         // Lock, fail once, unlock.
+        XCTAssertTrue(app.buttons["items.lock"].waitForExistence(timeout: 10), app.debugDescription)
         app.buttons["items.lock"].click()
         let unlock = app.secureTextFields["unlock.password"]
         XCTAssertTrue(unlock.waitForExistence(timeout: 10))
@@ -69,6 +71,12 @@ final class OnboardingAndUnlockTests: XCTestCase {
 }
 
 extension XCUIElement {
+    /// The string a SwiftUI `Text` shows. iOS exposes it as the element's label; macOS leaves the label empty and
+    /// exposes it as the value.
+    var displayedText: String {
+        label.isEmpty ? (value as? String ?? "") : label
+    }
+
     func clearAndType(_ text: String) {
         if let value = value as? String, !value.isEmpty {
             #if os(macOS)
@@ -89,7 +97,8 @@ extension XCUIElement {
         #else
             coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
         #endif
-        XCTAssertEqual(value as? String, "1", "toggle did not turn on")
+        // iOS reports a switch's value as the string "1"; macOS reports a checkbox's as the number 1.
+        XCTAssertEqual(value.map { "\($0)" }, "1", "toggle did not turn on")
     }
 
     #if os(iOS)
