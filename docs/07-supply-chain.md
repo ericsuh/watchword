@@ -112,11 +112,16 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
 
 ### 3.3 Remaining CI exposure, stated honestly
 
-- **Homebrew in `app-tests`.** `brew install xcodegen` fetches an unpinned formula and bottle at
-  build time (T3). It runs since milestone 2 added `Apps/project.yml`, in a job with
-  `contents: read` and no secrets, so the exposure is tampering with that job's own result.
-  **[planned, carried from milestone 2]** install a pinned XcodeGen release archive with a verified
-  SHA-256 instead of Homebrew, or commit the generated `.xcodeproj` with a drift check.
+- **XcodeGen in `app-tests`.** **[done]** closed. Milestone 2 shipped with `brew install
+  xcodegen`, an unpinned formula and bottle fetched at build time (T3). The job now downloads one
+  release archive (`xcodegen.zip`, 2.46.0) over HTTPS only and checks it against a SHA-256 recorded
+  in `ci.yml` before unpacking it; a mismatch fails the job, and the step also asserts that
+  `xcodegen --version` reports the pinned version. Nothing comes from Homebrew. The recorded hash
+  was taken from an independent download and matched the digest GitHub publishes for the release
+  asset. What remains is trust in that one artifact as its maintainer built it, the same residual
+  as an action pinned to a SHA: a bump updates version and hash together and is reviewed like an
+  action bump (§3.1), reading the release diff rather than trusting the tag. The job still has
+  `contents: read` and no secrets, so a bad archive could at worst falsify that job's own result.
 - **The runner image itself** is a large trust base (Xcode, Homebrew, preinstalled tooling) that we
   do not control. Accepted: the alternative is self-hosted runners, which trade this for a
   machine we would have to secure ourselves. Revisit if the project ever signs releases in CI.
