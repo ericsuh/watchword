@@ -24,7 +24,7 @@ swift format lint --strict --recursive --configuration .swift-format Package.swi
 swift format --in-place --recursive --configuration .swift-format Sources Tests
 swift build -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors   # mirrors the CI gate
 
-# Apps (macOS only; mirrors the app-tests CI job). XcodeGen and gh are pinned in mise.toml:
+# Apps (macOS only; mirrors the app-tests CI job). XcodeGen and gh are pinned in mise.toml, checksums in mise.lock:
 mise trust && mise install                             # once per checkout
 xcodegen generate --spec Apps/project.yml --project Apps
 xcodebuild test -project Apps/Watchword.xcodeproj -scheme Watchword-iOS \
@@ -279,6 +279,10 @@ Supply-chain rules that apply to edits in `.github/`:
 - Keep `permissions: contents: read` at workflow and job level, `persist-credentials: false` on every
   checkout, and the trigger as `pull_request` — never `pull_request_target`.
 - Xcode selection goes through `.github/scripts/select-xcode.sh`, not a third-party action.
+- Build tools reach CI only through mise with `MISE_LOCKED=1`, so every tool needs a `mise.lock` entry
+  (URL and SHA-256). Bump a tool by editing `mise.toml` and running
+  `mise lock --platform macos-arm64,linux-x64`; commit both files. mise itself is pinned by version and
+  SHA-256 in `ci.yml`, and a bump is reviewed like an action pin.
 
 `.claude/` and other agent/editor configuration is intentionally uncommitted
 (`docs/07-supply-chain.md` §5). `docs/08-repository-hardening.md` is the `gh` runbook for branch
