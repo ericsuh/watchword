@@ -43,12 +43,6 @@ url = "https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_macOS_amd6
 url_api = "https://api.github.com/repos/cli/cli/releases/assets/407353532"
 provenance = "github-attestations"
 
-[tools.gh."platforms.windows-x64"]
-checksum = "sha256:b6a8df3c8c6b9c80f290906387673bc4d272840f3789c5650e0e4e6e75522785"
-url = "https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_windows_amd64.zip"
-url_api = "https://api.github.com/repos/cli/cli/releases/assets/407353546"
-provenance = "github-attestations"
-
 [[tools.xcodegen]]
 version = "2.46.0"
 backend = "aqua:yonaskolb/XcodeGen"
