@@ -77,3 +77,9 @@ fastlane/test_output
 
 # Local test output (e.g. `swift test | tee test-output.log`); CI uploads its own as artifacts.
 *.log
+
+# XcodeGen output. Apps/project.yml is the single source for the project, its Info.plist keys and its entitlements
+# (reviewed there); the generated files are rebuilt by `xcodegen generate` locally and in CI.
+Apps/Watchword.xcodeproj/
+Apps/**/Info*.plist
+Apps/**/*.entitlements

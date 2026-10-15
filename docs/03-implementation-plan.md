@@ -22,7 +22,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | --- | --- | --- |
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
 | 1 — cryptographic core (done) | Builds, but the crypto suites are compiled out, not run | CryptoKit, CommonCrypto, Security.framework |
-| 2 — local vault and unlock | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
+| 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
 | 3 — sync | The change log, Lamport merge and multi-client simulation — if signing and encryption arrive through a port | `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
 | 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
@@ -80,7 +80,7 @@ Status: delivered as specified, with these scoping notes.
 - Crypto tests need CryptoKit and run on the macOS CI matrix; the files are wrapped in
   `#if canImport(CryptoKit)` so the package still builds and tests on Linux.
 
-## Milestone 2 — Local vault and unlock
+## Milestone 2 — Local vault and unlock (done)
 
 - `WatchwordStore` (SQLite ciphertext store in the App Group), `WatchwordKit.VaultSession`
   (create account, unlock, lock, CRUD items, history, trash), `UnlockPolicy`, Keychain and
@@ -95,6 +95,30 @@ Status: delivered as specified, with these scoping notes.
   milestone in which `Apps/` first exists, so `xcodebuild`, the simulators and the Xcode MCP server
   become usable (and necessary). A remote session can draft the `WatchwordStore` schema and the
   `VaultSession` state machine, but cannot run S1–S4: those need real keysets.
+
+Status: delivered, with these scoping notes.
+- Modules: `WatchwordStore` (port, `InMemoryRecordStore`, `SQLiteRecordStore`), `WatchwordKit`
+  (`VaultSession`, `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `EmergencyKit`, the ports) and a
+  new `WatchwordPlatform` (Keychain and LocalAuthentication adapters, Emergency Kit PDF). The
+  adapters are in the package rather than `Apps/` so every CI gate covers them; the four
+  pointer-typed system calls they need live in `SecureMemory` (ADR 0001, milestone 2 amendment).
+- `Apps/project.yml` exists, so the `app-tests` job is live: iOS and macOS apps, AutoFill extension
+  *shells* (they cancel every request; answering arrives with milestone 5), and one XCUITest smoke
+  test of onboarding, the Emergency Kit confirmation, item creation, lock and unlock, run on both
+  platforms with in-memory ports (`--uitest`, Debug builds only).
+- S1–S4 pass against `VaultSession` with in-memory ports for everything a single person's vault can
+  show: S1's fill decisions over items read back from the store, S2's passkey and recovery codes
+  (marking a code used is a new version with history), S3's three security questions, S4's PIN and
+  card number. The two-member halves of S3 and S4 need the membership chain (milestone 4).
+- **Not done:** on-device verification of QuickType behaviour with overlapping domain identities.
+  It needs a physical device with the extension publishing identities, which is milestone 5's
+  work; it is carried there and stays open in `02-architecture.md` §16.
+- Also deferred: the encrypted per-item index record (§5) to milestone 5, the `changelog` and
+  `sync_state` tables and tombstones to milestone 3, device-to-device enrolment to milestone 3
+  (Emergency Kit entry works now: `unlock(password:secretKey:)`), and the F11.7 add-a-mismatched-host
+  confirmation UI to milestone 5, where the mismatch is first observable.
+- Real Keychain round trips need an entitled, signed process; `swift test` skips them
+  (`errSecMissingEntitlement`) and checks the query attributes instead.
 
 ## Milestone 3 — Sync
 

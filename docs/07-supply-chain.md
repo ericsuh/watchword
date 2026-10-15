@@ -113,9 +113,10 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
 ### 3.3 Remaining CI exposure, stated honestly
 
 - **Homebrew in `app-tests`.** `brew install xcodegen` fetches an unpinned formula and bottle at
-  build time (T3). It is gated behind `Apps/project.yml` existing, so it does not run today.
-  **[planned, milestone 2]** commit the generated `.xcodeproj` and delete the step; if XcodeGen is
-  kept instead, install a pinned release archive with a verified SHA-256 rather than via Homebrew.
+  build time (T3). It runs since milestone 2 added `Apps/project.yml`, in a job with
+  `contents: read` and no secrets, so the exposure is tampering with that job's own result.
+  **[planned, carried from milestone 2]** install a pinned XcodeGen release archive with a verified
+  SHA-256 instead of Homebrew, or commit the generated `.xcodeproj` with a drift check.
 - **The runner image itself** is a large trust base (Xcode, Homebrew, preinstalled tooling) that we
   do not control. Accepted: the alternative is self-hosted runners, which trade this for a
   machine we would have to secure ourselves. Revisit if the project ever signs releases in CI.

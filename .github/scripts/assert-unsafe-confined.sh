@@ -26,14 +26,21 @@ report() {
   fail=1
 }
 
-links=$(find Sources Tests -type l)
-[ -z "$links" ] || report "Symlinks under Sources/ or Tests/ are not permitted (grep would not scan them):" "$links"
+links=$(find Sources Tests Apps -type l)
+[ -z "$links" ] || report "Symlinks under Sources/, Tests/ or Apps/ are not permitted (grep would not scan them):" "$links"
 
 foreign=$(find Sources -type f ! -name '*.swift')
 [ -z "$foreign" ] || report "Only .swift files may live under Sources/:" "$foreign"
 
+# Apps/: XcodeGen compiles every file under a target's source path, so a .c, .m or .h file there would be built with
+# nothing scanning it. Tracked files only: the generated project, Info.plists and entitlements are gitignored.
+apps_foreign=$(git ls-files Apps | grep -vE '(\.swift|^Apps/project\.yml)$' || true)
+[ -z "$apps_foreign" ] || report "Only .swift files and project.yml may be committed under Apps/:" "$apps_foreign"
+
+# Apps/ is scanned too: the app and extension targets are built by xcodebuild, not by the strict-memory-safety job, so
+# this script is the only gate that keeps unsafe code out of them.
 code_lines() {
-  grep -rnE "$1" Sources --include='*.swift' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true
+  grep -rnE "$1" Sources Apps --include='*.swift' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true
 }
 
 outside=$(code_lines '[Uu]nsafe|@unchecked|@_[A-Za-z]|@(extern|section|used|exclusivity)([^A-Za-z0-9_]|$)' | grep -v '^Sources/SecureMemory/' || true)

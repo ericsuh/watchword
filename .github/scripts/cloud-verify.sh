@@ -51,7 +51,7 @@ if [ "$quick" -eq 0 ]; then
     run "strict memory safety" swift build -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors
     if swift format --version > /dev/null 2>&1; then
         run "lint" swift format lint --strict --recursive --configuration .swift-format \
-            Package.swift Sources Tests
+            Package.swift Sources Tests Apps
     else
         echo
         echo "warning: swift format is unavailable in this toolchain; the lint gate was skipped."

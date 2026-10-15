@@ -7,8 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-end encrypted and
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
-milestone-1 cryptographic core, and CI scaffolding. There is no app project yet (`Apps/project.yml` does not exist; the `app-tests` CI
-job self-skips until it does).
+milestone-1 cryptographic core, and milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
+`WatchwordPlatform`). `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
+are not committed.
 
 ## Commands
 
@@ -21,9 +23,22 @@ swift test --filter WatchwordMatchingTests.ItemRankerTests   # one XCTest class
 swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests
 swift format --in-place --recursive --configuration .swift-format Sources Tests
 swift build -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors   # mirrors the CI gate
+
+# Apps (macOS only; mirrors the app-tests CI job). XcodeGen and gh are pinned in mise.toml:
+mise trust && mise install                             # once per checkout
+xcodegen generate --spec Apps/project.yml --project Apps
+xcodebuild test -project Apps/Watchword.xcodeproj -scheme Watchword-iOS \
+  -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO
+xcodebuild test -project Apps/Watchword.xcodeproj -scheme Watchword-macOS -destination 'platform=macOS' \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGN_ENTITLEMENTS=""
 ```
 
-Requires Xcode 16.4+ (Xcode 26 for strict memory safety). CI runs the same matrix: Xcode 16.4 on
+UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor.
+macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
+have it. Real Keychain round trips need a signed, entitled process, so `swift test` skips them.
+
+Requires Xcode 16.4+ (Xcode 26 for strict memory safety). Other developer tools come from the project-level
+`mise.toml`, never Homebrew or the global mise config; Swift and swift-format come from the selected Xcode. CI runs the same matrix: Xcode 16.4 on
 macOS 15 and Xcode 26.6 on macOS 26.
 
 ### Xcode MCP server (local macOS sessions only)
@@ -49,6 +64,8 @@ server, and the base image cannot be replaced. So in a cloud session:
 
 - `swift build`, `swift test`, the adversarial suite, `-strict-memory-safety` and `swift format`
   all work — four of the five `ci.yml` jobs. Run `.github/scripts/cloud-verify.sh` for the lot.
+- The setup script also installs mise and runs `mise trust && mise install` (XcodeGen skipped: macOS
+  only). The shims are not on `PATH` in the Bash tool, so run pinned tools as `mise exec -- <tool>`.
 - Anything importing CryptoKit, Security.framework, CommonCrypto or LocalAuthentication does not
   compile, and `xcodebuild` is absent. `WatchwordCrypto`, `SecureMemory` and the Keychain adapters
   (`docs/02-architecture.md` §15) can be drafted there but **not** built or tested. Say so rather
@@ -60,8 +77,10 @@ If an agent needs the real toolchain, the answer is Remote Control on a Mac (`cl
 --remote-control`), not a cloud session — that is the only arrangement with `xcodebuild`, a
 simulator and the Xcode MCP server.
 
-The current four modules import only `Foundation`, `Testing` and `XCTest`, which is the sole reason
-any of this is testable on Linux. Treat that portability as a property to keep.
+`WatchwordModel`, `WatchwordMatching`, `WatchwordGenerator` and `WatchwordEnvelope` import only `Foundation`,
+`Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a property to
+keep. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s policies and ports are portable too;
+`SQLiteRecordStore` (`#if canImport(SQLite3)`), `VaultSession` (CryptoKit) and all of `WatchwordPlatform` are not.
 
 ## Architecture
 
@@ -69,23 +88,42 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Six shipped modules, dependency-ordered, plus test support:
+Nine shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
 - **`WatchwordGenerator`** — password/passphrase/PIN generation, generic over `RandomNumberGenerator`.
 - **`WatchwordEnvelope`** — envelope format, canonical CBOR, `EnvelopeContext` (the AAD), every check that
   can run before decryption, and KDF parameter validation. Does no cryptography itself.
-- **`SecureMemory`** — `SecureBytes` (zeroising, page-locked key buffers), `ConstantTime`, and the
-  CommonCrypto PBKDF2 call. The only module allowed unsafe code.
+- **`SecureMemory`** — `SecureBytes` (zeroising, page-locked key buffers), `ConstantTime`, the
+  CommonCrypto PBKDF2 call, and the four system bindings with pointer-typed signatures (SQLite,
+  `SecItemCopyMatching`, `LAContext.canEvaluatePolicy`, the PDF `CGContext`). The only module allowed unsafe
+  code (ADR 0001 and its milestone-2 amendment).
 - **`WatchwordCrypto`** — Secret Key, 2SKD, KDF calibration, keyset, vault keys, HPKE grants, signatures,
   fingerprints, record sealing. Depends on `SecureMemory` and `WatchwordEnvelope`.
-- **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs. Test
-  targets only; not a product, and no production target may depend on it.
+- **`WatchwordStore`** — the `RecordStore` port, `InMemoryRecordStore` and `SQLiteRecordStore` (the App Group
+  ciphertext database). Envelopes plus storage locations only; never keys.
+- **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
+  history, trash, password change, deletion), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `EmergencyKit`, and
+  the ports (`KeychainStore`, `BiometricGate`, `WallClock`).
+- **`WatchwordPlatform`** — Apple adapters: `SystemKeychainStore`, `LocalAuthenticationGate`, the Emergency Kit
+  PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
+- **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
+  fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`). Test targets only; not a product, and no
+  production target may depend on it.
 
-`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordStore`, `WatchwordSync`,
-`WatchwordSharing`, `WatchwordHygiene`, `WatchwordInterchange`, `WatchwordKit`) and which milestone each
-belongs to.
+`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSync`, `WatchwordSharing`,
+`WatchwordHygiene`, `WatchwordInterchange`) and which milestone each belongs to.
+
+### `VaultSession` invariants
+
+- Nothing unlocks on a boolean. `BiometricGate` reports enrolment only; quick unlock needs the Keychain to release
+  the Local Unlock Key, that key to open the wrapped AUK, and the AUK to open the keyset. Keep it that way.
+- A refused quick unlock *deletes* the Local Unlock Key; it is not merely ignored.
+- The actor is re-entrant across `await`: after every suspension, re-check the lock epoch (`requireKeys(since:)`)
+  before touching key material, so `lock()` always wins.
+- Read contexts come from the store row, and a decrypted item's `id`/`vaultID`/`version` must equal the row's.
+- Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends.
 
 ### The matching pipeline is the whole point of `WatchwordMatching`
 
@@ -193,8 +231,10 @@ directions are tested; keep both when adjusting constants.
 - **Adversarial suites** live in `Tests/WatchwordAdversarialTests`, are named `Adversarial…`, and
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
-  `"phishing resistance"`, `"crypto core"`), so **renaming a suite breaks CI deliberately** — update the grep list in
-  `.github/workflows/ci.yml` alongside it.
+  `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
+  `"Keychain item protection"`), so **renaming a suite breaks CI deliberately** — update the grep list in
+  `.github/workflows/ci.yml` alongside it. Each adversarial test's doc comment states the concrete threat
+  (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
   adapter must add or update an adversarial test (`docs/03-implementation-plan.md`, working
   agreements).

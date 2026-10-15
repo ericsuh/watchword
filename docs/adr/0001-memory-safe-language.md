@@ -37,6 +37,35 @@ on 6.2+ and as a call to an identity function on older compilers (`UnsafeMarker.
 avoids both a per-target exemption, which would hide unmarked uses inside the module, and raising
 the tools version, which would drop the Xcode 16 leg of the CI matrix.
 
+## Amendment (2026-10-14, milestone 2): system bindings with pointer signatures
+
+Milestone 2 needs four system calls whose Swift signatures contain unsafe types even when no pointer
+is used: every SQLite C function (`OpaquePointer`, raw buffers), `SecItemCopyMatching` (an
+`UnsafeMutablePointer<CFTypeRef?>` out-parameter), `LAContext.canEvaluatePolicy(_:error:)` (an
+`AutoreleasingUnsafeMutablePointer` even when `nil` is passed) and `CGContext(consumer:mediaBox:_:)`
+(an `UnsafePointer<CGRect>`). Strict memory safety flags each call.
+
+Decision: these calls live in `SecureMemory` too, each in one small file
+(`SQLiteConnection.swift`, `KeychainBridge.swift`, `LocalAuthenticationBridge.swift`,
+`CoreGraphicsBridge.swift`) that exposes a safe API and contains nothing else. Everything that
+*uses* them — the store schema, Keychain queries and access-control flags, biometric policy, the
+Emergency Kit layout — is ordinary safe code in `WatchwordStore` and `WatchwordPlatform`. PRD P1
+("unsafe only in `SecureMemory`") therefore holds literally, and there is still exactly one
+directory to audit for pointer code.
+
+Alternatives rejected:
+- *A second unsafe-permitted module* (e.g. `WatchwordSQLite`). Equivalent in code, but it weakens
+  P1 and the tripwire from "one module" to "a list", which is how such lists grow.
+- *Avoiding the calls.* SwiftData/Core Data would replace SQLite with an ORM (§6 says no ORM), and
+  the PDF and biometric alternatives are platform-specific and no safer.
+- *Putting the adapters in `Apps/`.* The strict-memory-safety job builds only the package, so
+  unsafe code there would be checked by nothing but the tripwire. The adapters live in the package
+  (`WatchwordPlatform`), and `assert-unsafe-confined.sh` now scans `Apps/` as well.
+
+`SecureMemory` is therefore "the module where pointer-typed system calls are allowed", not only
+"the module that holds key material". Its review standard is unchanged; a new binding needs the same
+justification as any other unsafe construct.
+
 ## Consequences
 - Developers must justify any new `unsafe` use in review and place it in `SecureMemory`.
 - Argon2id is unavailable without third-party code; see ADR 0003.

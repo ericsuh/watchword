@@ -83,6 +83,11 @@ with password re-entry, import of 1PUX/CSV fixtures.
   sheet, export warning flow, import picker flow.
 - AutoFill in Safari cannot be reliably enabled from automation on the simulator; the job that
   attempts it (via the Settings app) is non-blocking and its result is recorded as an artifact.
+- Milestone 2 status: `OnboardingAndUnlockTests` (onboarding with the short-password error, the
+  Emergency Kit confirmation, item creation with a generated password, lock, wrong password, unlock)
+  runs on the iOS simulator and macOS from `Apps/UITests/Shared`. `AutoFillSettingsTests` skips
+  itself until the extension answers requests (milestone 5). The accessibility audit is not wired
+  in yet.
 - Accessibility audit (`XCUIApplication.performAccessibilityAudit()`) runs on every screen.
 
 ## 6. Adversarial security tests (explicit requirements)
@@ -155,6 +160,33 @@ specification, plus vectors from independent Python implementations for HPKE wit
   unlock (guards against the "boolean bypass").
 - Background → foreground after the grace period locks; secrets absent from memory.
 
+**Implemented in milestone 2**, each test documenting its threat model:
+- `AdversarialUnlockTests` ("Adversarial: unlock and quick unlock"): the gate alone never unlocks
+  (Keychain fails, cancels or reports the item invalidated); bytes other than the enrolled LUK fail
+  authentication and destroy the enrolment; three failures delete the LUK and stop prompting; each
+  F5.4 reason (interval, update, re-enrolment, biometrics off, clock wound back) refuses before any
+  prompt and deletes the key; an OS-invalidated item forgets quick unlock; a pre-password-change
+  enrolment replayed with its counter edited still fails; wrong password and wrong Secret Key are
+  indistinguishable; a setup code for another account is refused; idle, sleep, foreground and
+  zero-grace backgrounding lock and zeroise every key; a `lock()` landing inside an unlock or a save
+  wins; account deletion re-checks the password.
+- `AdversarialVaultStoreTests` ("Adversarial: local vault store"), tampering through a raw SQLite
+  connection: no title, host, field value or password anywhere in the database files; swapped
+  envelopes, and rows relabelled with another version, key or record ID, become unreadable; an item
+  envelope planted as a key wrap fails the kind check; a deleted key wrap is an error, never a new
+  key; KDF iterations tampered below the floor or to `UInt32.max` are refused before deriving, in
+  under five seconds; a substituted salt, keyset, keyset version or account ID fails closed; a
+  correctly sealed record whose payload claims another identity is refused; malformed values are
+  reported; a symlink at the database path is refused; over-broad scopes are refused at save.
+- `AdversarialKeychainAttributeTests` ("Adversarial: Keychain item protection"): every item is
+  device-only, non-synchronisable and in the shared access group; the LUK requires the current
+  biometric set with no passcode or any-biometry fallback.
+- Added by the milestone-2 review (`06-adversarial-review.md` §G): a quick-unlocked session cannot
+  restart the password interval; cancels count towards the failure limit; activity after the idle
+  timeout locks; a committed password change reports success even if the vault locks; a planted
+  vault-key row does not block unlock; a planted trigger, view, table or index makes the store refuse
+  to open; erasing leaves no ciphertext in the write-ahead log; SQLite refuses oversized values.
+
 ### 6.3 AutoFill matching (milestone 2/5)
 - Service identifiers with user-info (`https://amazon.com@evil.example/`), ports, trailing dots,
   mixed case, IDN homographs (`xn--` forms) and raw Unicode, IPv6 hosts, `file:` and `data:`
@@ -226,8 +258,10 @@ user-info rejected, and the IDNA compatibility mapping asserted as honoured so a
 "hardening" change cannot silently break legitimate matching.
 
 *Still to come:* a UI test that the AutoFill extension presents no override affordance on a
-suspicious host (milestone 5), and that adding a mismatched host as a scope requires the
-confirmation in F11.7 (milestone 2).
+suspicious host, and that adding a mismatched host as a scope requires the confirmation in F11.7
+(both milestone 5; the second was planned for milestone 2, but the mismatch it confirms is first
+observable from the extension). Milestone 2 enforces F11.2 at the vault boundary instead:
+`VaultSession.save` refuses over-broad scopes whatever the UI sends.
 
 ### 6.8 Fuzzing (nightly)
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,

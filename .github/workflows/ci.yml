@@ -124,7 +124,7 @@ jobs:
       - name: Verify each adversarial area is covered
         run: |
           for suite in "envelope and KDF" "AutoFill service matching" "password generator" "phishing resistance" \
-                       "crypto core"; do
+                       "crypto core" "unlock and quick unlock" "local vault store" "Keychain item protection"; do
             grep -Fq "$suite" adversarial.log \
               || { echo "::error::Adversarial suite missing: $suite"; exit 1; }
           done
@@ -163,7 +163,7 @@ jobs:
       - name: Select Xcode
         run: .github/scripts/select-xcode.sh 26.6
       - name: Lint
-        run: swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests
+        run: swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests Apps
 
   app-tests:
     # Runs the Xcode app and UI test suites once the app project exists (milestone 2 in
@@ -191,8 +191,8 @@ jobs:
             echo "::notice::Apps/project.yml not found; app tests skipped"
           fi
 
-      # XcodeGen is a build-time dependency fetched from Homebrew. See docs/07-supply-chain.md:
-      # the plan is to commit a generated project and drop this step.
+      # XcodeGen is a build-time dependency fetched from Homebrew, unpinned (docs/07-supply-chain.md §3.3): the plan is
+      # a pinned release archive with a verified SHA-256, or a committed project with a drift check.
       - name: Install XcodeGen
         if: steps.detect.outputs.present == 'true'
         run: brew install --quiet xcodegen
@@ -201,6 +201,9 @@ jobs:
         if: steps.detect.outputs.present == 'true'
         run: xcodegen generate --spec Apps/project.yml --project Apps
 
+      # A macOS XCUITest runner that is not signed at all hangs before connecting, so the macOS leg signs ad hoc. The
+      # entitlements are dropped (they need a provisioning profile); UI tests launch with `--uitest`, which uses
+      # in-memory ports and needs no App Group or Keychain access.
       - name: macOS app tests (XCTest + Swift Testing + XCUITest)
         if: steps.detect.outputs.present == 'true'
         run: |
@@ -209,7 +212,7 @@ jobs:
             -scheme Watchword-macOS \
             -destination 'platform=macOS' \
             -resultBundlePath TestResults/macOS.xcresult \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGN_ENTITLEMENTS=""
 
       - name: Pick an iOS simulator
         if: steps.detect.outputs.present == 'true'
