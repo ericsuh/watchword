@@ -64,6 +64,8 @@ server, and the base image cannot be replaced. So in a cloud session:
 
 - `swift build`, `swift test`, the adversarial suite, `-strict-memory-safety` and `swift format`
   all work — four of the five `ci.yml` jobs. Run `.github/scripts/cloud-verify.sh` for the lot.
+- The setup script also installs mise and runs `mise trust && mise install` (XcodeGen skipped: macOS
+  only). The shims are not on `PATH` in the Bash tool, so run pinned tools as `mise exec -- <tool>`.
 - Anything importing CryptoKit, Security.framework, CommonCrypto or LocalAuthentication does not
   compile, and `xcodebuild` is absent. `WatchwordCrypto`, `SecureMemory` and the Keychain adapters
   (`docs/02-architecture.md` §15) can be drafted there but **not** built or tested. Say so rather

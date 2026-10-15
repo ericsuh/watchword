@@ -56,12 +56,32 @@ checked, plus:
 ```text
 download.swift.org
 *.swift.org
+mise.jdx.dev
+mise-versions.jdx.dev
 ```
+
+Why each host is there, and which ones the default list already covers:
+
+| Host | Used for | On the default list? |
+| --- | --- | --- |
+| `download.swift.org` | The swiftly installer and every Swift toolchain tarball and signature | **No** — must be added |
+| `*.swift.org` (`www.swift.org`) | The Swift signing-key bundle | `swift.org` and `www.swift.org` are; the wildcard keeps future subdomains working |
+| `mise.jdx.dev` | The pinned mise binary (first source tried) | **No** — must be added |
+| `mise-versions.jdx.dev` | mise's version index; with exact pins it is rarely consulted, but without it mise falls back to the GitHub API, which the GitHub proxy can refuse (below) | **No** — must be added |
+| `github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` | The mise fallback download and the release assets of the tools pinned in `mise.toml` | Yes |
+| `archive.ubuntu.com`, `security.ubuntu.com`, `*.ubuntu.com` | apt dependencies, and the keyserver GPG may consult | Yes |
 
 The default **Trusted** allowlist contains `swift.org` and `www.swift.org` but *not*
 `download.swift.org`, and that host is where both the installer and every toolchain tarball live.
-On Trusted alone, setup fails with network errors that look like a broken script. GitHub traffic goes
-through a separate proxy and needs no entry.
+On Trusted alone, setup fails with network errors that look like a broken script.
+
+GitHub traffic is different: it goes through a separate GitHub proxy whatever the allowlist says, and
+that proxy serves API requests and source archives only for the repositories attached to the session
+(it answers others with a 403 saying access "is not enabled for this session"). The Claude Code docs
+do not say whether release downloads from *other* repositories (jdx/mise, cli/cli) are refused the same
+way, so the setup script fetches mise from `mise.jdx.dev` first and treats GitHub as the fallback. If
+`mise install` fails to fetch a tool, `/var/log/watchword-cloud-setup.log` says so; nothing in the
+Swift build depends on it, and `gh` is pre-installed on the VM regardless.
 
 **Setup script:** paste the contents of [`.github/scripts/cloud-setup.sh`](../.github/scripts/cloud-setup.sh).
 
@@ -77,6 +97,7 @@ checkout**, and it gets reviewed like `select-xcode.sh` rather than living only 
 | `BASH_DEFAULT_TIMEOUT_MS` | `600000` | A cold `swift build` or a full `swift test` run exceeds the 2-minute default, and Claude then has to shepherd a backgrounded command. |
 | `BASH_MAX_TIMEOUT_MS` | `1800000` | Headroom for `WATCHWORD_LONG_TESTS=1` runs. |
 | `WATCHWORD_TEST_SEED` | *(optional)* | Pin the SplitMix64 `SeededGenerator` when reproducing a nightly failure. |
+| `MISE_DISABLE_TOOLS` | `xcodegen` | XcodeGen publishes macOS builds only, so a `mise install` run inside a session would otherwise fail on it. The setup script sets this for its own run; this makes sessions match. |
 
 Do not put secrets here: anyone who can use the environment can read the variables and the setup
 script. Nothing in this repository needs a secret in a session — there are no dependencies to
@@ -102,8 +123,14 @@ authenticate to, and the GitHub proxy handles git.
    `/etc/profile.d/swift.sh`. The Bash tool does not run a login shell, so the symlinks are what
    actually make the toolchain reachable; only the drivers are linked, because symlinking the whole
    toolchain would shadow the system `clang` for everything else on the VM.
-5. Warms `.build` with `swift build --build-tests`, bounded by `timeout 150`.
-6. Verifies, and **announces its own failure**: everything is logged to
+5. In parallel with steps 2–4, installs **mise** `2026.9.11` to `/usr/local/bin/mise` — downloaded from
+   `mise.jdx.dev` (GitHub as fallback) and checked against GitHub's published SHA-256 before it is
+   unpacked — then runs `mise trust && mise install` in the checkout, with `xcodegen` disabled
+   (macOS-only). The tool versions themselves are pinned in [`mise.toml`](../mise.toml). The Bash tool
+   does not run a login shell, so mise's shims are not on `PATH`: run pinned tools as
+   `mise exec -- <tool>`. A failure here is logged as a warning and never blocks the Swift setup.
+6. Warms `.build` with `swift build --build-tests`, bounded by `timeout 150`.
+7. Verifies, and **announces its own failure**: everything is logged to
    `/var/log/watchword-cloud-setup.log`, and if no toolchain is present at the end the script appends
    a note to root's `CLAUDE.md`, which the session loads as user instructions. A setup script cannot
    fail a session start, so the alternative is an agent discovering `swift: command not found` much
@@ -157,6 +184,11 @@ error" is therefore not evidence that anything installed. Causes, in likelihood 
    restored, so edits reach only new sessions. Recover in place by running the script from the
    checkout: `.github/scripts/cloud-setup.sh` (it is idempotent and safe to re-run as root).
 4. **Setup overran five minutes**, so nothing was cached and every session repeats the whole install.
+
+`mise` problems show up in the same log as `mise could not be installed` (both sources failed or the
+checksum did not match), or `mise trust/install FAILED` followed by the tail of
+`/tmp/watchword-cloud-setup/mise.log`. The usual cause is `mise.jdx.dev` or `mise-versions.jdx.dev`
+missing from the allowlist (§2).
 
 GPG needs `keyserver.ubuntu.com` to fetch the signing key; it is covered by the `*.ubuntu.com` entry
 in the Trusted defaults, which is one more reason to keep **"Also include default list of common

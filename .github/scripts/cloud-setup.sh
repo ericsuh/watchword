@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provisions a Claude Code cloud-session VM with a Swift toolchain.
+# Provisions a Claude Code cloud-session VM with a Swift toolchain and the repository's mise tools.
 #
 # This is the body of the "Setup script" field on a cloud environment at claude.ai/code; see
 # docs/09-cloud-sessions.md for the rest of the environment configuration. It lives in the
@@ -34,6 +34,19 @@ readonly SWIFTLY_URL="https://download.swift.org/swiftly/linux/swiftly-x86_64.ta
 readonly SWIFT_KEYS_URL="https://www.swift.org/keys/all-keys.asc"
 readonly WORK="/tmp/watchword-cloud-setup"
 readonly LOG="/var/log/watchword-cloud-setup.log"
+
+# mise, pinned. The developer tools themselves are pinned in the checkout's mise.toml (CLAUDE.md, "Commands"); this pins
+# the tool that installs them. Same version as CI (.github/workflows/ci.yml). The checksum is GitHub's published
+# SHA-256 for that release asset; mise.jdx.dev serves the identical file, so one checksum covers both sources.
+readonly MISE_VERSION="2026.9.11"
+readonly MISE_ARCHIVE="mise-v${MISE_VERSION}-linux-x64.tar.gz"
+readonly MISE_SHA256="02a19e4a5eda23cda916503ad09dbc608a249fe7a7d5686c5a74ff3a7ce3b7e0"
+# mise.jdx.dev first: it is a plain CDN on the session's network allowlist. A github.com release URL is tried second,
+# because GitHub traffic from a session goes through the GitHub proxy, which refuses some requests for repositories
+# not attached to the session (docs/09-cloud-sessions.md §2).
+readonly MISE_URLS="https://mise.jdx.dev/v${MISE_VERSION}/${MISE_ARCHIVE} https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/${MISE_ARCHIVE}"
+# XcodeGen publishes macOS builds only, and there is no Xcode here to use it with.
+readonly MISE_LINUX_DISABLED_TOOLS="xcodegen"
 
 mkdir -p "$WORK"
 # /tmp is not a safe place to leave evidence: it can be cleared when a VM boots from the snapshot.
@@ -83,6 +96,55 @@ apt_pid=$!
 
 ( curl -fsSL --retry 3 --retry-delay 2 -o "$WORK/swiftly.tar.gz" "$SWIFTLY_URL" ) > "$WORK/curl.log" 2>&1 &
 curl_pid=$!
+
+# mise and the checkout's tools, alongside the Swift install. Small downloads, but they share the five-minute budget, so
+# they run concurrently and are bounded. Not load-bearing for building the package: a failure is logged, never fatal.
+install_mise() {
+    local current="" url verified=0
+    command -v mise > /dev/null 2>&1 && current="$(mise --version 2>/dev/null | awk '{print $1}')"
+    if [ "$current" = "$MISE_VERSION" ]; then
+        log "mise $MISE_VERSION already installed"
+    else
+        for url in $MISE_URLS; do
+            rm -f "$WORK/$MISE_ARCHIVE"
+            if ! curl -fsSL --retry 3 --retry-delay 2 -o "$WORK/$MISE_ARCHIVE" "$url"; then
+                log "mise download failed from $url"
+                continue
+            fi
+            if echo "$MISE_SHA256  $WORK/$MISE_ARCHIVE" | sha256sum --check --quiet - > /dev/null 2>&1; then
+                verified=1
+                log "mise $MISE_VERSION verified (SHA-256) from $url"
+                break
+            fi
+            log "mise CHECKSUM MISMATCH from $url; discarding the download"
+        done
+        if [ "$verified" -ne 1 ]; then
+            rm -f "$WORK/$MISE_ARCHIVE"
+            log "mise could not be installed; tools pinned in mise.toml are unavailable"
+            return 1
+        fi
+        tar -xzf "$WORK/$MISE_ARCHIVE" -C "$WORK" mise/bin/mise \
+            && install -m 0755 "$WORK/mise/bin/mise" /usr/local/bin/mise \
+            || { log "mise archive did not install"; return 1; }
+        rm -f "$WORK/$MISE_ARCHIVE"
+    fi
+    [ -n "$repo" ] || { log "no checkout, so no mise.toml to install from"; return 0; }
+    # Trusting the checkout's mise.toml lets mise act on it as root. That is no new trust: the warm-up build below
+    # already runs code from this checkout (SwiftPM evaluates Package.swift).
+    (
+        cd "$repo" \
+            && MISE_YES=1 mise trust \
+            && MISE_YES=1 MISE_DISABLE_TOOLS="$MISE_LINUX_DISABLED_TOOLS" timeout 120 mise install
+    ) > "$WORK/mise.log" 2>&1 || {
+        log "mise trust/install FAILED; see $WORK/mise.log"
+        tail -20 "$WORK/mise.log"
+        return 1
+    }
+    log "mise tools installed: $(cd "$repo" && MISE_DISABLE_TOOLS="$MISE_LINUX_DISABLED_TOOLS" mise ls --local --current 2>/dev/null \
+        | awk '{printf "%s%s %s", sep, $1, $2; sep=", "}')"
+}
+install_mise &
+mise_pid=$!
 
 wait "$apt_pid" || { log "apt dependencies FAILED; see $WORK/apt.log"; tail -20 "$WORK/apt.log"; }
 wait "$curl_pid" || log "swiftly download FAILED; see $WORK/curl.log"
@@ -253,6 +315,11 @@ if [ -n "$repo" ] && command -v swift > /dev/null 2>&1; then
 fi
 
 # -------------------------------------------------------------------------------- 7. verify loudly
+wait "$mise_pid" || log "WARNING: mise setup did not complete; see $WORK/mise.log"
+if command -v mise > /dev/null 2>&1; then
+    log "mise present: $(mise --version 2>&1)"
+fi
+
 ok=0
 if command -v swift > /dev/null 2>&1 && swift --version > /dev/null 2>&1; then
     ok=1
