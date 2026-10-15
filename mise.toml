@@ -1,0 +1,11 @@
+# Developer tools for this repository, pinned to exact versions (docs/07-supply-chain.md).
+# `mise install` in the repository root installs them; `mise trust` once per checkout first.
+#
+# Swift and swift-format are deliberately not here: they come with the Xcode toolchain that
+# `.github/scripts/select-xcode.sh` selects, so the compiler that builds the package is the one CI tests.
+
+[tools]
+# Generates Apps/Watchword.xcodeproj from Apps/project.yml.
+xcodegen = "2.46.0"
+# Repository and code-scanning queries in CLAUDE.md and docs/08-repository-hardening.md.
+gh = "2.92.0"

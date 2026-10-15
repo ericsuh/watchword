@@ -24,7 +24,8 @@ swift format lint --strict --recursive --configuration .swift-format Package.swi
 swift format --in-place --recursive --configuration .swift-format Sources Tests
 swift build -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors   # mirrors the CI gate
 
-# Apps (macOS only; mirrors the app-tests CI job)
+# Apps (macOS only; mirrors the app-tests CI job). XcodeGen and gh are pinned in mise.toml:
+mise trust && mise install                             # once per checkout
 xcodegen generate --spec Apps/project.yml --project Apps
 xcodebuild test -project Apps/Watchword.xcodeproj -scheme Watchword-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO
@@ -36,7 +37,8 @@ UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-m
 macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
 have it. Real Keychain round trips need a signed, entitled process, so `swift test` skips them.
 
-Requires Xcode 16.4+ (Xcode 26 for strict memory safety). CI runs the same matrix: Xcode 16.4 on
+Requires Xcode 16.4+ (Xcode 26 for strict memory safety). Other developer tools come from the project-level
+`mise.toml`, never Homebrew or the global mise config; Swift and swift-format come from the selected Xcode. CI runs the same matrix: Xcode 16.4 on
 macOS 15 and Xcode 26.6 on macOS 26.
 
 ### Xcode MCP server (local macOS sessions only)
