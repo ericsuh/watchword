@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#MISE description="Long randomised adversarial runs, as the nightly workflow does (WATCHWORD_LONG_TESTS=1)"
+#USAGE flag "--seed <n>" help="WATCHWORD_TEST_SEED (a UInt64) for this run; omit it for each test's fixed fallback seed. Pass a failing nightly's seed to replay it"
+#
+# docs/04-test-plan.md §1. Tests opt into wider iteration budgets through TestEnvironment.
+set -euo pipefail
+
+export WATCHWORD_LONG_TESTS=1
+if [ -n "${usage_seed:-}" ]; then
+  export WATCHWORD_TEST_SEED="$usage_seed"
+  echo "WATCHWORD_TEST_SEED=$WATCHWORD_TEST_SEED"
+fi
+swift test --parallel --filter 'WatchwordAdversarialTests|LongRunning'

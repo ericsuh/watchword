@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Fail if any workflow references an action by tag or branch instead of a 40-hex commit SHA"
+#
+# A tag can be moved; a SHA cannot (docs/07-supply-chain.md). This is the quiet way a supply-chain foothold gets
+# introduced, so the nightly workflow runs it as well as `check`.
+set -euo pipefail
+
+bad=$(grep -rhoE '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]]+' .github/workflows \
+  | sed -E 's/.*uses:[[:space:]]*//' \
+  | grep -vE '@[0-9a-f]{40}$' || true)
+if [ -n "$bad" ]; then
+  echo "::error::These actions are not pinned to a commit SHA:"
+  echo "$bad"
+  exit 1
+fi
+echo "All actions pinned to commit SHAs."

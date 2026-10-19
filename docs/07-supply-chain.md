@@ -116,10 +116,11 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
   xcodegen`, an unpinned formula and bottle fetched at build time (T3). XcodeGen now comes from
   the project's `mise.toml` (2.46.0), and `mise.lock` records its download URL and SHA-256. The
   job installs mise from one release tarball (2026.9.11, macOS arm64), fetched over HTTPS only and
-  checked against a SHA-256 in `ci.yml` before it runs. It then runs `mise install xcodegen` with
-  `MISE_LOCKED=1`, so mise refuses a tool with no lockfile entry and checks the archive against
-  the locked checksum. A mismatch at either layer fails the job. The step also asserts that
-  `xcodegen --version` matches `mise.toml`. `MISE_USE_VERSIONS_HOST=0` keeps mise from contacting
+  checked against a SHA-256 in `.github/scripts/install-mise.sh` before it runs. It then runs
+  `mise install xcodegen` with `MISE_LOCKED=1`, so mise refuses a tool with no lockfile entry and
+  checks the archive against the locked checksum. A mismatch at either layer fails the job. The
+  `app:generate` task also asserts that `xcodegen --version` matches `mise.toml` before generating.
+  `MISE_USE_VERSIONS_HOST=0` keeps mise from contacting
   `mise-versions.jdx.dev`, so the job's only fetches are from GitHub releases. Nothing comes from
   Homebrew. Both hashes were checked against an independent download and the digest GitHub
   publishes for the release asset. Each failure path (a bad mise hash, a tampered lock checksum, a
@@ -129,8 +130,18 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
   plus mise's baked-in aqua registry, which maps `xcodegen` to `yonaskolb/XcodeGen`. That is the
   same residual as an action pinned to a SHA. A bump changes version and hash together and is
   reviewed like an action bump (§3.1), by reading the release diff rather than trusting the tag:
-  mise in `ci.yml`, tools through `mise lock`. The job still has `contents: read` and no secrets,
-  and no token is passed to mise, so a bad artifact could at worst falsify that job's own result.
+  mise in `install-mise.sh`, tools through `mise lock`. The job still has `contents: read` and no
+  secrets, and no token is passed to mise, so a bad artifact could at worst falsify that job's own
+  result.
+- **mise in every job.** **[accepted]** Every CI step past checkout and Xcode selection is now
+  `mise run <task>` (`mise.toml`, `mise-tasks/`), so a failure reproduces locally with the same
+  command. That puts mise in the trust base of every job, not only `app-tests`: the same pinned
+  release, installed by `install-mise.sh` (macOS arm64, and linux x64 for the nightly pinning
+  audit, whose digest is the one `cloud-setup.sh` already pins). Auto-install is off
+  (`MISE_TASK_RUN_AUTO_INSTALL=0`), so a job downloads no tool it does not name; only `app-tests`
+  installs one. The residual is the one above: mise as its maintainers built it, with
+  `contents: read` and no secrets in reach. The task scripts are repository files, reviewed like
+  the workflow steps they replaced.
 - **The runner image itself** is a large trust base (Xcode, Homebrew, preinstalled tooling) that we
   do not control. Accepted: the alternative is self-hosted runners, which trade this for a
   machine we would have to secure ourselves. Revisit if the project ever signs releases in CI.

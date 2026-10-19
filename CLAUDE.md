@@ -14,23 +14,34 @@ are not committed.
 
 ## Commands
 
-```sh
-swift build
-swift test --parallel                                  # runs both Swift Testing and XCTest suites
-swift test --filter WatchwordAdversarialTests           # security suite only (its own CI job)
-swift test --filter 'Random password generation'        # one Swift Testing @Suite by display name
-swift test --filter WatchwordMatchingTests.ItemRankerTests   # one XCTest class
-swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests
-swift format --in-place --recursive --configuration .swift-format Sources Tests
-swift build -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors   # mirrors the CI gate
+Every CI step is a `mise run <task>`, so the command in a failing step's name reproduces it locally. One-line tasks
+are in `mise.toml`; the rest are scripts in `mise-tasks/` whose `#USAGE` header documents their flags
+(`mise run <task> --help`, `mise tasks` for the list).
 
-# Apps (macOS only; mirrors the app-tests CI job). XcodeGen and gh are pinned in mise.toml, checksums in mise.lock:
-mise trust && mise install                             # once per checkout
-xcodegen generate --spec Apps/project.yml --project Apps
-xcodebuild test -project Apps/Watchword.xcodeproj -scheme Watchword-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO
-xcodebuild test -project Apps/Watchword.xcodeproj -scheme Watchword-macOS -destination 'platform=macOS' \
-  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGN_ENTITLEMENTS=""
+```sh
+mise trust && mise install                             # once per checkout (XcodeGen, gh; checksums in mise.lock)
+mise run check                                         # every package gate in ci.yml: lint, audits, both test suites
+mise run check:all                                     # ...plus both app test suites (macOS + Xcode only)
+
+mise run build                                         # swift build (extra arguments are passed through)
+mise run test                                          # Swift Testing + XCTest; fails unless both frameworks ran
+mise run test --filter 'Random password generation'    # one Swift Testing @Suite by display name
+mise run test --filter WatchwordMatchingTests.ItemRankerTests   # one XCTest class
+mise run test --coverage                               # also writes an llvm-cov report to coverage.txt
+mise run test:adversarial                              # security suite only (its own CI job)
+mise run test:long --seed 1234                         # the nightly long randomised run; replay a nightly's seed
+mise run fuzz --max-total-time 60                      # libFuzzer harness (skips until Fuzz/ exists)
+
+mise run lint                                          # swift format lint --strict (alias fmt:check)
+mise run fmt                                           # swift format --in-place
+mise run audit                                         # dependency, unsafe-confinement, strict-build, action-pin tripwires
+mise run build:strict                                  # -strict-memory-safety, warnings as errors (Xcode 26)
+
+# Apps (macOS only; mirrors the app-tests CI job). Each regenerates the project from Apps/project.yml first.
+mise run app:generate                                  # xcodegen; refuses an XcodeGen other than mise.toml's
+mise run app:build [ios|macos]                         # both by default; --configuration Release
+mise run app:test [ios|macos]                          # --only-testing <id>, --results <dir>, --simulator <udid>
+mise run clean                                         # .build, generated project, logs, result bundles
 ```
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor.
@@ -51,8 +62,8 @@ instead of scraped log text, and will be the only practical way to run the XCUIT
 extension suites once `Apps/` exists.
 
 Do **not** rely on it in CI or in hosted/remote sessions — no Xcode GUI, no simulators, and no MCP
-server there. Those environments use the plain `swift build` / `swift test` / `xcodebuild` commands
-above, which is why every workflow step stays expressible as shell. Keep it that way: an
+server there. Those environments use the `mise run` tasks above (plain `swift` and `xcodebuild`
+underneath), which is why every workflow step stays expressible as shell. Keep it that way: an
 MCP-only step is a step CI cannot run.
 
 ### Cloud sessions run on Linux, so some of this repository is invisible there
@@ -232,8 +243,8 @@ directions are tested; keep both when adjusting constants.
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`), so **renaming a suite breaks CI deliberately** — update the grep list in
-  `.github/workflows/ci.yml` alongside it. Each adversarial test's doc comment states the concrete threat
+  `"Keychain item protection"`), so **renaming a suite breaks CI deliberately** — update the list in
+  `mise-tasks/test/adversarial` alongside it. Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
   adapter must add or update an adversarial test (`docs/03-implementation-plan.md`, working
@@ -252,7 +263,8 @@ claiming a layer is covered.
 ## CI
 
 `.github/workflows/ci.yml` — `package-tests` (2-runner matrix), `adversarial-tests`,
-`strict-memory-safety`, `lint`, `app-tests` (self-skipping). `security-nightly.yml` — long randomised
+`strict-memory-safety`, `lint`, `app-tests` (self-skipping). Each step after checkout and Xcode selection is
+`mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
 runs, libFuzzer harnesses under `Fuzz/` (self-skipping), and an audit that every `uses:` is a 40-hex
 commit SHA.
 
@@ -282,7 +294,8 @@ Supply-chain rules that apply to edits in `.github/`:
 - Build tools reach CI only through mise with `MISE_LOCKED=1`, so every tool needs a `mise.lock` entry
   (URL and SHA-256). Bump a tool by editing `mise.toml` and running
   `mise lock --platform macos-arm64,linux-x64`; commit both files. mise itself is pinned by version and
-  SHA-256 in `ci.yml`, and a bump is reviewed like an action pin.
+  SHA-256 in `.github/scripts/install-mise.sh`, and a bump is reviewed like an action pin. Workflows set
+  `MISE_TASK_RUN_AUTO_INSTALL=0`, so a job that needs a tool installs it by name (`mise install xcodegen`).
 
 `.claude/` and other agent/editor configuration is intentionally uncommitted
 (`docs/07-supply-chain.md` §5). `docs/08-repository-hardening.md` is the `gh` runbook for branch

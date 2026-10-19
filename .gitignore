@@ -83,3 +83,9 @@ fastlane/test_output
 Apps/Watchword.xcodeproj/
 Apps/**/Info*.plist
 Apps/**/*.entitlements
+
+# Task output (`mise run test --coverage`, `mise run app:test --results TestResults`, `mise run fuzz`).
+coverage.txt
+TestResults/
+corpus/
+artifacts/

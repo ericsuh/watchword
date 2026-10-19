@@ -15,11 +15,24 @@ concurrency:
 permissions:
   contents: read
 
-# `bash` as the default shell runs with `-eo pipefail`, so a failing `swift test` is not masked
-# by the `| tee` that captures its output.
+# `bash` as the default shell runs with `-eo pipefail`. The task scripts set `-euo pipefail` themselves, so a failing
+# `swift test` is not masked by the `| tee` that captures its output either way.
 defaults:
   run:
     shell: bash
+
+# Every step past checkout and Xcode selection is `mise run <task>`, the same command a developer runs locally
+# (mise.toml, `mise-tasks/`), so a red step reproduces with the command in its log. mise is installed by
+# `.github/scripts/install-mise.sh`, pinned by version and SHA-256. `MISE_LOCKED` makes mise refuse a tool with no
+# mise.lock entry and check each download against the lockfile checksum; with auto-install off, a job downloads only
+# the tools it asks for by name (`mise install xcodegen`). `MISE_USE_VERSIONS_HOST=0` keeps mise off
+# mise-versions.jdx.dev; the lockfile already names each URL.
+env:
+  MISE_LOCKED: "1"
+  MISE_YES: "1"
+  MISE_USE_VERSIONS_HOST: "0"
+  MISE_TASK_RUN_AUTO_INSTALL: "0"
+  MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
 
 # Third-party actions are pinned to full commit SHAs, not tags: a tag is mutable, so `@v4` is a
 # standing grant of code execution in CI to whoever can move it (docs/07-supply-chain.md).
@@ -56,36 +69,19 @@ jobs:
           XCODE_VERSION: ${{ matrix.xcode }}
         run: .github/scripts/select-xcode.sh "$XCODE_VERSION"
 
-      - name: Assert the package has no third-party dependencies
-        run: .github/scripts/assert-no-dependencies.sh
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
 
-      - name: Build
-        run: swift build -v
+      - name: mise run audit:dependencies
+        run: mise run audit:dependencies
 
-      # `swift test` runs both the Swift Testing suites and the XCTest suites in the package.
-      - name: Test (Swift Testing + XCTest)
-        run: swift test --parallel --enable-code-coverage 2>&1 | tee test-output.log
+      - name: mise run build
+        run: mise run build -v
 
-      # Belt and braces: both frameworks must have executed tests, not merely compiled.
-      - name: Verify both test frameworks ran
-        run: |
-          grep -Eq "Test run with [1-9][0-9]* tests?" test-output.log \
-            || { echo "::error::No Swift Testing tests were executed"; exit 1; }
-          # XCTest under `swift test --parallel` prints one "[n/m] Testing Target.Class/test" line per test.
-          grep -Eq "\[[0-9]+/[1-9][0-9]*\] Testing [A-Za-z]+Tests\.|Test Case .* passed|Executed [1-9][0-9]* tests?" test-output.log \
-            || { echo "::error::No XCTest tests were executed"; exit 1; }
-
-      - name: Export coverage
-        if: always()
-        run: |
-          BIN_PATH=$(swift build --show-bin-path)
-          PROFDATA=$(find "$BIN_PATH" -name 'default.profdata' | head -n 1 || true)
-          XCTEST=$(find "$BIN_PATH" -name '*.xctest' -maxdepth 1 | head -n 1 || true)
-          if [ -n "$PROFDATA" ] && [ -n "$XCTEST" ]; then
-            BINARY="$XCTEST/Contents/MacOS/$(basename "$XCTEST" .xctest)"
-            xcrun llvm-cov report "$BINARY" -instr-profile "$PROFDATA" -ignore-filename-regex='Tests/' > coverage.txt || true
-            cat coverage.txt || true
-          fi
+      # Both the Swift Testing and XCTest suites; the task fails unless the log shows each framework executed tests,
+      # and writes coverage.txt whether or not they passed.
+      - name: mise run test --coverage
+        run: mise run test --coverage --log test-output.log
 
       - name: Upload logs
         if: always()
@@ -111,23 +107,12 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: .github/scripts/select-xcode.sh 26.6
-      - name: Run adversarial suite only
-        run: swift test --parallel --filter WatchwordAdversarialTests 2>&1 | tee adversarial.log
-      - name: Fail if the suite ran zero tests
-        run: |
-          if grep -Eq "Test run with 0 tests|Executed 0 tests" adversarial.log; then
-            echo "::error::No adversarial tests were executed"
-            exit 1
-          fi
-      # Every adversarial sub-suite must be present. A renamed or deleted suite would otherwise
-      # pass silently as "fewer tests ran".
-      - name: Verify each adversarial area is covered
-        run: |
-          for suite in "envelope and KDF" "AutoFill service matching" "password generator" "phishing resistance" \
-                       "crypto core" "unlock and quick unlock" "local vault store" "Keychain item protection"; do
-            grep -Fq "$suite" adversarial.log \
-              || { echo "::error::Adversarial suite missing: $suite"; exit 1; }
-          done
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+      # Fails if the suite ran zero tests or any area's suite is missing from the output: a renamed or deleted suite
+      # would otherwise pass silently as "fewer tests ran". The list of areas is in mise-tasks/test/adversarial.
+      - name: mise run test:adversarial
+        run: mise run test:adversarial
 
   strict-memory-safety:
     # Fails on any construct the compiler classifies as unsafe and that is not marked `unsafe` (ADR 0001, SE-0458).
@@ -144,11 +129,13 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: .github/scripts/select-xcode.sh 26.6
-      - name: Build with -strict-memory-safety and warnings as errors
-        run: swift build -v -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+      - name: mise run build:strict
+        run: mise run build:strict -v
       # A marked `unsafe` expression compiles in any module, so confinement to SecureMemory is checked separately.
-      - name: Assert unsafe code is confined to SecureMemory
-        run: .github/scripts/assert-unsafe-confined.sh
+      - name: mise run audit:unsafe
+        run: mise run audit:unsafe
 
   lint:
     name: swift-format lint
@@ -162,8 +149,10 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: .github/scripts/select-xcode.sh 26.6
-      - name: Lint
-        run: swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests Apps
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+      - name: mise run lint
+        run: mise run lint
 
   app-tests:
     # Runs the Xcode app and UI test suites once the app project exists (milestone 2 in
@@ -191,89 +180,31 @@ jobs:
             echo "::notice::Apps/project.yml not found; app tests skipped"
           fi
 
+      - name: Install mise
+        if: steps.detect.outputs.present == 'true'
+        run: .github/scripts/install-mise.sh
+
       # XcodeGen comes from mise.toml, at the version, URL and SHA-256 recorded in mise.lock (docs/07-supply-chain.md
-      # §3.3). mise itself is pinned like an action: one release tarball, fetched over HTTPS only and checked against
-      # the SHA-256 here before it runs. `MISE_LOCKED` makes mise refuse a tool with no lockfile entry, and mise checks
-      # the downloaded archive against the lockfile checksum, so a mismatch at either layer fails the job. Bumping mise
-      # means updating both values from the release's published asset digest (`gh api
-      # repos/jdx/mise/releases/tags/v<version> --jq '.assets[]|{name,digest}'`) and an independent download, and
-      # reading the release diff — the same review as an action pin. Tool bumps go through `mise lock`.
+      # §3.3). `app:generate`, which both test tasks depend on, fails if the xcodegen on PATH is not that version.
       - name: Install XcodeGen (mise, locked)
         if: steps.detect.outputs.present == 'true'
-        env:
-          MISE_VERSION: 2026.9.11
-          MISE_SHA256: 34e8296f932c1d6f3b84d924bbb9f2841336d7bee1c373005d479e13664cb6c0
-          MISE_LOCKED: "1"
-          MISE_YES: "1"
-          # No version listing or install tracking via mise-versions.jdx.dev; the lockfile already names the URL.
-          MISE_USE_VERSIONS_HOST: "0"
-          MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
-        run: |
-          archive="$RUNNER_TEMP/mise.tar.gz"
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            --output "$archive" \
-            "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-macos-arm64.tar.gz"
-          echo "${MISE_SHA256}  ${archive}" | shasum -a 256 --check --strict
-          tar -xzf "$archive" -C "$RUNNER_TEMP"
-          mise="$RUNNER_TEMP/mise/bin/mise"
-          "$mise" install xcodegen
-          xcodegen=$("$mise" which xcodegen)
-          dirname "$xcodegen" >> "$GITHUB_PATH"
-          expected="Version: $("$mise" current xcodegen)"
-          installed=$("$xcodegen" --version)
-          echo "$installed"
-          if [ "$installed" != "$expected" ]; then
-            echo "::error::expected XcodeGen ${expected#Version: } from mise.toml, got: ${installed}"
-            exit 1
-          fi
+        run: mise install xcodegen
 
-      - name: Generate project
+      # Each task regenerates the project from Apps/project.yml first. See mise-tasks/app/test for the signing settings.
+      - name: mise run app:test macos
         if: steps.detect.outputs.present == 'true'
-        run: xcodegen generate --spec Apps/project.yml --project Apps
+        run: mise run app:test macos --results TestResults
 
-      # A macOS XCUITest runner that is not signed at all hangs before connecting, so the macOS leg signs ad hoc. The
-      # entitlements are dropped (they need a provisioning profile); UI tests launch with `--uitest`, which uses
-      # in-memory ports and needs no App Group or Keychain access.
-      - name: macOS app tests (XCTest + Swift Testing + XCUITest)
+      - name: mise run app:test ios
         if: steps.detect.outputs.present == 'true'
-        run: |
-          xcodebuild test \
-            -project Apps/Watchword.xcodeproj \
-            -scheme Watchword-macOS \
-            -destination 'platform=macOS' \
-            -resultBundlePath TestResults/macOS.xcresult \
-            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGN_ENTITLEMENTS=""
-
-      - name: Pick an iOS simulator
-        if: steps.detect.outputs.present == 'true'
-        id: sim
-        run: |
-          UDID=$(xcrun simctl list devices available --json \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(dev["udid"] for rt,devs in d.items() if "iOS" in rt for dev in devs if dev["name"].startswith("iPhone")))')
-          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
-
-      - name: iOS app tests (XCTest + Swift Testing + XCUITest)
-        if: steps.detect.outputs.present == 'true'
-        run: |
-          xcodebuild test \
-            -project Apps/Watchword.xcodeproj \
-            -scheme Watchword-iOS \
-            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
-            -resultBundlePath TestResults/iOS.xcresult \
-            CODE_SIGNING_ALLOWED=NO
+        run: mise run app:test ios --results TestResults
 
       # Enabling a third-party AutoFill provider from automation is unreliable on the simulator;
       # this attempt is informational and never blocks the pull request.
       - name: AutoFill extension UI test (best effort)
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        run: |
-          xcodebuild test \
-            -project Apps/Watchword.xcodeproj \
-            -scheme Watchword-iOS \
-            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
-            -only-testing:WatchwordUITests/AutoFillSettingsTests \
-            CODE_SIGNING_ALLOWED=NO
+        run: mise run app:test ios --only-testing WatchwordUITests/AutoFillSettingsTests
 
       - name: Upload result bundles
         if: always() && steps.detect.outputs.present == 'true'

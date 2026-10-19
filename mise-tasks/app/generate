@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#MISE description="Generate Apps/Watchword.xcodeproj, its Info.plists and entitlements from Apps/project.yml"
+#
+# The generated files are not committed; Apps/project.yml is the single reviewed source for them. XcodeGen must be
+# the one pinned in mise.toml (version, URL and SHA-256 in mise.lock; docs/07-supply-chain.md §3.3), so a Homebrew
+# or otherwise unpinned copy earlier on PATH fails here instead of quietly generating the project.
+set -euo pipefail
+
+want=$(mise current xcodegen)
+have=$(xcodegen --version 2> /dev/null || true)
+echo "$have"
+if [ -z "$want" ] || [ "$have" != "Version: $want" ]; then
+  echo "::error::expected XcodeGen ${want:-from mise.toml}, got: ${have:-none}. Run \`mise install xcodegen\`."
+  exit 1
+fi
+
+xcodegen generate --spec Apps/project.yml --project Apps

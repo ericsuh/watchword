@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Delete build output: .build, the generated Xcode project, test logs, coverage and result bundles"
+#
+# Leaves the fuzz corpus and crash artifacts alone: they are inputs worth keeping, not build output.
+set -euo pipefail
+
+rm -rf .build TestResults Apps/Watchword.xcodeproj coverage.txt test-output.log adversarial.log
+# XcodeGen writes Info.plists and entitlements next to the sources; remove only the untracked, ignored ones.
+git ls-files -z --others --ignored --exclude-standard -- 'Apps/*Info*.plist' 'Apps/*.entitlements' \
+  | xargs -0 rm -f

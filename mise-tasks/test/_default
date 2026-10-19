@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#MISE description="Run the package tests (Swift Testing + XCTest) and check that both frameworks ran"
+#USAGE flag "--filter <pattern>" help="Only run tests matching this regex (`swift test --filter`); skips the both-frameworks check, since a filter may select only one"
+#USAGE flag "--coverage" help="Collect code coverage and write an llvm-cov report to coverage.txt (best effort, even if tests fail)"
+#USAGE flag "--log <file>" default="test-output.log" help="Where to keep a copy of the test output"
+#
+# The package-tests CI job. Both frameworks must keep executing tests, not merely compiling (CLAUDE.md, "Tests"), so
+# the captured output is checked for evidence of each.
+set -euo pipefail
+
+log="$usage_log"
+coverage="${usage_coverage:-false}"
+
+args=(--parallel)
+[ -n "${usage_filter:-}" ] && args+=(--filter "$usage_filter")
+[ "$coverage" = true ] && args+=(--enable-code-coverage)
+
+status=0
+swift test "${args[@]}" 2>&1 | tee "$log" || status=$?
+
+if [ "$coverage" = true ]; then
+  bin=$(swift build --show-bin-path)
+  profdata=$(find "$bin" -name default.profdata | head -n 1 || true)
+  xctest=$(find "$bin" -maxdepth 1 -name '*.xctest' | head -n 1 || true)
+  if [ -n "$profdata" ] && [ -n "$xctest" ]; then
+    if [ -d "$xctest" ]; then # macOS bundle; on Linux the .xctest is the executable itself
+      xcrun llvm-cov report "$xctest/Contents/MacOS/$(basename "$xctest" .xctest)" \
+        -instr-profile "$profdata" -ignore-filename-regex='Tests/' > coverage.txt || true
+    else
+      llvm-cov report "$xctest" -instr-profile "$profdata" -ignore-filename-regex='Tests/' > coverage.txt || true
+    fi
+    cat coverage.txt || true
+  else
+    echo "warning: no coverage data found under $bin; coverage.txt not written"
+  fi
+fi
+
+[ "$status" -eq 0 ] || exit "$status"
+[ -z "${usage_filter:-}" ] || exit 0
+
+grep -Eq "Test run with [1-9][0-9]* tests?" "$log" \
+  || { echo "::error::No Swift Testing tests were executed"; exit 1; }
+# XCTest under `swift test --parallel` prints one "[n/m] Testing Target.Class/test" line per test.
+grep -Eq "\[[0-9]+/[1-9][0-9]*\] Testing [A-Za-z]+Tests\.|Test Case .* passed|Executed [1-9][0-9]* tests?" "$log" \
+  || { echo "::error::No XCTest tests were executed"; exit 1; }
