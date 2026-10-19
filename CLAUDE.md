@@ -73,10 +73,13 @@ x86\_64** VM. `docs/09-cloud-sessions.md` is the setup runbook; the part that ma
 is what the platform excludes. There is no Xcode, no simulator, no Apple SDK, and no Xcode MCP
 server, and the base image cannot be replaced. So in a cloud session:
 
-- `swift build`, `swift test`, the adversarial suite, `-strict-memory-safety` and `swift format`
-  all work — four of the five `ci.yml` jobs. Run `.github/scripts/cloud-verify.sh` for the lot.
-- The setup script also installs mise and runs `mise trust && mise install` (XcodeGen skipped: macOS
-  only). The shims are not on `PATH` in the Bash tool, so run pinned tools as `mise exec -- <tool>`.
+- `mise run build`, `test`, `test:adversarial`, `build:strict`, the `audit:*` tasks and `lint` all
+  work — four of the five `ci.yml` jobs. Run `.github/scripts/cloud-verify.sh` for the lot: it runs
+  those same tasks with a pass/FAIL line each (`--quick` for build and tests only).
+- The setup script installs mise and runs `mise trust && mise install` (XcodeGen skipped: macOS
+  only), but best-effort: without a working `mise`, `cloud-verify.sh` warns and falls back to plain
+  `swift` commands, which skip the audits. The shims are not on `PATH` in the Bash tool, so run pinned
+  tools as `mise exec -- <tool>`.
 - Anything importing CryptoKit, Security.framework, CommonCrypto or LocalAuthentication does not
   compile, and `xcodebuild` is absent. `WatchwordCrypto`, `SecureMemory` and the Keychain adapters
   (`docs/02-architecture.md` §15) can be drafted there but **not** built or tested. Say so rather

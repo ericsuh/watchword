@@ -158,13 +158,28 @@ dependencies to install per-session, so there is nothing a hook would buy.
 Ask Claude to run:
 
 ```sh
-.github/scripts/cloud-verify.sh          # build, both test frameworks, adversarial, memory safety, lint
+.github/scripts/cloud-verify.sh          # build, both test frameworks, adversarial, memory safety, audits, lint
 .github/scripts/cloud-verify.sh --quick  # build and test only
 ```
 
-That script is the honest subset of `ci.yml`: the four jobs expressible as plain `swift` commands. It
-says so in its own summary line, and it names the Xcode-only gates it did not run, so a green result
-is never mistaken for a green CI.
+That script is the honest subset of `ci.yml`: the four jobs that need no Xcode. Each gate is the same
+`mise run <task>` the matching `ci.yml` step calls — `build`, `test`, `test:adversarial`, then (without
+`--quick`) `build:strict`, `audit:unsafe`, `audit:dependencies`, `audit:actions` and `lint` — so it
+cannot drift from CI, and it inherits the tasks' own checks that both test frameworks and every
+adversarial suite actually ran. It prints a pass/FAIL line per gate and a summary naming which runner
+it used and the Xcode-only gates it did not run, so a green result is never mistaken for a green CI.
+
+Two gates are skipped, with a warning and a `skipped:` line in the summary, rather than failed:
+`lint` when the toolchain has no `swift format`, and `audit:dependencies` when `python3` is not on
+`PATH` (it parses `swift package dump-package` output with it; Ubuntu 24.04 ships it). `build:strict`
+runs: the session's Swift 6.4 supports `-strict-memory-safety`.
+
+mise is installed best-effort (§3, step 5), so when `mise` is not on `PATH`, or `mise tasks info build`
+fails (a mise older than `mise.toml`'s `min_version`, or a config it cannot parse), the script warns and
+falls back to the plain `swift build` / `swift test` / `swift format lint` commands. That fallback
+covers build, both test suites, the strict build and lint, but not the audits or the tasks'
+did-it-actually-run checks; the summary header says `(swift)` instead of `(mise)` when it was used.
+Fix mise (below) rather than settling for it.
 
 If `swift` is missing, read the log first — it names the failure:
 
@@ -200,6 +215,8 @@ older leg. Cloud-session green is a signal, not the gate — `ci.yml` is the gat
 
 ## 5. Related
 
+- [`mise.toml`](../mise.toml) and [`mise-tasks/`](../mise-tasks) — the gates `cloud-verify.sh` runs,
+  shared with `ci.yml`; edit a gate there, not in the script.
 - `07-supply-chain.md` §3 (operational shell lives in the repository, not in third-party actions),
   §5 (why `.claude/` is not committed).
 - `02-architecture.md` §15 — which future modules are Apple-framework-bound, and therefore outside
