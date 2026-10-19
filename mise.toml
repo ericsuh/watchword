@@ -1,11 +1,62 @@
-# Developer tools for this repository, pinned to exact versions (docs/07-supply-chain.md).
-# `mise install` in the repository root installs them; `mise trust` once per checkout first.
+# Developer tools and tasks for this repository. Tools are pinned to exact versions (docs/07-supply-chain.md).
+# `mise trust && mise install` once per checkout, then `mise tasks` lists what is below and in `mise-tasks/`.
 #
 # Swift and swift-format are deliberately not here: they come with the Xcode toolchain that
 # `.github/scripts/select-xcode.sh` selects, so the compiler that builds the package is the one CI tests.
+#
+# CI calls these same tasks, one per workflow step, so a red check reproduces locally with the command in its step
+# name. One-line tasks live here; anything longer or with a branch is a script in `mise-tasks/` whose `#USAGE`
+# header documents its arguments (`mise run <task> --help`).
+
+min_version = "2026.9.11"
 
 [tools]
 # Generates Apps/Watchword.xcodeproj from Apps/project.yml.
 xcodegen = "2.46.0"
 # Repository and code-scanning queries in CLAUDE.md and docs/08-repository-hardening.md.
 gh = "2.92.0"
+
+# Gates. `check` is the ci.yml gate minus the app tests, which need Xcode and a simulator; `check:all` adds them.
+
+[tasks.check]
+description = "Every package gate in ci.yml: lint, supply-chain and memory-safety audits, the tests"
+# `test` runs the adversarial suite too and checks every area's suite ran, so `test:adversarial` (its own CI job) is
+# not repeated here.
+depends = ["lint", "audit", "test"]
+
+[tasks."check:all"]
+description = "`check` plus the iOS and macOS app test suites (macOS with Xcode only)"
+depends = ["check", { task = "app:test", args = ["all"] }]
+
+# Package build.
+
+[tasks.build]
+description = "Build the Swift package (extra arguments go to `swift build`)"
+run = "swift build"
+
+# Static analysis. swift-format's `lint --strict` checks formatting as well as its rules, so it is also `fmt:check`.
+
+[tasks.lint]
+description = "swift-format lint, warnings as errors (read-only; `fmt` fixes what it can)"
+alias = "fmt:check"
+run = "swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests Apps"
+
+[tasks.fmt]
+description = "Rewrite Swift sources into canonical swift-format style"
+run = "swift format --in-place --recursive --configuration .swift-format Package.swift Sources Tests Apps"
+
+[tasks.audit]
+description = "Supply-chain and memory-safety tripwires (docs/07-supply-chain.md, ADR 0001)"
+depends = ["audit:dependencies", "audit:memory-safety", "audit:actions", "audit:mise-pins"]
+
+[tasks."audit:dependencies"]
+description = "Fail on any third-party package, binary target, plugin, unsafe flag or non-Swift source"
+run = ".github/scripts/assert-no-dependencies.sh"
+
+[tasks."audit:unsafe"]
+description = "Fail on unsafe constructs outside SecureMemory, including ones the compiler does not flag"
+run = ".github/scripts/assert-unsafe-confined.sh"
+
+[tasks."audit:memory-safety"]
+description = "The strict-memory-safety CI job: the strict build plus the unsafe-confinement tripwire"
+depends = ["build:strict", "audit:unsafe"]

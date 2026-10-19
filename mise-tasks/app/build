@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#MISE description="Build the iOS and/or macOS app with xcodebuild, unsigned (iOS Simulator) or ad hoc signed (macOS)"
+#MISE depends=["app:generate"]
+#USAGE arg "[platform]" default="all" help="Which app to build" {
+#USAGE   choices "ios" "macos" "all"
+#USAGE }
+#USAGE flag "--configuration <name>" default="Debug" help="Xcode build configuration" {
+#USAGE   choices "Debug" "Release"
+#USAGE }
+#
+# Signing settings are in signing.sh, shared with `app:test`, so a local build matches what CI tests.
+set -euo pipefail
+# shellcheck source=signing.sh
+source "$(dirname "${BASH_SOURCE[0]}")/signing.sh"
+
+build() { # build <scheme> <destination> <build settings...>
+  local scheme="$1" destination="$2"
+  shift 2
+  xcodebuild build -project Apps/Watchword.xcodeproj -scheme "$scheme" -destination "$destination" \
+    -configuration "$usage_configuration" "$@"
+}
+
+case "$usage_platform" in
+  ios | all) build Watchword-iOS 'generic/platform=iOS Simulator' "${ios_signing[@]}" ;;
+esac
+case "$usage_platform" in
+  macos | all) build Watchword-macOS 'platform=macOS' "${macos_signing[@]}" ;;
+esac

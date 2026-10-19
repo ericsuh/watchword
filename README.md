@@ -35,16 +35,20 @@ Sources/WatchwordEnvelope  envelope header and KDF parameter validation (two-sid
 Tests/                     Swift Testing suites, XCTest suites, adversarial + phishing suites
 .github/workflows          macOS CI: package tests, adversarial job, strict memory safety, lint
 .github/scripts            Xcode selection and the zero-dependency guard (no third-party actions)
+mise-tasks/                Build, test, audit and app tasks behind `mise run` (CI calls them too)
 ```
 
 ## Building and testing
 
-Requires Xcode 16.4 or newer (Xcode 26 for the strict-memory-safety job).
+Requires Xcode 16.4 or newer (Xcode 26 for the strict-memory-safety job) and
+[mise](https://mise.jdx.dev). CI runs these same tasks, so a failing check reproduces locally with
+the command in its step name.
 
 ```sh
-swift build
-swift test --parallel
-swift test --filter Adversarial            # security suite only
+mise trust && mise install      # once per checkout
+mise run check                  # lint, supply-chain audits, package and adversarial tests
+mise run app:test               # iOS and macOS app suites (generates the Xcode project first)
+mise tasks                      # everything else; `mise run <task> --help` for flags
 ```
 
 ## Principles

@@ -270,20 +270,27 @@ observable from the extension). Milestone 2 enforces F11.2 at the vault boundary
 
 ## 7. CI implementation
 
-Workflows live in `.github/workflows/` (see `ci.yml` and `security-nightly.yml`):
+Workflows live in `.github/workflows/` (see `ci.yml` and `security-nightly.yml`). Every step after
+checkout and Xcode selection is a `mise run` task (`mise.toml`, `mise-tasks/`), so each job below
+reproduces locally with the task named in brackets; `mise run check` runs all of them but the app
+tests (its `test` also checks every adversarial suite ran, so it skips the separate adversarial
+run, and its strict build skips with a warning on a compiler older than Swift 6.2).
 
-- `package-tests` matrix: `macos-15` with Xcode 16.4 and `macos-26` with Xcode 26.x; runs
-  `swift build -v` and `swift test --parallel --enable-code-coverage`, uploads `.xcresult`-style
-  logs as artifacts.
-- `adversarial-tests`: `swift test --filter 'Adversarial'` so that a regression in the security
-  suite is visible as its own red check.
+- `package-tests` matrix: `macos-15` with Xcode 16.4 and `macos-26` with Xcode 26.x; runs the
+  dependency tripwire, `swift build -v` and `swift test --parallel --enable-code-coverage`, fails
+  unless both test frameworks and every adversarial area's suite executed tests, and uploads the log and coverage report as artifacts
+  [`audit:dependencies`, `build`, `test --coverage`].
+- `adversarial-tests`: the adversarial suite alone, so that a regression in the security suite is
+  visible as its own red check; fails if any area's suite is missing [`test:adversarial`].
 - `strict-memory-safety`: builds with `-Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors`
-  on Xcode 26 (Swift 6.2+), proving no unsafe constructs outside `SecureMemory`.
-- `lint`: `swift format lint --strict` with the repository `.swift-format`.
+  on Xcode 26 (Swift 6.2+), then runs the unsafe-confinement tripwire, proving no unsafe constructs
+  outside `SecureMemory` [`build:strict --require`, `audit:unsafe`].
+- `lint`: `swift format lint --strict` with the repository `.swift-format` [`lint`].
 - `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator, with the AutoFill
   Settings attempt marked `continue-on-error`. The job is skipped until `Apps/project.yml`
-  exists.
-- `security-nightly.yml`: scheduled fuzzing and long randomised sync simulations.
+  exists [`app:test macos`, `app:test ios`].
+- `security-nightly.yml`: scheduled fuzzing, long randomised sync simulations and the action
+  pinning audit [`fuzz`, `test:long`, `audit:actions`].
 
 Branch protection should require `package-tests`, `adversarial-tests`, `strict-memory-safety`
 and `lint` to pass.

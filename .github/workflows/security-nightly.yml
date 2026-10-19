@@ -13,6 +13,9 @@ defaults:
   run:
     shell: bash
 
+# Steps run `mise run <task>`, as in ci.yml; `.github/scripts/install-mise.sh` installs and configures mise
+# (on the Linux job too, where it also disables the macOS-only XcodeGen).
+
 # Pinned to full commit SHAs, not tags (docs/07-supply-chain.md).
 #   actions/checkout        v4 -> 11d5960a326750d5838078e36cf38b85af677262
 #   actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -32,11 +35,13 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: .github/scripts/select-xcode.sh 26.6
-      - name: Run with extended iteration budget
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+      # Replay a failure locally with `mise run test:long --seed <the seed printed in this step>`.
+      - name: mise run test:long
         env:
-          WATCHWORD_LONG_TESTS: "1"
-          WATCHWORD_TEST_SEED: ${{ github.run_id }}
-        run: swift test --parallel --filter 'WatchwordAdversarialTests|LongRunning'
+          SEED: ${{ github.run_id }}
+        run: mise run test:long --seed "$SEED"
 
   fuzz:
     # libFuzzer harnesses for parsers and the envelope decoder (docs/04-test-plan.md §6.8).
@@ -53,16 +58,10 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: .github/scripts/select-xcode.sh 26.6
-      - name: Fuzz
-        run: |
-          if [ ! -d Fuzz ]; then
-            echo "::notice::No Fuzz/ directory yet; nothing to fuzz"
-            exit 0
-          fi
-          swift build -c release -Xswiftc -sanitize=fuzzer -Xswiftc -parse-as-library --product WatchwordFuzz
-          mkdir -p corpus artifacts
-          "$(swift build -c release --show-bin-path)/WatchwordFuzz" corpus \
-            -max_total_time=1800 -artifact_prefix=artifacts/ -rss_limit_mb=4096
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+      - name: mise run fuzz
+        run: mise run fuzz --max-total-time 1800
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -83,14 +82,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Every `uses:` must be a 40-hex SHA
-        run: |
-          bad=$(grep -rhoE '^\s*-?\s*uses:\s*\S+' .github/workflows \
-                | sed -E 's/.*uses:\s*//' \
-                | grep -vE '@[0-9a-f]{40}$' || true)
-          if [ -n "$bad" ]; then
-            echo "::error::These actions are not pinned to a commit SHA:"
-            echo "$bad"
-            exit 1
-          fi
-          echo "All actions pinned to commit SHAs."
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+      # Every `uses:` must be a 40-hex SHA.
+      - name: mise run audit:actions
+        run: mise run audit:actions

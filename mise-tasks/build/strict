@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#MISE description="Build with -strict-memory-safety and warnings as errors (ADR 0001, SE-0458); skips before Swift 6.2"
+#USAGE flag "--require" help="Fail instead of skipping when the compiler predates Swift 6.2. The strict-memory-safety CI job passes it, so the gate cannot quietly vanish"
+#USAGE flag "-v --verbose" help="Pass -v to swift build"
+#
+# The flag needs Swift 6.2 (Xcode 26), but Xcode 16.4 is a supported toolchain, so `check` on it warns and skips this
+# stage rather than failing every time. Its own scratch path, so it neither invalidates nor waits on `.build`.
+set -euo pipefail
+
+major=0 minor=0
+read -r major minor < <(swift --version 2>&1 | sed -nE 's/.*Swift version ([0-9]+)\.([0-9]+).*/\1 \2/p' | head -n 1) || true
+if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 2 ]; }; then
+  message="Swift $major.$minor predates -strict-memory-safety (Swift 6.2, Xcode 26)"
+  if [ "${usage_require:-false}" = true ]; then
+    echo "::error::$message"
+    exit 1
+  fi
+  echo "::warning::$message; strict build skipped. The strict-memory-safety CI job still runs it."
+  exit 0
+fi
+
+verbose=()
+if [ "${usage_verbose:-false}" = true ]; then verbose=(-v); fi
+swift build ${verbose[@]+"${verbose[@]}"} --scratch-path .build/strict \
+  -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors

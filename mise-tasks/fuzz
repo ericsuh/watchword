@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#MISE description="Build the libFuzzer harness under Fuzz/ and run it for a bounded time (skips until Fuzz/ exists)"
+#USAGE flag "--max-total-time <seconds>" default="60" help="libFuzzer -max_total_time; the nightly job uses 1800"
+#USAGE flag "--corpus <dir>" default="corpus" help="Corpus directory, created if missing and grown by the run"
+#
+# docs/04-test-plan.md §6.8. Crashing inputs land in artifacts/.
+set -euo pipefail
+
+if [ ! -d Fuzz ]; then
+  echo "::notice::No Fuzz/ directory yet; nothing to fuzz"
+  exit 0
+fi
+
+swift build -c release -Xswiftc -sanitize=fuzzer -Xswiftc -parse-as-library --product WatchwordFuzz
+mkdir -p "$usage_corpus" artifacts
+"$(swift build -c release --show-bin-path)/WatchwordFuzz" "$usage_corpus" \
+  -max_total_time="$usage_max_total_time" -artifact_prefix=artifacts/ -rss_limit_mb=4096
