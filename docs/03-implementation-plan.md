@@ -117,8 +117,10 @@ Status: delivered, with these scoping notes.
   `sync_state` tables and tombstones to milestone 3, device-to-device enrolment to milestone 3
   (Emergency Kit entry works now: `unlock(password:secretKey:)`), and the F11.7 add-a-mismatched-host
   confirmation UI to milestone 5, where the mismatch is first observable.
-- Real Keychain round trips need an entitled, signed process; `swift test` skips them
-  (`errSecMissingEntitlement`) and checks the query attributes instead.
+- Real Keychain round trips need an entitled, signed process; `swift test` and CI skip them
+  (`errSecMissingEntitlement`) and check the query attributes instead. On a Mac,
+  `mise run app:test-keychain --team <ID>` runs the round trip signed, in the app-hosted
+  `WatchwordKeychainTests` bundle (a free Personal Team is enough; `04-test-plan.md` §6.2).
 
 ## Milestone 3 — Sync
 

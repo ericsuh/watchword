@@ -14,6 +14,7 @@ explicitly, not just its happy path.
 | Multi-client sync and sharing simulations | Swift Testing | `swift test`, every push (short) + nightly (long, randomised) | 2 min / 30 min |
 | Adversarial security suite | Swift Testing, suites named `Adversarial…`, tag `.adversarial` | dedicated CI job, every push | < 3 min |
 | App UI tests | XCUITest | `xcodebuild test` on macOS and the iOS simulator, every pull request once `Apps/` exists | < 15 min |
+| Real Keychain round trip | Swift Testing in an app-hosted unit-test bundle (`WatchwordKeychainTests`) | signed, locally on a Mac (`mise run app:test-keychain --team <ID>`); unentitled in CI, where it skips | < 1 min |
 | CloudKit integration | Swift Testing against a development container | manual `workflow_dispatch` with secrets | < 10 min |
 | Fuzzing of parsers and envelope decoder | libFuzzer via `swift build -sanitize=fuzzer` | nightly | 30 min |
 | Manual QA checklist (AutoFill on device, Credential Exchange) | checklist in `docs/qa/` | before each TestFlight | — |
@@ -181,6 +182,18 @@ specification, plus vectors from independent Python implementations for HPKE wit
 - `AdversarialKeychainAttributeTests` ("Adversarial: Keychain item protection"): every item is
   device-only, non-synchronisable and in the shared access group; the LUK requires the current
   biometric set with no passcode or any-biometry fallback.
+- These check the query `SystemKeychainStore` sends, because the data-protection Keychain refuses
+  an unsigned process (`errSecMissingEntitlement`). The real store, read, replace and delete
+  (`SystemKeychainStoreTests`) runs in the `WatchwordKeychainTests` bundle, hosted by
+  `WatchwordKeychainHost`, a do-nothing macOS app whose only entitlement is its own
+  `keychain-access-groups` entry, so a free Personal Team can provision it (it cannot provision the
+  main app's App Group or AutoFill entitlements). Run it signed with
+  `mise run app:test-keychain --team <ID>` (or `DEVELOPMENT_TEAM=<ID>`): it passes
+  `-allowProvisioningUpdates` and the team on the command line, never in `Apps/project.yml`, and
+  sets `WATCHWORD_REQUIRE_KEYCHAIN`, so a host signed without its entitlement fails rather than
+  skipping. The `isEntitled` probe deletes its item (and any an earlier run left) and the signed
+  run asserts nothing remains. CI's `app:test macos` runs the same bundle ad hoc signed, where the
+  round trip skips.
 - Added by the milestone-2 review (`06-adversarial-review.md` §G): a quick-unlocked session cannot
   restart the password interval; cancels count towards the failure limit; activity after the idle
   timeout locks; a committed password change reports success even if the vault locks; a planted
@@ -288,7 +301,9 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
 - `lint`: `swift format lint --strict` with the repository `.swift-format` [`lint`].
 - `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator, with the AutoFill
   Settings attempt marked `continue-on-error`. The job is skipped until `Apps/project.yml`
-  exists [`app:test macos`, `app:test ios`].
+  exists [`app:test macos`, `app:test ios`]. The macOS scheme includes the app-hosted
+  `WatchwordKeychainTests` bundle, unentitled, so it compiles and its round trip skips; the signed
+  run is local only (`app:test-keychain`, §6.2), because CI has no provisioning profile.
 - `security-nightly.yml`: scheduled fuzzing, long randomised sync simulations and the action
   pinning audit [`fuzz`, `test:long`, `audit:actions`].
 

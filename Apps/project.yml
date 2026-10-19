@@ -194,6 +194,47 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.WatchwordMacUITests
 
+  # App-hosted Keychain tests (docs/04-test-plan.md §6.2). The data-protection Keychain needs a signed process with a
+  # keychain-access-groups entitlement, which `swift test` cannot have, so SystemKeychainStoreTests.swift is compiled a
+  # second time into a bundle hosted by this app. The host's only entitlement is its own access group: a free Personal
+  # Team can provision that, but not the main app's App Group or AutoFill entitlements. `mise run app:test-keychain
+  # --team <ID>` signs and runs it; CI and `app:test macos` sign ad hoc with the entitlements dropped, so there the
+  # round trip skips (the test's `isEntitled` probe sees errSecMissingEntitlement).
+  WatchwordKeychainHost:
+    type: application
+    platform: macOS
+    sources:
+      - path: KeychainHost
+        excludes: ["*.plist", "*.entitlements"]
+    entitlements:
+      path: KeychainHost/WatchwordKeychainHost.entitlements
+      properties:
+        keychain-access-groups: [$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.WatchwordKeychainHost
+        GENERATE_INFOPLIST_FILE: YES
+
+  WatchwordKeychainTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ../Tests/WatchwordPlatformTests/SystemKeychainStoreTests.swift
+    dependencies:
+      - target: WatchwordKeychainHost
+      - package: Watchword
+        product: WatchwordKit
+      - package: Watchword
+        product: WatchwordPlatform
+      - package: Watchword
+        product: SecureMemory
+    settings:
+      base:
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/WatchwordKeychainHost.app/Contents/MacOS/WatchwordKeychainHost
+        BUNDLE_LOADER: $(TEST_HOST)
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericsuh.WatchwordKeychainHostTests
+
 schemes:
   Watchword-iOS:
     build:
@@ -210,8 +251,20 @@ schemes:
       targets:
         Watchword-macOS: all
         WatchwordMacUITests: [test]
+        WatchwordKeychainTests: [test]
     run:
       config: Debug
     test:
       config: Debug
-      targets: [WatchwordMacUITests]
+      # WatchwordKeychainTests runs here unentitled (CI), so it compiles and its round trip skips.
+      targets: [WatchwordMacUITests, WatchwordKeychainTests]
+  # The signed Keychain run (`mise run app:test-keychain`): only the test host and its bundle, so automatic signing
+  # never has to provision the main app's App Group or AutoFill entitlements.
+  WatchwordKeychainTests:
+    build:
+      targets:
+        WatchwordKeychainHost: all
+        WatchwordKeychainTests: [test]
+    test:
+      config: Debug
+      targets: [WatchwordKeychainTests]
