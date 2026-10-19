@@ -13,14 +13,8 @@ defaults:
   run:
     shell: bash
 
-# Steps run `mise run <task>`, as in ci.yml (see the comment on its `env` block): mise pinned by
-# `.github/scripts/install-mise.sh`, tools locked, and no tool downloaded unless a job asks for it.
-env:
-  MISE_LOCKED: "1"
-  MISE_YES: "1"
-  MISE_USE_VERSIONS_HOST: "0"
-  MISE_TASK_RUN_AUTO_INSTALL: "0"
-  MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+# Steps run `mise run <task>`, as in ci.yml; `.github/scripts/install-mise.sh` installs and configures mise
+# (on the Linux job too, where it also disables the macOS-only XcodeGen).
 
 # Pinned to full commit SHAs, not tags (docs/07-supply-chain.md).
 #   actions/checkout        v4 -> 11d5960a326750d5838078e36cf38b85af677262

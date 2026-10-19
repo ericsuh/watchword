@@ -85,7 +85,8 @@ Apps/**/Info*.plist
 Apps/**/*.entitlements
 
 # Task output (`mise run test --coverage`, `mise run app:test --results TestResults`, `mise run fuzz`).
-coverage.txt
-TestResults/
-corpus/
-artifacts/
+# Anchored to the root, so a committed Fuzz/corpus/ seed set or a nested artifacts/ directory is never hidden.
+/coverage.txt
+/TestResults/
+/corpus/
+/artifacts/

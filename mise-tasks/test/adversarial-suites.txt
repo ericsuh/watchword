@@ -1,0 +1,11 @@
+# @Suite display names of the adversarial areas, one per line. `test` and `test:adversarial` fail unless each appears
+# in the test output, so a renamed or deleted suite cannot pass silently as "fewer tests ran". Renaming a suite breaks
+# CI on purpose: update this list alongside it. (Data, not a task: mise runs only executable files.)
+envelope and KDF
+AutoFill service matching
+password generator
+phishing resistance
+crypto core
+unlock and quick unlock
+local vault store
+Keychain item protection

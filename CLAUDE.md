@@ -20,7 +20,7 @@ are in `mise.toml`; the rest are scripts in `mise-tasks/` whose `#USAGE` header 
 
 ```sh
 mise trust && mise install                             # once per checkout (XcodeGen, gh; checksums in mise.lock)
-mise run check                                         # every package gate in ci.yml: lint, audits, both test suites
+mise run check                                         # every package gate in ci.yml: lint, audits, tests
 mise run check:all                                     # ...plus both app test suites (macOS + Xcode only)
 
 mise run build                                         # swift build (extra arguments are passed through)
@@ -34,13 +34,13 @@ mise run fuzz --max-total-time 60                      # libFuzzer harness (skip
 
 mise run lint                                          # swift format lint --strict (alias fmt:check)
 mise run fmt                                           # swift format --in-place
-mise run audit                                         # dependency, unsafe-confinement, strict-build, action-pin tripwires
-mise run build:strict                                  # -strict-memory-safety, warnings as errors (Xcode 26)
+mise run audit                                         # dependency, unsafe, strict-build, action-pin, mise-pin tripwires
+mise run build:strict                                  # -strict-memory-safety, warnings as errors; skips before Swift 6.2
 
 # Apps (macOS only; mirrors the app-tests CI job). Each regenerates the project from Apps/project.yml first.
 mise run app:generate                                  # xcodegen; refuses an XcodeGen other than mise.toml's
 mise run app:build [ios|macos]                         # both by default; --configuration Release
-mise run app:test [ios|macos]                          # --only-testing <id>, --results <dir>, --simulator <udid>
+mise run app:test [ios|macos]                          # both by default; --only-testing <id> (needs a platform), --results, --simulator
 mise run clean                                         # .build, generated project, logs, result bundles
 ```
 
@@ -246,8 +246,8 @@ directions are tested; keep both when adjusting constants.
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`), so **renaming a suite breaks CI deliberately** — update the list in
-  `mise-tasks/test/adversarial` alongside it. Each adversarial test's doc comment states the concrete threat
+  `"Keychain item protection"`), so **renaming a suite breaks CI deliberately** — update
+  `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
   adapter must add or update an adversarial test (`docs/03-implementation-plan.md`, working
@@ -297,8 +297,10 @@ Supply-chain rules that apply to edits in `.github/`:
 - Build tools reach CI only through mise with `MISE_LOCKED=1`, so every tool needs a `mise.lock` entry
   (URL and SHA-256). Bump a tool by editing `mise.toml` and running
   `mise lock --platform macos-arm64,linux-x64`; commit both files. mise itself is pinned by version and
-  SHA-256 in `.github/scripts/install-mise.sh`, and a bump is reviewed like an action pin. Workflows set
-  `MISE_TASK_RUN_AUTO_INSTALL=0`, so a job that needs a tool installs it by name (`mise install xcodegen`).
+  SHA-256 in `.github/scripts/install-mise.sh` (and again in `cloud-setup.sh`; `mise run audit:mise-pins` fails if
+  they differ), and a bump is reviewed like an action pin. That script also writes mise's CI settings to
+  `$GITHUB_ENV`, including `MISE_TASK_RUN_AUTO_INSTALL=0`, so a job that needs a tool installs it by name
+  (`mise install xcodegen`).
 
 `.claude/` and other agent/editor configuration is intentionally uncommitted
 (`docs/07-supply-chain.md` §5). `docs/08-repository-hardening.md` is the `gh` runbook for branch

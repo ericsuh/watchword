@@ -120,8 +120,9 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
   `mise install xcodegen` with `MISE_LOCKED=1`, so mise refuses a tool with no lockfile entry and
   checks the archive against the locked checksum. A mismatch at either layer fails the job. The
   `app:generate` task also asserts that `xcodegen --version` matches `mise.toml` before generating.
-  `MISE_USE_VERSIONS_HOST=0` keeps mise from contacting
-  `mise-versions.jdx.dev`, so the job's only fetches are from GitHub releases. Nothing comes from
+  `MISE_USE_VERSIONS_HOST=0` keeps mise from contacting `mise-versions.jdx.dev`, and the script
+  never runs `mise --version` (which checks `mise.jdx.dev` for a newer release), so the job's only
+  fetches are from GitHub releases. Nothing comes from
   Homebrew. Both hashes were checked against an independent download and the digest GitHub
   publishes for the release asset. Each failure path (a bad mise hash, a tampered lock checksum, a
   tool missing from the lock) was exercised and fails the step.
@@ -137,9 +138,11 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
   `mise run <task>` (`mise.toml`, `mise-tasks/`), so a failure reproduces locally with the same
   command. That puts mise in the trust base of every job, not only `app-tests`: the same pinned
   release, installed by `install-mise.sh` (macOS arm64, and linux x64 for the nightly pinning
-  audit, whose digest is the one `cloud-setup.sh` already pins). Auto-install is off
-  (`MISE_TASK_RUN_AUTO_INSTALL=0`), so a job downloads no tool it does not name; only `app-tests`
-  installs one. The residual is the one above: mise as its maintainers built it, with
+  audit, whose digest is the one `cloud-setup.sh` already pins; `mise run audit:mise-pins` fails if
+  the two scripts ever disagree). The same script writes mise's CI settings to `$GITHUB_ENV`, so
+  every job gets them from one place. Auto-install is off (`MISE_TASK_RUN_AUTO_INSTALL=0`), so a
+  job downloads no tool it does not name; only `app-tests` installs one, and the Linux job disables
+  the macOS-only XcodeGen outright. The residual is the one above: mise as its maintainers built it, with
   `contents: read` and no secrets in reach. The task scripts are repository files, reviewed like
   the workflow steps they replaced.
 - **The runner image itself** is a large trust base (Xcode, Homebrew, preinstalled tooling) that we

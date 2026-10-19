@@ -22,17 +22,9 @@ defaults:
     shell: bash
 
 # Every step past checkout and Xcode selection is `mise run <task>`, the same command a developer runs locally
-# (mise.toml, `mise-tasks/`), so a red step reproduces with the command in its log. mise is installed by
-# `.github/scripts/install-mise.sh`, pinned by version and SHA-256. `MISE_LOCKED` makes mise refuse a tool with no
-# mise.lock entry and check each download against the lockfile checksum; with auto-install off, a job downloads only
-# the tools it asks for by name (`mise install xcodegen`). `MISE_USE_VERSIONS_HOST=0` keeps mise off
-# mise-versions.jdx.dev; the lockfile already names each URL.
-env:
-  MISE_LOCKED: "1"
-  MISE_YES: "1"
-  MISE_USE_VERSIONS_HOST: "0"
-  MISE_TASK_RUN_AUTO_INSTALL: "0"
-  MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+# (mise.toml, `mise-tasks/`), so a red step reproduces with the command in its log. `.github/scripts/install-mise.sh`
+# installs mise (pinned by version and SHA-256) and sets its CI behaviour for the rest of the job: locked tool
+# downloads, no auto-install, no version host. The settings and their reasons are listed in that script.
 
 # Third-party actions are pinned to full commit SHAs, not tags: a tag is mutable, so `@v4` is a
 # standing grant of code execution in CI to whoever can move it (docs/07-supply-chain.md).
@@ -131,8 +123,9 @@ jobs:
         run: .github/scripts/select-xcode.sh 26.6
       - name: Install mise
         run: .github/scripts/install-mise.sh
-      - name: mise run build:strict
-        run: mise run build:strict -v
+      # `--require` turns a too-old compiler into a failure; without it the task skips, as `check` does on Xcode 16.4.
+      - name: mise run build:strict --require
+        run: mise run build:strict --require --verbose
       # A marked `unsafe` expression compiles in any module, so confinement to SecureMemory is checked separately.
       - name: mise run audit:unsafe
         run: mise run audit:unsafe

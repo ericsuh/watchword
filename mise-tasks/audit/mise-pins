@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#MISE description="Fail if CI and cloud sessions pin different mise releases or linux-x64 checksums"
+#
+# mise is pinned twice: install-mise.sh for CI runners, and cloud-setup.sh, which is pasted into the cloud environment's
+# setup field and so cannot read a shared file from the checkout. This keeps a bump from updating only one of them.
+set -euo pipefail
+
+pin() { # pin <file> <variable> -> the quoted value assigned to `readonly <variable>=` in <file>
+  sed -nE "s/^readonly $2=\"([^\"]+)\".*/\\1/p" "$1"
+}
+
+ci=.github/scripts/install-mise.sh
+cloud=.github/scripts/cloud-setup.sh
+status=0
+for pair in MISE_VERSION:MISE_VERSION MISE_SHA256_LINUX_X64:MISE_SHA256; do
+  a=$(pin "$ci" "${pair%%:*}")
+  b=$(pin "$cloud" "${pair##*:}")
+  if [ -z "$a" ] || [ "$a" != "$b" ]; then
+    echo "::error::$ci ${pair%%:*}=${a:-<missing>} but $cloud ${pair##*:}=${b:-<missing>}"
+    status=1
+  fi
+done
+[ "$status" -ne 0 ] || echo "CI and cloud sessions pin the same mise release."
+exit "$status"

@@ -1,46 +1,57 @@
 #!/usr/bin/env bash
 #MISE description="Run the iOS and/or macOS app test schemes (XCTest + Swift Testing + XCUITest) with xcodebuild"
 #MISE depends=["app:generate"]
-#USAGE arg "[platform]" default="all" help="Which app's scheme to test" {
+#USAGE arg "[platform]" default="all" help="Which app's scheme to test; with `all`, both run even if the first fails" {
 #USAGE   choices "ios" "macos" "all"
 #USAGE }
-#USAGE flag "--only-testing <identifier>" help="Run only this target, class or test, e.g. WatchwordUITests/AutoFillSettingsTests"
+#USAGE flag "--only-testing <identifier>" help="Run only this target, class or test, e.g. `ios --only-testing WatchwordUITests/AutoFillSettingsTests`. Needs ios or macos: the UI test targets differ (WatchwordUITests, WatchwordMacUITests)"
 #USAGE flag "--results <dir>" help="Write <dir>/iOS.xcresult and/or <dir>/macOS.xcresult, replacing earlier bundles"
 #USAGE flag "--simulator <udid>" help="iOS Simulator to test on; defaults to the first available iPhone"
 #
 # The app-tests CI job. UI tests launch the app with `--uitest`, which (Debug only) swaps in in-memory ports, so no
-# App Group or Keychain access is needed. A macOS XCUITest runner that is not signed at all hangs before connecting,
-# so macOS signs ad hoc with the entitlements dropped (they need a provisioning profile). macOS UI tests also need
-# automation mode enabled on the machine, which needs an administrator; CI runners have it.
+# App Group or Keychain access is needed. Signing settings are in signing.sh, shared with `app:build`.
+# macOS UI tests also need automation mode enabled on the machine, which needs an administrator; CI runners have it.
 set -euo pipefail
+# shellcheck source=signing.sh
+source "$(dirname "${BASH_SOURCE[0]}")/signing.sh"
+
+platform="$usage_platform"
+if [ -n "${usage_only_testing:-}" ] && [ "$platform" = all ]; then
+  echo "::error::--only-testing needs a platform (ios or macos): the two schemes have different test targets"
+  exit 2
+fi
 
 run_tests() { # run_tests <scheme> <destination> <result bundle name> <build settings...>
-  local scheme="$1" destination="$2" bundle="$3"
-  shift 3
-  local args=(-project Apps/Watchword.xcodeproj -scheme "$scheme" -destination "$destination")
+  local args=(-project Apps/Watchword.xcodeproj -scheme "$1" -destination "$2")
   if [ -n "${usage_results:-}" ]; then
     mkdir -p "$usage_results"
-    rm -rf "$usage_results/$bundle.xcresult" # xcodebuild refuses to overwrite a bundle
-    args+=(-resultBundlePath "$usage_results/$bundle.xcresult")
+    rm -rf "$usage_results/$3.xcresult" # xcodebuild refuses to overwrite a bundle
+    args+=(-resultBundlePath "$usage_results/$3.xcresult")
   fi
-  [ -n "${usage_only_testing:-}" ] && args+=("-only-testing:$usage_only_testing")
+  shift 3
+  if [ -n "${usage_only_testing:-}" ]; then
+    args+=("-only-testing:$usage_only_testing")
+  fi
   xcodebuild test "${args[@]}" "$@"
 }
 
-case "$usage_platform" in
-  macos | all)
-    run_tests Watchword-macOS 'platform=macOS' macOS \
-      CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGN_ENTITLEMENTS=""
-    ;;
-esac
-case "$usage_platform" in
-  ios | all)
-    udid="${usage_simulator:-}"
-    if [ -z "$udid" ]; then
-      udid=$(xcrun simctl list devices available --json | python3 -c 'import json, sys
+# Each platform runs even if the other failed (a Mac without automation mode fails the macOS UI tests), and the task
+# fails if either did.
+failed=""
+if [ "$platform" = macos ] || [ "$platform" = all ]; then
+  run_tests Watchword-macOS 'platform=macOS' macOS "${macos_signing[@]}" || failed="$failed macOS"
+fi
+if [ "$platform" = ios ] || [ "$platform" = all ]; then
+  udid="${usage_simulator:-}"
+  if [ -z "$udid" ]; then
+    udid=$(xcrun simctl list devices available --json | python3 -c 'import json, sys
 devices = json.load(sys.stdin)["devices"]
 print(next(d["udid"] for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")))')
-    fi
-    run_tests Watchword-iOS "platform=iOS Simulator,id=$udid" iOS CODE_SIGNING_ALLOWED=NO
-    ;;
-esac
+  fi
+  run_tests Watchword-iOS "platform=iOS Simulator,id=$udid" iOS "${ios_signing[@]}" || failed="$failed iOS"
+fi
+
+if [ -n "$failed" ]; then
+  echo "::error::App tests failed:$failed"
+  exit 1
+fi

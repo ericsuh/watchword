@@ -19,8 +19,10 @@ gh = "2.92.0"
 # Gates. `check` is the ci.yml gate minus the app tests, which need Xcode and a simulator; `check:all` adds them.
 
 [tasks.check]
-description = "Every package gate in ci.yml: lint, supply-chain and memory-safety audits, both test suites"
-depends = ["lint", "audit", "test", "test:adversarial"]
+description = "Every package gate in ci.yml: lint, supply-chain and memory-safety audits, the tests"
+# `test` runs the adversarial suite too and checks every area's suite ran, so `test:adversarial` (its own CI job) is
+# not repeated here.
+depends = ["lint", "audit", "test"]
 
 [tasks."check:all"]
 description = "`check` plus the iOS and macOS app test suites (macOS with Xcode only)"
@@ -31,11 +33,6 @@ depends = ["check", { task = "app:test", args = ["all"] }]
 [tasks.build]
 description = "Build the Swift package (extra arguments go to `swift build`)"
 run = "swift build"
-
-[tasks."build:strict"]
-description = "Build with -strict-memory-safety and warnings as errors (ADR 0001, SE-0458; needs Swift 6.2+)"
-# Its own scratch path, so it neither invalidates nor waits on the ordinary build in `.build`.
-run = "swift build --scratch-path .build/strict -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors"
 
 # Static analysis. swift-format's `lint --strict` checks formatting as well as its rules, so it is also `fmt:check`.
 
@@ -50,7 +47,7 @@ run = "swift format --in-place --recursive --configuration .swift-format Package
 
 [tasks.audit]
 description = "Supply-chain and memory-safety tripwires (docs/07-supply-chain.md, ADR 0001)"
-depends = ["audit:dependencies", "audit:memory-safety", "audit:actions"]
+depends = ["audit:dependencies", "audit:memory-safety", "audit:actions", "audit:mise-pins"]
 
 [tasks."audit:dependencies"]
 description = "Fail on any third-party package, binary target, plugin, unsafe flag or non-Swift source"

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #MISE description="Run the package tests (Swift Testing + XCTest) and check that both frameworks ran"
-#USAGE flag "--filter <pattern>" help="Only run tests matching this regex (`swift test --filter`); skips the both-frameworks check, since a filter may select only one"
+#USAGE flag "--filter <pattern>" help="Only run tests matching this regex (`swift test --filter`); skips the checks that both frameworks and every adversarial suite ran, since a filter may select only some"
 #USAGE flag "--coverage" help="Collect code coverage and write an llvm-cov report to coverage.txt (best effort, even if tests fail)"
 #USAGE flag "--log <file>" default="test-output.log" help="Where to keep a copy of the test output"
 #
 # The package-tests CI job. Both frameworks must keep executing tests, not merely compiling (CLAUDE.md, "Tests"), so
-# the captured output is checked for evidence of each.
+# the captured output is checked for evidence of each, and for every adversarial area's suite (as `test:adversarial`
+# does), which lets `check` skip a second run of that suite.
 set -euo pipefail
 
 log="$usage_log"
@@ -43,3 +44,11 @@ grep -Eq "Test run with [1-9][0-9]* tests?" "$log" \
 # XCTest under `swift test --parallel` prints one "[n/m] Testing Target.Class/test" line per test.
 grep -Eq "\[[0-9]+/[1-9][0-9]*\] Testing [A-Za-z]+Tests\.|Test Case .* passed|Executed [1-9][0-9]* tests?" "$log" \
   || { echo "::error::No XCTest tests were executed"; exit 1; }
+
+# Every adversarial area's @Suite must have run (adversarial-suites.txt says why).
+missing=0
+while IFS= read -r suite; do
+  case "$suite" in "" | "#"*) continue ;; esac
+  grep -Fq "$suite" "$log" || { echo "::error::Adversarial suite missing: $suite"; missing=1; }
+done < "$(dirname "${BASH_SOURCE[0]}")/adversarial-suites.txt"
+exit "$missing"

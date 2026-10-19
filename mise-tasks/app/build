@@ -8,9 +8,10 @@
 #USAGE   choices "Debug" "Release"
 #USAGE }
 #
-# Signing matches `app:test`: CI has no provisioning profile, so iOS builds for the simulator without signing and
-# macOS signs ad hoc with the entitlements dropped.
+# Signing settings are in signing.sh, shared with `app:test`, so a local build matches what CI tests.
 set -euo pipefail
+# shellcheck source=signing.sh
+source "$(dirname "${BASH_SOURCE[0]}")/signing.sh"
 
 build() { # build <scheme> <destination> <build settings...>
   local scheme="$1" destination="$2"
@@ -20,11 +21,8 @@ build() { # build <scheme> <destination> <build settings...>
 }
 
 case "$usage_platform" in
-  ios | all) build Watchword-iOS 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO ;;
+  ios | all) build Watchword-iOS 'generic/platform=iOS Simulator' "${ios_signing[@]}" ;;
 esac
 case "$usage_platform" in
-  macos | all)
-    build Watchword-macOS 'platform=macOS' \
-      CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGN_ENTITLEMENTS=""
-    ;;
+  macos | all) build Watchword-macOS 'platform=macOS' "${macos_signing[@]}" ;;
 esac

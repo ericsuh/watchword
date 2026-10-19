@@ -36,7 +36,8 @@ readonly WORK="/tmp/watchword-cloud-setup"
 readonly LOG="/var/log/watchword-cloud-setup.log"
 
 # mise, pinned. The developer tools themselves are pinned in the checkout's mise.toml (CLAUDE.md, "Commands"); this pins
-# the tool that installs them. Same version as CI (.github/workflows/ci.yml). The checksum is GitHub's published
+# the tool that installs them. Same version and linux-x64 checksum as CI (.github/scripts/install-mise.sh); `mise run
+# audit:mise-pins` fails if they disagree. The checksum is GitHub's published
 # SHA-256 for that release asset; mise.jdx.dev serves the identical file, so one checksum covers both sources.
 readonly MISE_VERSION="2026.9.11"
 readonly MISE_ARCHIVE="mise-v${MISE_VERSION}-linux-x64.tar.gz"

@@ -2,21 +2,9 @@
 #MISE description="Run the adversarial security suite alone and check every area's suite ran"
 #USAGE flag "--log <file>" default="adversarial.log" help="Where to keep a copy of the test output"
 #
-# The adversarial-tests CI job (docs/04-test-plan.md §6). A renamed or deleted suite would otherwise pass silently as
-# "fewer tests ran", so each area's @Suite display name must appear in the output. Renaming a suite breaks this on
-# purpose: update the list below alongside it.
+# The adversarial-tests CI job (docs/04-test-plan.md §6): the security suite on its own, so a regression shows up as
+# its own red check.
 set -euo pipefail
-
-suites=(
-  "envelope and KDF"
-  "AutoFill service matching"
-  "password generator"
-  "phishing resistance"
-  "crypto core"
-  "unlock and quick unlock"
-  "local vault store"
-  "Keychain item protection"
-)
 
 log="$usage_log"
 swift test --parallel --filter WatchwordAdversarialTests 2>&1 | tee "$log"
@@ -25,6 +13,11 @@ if grep -Eq "Test run with 0 tests|Executed 0 tests" "$log"; then
   echo "::error::No adversarial tests were executed"
   exit 1
 fi
-for suite in "${suites[@]}"; do
-  grep -Fq "$suite" "$log" || { echo "::error::Adversarial suite missing: $suite"; exit 1; }
-done
+
+# Every adversarial area's @Suite must have run (adversarial-suites.txt says why).
+missing=0
+while IFS= read -r suite; do
+  case "$suite" in "" | "#"*) continue ;; esac
+  grep -Fq "$suite" "$log" || { echo "::error::Adversarial suite missing: $suite"; missing=1; }
+done < "$(dirname "${BASH_SOURCE[0]}")/adversarial-suites.txt"
+exit "$missing"
