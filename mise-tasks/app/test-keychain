@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#MISE description="Run the real Keychain round trip on macOS, signed with your own development team (local only)"
+#MISE depends=["app:generate"]
+#USAGE flag "--team <id>" env="DEVELOPMENT_TEAM" help="Your 10-character Apple team ID (a free Personal Team works); Xcode › Settings › Accounts, or the OU of your Apple Development certificate"
+#USAGE flag "--results <dir>" help="Write <dir>/Keychain.xcresult, replacing an earlier bundle"
+#
+# SystemKeychainStoreTests' round trip needs a signed process with a keychain-access-groups entitlement, so it skips
+# under `swift test` and in CI. This runs the WatchwordKeychainTests scheme (Apps/project.yml) with automatic signing:
+# the host app's only entitlement is its own access group, which a Personal Team can provision. Xcode must be signed
+# in to an account for that team. The team ID stays on the command line, never in the committed spec.
+#
+# WATCHWORD_REQUIRE_KEYCHAIN (xcodebuild hands TEST_RUNNER_-prefixed variables to the test process) turns a missing
+# entitlement into a failure here, so a signing mistake cannot pass by skipping the round trip.
+set -euo pipefail
+
+team="${usage_team:-}"
+if [ -z "$team" ]; then
+  echo "::error::--team <id> (or DEVELOPMENT_TEAM) is required: the round trip needs a provisioned signature"
+  exit 2
+fi
+
+args=(-project Apps/Watchword.xcodeproj -scheme WatchwordKeychainTests -destination 'platform=macOS')
+if [ -n "${usage_results:-}" ]; then
+  mkdir -p "$usage_results"
+  rm -rf "$usage_results/Keychain.xcresult" # xcodebuild refuses to overwrite a bundle
+  args+=(-resultBundlePath "$usage_results/Keychain.xcresult")
+fi
+
+TEST_RUNNER_WATCHWORD_REQUIRE_KEYCHAIN=1 xcodebuild test "${args[@]}" -allowProvisioningUpdates \
+  CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$team"

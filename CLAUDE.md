@@ -41,12 +41,17 @@ mise run build:strict                                  # -strict-memory-safety, 
 mise run app:generate                                  # xcodegen; refuses an XcodeGen other than mise.toml's
 mise run app:build [ios|macos]                         # both by default; --configuration Release
 mise run app:test [ios|macos]                          # both by default; --only-testing <id> (needs a platform), --results, --simulator
+mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
 ```
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor.
 macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
-have it. Real Keychain round trips need a signed, entitled process, so `swift test` skips them.
+have it. Real Keychain round trips need a signed, entitled process, so `swift test` and CI skip them.
+`app:test-keychain` runs `SystemKeychainStoreTests` in the `WatchwordKeychainTests` bundle, hosted by a do-nothing
+app whose only entitlement is its own Keychain access group, so a free Personal Team can sign it; the team ID goes
+on the command line (`--team` or `DEVELOPMENT_TEAM`), never in `Apps/project.yml`, and xcodebuild runs with
+`-allowProvisioningUpdates`. It sets `WATCHWORD_REQUIRE_KEYCHAIN`, so a missing entitlement fails instead of skipping.
 
 Requires Xcode 16.4+ (Xcode 26 for strict memory safety). Other developer tools come from the project-level
 `mise.toml`, never Homebrew or the global mise config; Swift and swift-format come from the selected Xcode. CI runs the same matrix: Xcode 16.4 on
