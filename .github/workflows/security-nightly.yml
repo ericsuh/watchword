@@ -25,7 +25,7 @@ jobs:
     # Longer randomised runs of the sync/sharing simulations and adversarial suites
     # (docs/04-test-plan.md §1). WATCHWORD_LONG_TESTS lets tests opt into more iterations.
     name: Long randomised adversarial runs
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 120
     permissions:
       contents: read
@@ -34,7 +34,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Select Xcode
-        run: .github/scripts/select-xcode.sh 26.6
+        run: .github/scripts/select-xcode.sh 27.0
       - name: Install mise
         run: .github/scripts/install-mise.sh
       # Replay a failure locally with `mise run test:long --seed <the seed printed in this step>`.
@@ -48,7 +48,7 @@ jobs:
     # Each executable target under Fuzz/ is built with -sanitize=fuzzer and run for a bounded
     # time. Skips cleanly until the first harness exists.
     name: Fuzz parsers
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     permissions:
       contents: read
@@ -57,7 +57,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Select Xcode
-        run: .github/scripts/select-xcode.sh 26.6
+        run: .github/scripts/select-xcode.sh 27.0
       - name: Install mise
         run: .github/scripts/install-mise.sh
       - name: mise run fuzz

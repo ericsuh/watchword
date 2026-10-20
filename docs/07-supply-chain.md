@@ -180,8 +180,9 @@ Two properties to keep in mind:
 **[planned]** — these require repository-admin settings, not code. The `gh` commands,
 in an order that does not lock you out, are in `08-repository-hardening.md`:
 
-- Branch protection on `main`: require `package-tests` (both runners), `adversarial-tests`,
-  `strict-memory-safety`, and `lint`; require review; no force-push; no deletion.
+- Branch protection on `main`: require `Required checks`, the `ci.yml` job that fails unless
+  `package-tests` (both runners), `adversarial-tests`, `strict-memory-safety`, `lint` and both
+  `app-tests` legs succeeded; require review; no force-push; no deletion.
 - Require signed commits on `main`, so a push with stolen credentials is distinguishable.
 - Restrict who may edit `.github/` (a CODEOWNERS entry), because a workflow edit is code execution.
 - Tag protection on release tags, with two-person review.

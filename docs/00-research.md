@@ -249,6 +249,14 @@ documentation pages.
   A hang with Xcode 26.0.1 iOS tests on `macos-26` has been reported
   ([runner-images issue #13143](https://github.com/actions/runner-images/issues/13143)), so the
   workflows pin a later Xcode.
+- macOS 27 arrived as an image named after Xcode, not the OS: the label is `xcode-27` (arm64 only, or
+  `xcode-27-xlarge`), with no `macos-27` label, and runner-images now ships one Xcode major per
+  image. As of the 2026-10-12 image it runs macOS 27.0.1 with Xcode 27.0 (default; `Xcode_27.0.app`),
+  27.1 RC and 27.2 beta, and iOS 27.0 simulators
+  ([xcode-27-arm64 README](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md),
+  [runner-images issue #14404](https://github.com/actions/runner-images/issues/14404)). The
+  runner-images README still badges it "preview", which carries no SLA and may queue; that is the
+  standing risk of making it a required check.
 - Swift Testing and XCTest can coexist in one test target ("don't mix API from the two frameworks
   in the same test"); Swift Testing runs tests in parallel by default and supports tags and traits
   ([Swift Testing](https://developer.apple.com/documentation/testing),

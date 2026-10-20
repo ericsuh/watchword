@@ -55,7 +55,8 @@ on the command line (`--team` or `DEVELOPMENT_TEAM`), never in `Apps/project.yml
 
 Requires Xcode 16.4+ (Xcode 26 for strict memory safety). Other developer tools come from the project-level
 `mise.toml`, never Homebrew or the global mise config; Swift and swift-format come from the selected Xcode. CI runs the same matrix: Xcode 16.4 on
-macOS 15 and Xcode 26.6 on macOS 26.
+macOS 15 and Xcode 27.0 on macOS 27 (the `xcode-27` runner; GitHub keys macOS images by Xcode major, so there is
+no `macos-27` label).
 
 ### Xcode MCP server (local macOS sessions only)
 
@@ -79,7 +80,7 @@ is what the platform excludes. There is no Xcode, no simulator, no Apple SDK, an
 server, and the base image cannot be replaced. So in a cloud session:
 
 - `mise run build`, `test`, `test:adversarial`, `build:strict`, the `audit:*` tasks and `lint` all
-  work — four of the five `ci.yml` jobs. Run `.github/scripts/cloud-verify.sh` for the lot: it runs
+  work — four of the five `ci.yml` test jobs. Run `.github/scripts/cloud-verify.sh` for the lot: it runs
   those same tasks with a pass/FAIL line each (`--quick` for build and tests only).
 - The setup script installs mise and runs `mise trust && mise install` (XcodeGen skipped: macOS
   only), but best-effort: without a working `mise`, `cloud-verify.sh` warns and falls back to plain
@@ -271,7 +272,10 @@ claiming a layer is covered.
 ## CI
 
 `.github/workflows/ci.yml` — `package-tests` (2-runner matrix), `adversarial-tests`,
-`strict-memory-safety`, `lint`, `app-tests` (self-skipping). Each step after checkout and Xcode selection is
+`strict-memory-safety`, `lint`, `app-tests` (macOS and iOS-simulator legs), and `required` (`Required checks`), which
+fails unless every other job succeeded and is the one check branch protection names, so renaming a matrix leg for a
+runner bump never strands `main` waiting on a check that no longer reports. Everything Xcode-, AppKit- or
+screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is
 `mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
 runs, libFuzzer harnesses under `Fuzz/` (self-skipping), and an audit that every `uses:` is a 40-hex
 commit SHA.

@@ -289,23 +289,25 @@ reproduces locally with the task named in brackets; `mise run check` runs all of
 tests (its `test` also checks every adversarial suite ran, so it skips the separate adversarial
 run, and its strict build skips with a warning on a compiler older than Swift 6.2).
 
-- `package-tests` matrix: `macos-15` with Xcode 16.4 and `macos-26` with Xcode 26.x; runs the
+- `package-tests` matrix: `macos-15` with Xcode 16.4 and `xcode-27` (macOS 27) with Xcode 27.0; runs the
   dependency tripwire, `swift build -v` and `swift test --parallel --enable-code-coverage`, fails
   unless both test frameworks and every adversarial area's suite executed tests, and uploads the log and coverage report as artifacts
   [`audit:dependencies`, `build`, `test --coverage`].
 - `adversarial-tests`: the adversarial suite alone, so that a regression in the security suite is
   visible as its own red check; fails if any area's suite is missing [`test:adversarial`].
 - `strict-memory-safety`: builds with `-Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors`
-  on Xcode 26 (Swift 6.2+), then runs the unsafe-confinement tripwire, proving no unsafe constructs
+  on Xcode 27 (anything from Swift 6.2 on), then runs the unsafe-confinement tripwire, proving no unsafe constructs
   outside `SecureMemory` [`build:strict --require`, `audit:unsafe`].
 - `lint`: `swift format lint --strict` with the repository `.swift-format` [`lint`].
-- `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator, with the AutoFill
-  Settings attempt marked `continue-on-error`. The job is skipped until `Apps/project.yml`
-  exists [`app:test macos`, `app:test ios`]. The macOS scheme includes the app-hosted
+- `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator, one matrix leg each on
+  `xcode-27`, with the AutoFill Settings attempt marked `continue-on-error`. It no longer skips: a
+  missing `Apps/project.yml` fails `app:generate` [`app:test macos`, `app:test ios`]. The macOS scheme includes the app-hosted
   `WatchwordKeychainTests` bundle, unentitled, so it compiles and its round trip skips; the signed
   run is local only (`app:test-keychain`, §6.2), because CI has no provisioning profile.
 - `security-nightly.yml`: scheduled fuzzing, long randomised sync simulations and the action
   pinning audit [`fuzz`, `test:long`, `audit:actions`].
 
-Branch protection should require `package-tests`, `adversarial-tests`, `strict-memory-safety`
-and `lint` to pass.
+- `required` (`Required checks`): needs every job above and fails unless each succeeded. Branch
+  protection requires this one check (`08-repository-hardening.md` §5), so every job above blocks a
+  merge, including both app-test legs, and a runner bump that renames a matrix leg needs no
+  protection change.

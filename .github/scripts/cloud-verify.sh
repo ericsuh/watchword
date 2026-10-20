@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs every CI gate that a Linux cloud-session VM can honestly run.
 #
-# Four of the five `ci.yml` jobs survive the move to Linux: package-tests, adversarial-tests,
+# Four of the five `ci.yml` test jobs survive the move to Linux: package-tests, adversarial-tests,
 # strict-memory-safety and lint. What does not survive is anything that needs Xcode — the `app-tests`
 # job, the XCUITest and AutoFill extension suites, and any future module built on CryptoKit,
 # Security.framework or LocalAuthentication (docs/09-cloud-sessions.md §1). A green run here is
