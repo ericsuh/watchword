@@ -40,12 +40,18 @@ public struct SyncState: Sendable, Hashable {
     public var vaultID: UUID
     /// The sequence number of this device's next segment.
     public var nextSequence: UInt64 = 1
+    /// The last sequence number this device published, so a segment in its own stream that it did not write is
+    /// noticed.
+    public var lastPublishedSequence: UInt64 = 0
     /// For each stream, this device's included: the highest sequence number whose effects are in the local store,
     /// merged in order with no gap (or covered by a merged snapshot).
     public var merged: [UUID: UInt64] = [:]
     /// The latest stamp of every record the sync layer has merged or pushed, deletions included. A deletion here is
     /// the tombstone that stops an older version from resurrecting the record.
     public var known: [RecordKey: RecordStamp] = [:]
+    /// The latest erasure of each record this device has merged or published: the tombstone that decides whether a
+    /// version arriving later is one its author had seen (erased) or not (kept, in the trash).
+    public var erasures: [RecordKey: Erasure] = [:]
     /// The latest version of each record this device has published (or found in the log written by it). The outbox is
     /// every row this device wrote that is newer than this; it is kept apart from `known`, because a remote version
     /// can be newer than a local one that still holds changes nobody else has (the merge kept the local version).
@@ -54,12 +60,37 @@ public struct SyncState: Sendable, Hashable {
     public var acknowledgements: [UUID: [UUID: UInt64]] = [:]
     /// The acknowledgement vector of this device's last published segment.
     public var publishedAcknowledgement: [UUID: UInt64] = [:]
-    /// The newest snapshot this device has merged or written, and the segments it covers.
-    public var snapshot: SyncObjectLocation?
+    /// Every listed snapshot this device has merged or written, with the segments each covers.
+    public var snapshots: [SyncObjectLocation: [UUID: UInt64]] = [:]
+    /// For each stream, the most any merged snapshot covers. The effects of those segments are in the local store,
+    /// so a stream whose next segment is missing (collected, or never visible) continues from here.
     public var snapshotCoverage: [UUID: UInt64] = [:]
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID
+    }
+}
+
+/// A deletion of a record, and what its author had seen of it (`RecordMerger.erasureSummary`).
+public struct Erasure: Sendable, Hashable {
+    public var stamp: RecordStamp
+    public var summary: [UInt8]
+
+    public init(stamp: RecordStamp, summary: [UInt8]) {
+        self.stamp = stamp
+        self.summary = summary
+    }
+}
+
+/// A deletion made on this device and not yet published, with the row it deleted, kept locally until then so the
+/// erasure can say what its author had seen.
+public struct PendingDeletion: Sendable, Hashable {
+    public var stamp: RecordStamp
+    public var record: StoredRecord
+
+    public init(stamp: RecordStamp, record: StoredRecord) {
+        self.stamp = stamp
+        self.record = record
     }
 }
 
@@ -90,9 +121,16 @@ public protocol SyncStateStore: Sendable {
 
     /// Deletions made locally and not yet published. Kept apart from `SyncState` so that a sync in progress, which
     /// saves the state it loaded, can never drop a deletion recorded meanwhile.
-    func addPendingDeletion(_ key: RecordKey, stamp: RecordStamp, vaultID: UUID) async throws
-    func pendingDeletions(vaultID: UUID) async throws -> [RecordKey: RecordStamp]
+    func addPendingDeletion(_ deletion: PendingDeletion) async throws
+    func pendingDeletions(vaultID: UUID) async throws -> [RecordKey: PendingDeletion]
+    /// Removes each deletion only if it is still the one given (by stamp), so a newer one recorded meanwhile survives.
     func removePendingDeletions(_ deletions: [RecordKey: RecordStamp], vaultID: UUID) async throws
+
+    /// Record versions refused as implausible (U5). Kept, never discarded by sync; only the person, explicitly, may
+    /// discard them (PRD F7.7).
+    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws
+    func quarantined(vaultID: UUID) async throws -> [SyncEntry]
+    func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async throws
 
     func eraseAll() async throws
 }
@@ -100,7 +138,8 @@ public protocol SyncStateStore: Sendable {
 public actor InMemorySyncStateStore: SyncStateStore {
     private var states: [UUID: SyncState] = [:]
     private var stagedObjects: [UUID: [SyncObjectLocation: SignedObject]] = [:]
-    private var deletions: [UUID: [RecordKey: RecordStamp]] = [:]
+    private var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
+    private var quarantinedEntries: [UUID: [SyncEntry]] = [:]
 
     public init() {}
 
@@ -126,26 +165,42 @@ public actor InMemorySyncStateStore: SyncStateStore {
         }
     }
 
-    public func addPendingDeletion(_ key: RecordKey, stamp: RecordStamp, vaultID: UUID) {
-        if let existing = deletions[vaultID]?[key], existing >= stamp { return }
-        deletions[vaultID, default: [:]][key] = stamp
+    public func addPendingDeletion(_ deletion: PendingDeletion) {
+        let key = deletion.record.key
+        let vaultID = deletion.record.vaultID
+        if let existing = deletions[vaultID]?[key], existing.stamp >= deletion.stamp { return }
+        deletions[vaultID, default: [:]][key] = deletion
     }
 
-    public func pendingDeletions(vaultID: UUID) -> [RecordKey: RecordStamp] {
+    public func pendingDeletions(vaultID: UUID) -> [RecordKey: PendingDeletion] {
         deletions[vaultID] ?? [:]
     }
 
-    /// Removes each deletion only if it is still the one given, so a newer deletion recorded meanwhile survives.
     public func removePendingDeletions(_ published: [RecordKey: RecordStamp], vaultID: UUID) {
-        for (key, stamp) in published where deletions[vaultID]?[key] == stamp {
+        for (key, stamp) in published where deletions[vaultID]?[key]?.stamp == stamp {
             deletions[vaultID]?[key] = nil
         }
+    }
+
+    public func quarantine(_ entry: SyncEntry, vaultID: UUID) {
+        if !(quarantinedEntries[vaultID] ?? []).contains(entry) {
+            quarantinedEntries[vaultID, default: []].append(entry)
+        }
+    }
+
+    public func quarantined(vaultID: UUID) -> [SyncEntry] {
+        quarantinedEntries[vaultID] ?? []
+    }
+
+    public func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) {
+        quarantinedEntries[vaultID]?.removeAll { entries.contains($0) }
     }
 
     public func eraseAll() {
         states = [:]
         stagedObjects = [:]
         deletions = [:]
+        quarantinedEntries = [:]
     }
 
     // MARK: - Test seams: what an attacker with the local file (A8) can do.
@@ -195,8 +250,8 @@ public struct DeletionRecordingStore: RecordStore {
         try await base.commit(change)
         for row in deleted where row.version < UInt64.max {
             try await syncState.addPendingDeletion(
-                row.key, stamp: RecordStamp(version: row.version + 1, device: deviceID, deleted: true),
-                vaultID: row.vaultID)
+                PendingDeletion(
+                    stamp: RecordStamp(version: row.version + 1, device: deviceID, deleted: true), record: row))
         }
     }
 

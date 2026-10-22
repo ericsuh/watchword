@@ -127,8 +127,8 @@ Ten shipped modules, dependency-ordered, plus test support:
   ciphertext database). Envelopes plus storage locations only; never keys.
 - **`WatchwordSync`** — milestone 3's portable half: object layout, the `SyncTransport` port with
   `InMemorySyncTransport` and `FileSyncTransport`, signed sealed segments and snapshots (`SyncPayload`,
-  `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, field-level `ItemMerge`, `SyncEngine`,
-  and `DeletionRecordingStore`. Depends on `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`; no CryptoKit.
+  `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, conflict-keeping `ItemMerge` and
+  line-level `NoteText`, `SyncEngine`, and `DeletionRecordingStore`. Depends on `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`; no CryptoKit.
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
   history, trash, password change, deletion), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `EmergencyKit`, and
   the ports (`KeychainStore`, `BiometricGate`, `WallClock`).
@@ -153,11 +153,17 @@ Ten shipped modules, dependency-ordered, plus test support:
 - A segment carries only its author's versions, and each record envelope's own context must match its entry
   before anything is applied. Record versions above `maximumVersion` or jumps beyond `maximumVersionJump` are
   quarantined (U5).
-- Merging only moves forward. `ItemMerge` takes the later `Revision` per group, so an old version can never
-  displace a newer value; `ItemMerge.stamped` keeps `modifiedAt` monotonic so a new version always contains its
-  predecessor. Keep both properties: the long simulation found divergence each time one was broken.
+- **Never lose data (PRD F7.6, F7.7).** `ItemMerge` is a multi-value register per group: a value is replaced only
+  by one written *knowing about it* (its `GroupStamp.seen` vector contains it); concurrent values all stay, in
+  `Item.conflicts`, until the person edits the group or calls `ItemMerge.resolve`. Notes merge line by line
+  (`NoteText`). Merges never shorten a history; quarantined versions are kept. A permanent deletion carries an
+  erasure summary and removes only what its author had seen; anything else is kept, trashed.
+- A version must contain its predecessor: `ItemMerge.stamped` on every save (it also keeps `modifiedAt` monotonic),
+  `ItemMerge.written` on every merge result a device seals. The long simulation diverged each time one was broken.
 - Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
-  counts as a tombstone while merging. The outbox compares rows with `SyncState.published`, not `known`.
+  counts as an erasure while merging. The outbox compares rows with `SyncState.published`, not `known`.
+- The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;
+  a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
 
 ### `VaultSession` invariants

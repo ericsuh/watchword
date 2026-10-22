@@ -1,114 +1,160 @@
 import Foundation
 import WatchwordModel
 
-/// Field-level merging of two versions of one item (PRD F7.4, docs/02-architecture.md §7.1).
+/// Field-level merging of versions of one item (PRD F7.4, F7.6, docs/02-architecture.md §7.5).
 ///
-/// Every item attribute and every field is a group (`ItemGroup`) carrying the `Revision` that last changed it. The
-/// merge takes, group by group, the value with the later revision, so two devices that edited different fields both
-/// keep their edit, and two that edited the same field agree on one winner — the later version, then the higher device
-/// ID. The losing values are kept in the item's history.
+/// Every item attribute and every field is a group (`ItemGroup`), and each group is a multi-value register: its
+/// value carries a `GroupStamp` — who wrote it, and the `VersionVector` of everything that writer had seen. Merging
+/// takes the union of both versions' values for the group and drops only those a later write was made *knowing
+/// about*. So:
 ///
-/// Current values merge as a join: the result does not depend on the order versions arrive in, on how often one is
-/// applied, or — except for one corner of field order — on how they are grouped, which is what lets devices that see
-/// the same versions in any order converge. Revisions are kept in the merged item, so a later merge compares the same
-/// revisions an earlier one did.
+/// - two devices editing different fields, or different items, both keep their edit;
+/// - an edit made after seeing another replaces it;
+/// - two concurrent edits of the same group both stay: one is shown, chosen the same way on every device (a deletion
+///   first, then the later revision), and the others are kept in `Item.conflicts` until the person resolves them by
+///   editing the group (`stamped`) or choosing (`resolve`). Sync never discards a conflicting value.
 ///
-/// The corner: `Item.fields` records the order of present fields only, so a field removed in an intermediate merge and
-/// revived by a later edit is placed after the ordered ones rather than at its old position. Two devices can then hold
-/// the same fields in different orders under the same `fieldOrder` revision; the equal-revision tie-break picks one
-/// order for both on their next exchange. The history is a bounded union and is not order-independent in every corner
-/// either, but every losing value reaches it.
+/// Moving to the trash is the `trashedAt` group, so trashing and a concurrent edit of anything else resolve to a
+/// trashed item that contains the edit; a concurrent restore and trash keep both, showing the trash. Notes merge line
+/// by line (`NoteText`).
+///
+/// The result is a join — independent of the order versions arrive in, how they are grouped and how often one is
+/// applied — except for field order. The latest reorder wins and a concurrent one is not kept (order holds no field's
+/// contents), and a field removed in an intermediate merge and revived later goes after the ordered ones; the
+/// deterministic choice settles that one exchange later.
 ///
 /// Pure and portable; the production caller opens both versions under the vault key first (milestone 3's Mac half).
 public enum ItemMerge {
-    /// The revision of a group nobody has stamped: older than every real one.
-    public static let unstamped = Revision(
-        version: 0, device: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+    static let zeroDevice = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
-    // MARK: - Stamping on save
+    // MARK: - Saving
 
-    /// `edited` with its revisions brought up to date: every group whose value differs from `previous` is stamped with
-    /// `revision`; the others keep `previous`'s revision. A new item (`previous == nil`) has every group stamped. The
-    /// caller's own `revisions` are ignored — the vault owns them, as it owns `version`.
+    /// `edited` as a new version written by `revision`: every group whose value differs from `previous` is stamped
+    /// with what this device has seen (which supersedes, and so resolves, any conflict the group held — the person
+    /// edited it where the conflict is shown); unchanged groups keep their stamps and conflicts; the notes are diffed
+    /// line by line. A new item (`previous == nil`) has every group stamped. The caller's own sync metadata is
+    /// ignored — the vault owns it, as it owns `version`.
     ///
-    /// `previousOrigin` is the version and device of the row `previous` was read from; it stands in for the
-    /// revisions of an item written before revisions existed.
+    /// `previousOrigin` is the version and device of the row `previous` was read from; it stands in for the stamps
+    /// of an item written before sync existed.
     public static func stamped(_ edited: Item, previous: Item?, previousOrigin: Revision? = nil, revision: Revision)
         -> Item
     {
         var item = edited
         guard let previous else {
-            item.revisions = [:]
-            for group in groups(of: edited) {
-                item.revisions[group] = revision
-            }
+            var clock = VersionVector()
+            clock.record(revision)
+            let stamp = GroupStamp(revision: revision, seen: clock)
+            item.clock = clock
+            item.revisions = Dictionary(uniqueKeysWithValues: groups(of: edited).map { ($0, stamp) })
+            item.conflicts = [:]
+            item.noteLines = NoteText.initial(edited.notes, revision: revision)
+            item.notes = NoteText.text(item.noteLines)
             return item
         }
-        let fallback = previousOrigin ?? Revision(version: previous.version, device: unstamped.device)
-        var revisions = previous.revisions
-        for group in groups(of: previous).union(groups(of: edited)) {
+        let origin = previousOrigin ?? Revision(version: previous.version, device: zeroDevice)
+        var clock = effectiveClock(previous, origin: origin)
+        clock.record(revision)
+        let stamp = GroupStamp(revision: revision, seen: clock)
+        item.clock = clock
+
+        var revisions: [ItemGroup: GroupStamp] = [:]
+        var conflicts = previous.conflicts
+        for group in groups(of: previous).union(groups(of: edited)).union(previous.revisions.keys) {
             if value(of: group, in: previous) != value(of: group, in: edited) {
-                revisions[group] = revision
-            } else if previous.revisions.isEmpty {
-                revisions[group] = fallback
+                revisions[group] = stamp
+                conflicts[group] = nil
+            } else if let existing = effectiveStamp(of: group, in: previous, origin: origin) {
+                revisions[group] = existing
             }
         }
         item.revisions = revisions
-        // A new version must contain its predecessor in every merged value, or a device holding the predecessor's
-        // merge would see nothing new in it. Device clocks disagree, so `modifiedAt` never moves backwards.
+        item.conflicts = conflicts
+        item.noteLines = NoteText.edit(effectiveLines(previous, origin: origin), to: edited.notes, revision: revision)
+        item.notes = NoteText.text(item.noteLines)
+        // A new version must contain its predecessor in every merged value. Device clocks disagree, so `modifiedAt`
+        // never moves backwards.
         item.modifiedAt = max(edited.modifiedAt, previous.modifiedAt)
         return item
+    }
+
+    /// Resolves a conflict by the person's explicit choice: `group` takes `value` (the one shown or one of the
+    /// conflicting ones), written by `revision` — the result is that version, ready to seal — superseding every value
+    /// the item holds for the group.
+    public static func resolve(
+        _ item: Item, group: ItemGroup, choosing value: ItemGroupValue, origin: Revision, revision: Revision
+    ) -> Item {
+        var chosen = item
+        apply(value, to: &chosen, group: group)
+        var resolved = stamped(chosen, previous: item, previousOrigin: origin, revision: revision)
+        resolved.revisions[group] = GroupStamp(revision: revision, seen: resolved.clock)
+        resolved.conflicts[group] = nil
+        return written(resolved, as: revision)
+    }
+
+    /// Every conflicting value a person should be shown, by group.
+    public static func conflicts(of item: Item) -> [ItemGroup: [ConflictingValue]] {
+        item.conflicts.filter { !$0.value.isEmpty }
     }
 
     // MARK: - Merging
 
     /// Merges two versions of the same item. `originA` and `originB` are the version and device of the rows each was
     /// read from. The result's `version` is the higher of the two; the writer assigns the real one.
-    ///
-    /// - Parameter historyLimit: at most this many history entries are kept, newest first
-    ///   (`VaultConfiguration.maximumHistoryEntries`). Pruning by age (PRD F1.4) is left to the device that saves:
-    ///   measured against anything in the versions themselves, one device's wrong clock would empty everyone's history.
-    public static func merge(
-        _ a: Item, origin originA: Revision, _ b: Item, origin originB: Revision, historyLimit: Int = 100
-    ) -> Item {
+    public static func merge(_ a: Item, origin originA: Revision, _ b: Item, origin originB: Revision) -> Item {
         precondition(a.id == b.id && a.vaultID == b.vaultID, "merging versions of different items")
         var merged = a
         merged.revisions = [:]
+        merged.conflicts = [:]
         var mergedFields: [UUID: Field] = [:]
         var order: [UUID] = []
 
-        let allGroups = groups(of: a).union(groups(of: b)).union(a.revisions.keys).union(b.revisions.keys)
+        var allGroups = groups(of: a).union(groups(of: b))
+        for item in [a, b] {
+            allGroups.formUnion(item.revisions.keys)
+            allGroups.formUnion(item.conflicts.keys)
+        }
         for group in allGroups.sorted() {
-            let revisionA = effectiveRevision(of: group, in: a, origin: originA)
-            let revisionB = effectiveRevision(of: group, in: b, origin: originB)
-            let valueA = value(of: group, in: a)
-            let valueB = value(of: group, in: b)
-            let takeB: Bool
-            if revisionA != revisionB {
-                takeB = revisionA < revisionB
-            } else {
-                // Only a device that wrote two different values under one revision (a restored backup reusing a device
-                // ID, or a misbehaving member) gets here. Any deterministic choice keeps devices converging.
-                takeB = valueA.canonicalBytes.lexicographicallyPrecedes(valueB.canonicalBytes)
-            }
-            let (revision, value) = takeB ? (revisionB, valueB) : (revisionA, valueA)
-            merged.revisions[group] = revision
-            switch value {
+            let candidates =
+                candidates(for: group, in: a, origin: originA) + candidates(for: group, in: b, origin: originB)
+            let maximal = maximalValues(candidates)
+            guard let shown = maximal.max(by: shownOrder) else { continue }
+            merged.revisions[group] = shown.stamp
+            let others = maximal.filter { $0 != shown }.sorted(by: canonicalOrder)
+            // Field order is the one group whose concurrent values are not kept: it arranges fields, it holds none of
+            // their contents, and a stored order lists only the fields present when it was stored.
+            if !others.isEmpty, group != .fieldOrder { merged.conflicts[group] = others }
+            switch shown.value {
             case .field(let field?): mergedFields[field.id] = field
+            case .field(nil): break
             case .fieldOrder(let ids): order = ids
-            default: apply(value, to: &merged)
+            default: apply(shown.value, to: &merged, group: group)
             }
         }
 
-        // Fields in the winning order first, then any it does not mention (added on the losing side), by ID.
+        // Fields in the shown order first, then any it does not mention (added on the other side), by ID.
         var fields = order.compactMap { mergedFields.removeValue(forKey: $0) }
         fields += mergedFields.values.sorted { $0.id.precedes($1.id) }
         merged.fields = fields
+        merged.noteLines = NoteText.merge(effectiveLines(a, origin: originA), effectiveLines(b, origin: originB))
+        merged.notes = NoteText.text(merged.noteLines)
+        merged.clock = effectiveClock(a, origin: originA).merging(effectiveClock(b, origin: originB))
         merged.createdAt = min(a.createdAt, b.createdAt)
         merged.modifiedAt = max(a.modifiedAt, b.modifiedAt)
         merged.version = max(a.version, b.version)
-        merged.history = mergedHistory(a, b, mergedFields: merged.fields, limit: historyLimit)
+        // Both histories, whole: merging never shortens a history (pruning by age is the saving device's policy).
+        merged.history = Array(Set(a.history + b.history)).sorted(by: historyOrder)
         return merged
+    }
+
+    /// `item` as the version `revision` writes: its version set, and the write recorded in its clock. Every merge
+    /// result a device stores goes through this, so a version always contains itself and devices can tell when they
+    /// hold the same state.
+    public static func written(_ item: Item, as revision: Revision) -> Item {
+        var item = item
+        item.version = revision.version
+        item.clock.record(revision)
+        return item
     }
 
     /// Whether two versions hold the same state: everything but `version`, with histories compared as sets.
@@ -123,121 +169,155 @@ public enum ItemMerge {
         return a == b
     }
 
+    /// Whether everything in `item` was known to the device that erased it, whose version vector for the item was then
+    /// `erased`. An erasure removes only what its author had seen (PRD F7.6).
+    public static func isCovered(_ item: Item, origin: Revision, byErasure erased: VersionVector) -> Bool {
+        effectiveClock(item, origin: origin).isCovered(by: erased)
+    }
+
+    /// The item's version vector, including the row it was read from.
+    public static func effectiveClock(_ item: Item, origin: Revision) -> VersionVector {
+        var clock = item.clock
+        clock.record(origin)
+        return clock
+    }
+
     // MARK: - Groups
 
-    static func effectiveRevision(of group: ItemGroup, in item: Item, origin: Revision) -> Revision {
-        // An item from before revisions existed: every group changed with the record itself (record-level
-        // last-writer-wins). Otherwise a group nobody stamped is older than anything.
-        item.revisions.isEmpty ? origin : item.revisions[group] ?? unstamped
+    /// The stamp of a group; for an item from before sync, the record's own origin.
+    static func effectiveStamp(of group: ItemGroup, in item: Item, origin: Revision) -> GroupStamp? {
+        if let stamp = item.revisions[group] { return stamp }
+        guard holds(group, item) else { return nil }
+        return GroupStamp(revision: origin, seen: VersionVector([origin.device: origin.version]))
+    }
+
+    static func effectiveLines(_ item: Item, origin: Revision) -> [NoteLine] {
+        item.noteLines.isEmpty ? NoteText.initial(item.notes, revision: origin) : item.noteLines
+    }
+
+    /// Whether the item itself has a value for the group: always for attributes, for a field while it is present.
+    static func holds(_ group: ItemGroup, _ item: Item) -> Bool {
+        if let id = group.fieldID { return item.fields.contains { $0.id == id } }
+        return ItemGroup.attributes.contains(group)
+    }
+
+    static func candidates(for group: ItemGroup, in item: Item, origin: Revision) -> [ConflictingValue] {
+        var result = item.conflicts[group] ?? []
+        if let stamp = effectiveStamp(of: group, in: item, origin: origin), let value = value(of: group, in: item) {
+            result.append(ConflictingValue(stamp: stamp, value: value))
+        }
+        return result
+    }
+
+    /// The values no other value supersedes. Concurrent writes of the *same* value are one value, not a conflict:
+    /// the latest stamp is kept, and nothing anyone typed is lost.
+    static func maximalValues(_ candidates: [ConflictingValue]) -> [ConflictingValue] {
+        let unique = Array(Set(candidates))
+        let maximal = unique.filter { candidate in !unique.contains { $0.stamp.supersedes(candidate.stamp) } }
+        var byValue: [ItemGroupValue: ConflictingValue] = [:]
+        for candidate in maximal {
+            if let existing = byValue[candidate.value], !canonicalOrder(existing, candidate) { continue }
+            byValue[candidate.value] = candidate
+        }
+        return Array(byValue.values)
+    }
+
+    /// Which of several concurrent values is shown: a deletion (a removed field, a trashed item) first, so a deletion
+    /// and a concurrent edit resolve to the deletion with the edit kept; then the later revision; then a fixed order.
+    static func shownOrder(_ x: ConflictingValue, _ y: ConflictingValue) -> Bool {
+        let (deletionX, deletionY) = (isDeletion(x.value), isDeletion(y.value))
+        if deletionX != deletionY { return deletionY }
+        return canonicalOrder(x, y)
+    }
+
+    static func canonicalOrder(_ x: ConflictingValue, _ y: ConflictingValue) -> Bool {
+        if x.stamp.revision != y.stamp.revision { return x.stamp.revision < y.stamp.revision }
+        return canonicalBytes(x.value).lexicographicallyPrecedes(canonicalBytes(y.value))
+    }
+
+    static func isDeletion(_ value: ItemGroupValue) -> Bool {
+        switch value {
+        case .field(nil): return true
+        case .trashedAt(let date): return date != nil
+        default: return false
+        }
     }
 
     static func groups(of item: Item) -> Set<ItemGroup> {
         Set(ItemGroup.attributes).union(item.fields.map { ItemGroup.field($0.id) })
     }
 
-    enum GroupValue: Equatable {
-        case title(String)
-        case scopes([ServiceScope])
-        case tags(Set<String>)
-        case notes(String)
-        case archived(Bool)
-        case trashedAt(Date?)
-        case excludedFromSuggestions(Bool)
-        case fieldOrder([UUID])
-        case field(Field?)
-        /// A group this client does not know (written by a newer one): only its revision is merged.
-        case unknown
-
-        /// A deterministic encoding, for breaking ties identically on every device. Sets are sorted and dictionaries
-        /// encoded with sorted keys, so it never depends on hashing order.
-        var canonicalBytes: [UInt8] {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            encoder.dateEncodingStrategy = .secondsSince1970
-            let text: String
-            switch self {
-            case .title(let value), .notes(let value): text = value
-            case .scopes(let scopes):
-                text = scopes.map { "\($0.host)|\($0.includeSubdomains)|\($0.excludedHosts.sorted())" }.joined(
-                    separator: "\n")
-            case .tags(let tags): text = tags.sorted().joined(separator: "\n")
-            case .archived(let value), .excludedFromSuggestions(let value): text = String(value)
-            case .trashedAt(let date): text = date.map { String($0.timeIntervalSince1970) } ?? "-"
-            case .fieldOrder(let ids): text = ids.map(\.uuidString).joined(separator: ",")
-            case .field(let field):
-                text = field.flatMap { (try? encoder.encode($0)).flatMap { String(data: $0, encoding: .utf8) } } ?? "-"
-            case .unknown: text = ""
-            }
-            return Array(text.utf8)
-        }
-    }
-
-    static func value(of group: ItemGroup, in item: Item) -> GroupValue {
+    /// The group's value in `item`; `nil` for a group this client does not know.
+    static func value(of group: ItemGroup, in item: Item) -> ItemGroupValue? {
         if let id = group.fieldID { return .field(item.fields.first { $0.id == id }) }
         switch group {
         case .title: return .title(item.title)
         case .scopes: return .scopes(item.scopes)
         case .tags: return .tags(item.tags)
-        case .notes: return .notes(item.notes)
         case .archived: return .archived(item.archived)
         case .trashedAt: return .trashedAt(item.trashedAt)
         case .excludedFromSuggestions: return .excludedFromSuggestions(item.excludedFromSuggestions)
         case .fieldOrder: return .fieldOrder(item.fields.map(\.id))
-        default: return .unknown
+        default: return nil
         }
     }
 
-    static func apply(_ value: GroupValue, to item: inout Item) {
+    static func apply(_ value: ItemGroupValue, to item: inout Item, group: ItemGroup) {
         switch value {
         case .title(let title): item.title = title
         case .scopes(let scopes): item.scopes = scopes
         case .tags(let tags): item.tags = tags
-        case .notes(let notes): item.notes = notes
         case .archived(let archived): item.archived = archived
         case .trashedAt(let date): item.trashedAt = date
         case .excludedFromSuggestions(let excluded): item.excludedFromSuggestions = excluded
-        case .fieldOrder, .field, .unknown: break
+        case .fieldOrder(let ids):
+            let byID = Dictionary(item.fields.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            item.fields = ids.compactMap { byID[$0] } + item.fields.filter { !ids.contains($0.id) }
+        case .field(let field):
+            guard let id = group.fieldID else { return }
+            if let field, let index = item.fields.firstIndex(where: { $0.id == id }) {
+                item.fields[index] = field
+            } else if let field {
+                item.fields.append(field)
+            } else {
+                item.fields.removeAll { $0.id == id }
+            }
         }
+    }
+
+    /// A deterministic encoding, for ordering identically on every device. Sets are sorted and dictionaries encoded
+    /// with sorted keys, so it never depends on hashing order.
+    static func canonicalBytes(_ value: ItemGroupValue) -> [UInt8] {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let text: String
+        switch value {
+        case .title(let value): text = "title:" + value
+        case .scopes(let scopes):
+            text =
+                "scopes:"
+                + scopes.map { "\($0.host)|\($0.includeSubdomains)|\($0.excludedHosts.sorted())" }.joined(
+                    separator: "\n")
+        case .tags(let tags): text = "tags:" + tags.sorted().joined(separator: "\n")
+        case .archived(let value): text = "archived:\(value)"
+        case .excludedFromSuggestions(let value): text = "excluded:\(value)"
+        case .trashedAt(let date): text = "trashed:" + (date.map { String($0.timeIntervalSince1970) } ?? "-")
+        case .fieldOrder(let ids): text = "order:" + ids.map(\.uuidString).joined(separator: ",")
+        case .field(let field):
+            let encoded = field.flatMap { (try? encoder.encode($0)).flatMap { String(data: $0, encoding: .utf8) } }
+            text = "field:" + (encoded ?? "-")
+        }
+        return Array(text.utf8)
     }
 
     // MARK: - History
 
-    /// Both histories, plus the fields of whichever version lost (F7.4), deduplicated, newest first and capped: a
-    /// bounded union, so the same entries survive whichever device merges.
-    static func mergedHistory(_ a: Item, _ b: Item, mergedFields: [Field], limit: Int) -> [ItemHistoryEntry] {
-        var entries = a.history + b.history
-        for version in [a, b] where !sameFields(version.fields, mergedFields) {
-            entries.append(
-                ItemHistoryEntry(replacedAt: version.modifiedAt, version: version.version, fields: version.fields))
-        }
-        // One entry per (version, fields); the latest replacement time wins.
-        struct Key: Hashable {
-            let version: UInt64
-            let fields: [Field]
-        }
-        var unique: [Key: ItemHistoryEntry] = [:]
-        for entry in entries {
-            let key = Key(version: entry.version, fields: entry.fields)
-            if let existing = unique[key], existing.replacedAt >= entry.replacedAt { continue }
-            unique[key] = entry
-        }
-        return Array(unique.values.sorted(by: historyOrder).prefix(limit))
-    }
-
     static func historyOrder(_ x: ItemHistoryEntry, _ y: ItemHistoryEntry) -> Bool {
         if x.replacedAt != y.replacedAt { return x.replacedAt > y.replacedAt }
         if x.version != y.version { return x.version > y.version }
-        let bytesX =
-            GroupValue.fieldOrder(x.fields.map(\.id)).canonicalBytes
-            + x.fields.flatMap { GroupValue.field($0).canonicalBytes }
-        let bytesY =
-            GroupValue.fieldOrder(y.fields.map(\.id)).canonicalBytes
-            + y.fields.flatMap { GroupValue.field($0).canonicalBytes }
+        let bytesX = x.fields.flatMap { canonicalBytes(.field($0)) }
+        let bytesY = y.fields.flatMap { canonicalBytes(.field($0)) }
         return bytesY.lexicographicallyPrecedes(bytesX)
-    }
-
-    /// Equal contents regardless of order: a reordering alone is not a lost value.
-    static func sameFields(_ x: [Field], _ y: [Field]) -> Bool {
-        x.count == y.count && Set(x) == Set(y)
     }
 }

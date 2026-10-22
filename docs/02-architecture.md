@@ -197,8 +197,9 @@ decoded `id`, `vaultID` and `version` must equal the storage location's or the r
 
 ```
 Item { id, vaultID, title, scopes: [ServiceScope], fields: [Field], tags, notes,
-       createdAt, modifiedAt, modifiedBy(deviceID), version(lamport), archived, trashedAt?,
-       history: [FieldSnapshot] }
+       createdAt, modifiedAt, version(lamport), archived, trashedAt?, history: [FieldSnapshot],
+       revisions: [group: GroupStamp], conflicts: [group: [ConflictingValue]], clock: VersionVector,
+       noteLines: [NoteLine] }          // the last four are sync metadata (§7.5); absent before milestone 3
 ServiceScope { host, includeSubdomains, scheme?, path?, excludedHosts: [host], nativeAppIDs: [bundleID] }
 Field { id, kind, label, value(secret or plain), order, meta }   // kinds listed in PRD F1.2
 ```
@@ -340,53 +341,66 @@ checked with public keys alone. The plaintext (`SyncPayload`) is a canonical bin
 what it has merged; for a snapshot, what it covers. Object names reveal vault and device IDs, counters and
 Lamport times to the transport; nothing else.
 
-**Download** (no keys, §7.4). List the vault, fetch the newest snapshot and every segment past what has been
+**Download** (no keys, §7.4). List the vault, fetch every snapshot not yet merged and every segment past what has been
 merged, check each signature against the author named in the location, stage what verifies. A forged, moved or
 damaged object is reported and skipped; it never stops other streams.
 
 **Merge** (needs the vault key). Staged objects are verified again (the staging area is in the local file, which
 A8 can edit), then checked and opened in the order kind, context, AEAD, payload. Each stream is merged strictly in
-sequence; a missing or rejected segment stops that stream (`SyncReport.waiting`) rather than being skipped. Before
-any entry is applied the whole payload is checked: a segment carries only its author's versions, and every record
-envelope's own context must match the entry carrying it (no record swaps inside a validly signed segment). Then,
-per record:
+sequence; a missing or rejected segment stops that stream (`SyncReport.waiting`) rather than being skipped, unless a
+merged snapshot already covers it. Before any entry is applied the whole payload is checked: a segment carries only
+its author's versions, every record envelope's own context must match the entry carrying it (no record swaps inside a
+validly signed segment), and acknowledgement and coverage values must be plausible sequence numbers. Then, per record
+(PRD F7.4, F7.6, F7.7):
 
-- A version the device does not have is stored, unless a deletion at least as late is known — published or still
-  pending here.
-- Two different versions go to the merger, which opens both and calls `ItemMerge.merge`: per group (each item
-  attribute and each field, `ItemGroup`), the later `Revision` wins, ties broken by encoded value; losers go to the
-  history. Current values form a join, so devices converge whatever order versions arrive in — except one corner of
-  field order, which the tie-break settles one exchange later. The merger answers keep, adopt, or a new version
-  above both, and the commit names the local version it read (`StoreChange.expectations`).
-- A deletion wins over the local version only if it is later (last writer wins at record level).
+- A version the device does not have is stored.
+- Two different versions go to the merger, which opens both and calls `ItemMerge.merge`. Each item attribute and each
+  field (`ItemGroup`) is a multi-value register: every value carries a `GroupStamp` — who wrote it and the
+  `VersionVector` of everything that writer had seen — so the merge can tell an edit made *after seeing* another
+  (which replaces it) from a concurrent one. Concurrent values of the same group are all kept: one is shown, chosen
+  the same way on every device (a deletion first, then the later revision), the others are kept in `Item.conflicts`
+  until the person edits the group or chooses (`ItemMerge.resolve`). Identical concurrent values are one value.
+  Notes are a line-level sequence CRDT (`NoteText`, an RGA over lines): concurrent edits to different lines all
+  survive, and two edits of the same line both appear. Histories are unioned, never shortened by a merge. The merge is
+  a join — the same versions in any order give the same item — except that field order is last-writer-wins (it
+  holds no field's contents) with one corner the deterministic choice settles one exchange later. The merger answers
+  keep, adopt, or a new version above both, and the commit names the local version it read
+  (`StoreChange.expectations`).
+- Moving to the trash is the `trashedAt` group, so trashing and a concurrent edit give a trashed item that contains
+  the edit. A permanent deletion is a tombstone carrying an *erasure summary*: the version vector of what its author
+  had seen. A version it covers is erased; a version holding an edit its author never saw is kept, in the trash, with
+  that edit as its last version — on the deleting device as on every other.
 - Versions above 2^62, or more than 2^20 above the vault's highest, are quarantined rather than merged (review
-  finding U5).
+  finding U5) — and kept in the sync state store until the person discards them (F7.7).
 
 This is the monotonic check of §5: an older version, replayed by the store or found in an old snapshot, can never
-displace newer values, because every group keeps its latest revision.
+displace newer values, because a value is only ever replaced by one written knowing about it.
 
 **Publish.** Every row this device wrote that is newer than what it last published, and every pending deletion,
 goes into the next segment of its stream. Deletions exist only when the session makes them
-(`DeletionRecordingStore` records them as it commits them); a row that has merely gone missing from the database
-is damage, repaired by a reconciling sync, and is never propagated as a deletion. Objects are created, never
-overwritten: if the next sequence number is taken (a crash after publishing, or a restored backup running under
-the same device ID), the device merges what is there and continues after it.
+(`DeletionRecordingStore` records them as it commits them, with the row deleted, so the erasure summary can be made);
+a row that has merely gone missing from the database is damage, repaired by a reconciling sync, and is never
+propagated as a deletion. A row that came back while its deletion was being made is settled against the deletion
+before publishing. Objects are created, never overwritten, and the next sequence number is never below anything the
+stream has on the transport, so a device whose state was rolled back never reuses a collected number.
 
 **Snapshots and garbage collection.** Once the segments not covered by a snapshot reach a threshold (never less
 than twice the number of streams, so the acknowledgements a snapshot causes cannot trigger the next), the lowest
-active device writes one; any device steps in once four times the threshold is reached. A device deletes its own
-segments covered by the newest snapshot once every other known stream's latest acknowledgement covers it, always
-keeping its newest segment. A new device bootstraps from the snapshot. A snapshot's contents are trusted only as
-far as their signature: existing devices never delete anything because a snapshot omits it, and use a snapshot's
-coverage only for streams whose next segment is not available.
+active device writes one; any device steps in once four times the threshold is reached. A failure elsewhere in the
+sync never stops this. Every device merges *every* listed snapshot, not only the newest, and continues a stream from
+the highest coverage any of them has when its next segment is missing. A device deletes its own segment once every
+other known stream has acknowledged merging it and some listed snapshot covers it, always keeping its newest; it
+deletes one of its own snapshots only when another listed snapshot covers everything it does. A snapshot's contents
+are trusted only as far as their signature: existing devices never delete anything because a snapshot omits it.
 
 **Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and replays the log. On a
 healthy device it changes nothing; on one whose file was rolled back it restores the newest versions.
 
 Known limits, tracked in `06-adversarial-review.md` §H: every device still holds the account signing key, so
 the device registry (D9) is still needed before sync ships; a device that stops syncing for good holds garbage
-collection back until it is removed; the store can withhold objects (reported, not prevented); and merges bring
-back history entries a device pruned by age.
+collection back until it is removed; the store can withhold objects (reported, not prevented); merges bring back
+history entries a device pruned by age; and a snapshot may attribute versions to any device (its author is
+trusted for the vault, so this is an insider's capability).
 
 ## 8. Sharing protocol
 

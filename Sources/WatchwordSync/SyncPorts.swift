@@ -49,15 +49,37 @@ public enum MergeDecision: Sendable, Hashable {
 }
 
 /// Field-level merging needs the plaintext, so it needs keys: the merger is the half of merging that lives with them
-/// (docs/02-architecture.md §7.1, PRD F7.4). The engine calls it only when both versions exist and differ; it handles
-/// absence, deletions and versions itself.
+/// (docs/02-architecture.md §7.5, PRD F7.4, F7.6). The engine calls `merge` only when both versions exist and differ,
+/// and `resolveErasure` whenever a version of an erased record is in question; it handles absence and versions itself.
 ///
 /// Production (Mac half): `VaultSession`, which opens both items under the vault key, calls `ItemMerge.merge`, and
 /// seals the result. Tests: `WatchwordTestSupport.FakeItemMerger`, the same logic over the fake keyring.
 ///
 /// A merger that cannot open the remote version (it does not decrypt, or decodes to another item) throws; the engine
-/// then rejects that entry and keeps the local version. One that cannot open the local version must not throw for
-/// that reason alone — it adopts the remote version, so a damaged local row is repaired rather than pinned.
+/// then rejects the object carrying it, keeps the local version, and the stream waits — nothing is applied in part and
+/// the object stays on the transport. One that cannot open the local version must not throw for that reason alone: it
+/// adopts the remote version (re-sealing it above the local version if need be), so a damaged row is repaired rather
+/// than pinned. When no key is resident it throws `SyncKeyringError.locked`, which defers the merge.
 public protocol RecordMerger: Sendable {
     func merge(local: StoredRecord, remote: StoredRecord) async throws -> MergeDecision
+
+    /// What this device has seen of a record it is about to publish the erasure of: carried in the tombstone, so the
+    /// erasure removes only that (PRD F7.6). Opaque to the engine; at most `SyncPayload.maximumErasureLength` bytes.
+    func erasureSummary(of record: StoredRecord) async throws -> [UInt8]
+
+    /// A version of an erased record — the local one when an erasure arrives, or one arriving after the erasure is
+    /// known. If its author had seen everything in it, it is erased; otherwise it holds an edit the erasure's author
+    /// never saw, and is kept, in the trash, with that edit as its latest version (PRD F7.6).
+    func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision
+}
+
+/// What to do with a version of a record that has been erased.
+public enum ErasureDecision: Sendable, Hashable {
+    /// Its author had seen all of it: erase it, or do not store it.
+    case erase
+    /// It holds something the erasure's author never saw, and is already in the trash: keep it as it is.
+    case keep
+    /// It holds something the erasure's author never saw: keep this trashed version of it instead, written by this
+    /// device at a version above the given one.
+    case replace(StoredRecord)
 }

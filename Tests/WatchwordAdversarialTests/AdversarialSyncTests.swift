@@ -194,7 +194,7 @@ struct AdversarialSyncTests {
         await reader.keyring.lock()
         let report = try await reader.sync()
         #expect(Set(report.rejected.map(\.name)) == [f.segmentName(2), f.segmentName(3)])
-        #expect(try await reader.syncState.staged(vaultID: Self.vault).map(\.location.number) == [1])
+        #expect(await reader.syncState.staged(vaultID: Self.vault).map(\.location.number) == [1])
     }
 
     /// Threat: A1 serves an old snapshot again after newer ones (and the segments they covered) have been collected,
@@ -288,7 +288,7 @@ struct AdversarialSyncTests {
         let f = try await Self.fixture()
         let bank = try await f.writer.save(Self.login("Bank", password: "bank-secret"))
         let library = try await f.writer.save(Self.login("Library", password: "library-secret"))
-        let rows = try await f.writer.store.records(in: Self.vault, kind: .item)
+        let rows = await f.writer.store.records(in: Self.vault, kind: .item)
         let bankRow = try #require(rows.first { $0.recordID == bank.id })
         let libraryRow = try #require(rows.first { $0.recordID == library.id })
         var swapped = libraryRow
@@ -312,7 +312,7 @@ struct AdversarialSyncTests {
         await f.keys.trust(device: Self.b)
         let other = SyncTestClient(deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport)
         try await other.save(Self.login("B's item", password: "b-secret"))
-        let rows = try await other.store.records(in: Self.vault, kind: .item)
+        let rows = await other.store.records(in: Self.vault, kind: .item)
         try await f.plant(Self.payload(rows), signedBy: f.writer.keyring)
         let report = try await f.reader(UUID()).sync()
         #expect(report.applied == 0)
@@ -333,7 +333,7 @@ struct AdversarialSyncTests {
         try await f.writer.sync()
         let report = try await reader.sync()
         #expect(report.rejected.first?.reason == .recordInAnotherVault(item.id))
-        #expect(try await reader.store.record(foreign.key) == foreign)
+        #expect(await reader.store.record(foreign.key) == foreign)
     }
 
     /// Threat: an insider writes a record version near `UInt64.max`, so no later version fits and the item freezes
@@ -353,6 +353,34 @@ struct AdversarialSyncTests {
         #expect(report.quarantined.count == 2)
         #expect(report.applied == 0)
         #expect(try await reader.items().isEmpty)
+        // Not merged, but not thrown away either: kept until the person discards them (PRD F7.7).
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).map(\.version).sorted() == [1 << 30, .max - 1])
+        try await reader.sync()
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).count == 2, "quarantine is not emptied by sync")
+    }
+
+    /// Threat: an insider signs a snapshot or segment whose acknowledgement vector claims a sequence number near
+    /// `UInt64.max`, or A1 plants an object named with one, so that the arithmetic on it traps every reader — a crash
+    /// loop, since the object is fetched again on every launch (review finding Y11).
+    @Test("sequence numbers and vectors near the integer limit are refused, not trapped on")
+    func overflowingNumbers() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("Bank", password: "x"))
+        let rows = await f.writer.store.records(in: Self.vault, kind: .item)
+        let snapshot = SyncPayload(
+            kind: .snapshot, vaultID: Self.vault, author: Self.a, number: 1, vector: [Self.a: .max],
+            entries: rows.map(SyncEntry.init))
+        try await f.plant(snapshot, signedBy: f.writer.keyring)
+        var segment = Self.payload(rows, sequence: 2)
+        segment.vector = [Self.b: .max - 1]
+        try await f.plant(segment, signedBy: f.writer.keyring)
+        await f.transport.tamper(f.segmentName(.max), contents: [1, 2, 3])
+        let reader = await f.reader()
+        let report = try await reader.sync()
+        #expect(report.rejected.map(\.reason).contains(.vectorOutOfRange))
+        #expect(report.ignoredNames == 1)
+        #expect(try await reader.items().isEmpty)
+        #expect(try await reader.sync().applied == 0, "and again on the next sync, without trapping")
     }
 
     // MARK: - A8: the local file
@@ -368,7 +396,7 @@ struct AdversarialSyncTests {
         let reader = await f.reader()
         try await reader.sync()
         let key = RecordKey(recordID: item.id, kind: .item)
-        let old = try #require(try await reader.store.record(key))
+        let old = try #require(await reader.store.record(key))
         try await f.writer.edit(item.id) { $0.fields[1].value = "v2" }
         try await f.writer.sync()
         try await reader.sync()
@@ -398,7 +426,7 @@ struct AdversarialSyncTests {
         let reader = await f.reader()
         await reader.keyring.lock()
         try await reader.sync()
-        let staged = try #require(try await reader.syncState.staged(vaultID: Self.vault).first)
+        let staged = try #require(await reader.syncState.staged(vaultID: Self.vault).first)
         var object = staged.object
         object.envelope[object.envelope.count - 1] ^= 0x80
         await reader.syncState.stage(StagedObject(location: staged.location, object: object))
@@ -488,5 +516,17 @@ struct AdversarialSyncTests {
             try await transport.fetch(location.name, maximumLength: 1 << 20)
         }
         #expect(try await transport.list(prefix: SyncObjectLocation.vaultPrefix(Self.vault)).isEmpty)
+
+        // A link higher up the tree: the vault directory itself points elsewhere.
+        let elsewhere = root.deletingLastPathComponent().appendingPathComponent("elsewhere-\(UUID().uuidString)")
+        let other = FileSyncTransport(root: elsewhere)
+        try await other.create(location.name, contents: [9])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("vault"))
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("vault"), withDestinationURL: elsewhere.appendingPathComponent("vault"))
+        #expect(try await transport.list(prefix: SyncObjectLocation.vaultPrefix(Self.vault)).isEmpty)
+        await #expect(throws: SyncTransportError.self) {
+            try await transport.fetch(location.name, maximumLength: 1 << 20)
+        }
     }
 }

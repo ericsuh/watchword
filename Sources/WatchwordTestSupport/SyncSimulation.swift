@@ -77,6 +77,16 @@ public actor SyncTestClient {
         return item
     }
 
+    /// Stores an item the caller built as a new version (a conflict resolution from `ItemMerge.resolve`), as the
+    /// vault will.
+    public func commitResolved(_ item: Item) async throws {
+        let row = try await keyring.sealItem(item)
+        let existing = try await sessionStore.record(row.key)
+        var change = StoreChange(upserts: [row])
+        change.expectations[row.key] = existing.map { .version($0.version) } ?? .absent
+        try await sessionStore.commit(change)
+    }
+
     @discardableResult
     public func edit(_ id: UUID, _ mutate: @Sendable (inout Item) -> Void) async throws -> Item {
         var item = try await item(id)
@@ -156,6 +166,11 @@ public actor SimulatedServer {
 
     public var allObjects: [String: [UInt8]] {
         objects.mapValues(\.bytes)
+    }
+
+    /// Writes an object as no device: what a provider glitch, a half-uploaded file or a stray file looks like.
+    public func plant(_ name: String, contents: [UInt8]) {
+        objects[name] = Stored(bytes: contents, creator: UUID(), visibleAt: now)
     }
 
     func check(_ device: UUID) throws {

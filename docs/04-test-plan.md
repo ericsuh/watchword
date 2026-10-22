@@ -49,7 +49,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
-| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation", "Sync engine", "Field-level item merge", "Sync payload format", "Sync transport contract"; milestone 3) |
+| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract"; milestone 3) |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
@@ -226,7 +226,8 @@ another stream, sequence, vault or slot, a withheld or replayed segment (the str
 rejected before staging, a former device's segments, a record swap or relabel inside a validly signed segment, a
 segment carrying another device's versions, a record ID of another vault, implausible versions (U5), no plaintext
 on the transport, a row rolled back or deleted in the local file (A8) restored by reconciling, a tampered staged
-download, mutated payloads and containers, and symbolic links planted in a file transport's directory. Still to
+download, mutated payloads and containers, sequence numbers and vectors near the integer limit, and symbolic links
+planted in a file transport's directory (at the file and higher up). Quarantined versions are kept, not dropped. Still to
 come with milestone 4: member key substitution, membership records, revocation and read-only enforcement — and,
 with milestone 3's Mac half, the same suite over the real keyring.
 

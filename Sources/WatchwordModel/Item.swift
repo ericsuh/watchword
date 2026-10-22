@@ -23,11 +23,19 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
     public var history: [ItemHistoryEntry]
     /// Keeps the item out of the OS QuickType identity store (PRD F6.8).
     public var excludedFromSuggestions: Bool
-    /// When each attribute and each field last changed, for field-level merging across devices (PRD F7.4,
-    /// docs/02-architecture.md §7.1). A field removed from `fields` keeps its entry, which is what records the removal.
-    /// Empty on items written before revisions existed; the merge then treats every group as changed by the record's
-    /// own version, which is record-level last-writer-wins.
-    public var revisions: [ItemGroup: Revision]
+    /// Who last wrote each attribute and each field, and what they had seen, for field-level merging across devices
+    /// (PRD F7.4, docs/02-architecture.md §7.5). A field removed from `fields` keeps its entry, which is what records
+    /// the removal. Empty on items written before sync; the merge then treats every group as written by the record's
+    /// own version.
+    public var revisions: [ItemGroup: GroupStamp]
+    /// Values written concurrently with the ones shown, per group, kept until the person chooses (PRD F7.6). Sync
+    /// never discards one; an edit of the group, made where these are shown, resolves them.
+    public var conflicts: [ItemGroup: [ConflictingValue]]
+    /// For each device, the highest of its versions this copy of the item contains.
+    public var clock: VersionVector
+    /// `notes` as a line-level sequence, so concurrent edits to different lines merge (PRD F7.6). Empty on items
+    /// written before sync, and for empty notes.
+    public var noteLines: [NoteLine]
 
     public init(
         id: UUID = UUID(),
@@ -44,7 +52,10 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         trashedAt: Date? = nil,
         history: [ItemHistoryEntry] = [],
         excludedFromSuggestions: Bool = false,
-        revisions: [ItemGroup: Revision] = [:]
+        revisions: [ItemGroup: GroupStamp] = [:],
+        conflicts: [ItemGroup: [ConflictingValue]] = [:],
+        clock: VersionVector = VersionVector(),
+        noteLines: [NoteLine] = []
     ) {
         self.id = id
         self.vaultID = vaultID
@@ -61,14 +72,17 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         self.history = history
         self.excludedFromSuggestions = excludedFromSuggestions
         self.revisions = revisions
+        self.conflicts = conflicts
+        self.clock = clock
+        self.noteLines = noteLines
     }
 
     enum CodingKeys: String, CodingKey {
         case id, vaultID, title, scopes, fields, tags, notes, createdAt, modifiedAt, version, archived, trashedAt
-        case history, excludedFromSuggestions, revisions
+        case history, excludedFromSuggestions, revisions, conflicts, clock, noteLines
     }
 
-    /// Synthesised decoding, except that `revisions` may be absent: payloads written before it existed still open.
+    /// Synthesised decoding, except that the sync metadata may be absent: payloads written before it existed still open.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -85,7 +99,10 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         trashedAt = try container.decodeIfPresent(Date.self, forKey: .trashedAt)
         history = try container.decode([ItemHistoryEntry].self, forKey: .history)
         excludedFromSuggestions = try container.decode(Bool.self, forKey: .excludedFromSuggestions)
-        revisions = try container.decodeIfPresent([ItemGroup: Revision].self, forKey: .revisions) ?? [:]
+        revisions = try container.decodeIfPresent([ItemGroup: GroupStamp].self, forKey: .revisions) ?? [:]
+        conflicts = try container.decodeIfPresent([ItemGroup: [ConflictingValue]].self, forKey: .conflicts) ?? [:]
+        clock = try container.decodeIfPresent(VersionVector.self, forKey: .clock) ?? VersionVector()
+        noteLines = try container.decodeIfPresent([NoteLine].self, forKey: .noteLines) ?? []
     }
 
     /// The first field of a given kind, if any.
@@ -100,6 +117,11 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
 
     public var isTrashed: Bool {
         trashedAt != nil
+    }
+
+    /// Whether any group holds values written concurrently with the one shown (PRD F7.6).
+    public var hasConflicts: Bool {
+        conflicts.contains { !$0.value.isEmpty }
     }
 }
 

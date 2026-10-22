@@ -253,8 +253,8 @@ public struct FakeItemMerger: RecordMerger {
         } catch {
             // A local row that does not open is damage, not a version: the remote one replaces it.
             if remote.version > local.version { return .adoptRemote }
-            var item = remoteItem
-            item.version = local.version + 1
+            let item = ItemMerge.written(
+                remoteItem, as: Revision(version: local.version + 1, device: keyring.deviceID))
             return .replace(try await keyring.sealItem(item))
         }
         let merged = ItemMerge.merge(
@@ -262,8 +262,37 @@ public struct FakeItemMerger: RecordMerger {
             remoteItem, origin: Revision(version: remote.version, device: remote.deviceID))
         if ItemMerge.sameState(merged, remoteItem), remote.version > local.version { return .adoptRemote }
         if ItemMerge.sameState(merged, localItem) { return .keepLocal }
-        var item = merged
-        item.version = max(local.version, remote.version) + 1
+        let item = ItemMerge.written(
+            merged, as: Revision(version: max(local.version, remote.version) + 1, device: keyring.deviceID))
         return .replace(try await keyring.sealItem(item))
+    }
+
+    /// The item's version vector, as JSON.
+    public func erasureSummary(of record: StoredRecord) async throws -> [UInt8] {
+        let item = try await keyring.openItem(record)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return Array(try encoder.encode(ItemMerge.effectiveClock(item, origin: Self.origin(record))))
+    }
+
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
+        let item = try await keyring.openItem(record)
+        // A summary that does not decode claims to have seen nothing, so nothing is erased because of it.
+        let erased = (try? JSONDecoder().decode(VersionVector.self, from: Data(summary))) ?? VersionVector()
+        if ItemMerge.isCovered(item, origin: Self.origin(record), byErasure: erased) { return .erase }
+        if item.isTrashed { return .keep }
+        // Above the record and above any erasure of what the erased vector names (an erasure is one past the row).
+        let version = max(record.version, erased.entries.values.max() ?? 0) + 2
+        var trashed = item
+        trashed.trashedAt = item.modifiedAt
+        trashed = ItemMerge.stamped(
+            trashed, previous: item, previousOrigin: Self.origin(record),
+            revision: Revision(version: version, device: keyring.deviceID))
+        trashed.version = version
+        return .replace(try await keyring.sealItem(trashed))
+    }
+
+    static func origin(_ record: StoredRecord) -> Revision {
+        Revision(version: record.version, device: record.deviceID)
     }
 }

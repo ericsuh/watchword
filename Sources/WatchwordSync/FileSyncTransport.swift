@@ -12,6 +12,9 @@ import Foundation
 /// otherwise redirect a read to an arbitrary local file or a write outside the root — and a file larger than the
 /// caller's limit is refused before it is read (SEC9).
 ///
+/// A link swapped in between the check and the read of a file is not caught (Foundation offers no `O_NOFOLLOW` open);
+/// the read is still capped, and what it returns is still checked like anything else from a transport.
+///
 /// This is the portable core. On iCloud Drive every access must also go through `NSFileCoordinator`, with an
 /// `NSFilePresenter` for change notification and a reconciliation pass on wake; on other providers the root comes from
 /// a security-scoped bookmark. Those wrappers are Apple-only and belong to milestone 3's Mac half.
@@ -31,8 +34,12 @@ public struct FileSyncTransport: SyncTransport {
         guard directoryComponents.allSatisfy(Self.isValidComponent) else {
             throw SyncTransportError.invalidName(prefix)
         }
-        let start = directoryComponents.reduce(root) { $0.appendingPathComponent($1, isDirectory: true) }
-        guard try Self.kind(of: start) == .directory else { return [] }
+        // Every directory on the way must be a real one: a planted link anywhere would list another folder.
+        var start = root
+        for component in directoryComponents {
+            start.appendPathComponent(component, isDirectory: true)
+            guard try Self.kind(of: start) == .directory else { return [] }
+        }
         var names: [String] = []
         try walk(start, relative: directoryComponents, into: &names)
         return names.filter { $0.hasPrefix(prefix) }.sorted()
@@ -83,7 +90,14 @@ public struct FileSyncTransport: SyncTransport {
             try FileManager.default.linkItem(at: temporary, to: url)
         } catch {
             if try Self.kind(of: url) != .missing { throw SyncTransportError.objectExists(name) }
-            throw error
+            // Some providers (exFAT, SMB, some file-provider domains) have no hard links. A move refuses an existing
+            // destination too, though not atomically; the coordinated iCloud Drive wrapper (Mac half) closes that.
+            do {
+                try FileManager.default.moveItem(at: temporary, to: url)
+            } catch {
+                if try Self.kind(of: url) != .missing { throw SyncTransportError.objectExists(name) }
+                throw error
+            }
         }
     }
 

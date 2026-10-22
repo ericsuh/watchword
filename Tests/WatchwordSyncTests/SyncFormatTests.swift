@@ -139,7 +139,7 @@ struct SyncPayloadTests {
             try SyncPayload.parse(large, allowedKinds: [.item], maximumEntryEnvelopeLength: 1)
         }
         var flagged = SyncFixtures.payload(entries: [SyncFixtures.entry(1, deleted: true)]).encoded()
-        flagged[flagged.count - 1] = 0x03
+        flagged[flagged.count - 5] = 0x03  // The flags byte, before the erasure summary's length.
         #expect(throws: SyncFormatError.unknownFlags(3)) { try SyncPayload.parse(flagged, allowedKinds: [.item]) }
         var keyed = SyncFixtures.entry(1, deleted: true)
         keyed.keyID = UUID()

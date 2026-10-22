@@ -142,24 +142,33 @@ Status: **portable half delivered** from a remote session, as the split above in
 - Delivered (`WatchwordSync`, verified by `swift test` on Linux): the object layout and names; the `SyncTransport`
   port with `InMemorySyncTransport` and `FileSyncTransport` (a plain directory: create-once by hard link, no
   symbolic links followed, sizes capped); signed, sealed segments and snapshots with a bounded canonical parser;
-  the `SyncKeyring`, `RecordMerger` and `SyncStateStore` ports; field-level merging (`ItemMerge`, with per-group
-  `Revision`s now carried in `Item.revisions`); and `SyncEngine` — download while locked, in-order merge that never
-  skips a gap, explicit tombstones (`DeletionRecordingStore`), publishing, snapshot election, garbage collection
-  and reconciliation against local rollback. Supporting changes: `StoreChange.expectations` (compare-and-swap
+  the `SyncKeyring`, `RecordMerger` and `SyncStateStore` ports; conflict-keeping merging (`ItemMerge`: a
+  multi-value register per field with version vectors, concurrent values kept in `Item.conflicts` until resolved,
+  notes merged line by line by `NoteText`; PRD F7.6, F7.7); and `SyncEngine` — download while locked, in-order merge
+  that never skips a gap, explicit deletions whose erasure summary removes only what their author had seen
+  (`DeletionRecordingStore`), publishing, snapshot election, garbage collection, a quarantine that keeps what it
+  refuses, and reconciliation against local rollback. Supporting changes: `StoreChange.expectations` (compare-and-swap
   commits) and envelope kind 5, `snapshot`. Architecture §7.5 describes it.
 - Exit criteria: the N-client simulation (random partitions, an eventually consistent server that delays,
   reorders and duplicates, concurrent edits and deletions, devices locking) converges, a device joining afterwards
   from snapshots sees the same vault, and no title or secret reaches the transport — every push, and 4,000-step
-  five-device runs nightly. It found three convergence bugs before review (`06-adversarial-review.md` §H), each now
-  with a deterministic regression test. The transport contract runs against both transports. The CloudKit
+  five-device runs nightly. It also checks that no field value any device saved is lost, and models a stray object
+  and rolled-back sync state. It found three convergence bugs (`06-adversarial-review.md` §H, Y1–Y3); an independent
+  review found six more (Y8–Y13); each now has a regression test that reproduced it. The suite "Simultaneous edits
+  across devices" covers the everyday cases end to end: separate fields, separate items, a long note edited in
+  different places and on the same line, one field edited on three devices, trash or permanent delete against a
+  concurrent edit. The transport contract runs against both transports. The CloudKit
   integration workflow is not built.
 - Adversarial suite "sync log" (A1, insider and former devices, A8): byte flips anywhere, moved and replayed
   objects, withheld segments, forgeries, record swaps inside a validly signed segment, versions for another device
   or vault, implausible versions (U5), stale snapshots, local rollback, tampered staging, parser mutations and
   planted symbolic links. Signatures and encryption are fakes there; real primitives are the crypto core suite's.
 - **Mac half, not done:** the production `SyncKeyring` (vault keys and `RecordCipher` for segments, the account
-  Ed25519 key, later the device key) and `RecordMerger` in `VaultSession`, with `VaultSession.write` stamping
-  revisions through `ItemMerge.stamped` and writing through `DeletionRecordingStore`; `sync_state`/staging tables
+  Ed25519 key, later the device key) and `RecordMerger` in `VaultSession` (`merge`, `erasureSummary`,
+  `resolveErasure`, sealing results through `ItemMerge.written`), with `VaultSession.write` stamping every save
+  through `ItemMerge.stamped` (ignoring the caller's sync metadata) and writing through `DeletionRecordingStore`; a
+  conflict UI over `ItemMerge.conflicts` and `ItemMerge.resolve`, and listing the quarantine for the person to
+  discard; `sync_state`/staging tables
   in `SQLiteRecordStore`; device enrolment from the account header on the transport; `CloudKitTransport` and the
   coordinated iCloud Drive wrapper around `FileSyncTransport`; the manual CloudKit workflow; and the adversarial
   tests repeated with real keys. The device registry (D9) must land before sync ships.

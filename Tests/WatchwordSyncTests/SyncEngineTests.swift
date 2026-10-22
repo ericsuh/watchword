@@ -80,51 +80,6 @@ struct SyncEngineTests {
         #expect(try await b.sync().applied == 0, "a second sync changes nothing")
     }
 
-    @Test("concurrent edits merge at field level; the losing value is kept in history (F7.4)")
-    func concurrentEdits() async throws {
-        let home = await Household.make()
-        let (a, b) = (home.devices[0], home.devices[1])
-        let item = try await a.save(Household.login())
-        try await home.settle()
-        try await a.edit(item.id) { $0.fields[1].value = "from-A" }
-        try await b.edit(item.id) { $0.notes = "from-B" }
-        try await home.settle()
-        try await home.expectConverged()
-        let merged = try await a.item(item.id)
-        #expect(merged.field(.password)?.value == "from-A")
-        #expect(merged.notes == "from-B")
-
-        try await a.edit(item.id) { $0.fields[1].value = "A-again" }
-        try await b.edit(item.id) { $0.fields[1].value = "B-again" }
-        try await home.settle()
-        try await home.expectConverged()
-        let resolved = try await a.item(item.id)
-        let loser = resolved.field(.password)?.value == "A-again" ? "B-again" : "A-again"
-        #expect(resolved.history.flatMap(\.fields).contains { $0.value == loser })
-        #expect(try await b.item(item.id).history.flatMap(\.fields).contains { $0.value == loser })
-    }
-
-    @Test("a deletion reaches every device; an edit made after it brings the item back")
-    func deletion() async throws {
-        let home = await Household.make()
-        let (a, b) = (home.devices[0], home.devices[1])
-        let item = try await a.save(Household.login())
-        try await home.settle()
-        try await a.delete(item.id)
-        try await home.settle()
-        #expect(try await b.items().isEmpty)
-
-        let second = try await a.save(Household.login(title: "Library"))
-        try await home.settle()
-        // B edits after A's deletion is made but before it is seen, at a higher version: the edit wins.
-        try await b.edit(second.id) { $0.title = "Library (edited)" }
-        try await b.edit(second.id) { $0.notes = "kept" }
-        try await a.delete(second.id)
-        try await home.settle()
-        try await home.expectConverged()
-        #expect(try await a.item(second.id).notes == "kept")
-    }
-
     /// Found by the long simulation: when the merge kept a local version (it already contained a higher remote one —
     /// here a no-op save on a device with a slower clock), the local version was never published, because the outbox
     /// compared rows with the highest stamp seen rather than with what this device had published.

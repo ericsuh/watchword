@@ -19,6 +19,7 @@ public enum SyncFormatError: Error, Equatable, Sendable {
     /// A deletion that names a key, or a live entry with an empty envelope.
     case malformedEntry
     case signatureTooLong(Int)
+    case erasureTooLarge(Int)
 }
 
 /// One record version carried by a segment or a snapshot: a `StoredRecord` (ciphertext and storage location) or a
@@ -33,14 +34,21 @@ public struct SyncEntry: Sendable, Hashable {
     public var device: UUID
     /// The record's envelope, or `nil` for a deletion (a tombstone).
     public var envelope: [UInt8]?
+    /// For a deletion, what its author had seen of the record (`RecordMerger.erasureSummary`), so that a version it
+    /// had not seen is kept rather than erased (PRD F7.6). Opaque to the engine.
+    public var erasure: [UInt8]
 
-    public init(recordID: UUID, kind: EnvelopeKind, keyID: UUID, version: UInt64, device: UUID, envelope: [UInt8]?) {
+    public init(
+        recordID: UUID, kind: EnvelopeKind, keyID: UUID, version: UInt64, device: UUID, envelope: [UInt8]?,
+        erasure: [UInt8] = []
+    ) {
         self.recordID = recordID
         self.kind = kind
         self.keyID = keyID
         self.version = version
         self.device = device
         self.envelope = envelope
+        self.erasure = envelope == nil ? erasure : []
     }
 
     public init(_ record: StoredRecord) {
@@ -49,10 +57,10 @@ public struct SyncEntry: Sendable, Hashable {
             device: record.deviceID, envelope: record.envelope)
     }
 
-    public static func tombstone(_ key: RecordKey, stamp: RecordStamp) -> SyncEntry {
+    public static func tombstone(_ key: RecordKey, stamp: RecordStamp, erasure: [UInt8]) -> SyncEntry {
         SyncEntry(
             recordID: key.recordID, kind: key.kind, keyID: SyncPayload.zeroUUID, version: stamp.version,
-            device: stamp.device, envelope: nil)
+            device: stamp.device, envelope: nil, erasure: erasure)
     }
 
     public var key: RecordKey {
@@ -88,7 +96,7 @@ public struct SyncEntry: Sendable, Hashable {
 /// vectorCount u32, then per element: device 16, sequence u64   (strictly ascending by device)
 /// entryCount u32, then per entry:
 ///   recordID 16  kind u8  keyID 16  version u64  device 16  flags u8 (bit 0: deletion)
-///   live entries only: envelopeLength u32, envelope
+///   live entries: envelopeLength u32, envelope; deletions: erasureLength u32, erasure summary
 /// (entries strictly ascending by record ID, then kind; nothing after the last)
 /// ```
 ///
@@ -106,9 +114,11 @@ public struct SyncPayload: Sendable, Hashable {
     static let formatVersion: UInt8 = 1
     static let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     /// The smallest an entry can encode to, used to bound declared counts.
-    static let minimumEntryLength = 16 + 1 + 16 + 8 + 16 + 1
+    static let minimumEntryLength = 16 + 1 + 16 + 8 + 16 + 1 + 4
     /// One record envelope; an item is at most 1 MiB of plaintext (`ItemCodec`), so this is generous.
     public static let maximumEntryEnvelopeLength = 2 << 20
+    /// An erasure summary is a version vector: one entry per device that ever wrote the record.
+    public static let maximumErasureLength = 64 << 10
 
     public var kind: SyncObjectLocation.Kind
     public var vaultID: UUID
@@ -157,6 +167,8 @@ public struct SyncPayload: Sendable, Hashable {
                 out += envelope
             } else {
                 out.append(1)
+                out += Self.littleEndian(UInt32(entry.erasure.count))
+                out += entry.erasure
             }
         }
         return out
@@ -216,6 +228,7 @@ public struct SyncPayload: Sendable, Hashable {
             let device = try reader.uuid()
             let flags = try reader.byte()
             var envelope: [UInt8]?
+            var erasure: [UInt8] = []
             switch flags {
             case 0:
                 let length = Int(try reader.uint32())
@@ -224,12 +237,15 @@ public struct SyncPayload: Sendable, Hashable {
                 envelope = try reader.read(length)
             case 1:
                 guard keyID == zeroUUID else { throw SyncFormatError.malformedEntry }
+                let length = Int(try reader.uint32())
+                guard length <= maximumErasureLength else { throw SyncFormatError.erasureTooLarge(length) }
+                erasure = try reader.read(length)
             default:
                 throw SyncFormatError.unknownFlags(flags)
             }
             let entry = SyncEntry(
                 recordID: recordID, kind: kind, keyID: keyID, version: recordVersion, device: device,
-                envelope: envelope)
+                envelope: envelope, erasure: erasure)
             if let last = entries.last, !entryOrder(last, entry) { throw SyncFormatError.notCanonical }
             entries.append(entry)
         }

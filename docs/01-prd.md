@@ -206,6 +206,17 @@ Requirement IDs are stable and referenced from the test plan.
   level by last-writer-wins with a tiebreak on device ID, and the losing version is kept in history.
 - F7.5 Sync requires the vault to be unlocked only for *merging*; downloading ciphertext may happen
   while locked.
+- F7.6 Simultaneous edits merge: edits to separate fields or separate items all survive; edits to
+  different parts of a long text (notes) merge line by line, and two edits of the same line both survive.
+  Two concurrent values of the same field are a conflict: every version is kept — one shown, the others
+  listed — until the person resolves it. A deletion and a concurrent edit resolve to the deletion with the
+  edit kept as the item's last version: trashing and an edit give a trashed item containing the edit; a
+  permanent deletion and an edit its author had not seen give the item back, in the trash, with the edit.
+- F7.7 Sync never throws away data a person entered or a device received without an explicit action by
+  the person: conflicting values, history, notes lines and versions refused as implausible are all kept
+  until the person resolves, empties or discards them. *Open:* the local policies of F1.4 (history pruned
+  after 90 days or 100 entries) and F1.5 (trash purged after 30 days) are automatic discards; whether F7.7
+  overrides them is a decision for the owner (`06-adversarial-review.md` §H, Y14).
 
 ### 5.8 Import and export (F8)
 
