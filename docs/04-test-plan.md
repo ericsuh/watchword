@@ -49,7 +49,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
-| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only |
+| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation", "Sync engine", "Field-level item merge", "Sync payload format", "Sync transport contract"; milestone 3) |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
@@ -122,8 +122,9 @@ context-binding tests added to `AdversarialEnvelopeTests`):
   the whole header.
 - Relabel a record as another record ID, a newer `recordVersion`, another schema version, another
   kind or another key ID → rejected before decryption.
-- Replay of an *older* version presented as itself → the sync layer's monotonic check
-  (milestone 3); presenting it as newer is rejected now.
+- Replay of an *older* version presented as itself → cannot displace newer values: the merge keeps the latest
+  revision of every group (milestone 3, suite "sync log": `withheldSegment`, `staleSnapshot`); presenting it as
+  newer is rejected by the AAD.
 - Nonce uniqueness over 1e5 encryptions under one key (1e6 when `WATCHWORD_LONG_TESTS=1`), and a
   generator that repeats is caught by the key's nonce ledger before the second encryption — including
   across two separate key wraps under the same Ksym, and across copies of the key value.
@@ -218,6 +219,16 @@ specification, plus vectors from independent Python implementations for HPKE wit
   their pushed segments are rejected by remaining members.
 - Read-only member's writes are rejected by the transport fake and never merged.
 - Two admins remove each other concurrently → deterministic outcome, no vault lock-out.
+
+**Implemented in milestone 3** (`AdversarialSyncTests`, suite "Adversarial: sync log", with the fake keyring):
+the server's reorder/duplicate/drop/stale-snapshot cases, a byte flipped anywhere in a segment, objects moved to
+another stream, sequence, vault or slot, a withheld or replayed segment (the stream waits at the gap), forgeries
+rejected before staging, a former device's segments, a record swap or relabel inside a validly signed segment, a
+segment carrying another device's versions, a record ID of another vault, implausible versions (U5), no plaintext
+on the transport, a row rolled back or deleted in the local file (A8) restored by reconciling, a tampered staged
+download, mutated payloads and containers, and symbolic links planted in a file transport's directory. Still to
+come with milestone 4: member key substitution, membership records, revocation and read-only enforcement — and,
+with milestone 3's Mac half, the same suite over the real keyring.
 
 ### 6.5 Interchange (milestone 7)
 - Zip-slip entry names, nested zip bombs beyond the ratio cap, 1PUX with 10^6 items, CSV cells

@@ -23,6 +23,11 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
     public var history: [ItemHistoryEntry]
     /// Keeps the item out of the OS QuickType identity store (PRD F6.8).
     public var excludedFromSuggestions: Bool
+    /// When each attribute and each field last changed, for field-level merging across devices (PRD F7.4,
+    /// docs/02-architecture.md §7.1). A field removed from `fields` keeps its entry, which is what records the removal.
+    /// Empty on items written before revisions existed; the merge then treats every group as changed by the record's
+    /// own version, which is record-level last-writer-wins.
+    public var revisions: [ItemGroup: Revision]
 
     public init(
         id: UUID = UUID(),
@@ -38,7 +43,8 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         archived: Bool = false,
         trashedAt: Date? = nil,
         history: [ItemHistoryEntry] = [],
-        excludedFromSuggestions: Bool = false
+        excludedFromSuggestions: Bool = false,
+        revisions: [ItemGroup: Revision] = [:]
     ) {
         self.id = id
         self.vaultID = vaultID
@@ -54,6 +60,32 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         self.trashedAt = trashedAt
         self.history = history
         self.excludedFromSuggestions = excludedFromSuggestions
+        self.revisions = revisions
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, vaultID, title, scopes, fields, tags, notes, createdAt, modifiedAt, version, archived, trashedAt
+        case history, excludedFromSuggestions, revisions
+    }
+
+    /// Synthesised decoding, except that `revisions` may be absent: payloads written before it existed still open.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        vaultID = try container.decode(UUID.self, forKey: .vaultID)
+        title = try container.decode(String.self, forKey: .title)
+        scopes = try container.decode([ServiceScope].self, forKey: .scopes)
+        fields = try container.decode([Field].self, forKey: .fields)
+        tags = try container.decode(Set<String>.self, forKey: .tags)
+        notes = try container.decode(String.self, forKey: .notes)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
+        version = try container.decode(UInt64.self, forKey: .version)
+        archived = try container.decode(Bool.self, forKey: .archived)
+        trashedAt = try container.decodeIfPresent(Date.self, forKey: .trashedAt)
+        history = try container.decode([ItemHistoryEntry].self, forKey: .history)
+        excludedFromSuggestions = try container.decode(Bool.self, forKey: .excludedFromSuggestions)
+        revisions = try container.decodeIfPresent([ItemGroup: Revision].self, forKey: .revisions) ?? [:]
     }
 
     /// The first field of a given kind, if any.

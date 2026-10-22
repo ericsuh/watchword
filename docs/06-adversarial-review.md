@@ -254,3 +254,24 @@ not run on a device. One High finding (U1), fixed.
 
 Carried from milestone 1, still open: rejecting code points unassigned in older Unicode versions when
 a password is set (R12). The onboarding screen accepts any password of ten or more characters.
+
+## H. Milestone 3 review (sync, portable half)
+
+Review date: 2026-10-22. The change was written in a remote Linux session; everything below was reproduced there
+with `swift test`. Three findings came from the randomised multi-device simulation itself (`LongRunning…`, in its
+4,000-step nightly size) before any human or agent review: each made devices settle on *different* vaults while
+believing they were in sync, and each now has a deterministic regression test that fails without its fix.
+
+| ID | Severity | Finding and threat | Disposition |
+| --- | --- | --- | --- |
+| Y1 | High | A save set `modifiedAt` from the saving device's clock, so a version saved on a device with a slower clock than its predecessor's was not "after" it in the merge. A device holding the predecessor kept it (`keepLocal`) while the others adopted the save: silent divergence from ordinary clock skew. | **Fixed.** `ItemMerge.stamped` never moves `modifiedAt` back, so every version contains its predecessor in every merged value. Merge-side history pruning by age was removed for the same reason (one wrong clock would have emptied everyone's history); pruning stays with the saving device. Test: `stamping`. |
+| Y2 | High | A deletion made on a device but not yet published was not a tombstone during merging. If that device then merged an older version of the record (a snapshot, a replayed segment), the record came back on that device only, while every other device applied the tombstone. | **Fixed.** Pending deletions count as tombstones in merge. Test: `pendingDeletionBeatsOlderVersions`. |
+| Y3 | High | The outbox published rows newer than the highest stamp *seen* for a record. When the merge kept a local version over a higher remote one (the remote changed nothing the local lacked), the local version was never published: its changes stayed on one device. | **Fixed.** `SyncState.published` records what this device published; the outbox compares with it. Test: `keptLocalVersionIsPublished`. |
+| Y4 | Low | `ItemMerge` is associative in every value but field order: a field removed in an intermediate merge and revived by a later edit is placed after the ordered fields. | **Accepted.** The equal-revision tie-break makes devices agree one exchange later; the simulation checks convergence including order. Recording the order of absent fields in `Item` would remove it. |
+| Y5 | Medium | Every device holds the account signing key (D9), so a lost device can still write validly signed segments to any stream of the account. | **Tracked**, as D9: needed before sync ships. `SyncKeyring.verify` decides per object whether the named author may write, which is where the registry plugs in. |
+| Y6 | Low | A device that stops syncing for good blocks garbage collection of every stream (its acknowledgement never arrives); a snapshot's author can omit records, which affects only devices that bootstrap from it. | **Tracked.** Removing the device from the registry (D9) unblocks collection; existing devices never delete anything because a snapshot omits it. |
+| Y7 | Low | The store (A1) can withhold objects. | **Accepted**, unpreventable without a trusted clock: the stream stops at the gap and `SyncReport.waiting` says so; nothing is applied out of order. |
+
+Also fixed in passing: `StoreFixtures.physicalTemporaryPath` named `SQLiteRecordStore` without a
+`canImport(SQLite3)` guard, so the test targets did not build on Linux at all (CI runs only on macOS, so nothing
+noticed).

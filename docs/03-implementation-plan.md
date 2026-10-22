@@ -23,7 +23,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
 | 1 — cryptographic core (done) | Builds, but the crypto suites are compiled out, not run | CryptoKit, CommonCrypto, Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
-| 3 — sync | The change log, Lamport merge and multi-client simulation — if signing and encryption arrive through a port | `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
+| 3 — sync (portable half done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | the production keyring and merger in `VaultSession`, sync state in the App Group database, `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
 | 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
 | 6 — hygiene | HIBP client, scheduling, strength estimator, reuse/age/2FA checks | the Watchtower-style report UI and its snapshot tests |
@@ -136,6 +136,33 @@ Status: delivered, with these scoping notes.
   remote session — provided segment signing and record encryption reach them through a port with a
   fake, so nothing in `WatchwordSync` imports CryptoKit. `CloudKitTransport` and the iCloud Drive
   `FileTransport` are Mac-only, as is the manually triggered CloudKit integration workflow.
+
+Status: **portable half delivered** from a remote session, as the split above intended; the Mac half is open.
+
+- Delivered (`WatchwordSync`, verified by `swift test` on Linux): the object layout and names; the `SyncTransport`
+  port with `InMemorySyncTransport` and `FileSyncTransport` (a plain directory: create-once by hard link, no
+  symbolic links followed, sizes capped); signed, sealed segments and snapshots with a bounded canonical parser;
+  the `SyncKeyring`, `RecordMerger` and `SyncStateStore` ports; field-level merging (`ItemMerge`, with per-group
+  `Revision`s now carried in `Item.revisions`); and `SyncEngine` — download while locked, in-order merge that never
+  skips a gap, explicit tombstones (`DeletionRecordingStore`), publishing, snapshot election, garbage collection
+  and reconciliation against local rollback. Supporting changes: `StoreChange.expectations` (compare-and-swap
+  commits) and envelope kind 5, `snapshot`. Architecture §7.5 describes it.
+- Exit criteria: the N-client simulation (random partitions, an eventually consistent server that delays,
+  reorders and duplicates, concurrent edits and deletions, devices locking) converges, a device joining afterwards
+  from snapshots sees the same vault, and no title or secret reaches the transport — every push, and 4,000-step
+  five-device runs nightly. It found three convergence bugs before review (`06-adversarial-review.md` §H), each now
+  with a deterministic regression test. The transport contract runs against both transports. The CloudKit
+  integration workflow is not built.
+- Adversarial suite "sync log" (A1, insider and former devices, A8): byte flips anywhere, moved and replayed
+  objects, withheld segments, forgeries, record swaps inside a validly signed segment, versions for another device
+  or vault, implausible versions (U5), stale snapshots, local rollback, tampered staging, parser mutations and
+  planted symbolic links. Signatures and encryption are fakes there; real primitives are the crypto core suite's.
+- **Mac half, not done:** the production `SyncKeyring` (vault keys and `RecordCipher` for segments, the account
+  Ed25519 key, later the device key) and `RecordMerger` in `VaultSession`, with `VaultSession.write` stamping
+  revisions through `ItemMerge.stamped` and writing through `DeletionRecordingStore`; `sync_state`/staging tables
+  in `SQLiteRecordStore`; device enrolment from the account header on the transport; `CloudKitTransport` and the
+  coordinated iCloud Drive wrapper around `FileSyncTransport`; the manual CloudKit workflow; and the adversarial
+  tests repeated with real keys. The device registry (D9) must land before sync ships.
 
 ## Milestone 4 — Sharing
 

@@ -156,7 +156,8 @@ Rationale and parameters:
 Envelope v1 (binary, little-endian; also expressible as JSON for debugging)
   magic        "WWE1"
   version      u16   = 1
-  kind         u8    (0 = item, 1 = vault-key-wrap, 2 = membership, 3 = account-header, 4 = log-segment)
+  kind         u8    (0 = item, 1 = vault-key-wrap, 2 = membership, 3 = account-header, 4 = log-segment,
+                    5 = snapshot)
   keyID        16 B  (UUID of the key that encrypted this record)
   nonce        12 B
   aadLength    u16, aad bytes  (canonical CBOR map {1: recordID, 2: vaultID, 3: schemaVersion,
@@ -167,8 +168,8 @@ Envelope v1 (binary, little-endian; also expressible as JSON for debugging)
 The AES-GCM associated data is the **entire serialized header**, not only the `aad` field, so a byte
 changed anywhere before the ciphertext fails authentication even if no parser check covers it.
 `recordVersion` is the record's Lamport version: binding it means a sync store cannot present an old
-ciphertext as a newer version (presenting it as its true older version is the sync layer's monotonic
-check, milestone 3).
+ciphertext as a newer version. Presenting it as its true older version is harmless: the sync layer's merge only
+moves forward (§7.5), so an old version can never displace newer values.
 
 Rules enforced by the decoder (`Envelope.parse`, then `RecordCipher.open`; all covered by
 adversarial tests), in order: envelopes over 64 MiB rejected before any copy; magic; unknown
@@ -218,10 +219,13 @@ milestone 2 stores full item records only.
   tables, both `STRICT` with length checks on every UUID column: `account` (one row: account ID,
   device ID, personal vault and key IDs, KDF parameters, salt, AUK key ID, the wrapped keyset and
   its version, the credential generation, Emergency Kit confirmation) and `records(record_id, kind,
-  vault_id, key_id, version, device_id, envelope BLOB)` keyed by `(record_id, kind)`. Still to come:
-  `changelog(deviceID, seq, envelope BLOB, pushed)` and `sync_state` (milestone 3), `hibp_cache`
-  (milestone 6), and tombstones (`deletedAt`) once deletions have to sync. The schema version is
-  `PRAGMA user_version`; a newer one is refused, not misread.
+  vault_id, key_id, version, device_id, envelope BLOB)` keyed by `(record_id, kind)`. Still to come: the
+  sync layer's state, staged downloads and pending deletions (`WatchwordSync.SyncStateStore`, held in memory
+  until milestone 3's Mac half adds the tables, since the SQLite store cannot be built on Linux) and
+  `hibp_cache` (milestone 6). The schema version is `PRAGMA user_version`; a newer one is refused, not
+  misread. A commit may name the version it read of each record (`StoreChange.expectations`), so a writer
+  that awaited something in between — the sync engine waiting on its merger while the person saves the same
+  item — fails with `versionConflict` instead of overwriting the newer save.
 - The file is untrusted input (A8 can edit it while the app is locked; a restored backup is anyone's).
   The connection is opened with `SQLITE_OPEN_NOFOLLOW` (the database path is resolved first, since
   `/var` is itself a link), `trusted_schema = OFF`, `cell_size_check = ON` and `secure_delete = ON`;
@@ -235,10 +239,11 @@ milestone 2 stores full item records only.
   `EnvelopeContext` from the columns, so editing a row's vault, record ID, key ID, kind or version
   makes it unreadable before decryption (adversarial suite "local vault store"). One unreadable
   record is listed as such (`ItemListing.unreadable`), never hidden, repaired or overwritten.
-- Known limit until sync: an attacker who can write the file can roll an item back to an *older*
-  ciphertext together with its older version column, which is self-consistent. Detecting that needs
-  a version high-water mark outside the file; the sync layer's monotonic check (milestone 3) is the
-  planned answer.
+- Rolling a row back: an attacker who can write the file can replace an item with an *older* ciphertext
+  together with its older version column, which is self-consistent, or delete the row. Neither is published
+  as a change (deletions reach the sync layer only when the session makes them, §7.5), and a reconciling
+  sync replays the signed log, which lives outside the file, and restores the newest version (adversarial
+  suite "sync log"). A vault that has never synced has no log to restore from.
 - File protection: `completeUntilFirstUserAuthentication` for the ciphertext store (needed so the
   AutoFill extension and background sync can read ciphertext while the device is locked after first
   unlock); key material is never in this file.
@@ -267,11 +272,12 @@ Each device appends **log segments** (envelopes of kind 4, each containing one o
 versions or membership operations, signed with the account Ed25519 key and the device key) to its
 own stream `vault/<vaultID>/log/<deviceID>/<seq>`. No two devices ever write the same object, so
 the transport never sees a write conflict. Periodically, the device with the lowest device ID among
-those online writes a **snapshot** (`vault/<vaultID>/snapshot/<lamport>`) and older segments are
+those that wrote since the last snapshot writes a **snapshot** (`vault/<vaultID>/snapshot/<lamport>-<deviceID>`;
+the device ID keeps two simultaneous snapshots from sharing a name) and older segments are
 garbage-collected once every known device acknowledges the snapshot.
 
 Merging: item versions carry a Lamport clock and device ID; the highest (lamport, deviceID) wins per
-field group; losers are kept in the item's history (F7.4). Membership operations are totally
+field group; losers are kept in the item's history (F7.4). §7.5 describes what milestone 3 built. Membership operations are totally
 ordered by the owner's signature chain; a member's device only accepts a membership change signed
 by a current admin as of the previous state.
 
@@ -315,6 +321,72 @@ by a current admin as of the previous state.
 
 Downloads and uploads of already-encrypted segments need no keys; merging into the item store needs
 VK, so merge is deferred until unlock. The AutoFill extension works from the last merged state.
+
+### 7.5 As built in milestone 3 (`WatchwordSync`, the portable half)
+
+`WatchwordSync` imports no Apple framework: sealing, opening, signing and verifying reach it through the
+`SyncKeyring` port, and field-level merging through the `RecordMerger` port, both implemented with fakes in
+`WatchwordTestSupport`, so the whole engine — including the N-device partition simulation and the adversarial
+suite "sync log" — runs under `swift test` on Linux. What it does not yet have: the production keyring and
+merger (CryptoKit, in `VaultSession`), persistence of its state in the App Group database, and the CloudKit and
+iCloud Drive transports. Those are milestone 3's Mac half (`03-implementation-plan.md`).
+
+**Objects.** A transport holds `SignedObject`s: `"WWSO" ‖ version ‖ signature ‖ envelope`, where the envelope
+is of kind `logSegment` or `snapshot`, sealed under the vault key, with the object's location bound into its
+context (record ID = author device, record version = sequence number or Lamport time). So an object moved to
+another name, stream, vault or slot fails before decryption, and the signature over the stored envelope can be
+checked with public keys alone. The plaintext (`SyncPayload`) is a canonical binary list of record versions —
+`StoredRecord`s, ciphertext still — and deletions, plus a vector: for a segment, the author's acknowledgement of
+what it has merged; for a snapshot, what it covers. Object names reveal vault and device IDs, counters and
+Lamport times to the transport; nothing else.
+
+**Download** (no keys, §7.4). List the vault, fetch the newest snapshot and every segment past what has been
+merged, check each signature against the author named in the location, stage what verifies. A forged, moved or
+damaged object is reported and skipped; it never stops other streams.
+
+**Merge** (needs the vault key). Staged objects are verified again (the staging area is in the local file, which
+A8 can edit), then checked and opened in the order kind, context, AEAD, payload. Each stream is merged strictly in
+sequence; a missing or rejected segment stops that stream (`SyncReport.waiting`) rather than being skipped. Before
+any entry is applied the whole payload is checked: a segment carries only its author's versions, and every record
+envelope's own context must match the entry carrying it (no record swaps inside a validly signed segment). Then,
+per record:
+
+- A version the device does not have is stored, unless a deletion at least as late is known — published or still
+  pending here.
+- Two different versions go to the merger, which opens both and calls `ItemMerge.merge`: per group (each item
+  attribute and each field, `ItemGroup`), the later `Revision` wins, ties broken by encoded value; losers go to the
+  history. Current values form a join, so devices converge whatever order versions arrive in — except one corner of
+  field order, which the tie-break settles one exchange later. The merger answers keep, adopt, or a new version
+  above both, and the commit names the local version it read (`StoreChange.expectations`).
+- A deletion wins over the local version only if it is later (last writer wins at record level).
+- Versions above 2^62, or more than 2^20 above the vault's highest, are quarantined rather than merged (review
+  finding U5).
+
+This is the monotonic check of §5: an older version, replayed by the store or found in an old snapshot, can never
+displace newer values, because every group keeps its latest revision.
+
+**Publish.** Every row this device wrote that is newer than what it last published, and every pending deletion,
+goes into the next segment of its stream. Deletions exist only when the session makes them
+(`DeletionRecordingStore` records them as it commits them); a row that has merely gone missing from the database
+is damage, repaired by a reconciling sync, and is never propagated as a deletion. Objects are created, never
+overwritten: if the next sequence number is taken (a crash after publishing, or a restored backup running under
+the same device ID), the device merges what is there and continues after it.
+
+**Snapshots and garbage collection.** Once the segments not covered by a snapshot reach a threshold (never less
+than twice the number of streams, so the acknowledgements a snapshot causes cannot trigger the next), the lowest
+active device writes one; any device steps in once four times the threshold is reached. A device deletes its own
+segments covered by the newest snapshot once every other known stream's latest acknowledgement covers it, always
+keeping its newest segment. A new device bootstraps from the snapshot. A snapshot's contents are trusted only as
+far as their signature: existing devices never delete anything because a snapshot omits it, and use a snapshot's
+coverage only for streams whose next segment is not available.
+
+**Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and replays the log. On a
+healthy device it changes nothing; on one whose file was rolled back it restores the newest versions.
+
+Known limits, tracked in `06-adversarial-review.md` §H: every device still holds the account signing key, so
+the device registry (D9) is still needed before sync ships; a device that stops syncing for good holds garbage
+collection back until it is removed; the store can withhold objects (reported, not prevented); and merges bring
+back history entries a device pruned by age.
 
 ## 8. Sharing protocol
 
@@ -529,7 +601,7 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordCrypto       2SKD, keyset, vault keys, HPKE wrap  (CryptoKit)   [milestone 1, done]
   Sources/SecureMemory          SecureBytes (only unsafe code)                      [milestone 1, done]
   Sources/WatchwordStore        record-store port, in-memory and SQLite stores     [milestone 2, done]
-  Sources/WatchwordSync         change log, merge, SyncTransport protocol          [milestone 3]
+  Sources/WatchwordSync         change log, merge, SyncTransport protocol          [milestone 3, portable half]
   Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
   Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 6]
   Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
@@ -546,7 +618,9 @@ Apps/ (Xcode project generated with XcodeGen from project.yml)
 Ports (protocols) injected into the core: `KeychainStore`, `BiometricGate`, `RandomSource`,
 `Clock`, `HTTPClient`, `SyncTransport`, `CredentialIdentityPublisher`, `FileAccess`. Milestone 2
 has `RecordStore`, `KeychainStore`, `BiometricGate` and `WallClock`; randomness is an injected
-`RandomNumberGenerator`. Production adapters live in the package (`WatchwordPlatform`,
+`RandomNumberGenerator`. Milestone 3 adds `SyncTransport`, `SyncKeyring`, `RecordMerger` and `SyncStateStore`,
+with `InMemorySyncTransport`, `FileSyncTransport` and `InMemorySyncStateStore` in the module and the fakes
+(`FakeSyncKeyring`, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`) in `WatchwordTestSupport`. Production adapters live in the package (`WatchwordPlatform`,
 `SQLiteRecordStore`) rather than `Apps/`, so the strict-memory-safety job, the unsafe tripwire,
 lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live in
 `WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`).
@@ -560,7 +634,8 @@ lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live 
   rotation runs on every membership change, so its cost is not a tail case.
 - A device registry signed by existing devices (review finding D9). Today every device holds the
   account Ed25519 key, so a lost device cannot be excluded without rotating the account key.
-  Needed before sync ships.
+  Needed before sync ships. `SyncKeyring.verify` is where it plugs in: it already decides, per object, whether
+  the author named in the location may write to the vault.
 - OS QuickType behaviour with overlapping domain identities. Planned for milestone 2 but not yet
   verified: it needs a physical device with the AutoFill extension publishing identities, which
   arrives with milestone 5. Carried to milestone 5's on-device QA.

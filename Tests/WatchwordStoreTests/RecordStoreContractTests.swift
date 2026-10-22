@@ -37,12 +37,15 @@ enum StoreFixtures {
             .appendingPathComponent("Watchword.sqlite")
     }
 
-    /// A fresh path with no symlink in it, for opening a raw `SQLiteConnection` (which uses `SQLITE_OPEN_NOFOLLOW`).
-    static func physicalTemporaryPath() throws -> String {
-        let url = temporaryDatabaseURL()
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        return try SQLiteRecordStore.resolvingSymlinks(url.path)
-    }
+    #if canImport(SQLite3)
+        /// A fresh path with no symlink in it, for opening a raw `SQLiteConnection` (which uses `SQLITE_OPEN_NOFOLLOW`).
+        static func physicalTemporaryPath() throws -> String {
+            let url = temporaryDatabaseURL()
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            return try SQLiteRecordStore.resolvingSymlinks(url.path)
+        }
+    #endif
 
     static func account(keysetVersion: UInt64 = 0, confirmed: Date? = nil) -> AccountRecord {
         AccountRecord(
@@ -196,6 +199,34 @@ struct RecordStoreContractTests {
         try await store.commit(StoreChange(deletions: [drop.key]))
         #expect(try await store.record(drop.key) == nil)
         #expect(try await store.record(keep.key) == keep)
+    }
+
+    /// The sync engine reads a record, awaits the merger, then writes; the session may have saved the same record in
+    /// between. Expectations make that write fail instead of overwriting the newer save (docs/02-architecture.md §7.1).
+    @Test("expectations make a change conditional on what the writer read", arguments: StoreKind.allCases)
+    func expectations(_ kind: StoreKind) async throws {
+        let store = try kind.make()
+        let id = UUID()
+        let key = RecordKey(recordID: id, kind: .item)
+        try await store.commit(
+            StoreChange(upserts: [StoreFixtures.record(id, version: 1)], expectations: [key: .absent]))
+        await #expect(throws: RecordStoreError.versionConflict(recordID: id)) {
+            try await store.commit(
+                StoreChange(upserts: [StoreFixtures.record(id, version: 9)], expectations: [key: .absent]))
+        }
+        await #expect(throws: RecordStoreError.versionConflict(recordID: id)) {
+            try await store.commit(
+                StoreChange(upserts: [StoreFixtures.record(id, version: 9)], expectations: [key: .version(2)]))
+        }
+        let other = UUID()
+        await #expect(throws: RecordStoreError.versionConflict(recordID: other)) {
+            try await store.commit(
+                StoreChange(expectations: [RecordKey(recordID: other, kind: .item): .version(1)]))
+        }
+        #expect(try await store.record(key)?.version == 1)
+        try await store.commit(
+            StoreChange(upserts: [StoreFixtures.record(id, version: 2)], expectations: [key: .version(1)]))
+        #expect(try await store.record(key)?.version == 2)
     }
 
     @Test("eraseAll removes the account and every record", arguments: StoreKind.allCases)

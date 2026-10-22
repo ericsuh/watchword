@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-end encrypted and
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
-milestone-1 cryptographic core, and milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
-`WatchwordPlatform`). `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
+`WatchwordPlatform`), and the portable half of milestone 3's sync (`WatchwordSync`). `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -97,10 +97,12 @@ If an agent needs the real toolchain, the answer is Remote Control on a Mac (`cl
 --remote-control`), not a cloud session — that is the only arrangement with `xcodebuild`, a
 simulator and the Xcode MCP server.
 
-`WatchwordModel`, `WatchwordMatching`, `WatchwordGenerator` and `WatchwordEnvelope` import only `Foundation`,
-`Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a property to
-keep. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s policies and ports are portable too;
-`SQLiteRecordStore` (`#if canImport(SQLite3)`), `VaultSession` (CryptoKit) and all of `WatchwordPlatform` are not.
+`WatchwordModel`, `WatchwordMatching`, `WatchwordGenerator`, `WatchwordEnvelope` and `WatchwordSync` import only
+`Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
+property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` and `RecordMerger` ports, and the day it
+imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
+policies and ports are portable too; `SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard
+test helpers that name it), `VaultSession` (CryptoKit) and all of `WatchwordPlatform` are not.
 
 ## Architecture
 
@@ -108,7 +110,7 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Nine shipped modules, dependency-ordered, plus test support:
+Ten shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
@@ -123,17 +125,40 @@ Nine shipped modules, dependency-ordered, plus test support:
   fingerprints, record sealing. Depends on `SecureMemory` and `WatchwordEnvelope`.
 - **`WatchwordStore`** — the `RecordStore` port, `InMemoryRecordStore` and `SQLiteRecordStore` (the App Group
   ciphertext database). Envelopes plus storage locations only; never keys.
+- **`WatchwordSync`** — milestone 3's portable half: object layout, the `SyncTransport` port with
+  `InMemorySyncTransport` and `FileSyncTransport`, signed sealed segments and snapshots (`SyncPayload`,
+  `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, field-level `ItemMerge`, `SyncEngine`,
+  and `DeletionRecordingStore`. Depends on `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`; no CryptoKit.
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
   history, trash, password change, deletion), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `EmergencyKit`, and
   the ports (`KeychainStore`, `BiometricGate`, `WallClock`).
 - **`WatchwordPlatform`** — Apple adapters: `SystemKeychainStore`, `LocalAuthenticationGate`, the Emergency Kit
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
-  fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`). Test targets only; not a product, and no
+  fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
+  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`). Test targets only; not a product, and no
   production target may depend on it.
 
-`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSync`, `WatchwordSharing`,
-`WatchwordHygiene`, `WatchwordInterchange`) and which milestone each belongs to.
+`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`, `WatchwordHygiene`,
+`WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
+`docs/03-implementation-plan.md` milestone 3 lists the Mac half still open (production keyring and merger in
+`VaultSession`, SQLite sync state, CloudKit and iCloud Drive transports).
+
+### `SyncEngine` invariants
+
+- Objects are created, never overwritten; each device writes only its own stream. Never add an "update" to
+  `SyncTransport`.
+- Download needs no keys and checks signatures before staging; merge re-verifies staged objects and checks kind,
+  context, AEAD, then payload, in that order. A stream is merged strictly in sequence: never skip a gap.
+- A segment carries only its author's versions, and each record envelope's own context must match its entry
+  before anything is applied. Record versions above `maximumVersion` or jumps beyond `maximumVersionJump` are
+  quarantined (U5).
+- Merging only moves forward. `ItemMerge` takes the later `Revision` per group, so an old version can never
+  displace a newer value; `ItemMerge.stamped` keeps `modifiedAt` monotonic so a new version always contains its
+  predecessor. Keep both properties: the long simulation found divergence each time one was broken.
+- Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
+  counts as a tombstone while merging. The outbox compares rows with `SyncState.published`, not `known`.
+- Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
 
 ### `VaultSession` invariants
 
@@ -252,7 +277,7 @@ directions are tested; keep both when adjusting constants.
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`), so **renaming a suite breaks CI deliberately** — update
+  `"Keychain item protection"`, `"sync log"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
@@ -262,7 +287,9 @@ directions are tested; keep both when adjusting constants.
   `SeededGenerator` from `WatchwordTestSupport`. Never make production code reach for a seeded generator, and never sleep in a
   test — time will come from an injected `Clock`.
 - `WATCHWORD_LONG_TESTS=1` and `WATCHWORD_TEST_SEED` are the nightly workflow's knobs for extended
-  randomised runs; new long-running tests should honour them via `TestEnvironment`.
+  randomised runs; new long-running tests should honour them via `TestEnvironment`. `test:long` runs the
+  adversarial target plus any test whose identifier contains `LongRunning` (the sync simulation is
+  `LongRunningSyncSimulationTests`), so name a new randomised suite that way to have the nightly widen it.
 - Known-answer vectors come from the RFC that defines the primitive, or from an independent
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 

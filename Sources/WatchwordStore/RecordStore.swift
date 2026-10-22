@@ -33,6 +33,14 @@ public enum AccountWrite: Sendable, Hashable {
     case update(AccountRecord, expectedKeysetVersion: UInt64)
 }
 
+/// What a writer read, and so what the store must still hold for its change to apply.
+public enum RecordExpectation: Sendable, Hashable {
+    /// No record under the key.
+    case absent
+    /// A record at exactly this version.
+    case version(UInt64)
+}
+
 /// One atomic change to the store.
 public struct StoreChange: Sendable, Hashable {
     public var account: AccountWrite?
@@ -40,15 +48,21 @@ public struct StoreChange: Sendable, Hashable {
     public var deletions: [RecordKey]
     /// Deletions that apply only if the record is still at the given version.
     public var conditionalDeletions: [RecordKey: UInt64]
+    /// Preconditions on records, checked before anything is written; any mismatch fails the whole change with
+    /// `versionConflict`. A writer that read a record before an `await` names what it read, so a change that landed in
+    /// between (the person saving the same item while sync merges it) is not silently overwritten by a version that
+    /// happens to be higher (docs/02-architecture.md §7.1).
+    public var expectations: [RecordKey: RecordExpectation]
 
     public init(
         account: AccountWrite? = nil, upserts: [StoredRecord] = [], deletions: [RecordKey] = [],
-        conditionalDeletions: [RecordKey: UInt64] = [:]
+        conditionalDeletions: [RecordKey: UInt64] = [:], expectations: [RecordKey: RecordExpectation] = [:]
     ) {
         self.account = account
         self.upserts = upserts
         self.deletions = deletions
         self.conditionalDeletions = conditionalDeletions
+        self.expectations = expectations
     }
 
     /// Every key this change deletes.
@@ -90,6 +104,17 @@ extension StoreChange {
         }
         for (key, expected) in conditionalDeletions where try existingVersion(key) != expected {
             throw RecordStoreError.versionConflict(recordID: key.recordID)
+        }
+        for (key, expectation) in expectations {
+            let found = try existingVersion(key)
+            switch expectation {
+            case .absent where found != nil, .version where found == nil:
+                throw RecordStoreError.versionConflict(recordID: key.recordID)
+            case .version(let expected) where found != expected:
+                throw RecordStoreError.versionConflict(recordID: key.recordID)
+            default:
+                break
+            }
         }
         for record in upserts {
             if let stored = try existingVersion(record.key), record.version <= stored {

@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "SecureMemory", targets: ["SecureMemory"]),
         .library(name: "WatchwordCrypto", targets: ["WatchwordCrypto"]),
         .library(name: "WatchwordStore", targets: ["WatchwordStore"]),
+        .library(name: "WatchwordSync", targets: ["WatchwordSync"]),
         .library(name: "WatchwordKit", targets: ["WatchwordKit"]),
         .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
     ],
@@ -41,6 +42,11 @@ let package = Package(
         // Local ciphertext store: the port, an in-memory implementation and the SQLite database (§6; milestone 2).
         .target(name: "WatchwordStore", dependencies: ["SecureMemory", "WatchwordEnvelope"]),
 
+        // Change-log segments, snapshots, field-level merge and the SyncTransport port (§7; milestone 3). Pure: segment
+        // sealing, signing and item decryption reach it through ports, so nothing here imports CryptoKit and the whole
+        // engine runs under `swift test` on Linux (docs/03-implementation-plan.md, "Where each milestone is built").
+        .target(name: "WatchwordSync", dependencies: ["WatchwordModel", "WatchwordEnvelope", "WatchwordStore"]),
+
         // VaultSession façade, unlock and auto-lock policies, and the ports the UI and adapters plug into (§10, §15).
         .target(
             name: "WatchwordKit",
@@ -59,7 +65,10 @@ let package = Package(
         // and no production target may depend on it.
         .target(
             name: "WatchwordTestSupport",
-            dependencies: ["WatchwordKit", "WatchwordStore", "WatchwordEnvelope", "SecureMemory"]
+            dependencies: [
+                "WatchwordKit", "WatchwordModel", "WatchwordStore", "WatchwordSync", "WatchwordEnvelope",
+                "SecureMemory",
+            ]
         ),
 
         // XCTest suite.
@@ -79,6 +88,13 @@ let package = Package(
             dependencies: ["WatchwordStore", "WatchwordEnvelope", "SecureMemory", "WatchwordTestSupport"]
         ),
         .testTarget(
+            name: "WatchwordSyncTests",
+            dependencies: [
+                "WatchwordSync", "WatchwordModel", "WatchwordStore", "WatchwordEnvelope", "WatchwordKit",
+                "WatchwordTestSupport",
+            ]
+        ),
+        .testTarget(
             name: "WatchwordKitTests",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordMatching", "WatchwordStore", "WatchwordCrypto",
@@ -95,7 +111,8 @@ let package = Package(
             name: "WatchwordAdversarialTests",
             dependencies: [
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
-                "SecureMemory", "WatchwordStore", "WatchwordKit", "WatchwordPlatform", "WatchwordTestSupport",
+                "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordKit", "WatchwordPlatform",
+                "WatchwordTestSupport",
             ]
         ),
     ],
