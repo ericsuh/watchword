@@ -158,8 +158,12 @@ Ten shipped modules, dependency-ordered, plus test support:
   `Item.conflicts`, until the person edits the group or calls `ItemMerge.resolve`. Notes merge line by line
   (`NoteText`). Merges never shorten a history; quarantined versions are kept. A permanent deletion carries an
   erasure summary and removes only what its author had seen; anything else is kept, trashed.
-- A version must contain its predecessor: `ItemMerge.stamped` on every save (it also keeps `modifiedAt` monotonic),
-  `ItemMerge.written` on every merge result a device seals. The long simulation diverged each time one was broken.
+- A version must contain its predecessor: `ItemMerge.stamped` on every save (it also keeps `modifiedAt` monotonic).
+  The clock records *edits* only; a merge result is sealed through `ItemMerge.written`, which sets the version and
+  nothing else, so devices that merged the same edits hold the same state. The long simulation diverged each time one
+  of these was broken.
+- An edit of a group that holds a conflict moves the conflicting values to `Item.retainedValues`; only
+  `ItemMerge.resolve` (an explicit choice) discards them.
 - Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
   counts as an erasure while merging. The outbox compares rows with `SyncState.published`, not `known`.
 - The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;

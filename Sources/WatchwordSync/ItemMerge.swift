@@ -60,9 +60,12 @@ public enum ItemMerge {
 
         var revisions: [ItemGroup: GroupStamp] = [:]
         var conflicts = previous.conflicts
+        var retained = previous.retainedValues
         for group in groups(of: previous).union(groups(of: edited)).union(previous.revisions.keys) {
             if value(of: group, in: previous) != value(of: group, in: edited) {
                 revisions[group] = stamp
+                // The edit settles what is shown; the conflicting values it supersedes are kept, not discarded.
+                retained += conflicts[group] ?? []
                 conflicts[group] = nil
             } else if let existing = effectiveStamp(of: group, in: previous, origin: origin) {
                 revisions[group] = existing
@@ -70,6 +73,7 @@ public enum ItemMerge {
         }
         item.revisions = revisions
         item.conflicts = conflicts
+        item.retainedValues = canonicalSet(retained)
         item.noteLines = NoteText.edit(effectiveLines(previous, origin: origin), to: edited.notes, revision: revision)
         item.notes = NoteText.text(item.noteLines)
         // A new version must contain its predecessor in every merged value. Device clocks disagree, so `modifiedAt`
@@ -80,7 +84,8 @@ public enum ItemMerge {
 
     /// Resolves a conflict by the person's explicit choice: `group` takes `value` (the one shown or one of the
     /// conflicting ones), written by `revision` — the result is that version, ready to seal — superseding every value
-    /// the item holds for the group.
+    /// the item holds for the group. The person chose, so the values not chosen are discarded (PRD F7.7), as are any
+    /// earlier ones retained for the group.
     public static func resolve(
         _ item: Item, group: ItemGroup, choosing value: ItemGroupValue, origin: Revision, revision: Revision
     ) -> Item {
@@ -89,6 +94,7 @@ public enum ItemMerge {
         var resolved = stamped(chosen, previous: item, previousOrigin: origin, revision: revision)
         resolved.revisions[group] = GroupStamp(revision: revision, seen: resolved.clock)
         resolved.conflicts[group] = nil
+        resolved.retainedValues = item.retainedValues.filter { Self.group(of: $0.value) != group }
         return written(resolved, as: revision)
     }
 
@@ -144,17 +150,36 @@ public enum ItemMerge {
         merged.version = max(a.version, b.version)
         // Both histories, whole: merging never shortens a history (pruning by age is the saving device's policy).
         merged.history = Array(Set(a.history + b.history)).sorted(by: historyOrder)
+        merged.retainedValues = canonicalSet(a.retainedValues + b.retainedValues)
         return merged
     }
 
-    /// `item` as the version `revision` writes: its version set, and the write recorded in its clock. Every merge
-    /// result a device stores goes through this, so a version always contains itself and devices can tell when they
-    /// hold the same state.
+    /// `item` as the version `revision` writes, for a merge result a device stores. Only the version changes: the
+    /// clock records edits, not the versions that carry them, so devices that merged the same edits hold the same
+    /// state whichever of them wrote it down — and do not keep exchanging versions that differ in nothing else.
     public static func written(_ item: Item, as revision: Revision) -> Item {
         var item = item
         item.version = revision.version
-        item.clock.record(revision)
         return item
+    }
+
+    /// Values without duplicates, in a fixed order.
+    static func canonicalSet(_ values: [ConflictingValue]) -> [ConflictingValue] {
+        Array(Set(values)).sorted(by: canonicalOrder)
+    }
+
+    /// The group a value belongs to; `nil` for a removed field, which names none.
+    static func group(of value: ItemGroupValue) -> ItemGroup? {
+        switch value {
+        case .title: return .title
+        case .scopes: return .scopes
+        case .tags: return .tags
+        case .archived: return .archived
+        case .trashedAt: return .trashedAt
+        case .excludedFromSuggestions: return .excludedFromSuggestions
+        case .fieldOrder: return .fieldOrder
+        case .field(let field): return field.map { .field($0.id) }
+        }
     }
 
     /// Whether two versions hold the same state: everything but `version`, with histories compared as sets.
@@ -175,9 +200,10 @@ public enum ItemMerge {
         effectiveClock(item, origin: origin).isCovered(by: erased)
     }
 
-    /// The item's version vector, including the row it was read from.
+    /// The edits the item contains. An item from before sync has no clock; the row it was read from stands in.
     public static func effectiveClock(_ item: Item, origin: Revision) -> VersionVector {
-        var clock = item.clock
+        guard item.clock.isEmpty else { return item.clock }
+        var clock = VersionVector()
         clock.record(origin)
         return clock
     }

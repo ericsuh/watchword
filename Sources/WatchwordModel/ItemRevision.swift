@@ -20,10 +20,10 @@ public struct Revision: Hashable, Codable, Sendable, Comparable {
     }
 }
 
-/// For each device, the highest of its versions of an item that a copy of the item contains.
+/// For each device, the highest of its edits of an item that a copy of the item contains.
 ///
-/// A device's versions of one item each contain the one before (merges never drop anything), so containing version
-/// `n` from a device means containing all of that device's earlier versions too. That is what makes `contains` exact:
+/// A device's edits of one item are each made on a copy containing its earlier ones (merges never drop anything), so
+/// containing edit `n` from a device means containing all of that device's earlier edits too. That is what makes `contains` exact:
 /// a write whose vector contains another write's revision was made by someone who had seen it. Two writes neither of
 /// which contains the other are concurrent — a conflict — and sync keeps both (PRD F7.6).
 public struct VersionVector: Hashable, Sendable, Codable {

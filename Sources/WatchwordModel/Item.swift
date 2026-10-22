@@ -31,7 +31,11 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
     /// Values written concurrently with the ones shown, per group, kept until the person chooses (PRD F7.6). Sync
     /// never discards one; an edit of the group, made where these are shown, resolves them.
     public var conflicts: [ItemGroup: [ConflictingValue]]
-    /// For each device, the highest of its versions this copy of the item contains.
+    /// Conflicting values that an edit of their group superseded: the person edited the field while the conflict
+    /// stood, which settles what is shown but is not a choice to discard the others (PRD F7.7). Kept until the person
+    /// explicitly discards them.
+    public var retainedValues: [ConflictingValue]
+    /// For each device, the highest of its edits this copy of the item contains (merge results are not edits).
     public var clock: VersionVector
     /// `notes` as a line-level sequence, so concurrent edits to different lines merge (PRD F7.6). Empty on items
     /// written before sync, and for empty notes.
@@ -54,6 +58,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         excludedFromSuggestions: Bool = false,
         revisions: [ItemGroup: GroupStamp] = [:],
         conflicts: [ItemGroup: [ConflictingValue]] = [:],
+        retainedValues: [ConflictingValue] = [],
         clock: VersionVector = VersionVector(),
         noteLines: [NoteLine] = []
     ) {
@@ -73,13 +78,14 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         self.excludedFromSuggestions = excludedFromSuggestions
         self.revisions = revisions
         self.conflicts = conflicts
+        self.retainedValues = retainedValues
         self.clock = clock
         self.noteLines = noteLines
     }
 
     enum CodingKeys: String, CodingKey {
         case id, vaultID, title, scopes, fields, tags, notes, createdAt, modifiedAt, version, archived, trashedAt
-        case history, excludedFromSuggestions, revisions, conflicts, clock, noteLines
+        case history, excludedFromSuggestions, revisions, conflicts, retainedValues, clock, noteLines
     }
 
     /// Synthesised decoding, except that the sync metadata may be absent: payloads written before it existed still open.
@@ -101,6 +107,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         excludedFromSuggestions = try container.decode(Bool.self, forKey: .excludedFromSuggestions)
         revisions = try container.decodeIfPresent([ItemGroup: GroupStamp].self, forKey: .revisions) ?? [:]
         conflicts = try container.decodeIfPresent([ItemGroup: [ConflictingValue]].self, forKey: .conflicts) ?? [:]
+        retainedValues = try container.decodeIfPresent([ConflictingValue].self, forKey: .retainedValues) ?? []
         clock = try container.decodeIfPresent(VersionVector.self, forKey: .clock) ?? VersionVector()
         noteLines = try container.decodeIfPresent([NoteLine].self, forKey: .noteLines) ?? []
     }

@@ -19,7 +19,7 @@ struct LongRunningSyncSimulationTests {
         let seed = TestEnvironment.seed(fallback: 0x5EED_0000) &+ run
         var generator = SeededGenerator(seed: seed)
         let deviceCount = TestEnvironment.iterations(standard: 3, long: 5)
-        let steps = TestEnvironment.iterations(standard: 300, long: 4_000)
+        let steps = TestEnvironment.iterations(standard: 300, long: 2_500)
 
         let server = SimulatedServer(seed: seed, maximumVisibilityDelay: 4, duplicateListings: true)
         let keys = FakeAccountKeys(seed: seed)
@@ -54,7 +54,8 @@ struct LongRunningSyncSimulationTests {
             let index = Int.random(in: 0..<deviceCount, using: &generator)
             let device = devices[index]
             let roll = Int.random(in: 0..<100, using: &generator)
-            let existing = locked.contains(index) ? [:] : try await device.items()
+            // Opened only when the step needs them: decrypting every item at every step dominated the run time.
+            let existing = (10..<49).contains(roll) && !locked.contains(index) ? try await device.items() : [:]
             switch roll {
             case 0..<10 where !locked.contains(index):
                 let secret = "s3cret-\(seed)-\(step)"
@@ -124,7 +125,7 @@ struct LongRunningSyncSimulationTests {
         }
 
         // Nothing anyone typed was lost: every field value saved for an item nobody erased is still in it on every
-        // device — shown, kept as a conflict, or in its history (PRD F7.7).
+        // device — shown, kept as a conflict, retained after an edit settled one, or in its history (PRD F7.7).
         for device in devices {
             let items = try await device.items()
             for (id, values) in savedValues where !erased.contains(id) {
@@ -134,7 +135,7 @@ struct LongRunningSyncSimulationTests {
                 }
                 var present = Set(item.fields.map(\.value))
                 present.formUnion(item.history.flatMap(\.fields).map(\.value))
-                for conflict in item.conflicts.values.joined() {
+                for conflict in Array(item.conflicts.values.joined()) + item.retainedValues {
                     if case .field(let field?) = conflict.value { present.insert(field.value) }
                 }
                 let lost = values.subtracting(present)

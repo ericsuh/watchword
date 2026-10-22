@@ -193,6 +193,40 @@ struct ItemMergeTests {
         #expect(!everywhere.hasConflicts)
     }
 
+    /// Found by the long simulation: an ordinary edit of a field that held a conflict superseded the conflicting value
+    /// and dropped it. Editing settles what is shown; it is not a choice to discard the other value.
+    @Test("editing a field that holds a conflict keeps the conflicting value, retained")
+    func editKeepsConflictingValue() {
+        let base = F.base()
+        let onA = F.edit(base, by: F.a, at: 2) { $0.fields[1].value = "from-A" }
+        let onB = F.edit(base, by: F.b, at: 2) { $0.fields[1].value = "from-B" }
+        let merged = F.merge((onA, F.a), (onB, F.b))
+        let edited = F.edit(merged, by: F.a, at: 3) { $0.fields[1].value = "typed-later" }
+        #expect(edited.field(.password)?.value == "typed-later")
+        #expect(!edited.hasConflicts)
+        #expect(edited.retainedValues.map(\.value) == [F.password("from-A")])
+        #expect(edited.history.flatMap(\.fields).contains { $0.value == "from-B" }, "the shown value went to history")
+        // Retained values survive merges with versions that never had them.
+        let elsewhere = F.merge((onB, F.b), (edited, F.a))
+        #expect(elsewhere.retainedValues.map(\.value) == [F.password("from-A")])
+    }
+
+    /// Found by the long simulation: devices that merged the same edits wrote their results as different versions,
+    /// each recording its own write in the clock, so every exchange looked like news and sync never settled.
+    @Test("devices that merge the same edits hold the same state, whoever writes the result down")
+    func mergeResultsAreTheSameState() {
+        let base = F.base()
+        let onA = F.edit(base, by: F.a, at: 2) { $0.fields[1].value = "from-A" }
+        let onB = F.edit(base, by: F.b, at: 2) { $0.notes = "from-B" }
+        let writtenByA = ItemMerge.written(F.merge((onA, F.a), (onB, F.b)), as: Revision(version: 3, device: F.a))
+        let writtenByB = ItemMerge.written(F.merge((onB, F.b), (onA, F.a)), as: Revision(version: 3, device: F.b))
+        #expect(ItemMerge.sameState(writtenByA, writtenByB))
+        let again = ItemMerge.merge(
+            writtenByA, origin: Revision(version: 3, device: F.a), writtenByB, origin: Revision(version: 3, device: F.b)
+        )
+        #expect(ItemMerge.sameState(again, writtenByA))
+    }
+
     @Test("removing a field while another device edits it: removed, with the edit kept as a conflict")
     func fieldDeleteVersusEdit() {
         let base = F.base()

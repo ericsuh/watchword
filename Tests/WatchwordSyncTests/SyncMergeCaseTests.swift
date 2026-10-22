@@ -98,7 +98,7 @@ struct SyncMergeCaseTests {
         for (device, value) in zip(home.devices, ["from-A", "from-B", "from-C"]) {
             try await device.edit(item.id) { $0.fields[1].value = value }
         }
-        try await home.settle()
+        #expect(try await home.settle() <= 4, "merging the same edits settles in a few rounds")
         try await home.expectConverged()
         for copy in try await Self.everywhere(home, item.id) {
             let kept = (copy.conflicts[.field(F.fieldID(2))] ?? []).compactMap { conflict -> String? in

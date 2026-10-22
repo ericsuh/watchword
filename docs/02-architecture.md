@@ -359,7 +359,9 @@ validly signed segment), and acknowledgement and coverage values must be plausib
   `VersionVector` of everything that writer had seen — so the merge can tell an edit made *after seeing* another
   (which replaces it) from a concurrent one. Concurrent values of the same group are all kept: one is shown, chosen
   the same way on every device (a deletion first, then the later revision), the others are kept in `Item.conflicts`
-  until the person edits the group or chooses (`ItemMerge.resolve`). Identical concurrent values are one value.
+  until the person chooses (`ItemMerge.resolve`); an ordinary edit of the group settles what is shown and moves the
+  others to `Item.retainedValues`, still kept. Identical concurrent values are one value. The version vector records
+  edits only, never the versions that carry merge results, so devices that merged the same edits hold the same state.
   Notes are a line-level sequence CRDT (`NoteText`, an RGA over lines): concurrent edits to different lines all
   survive, and two edits of the same line both appear. Histories are unioned, never shortened by a merge. The merge is
   a join — the same versions in any order give the same item — except that field order is last-writer-wins (it

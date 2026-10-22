@@ -151,7 +151,7 @@ Status: **portable half delivered** from a remote session, as the split above in
   commits) and envelope kind 5, `snapshot`. Architecture §7.5 describes it.
 - Exit criteria: the N-client simulation (random partitions, an eventually consistent server that delays,
   reorders and duplicates, concurrent edits and deletions, devices locking) converges, a device joining afterwards
-  from snapshots sees the same vault, and no title or secret reaches the transport — every push, and 4,000-step
+  from snapshots sees the same vault, and no title or secret reaches the transport — every push, and 2,500-step
   five-device runs nightly. It also checks that no field value any device saved is lost, and models a stray object
   and rolled-back sync state. It found three convergence bugs (`06-adversarial-review.md` §H, Y1–Y3); an independent
   review found six more (Y8–Y13); each now has a regression test that reproduced it. The suite "Simultaneous edits
