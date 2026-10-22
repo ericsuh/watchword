@@ -354,7 +354,10 @@ struct AdversarialSyncTests {
         #expect(report.applied == 0)
         #expect(try await reader.items().isEmpty)
         // Not merged, but not thrown away either: kept until the person discards them (PRD F7.7).
-        #expect(await reader.syncState.quarantined(vaultID: Self.vault).map(\.version).sorted() == [1 << 30, .max - 1])
+        #expect(
+            await reader.syncState.quarantined(vaultID: Self.vault).map(\.version).sorted() == [
+                UInt64(1) << 30, UInt64.max - 1,
+            ])
         try await reader.sync()
         #expect(await reader.syncState.quarantined(vaultID: Self.vault).count == 2, "quarantine is not emptied by sync")
     }
@@ -368,11 +371,11 @@ struct AdversarialSyncTests {
         try await f.writer.save(Self.login("Bank", password: "x"))
         let rows = await f.writer.store.records(in: Self.vault, kind: .item)
         let snapshot = SyncPayload(
-            kind: .snapshot, vaultID: Self.vault, author: Self.a, number: 1, vector: [Self.a: .max],
+            kind: .snapshot, vaultID: Self.vault, author: Self.a, number: 1, vector: [Self.a: UInt64.max],
             entries: rows.map(SyncEntry.init))
         try await f.plant(snapshot, signedBy: f.writer.keyring)
         var segment = Self.payload(rows, sequence: 2)
-        segment.vector = [Self.b: .max - 1]
+        segment.vector = [Self.b: UInt64.max - 1]
         try await f.plant(segment, signedBy: f.writer.keyring)
         await f.transport.tamper(f.segmentName(.max), contents: [1, 2, 3])
         let reader = await f.reader()
