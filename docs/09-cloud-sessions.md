@@ -6,7 +6,7 @@ the Claude Code docs on 2026-10-13; the scripts referenced here were exercised a
 on macOS with Swift 6.4.
 
 The short version: a cloud session gives you `swift build`, `swift test`, the adversarial suite, the
-strict-memory-safety gate and `swift format` — four of the five `ci.yml` jobs. It will never give
+strict-memory-safety gate and `swift format` — four of the five `ci.yml` test jobs. It will never give
 you Xcode. §1 is what that costs; §2–§4 is the setup.
 
 ## 1. What a cloud VM is, and what it can never be

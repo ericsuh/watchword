@@ -46,11 +46,12 @@ jobs:
           - name: Xcode 16.4 / macOS 15
             runner: macos-15
             xcode: "16.4"
-          # Current toolchain on macOS 26. Avoid Xcode 26.0.x, which has a reported test-runner
-          # hang on the macos-26 image (actions/runner-images#13143).
-          - name: Xcode 26 / macOS 26
-            runner: macos-26
-            xcode: "26.6"
+          # Current toolchain on macOS 27. GitHub keys macOS images by Xcode major from 27 on, so the
+          # macOS 27 runner is `xcode-27`; there is no `macos-27` label. 27.0 is the image's one
+          # non-beta, non-RC Xcode.
+          - name: Xcode 27 / macOS 27
+            runner: xcode-27
+            xcode: "27.0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -89,7 +90,7 @@ jobs:
     # The security suite runs on its own so a regression shows up as its own red check
     # (docs/04-test-plan.md §6).
     name: Adversarial security tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
     permissions:
       contents: read
@@ -98,7 +99,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Select Xcode
-        run: .github/scripts/select-xcode.sh 26.6
+        run: .github/scripts/select-xcode.sh 27.0
       - name: Install mise
         run: .github/scripts/install-mise.sh
       # Fails if the suite ran zero tests or any area's suite is missing from the output: a renamed or deleted suite
@@ -111,7 +112,7 @@ jobs:
     # SecureMemory is not exempted: it marks each one. Marked constructs compile anywhere, and the compiler does not
     # classify everything (e.g. `@_silgen_name` bindings), so the confinement script below backs this up.
     name: Strict memory safety
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
     permissions:
       contents: read
@@ -120,7 +121,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Select Xcode
-        run: .github/scripts/select-xcode.sh 26.6
+        run: .github/scripts/select-xcode.sh 27.0
       - name: Install mise
         run: .github/scripts/install-mise.sh
       # `--require` turns a too-old compiler into a failure; without it the task skips, as `check` does on Xcode 16.4.
@@ -132,7 +133,7 @@ jobs:
 
   lint:
     name: swift-format lint
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 10
     permissions:
       contents: read
@@ -141,68 +142,87 @@ jobs:
         with:
           persist-credentials: false
       - name: Select Xcode
-        run: .github/scripts/select-xcode.sh 26.6
+        run: .github/scripts/select-xcode.sh 27.0
       - name: Install mise
         run: .github/scripts/install-mise.sh
       - name: mise run lint
         run: mise run lint
 
   app-tests:
-    # Runs the Xcode app and UI test suites once the app project exists (milestone 2 in
-    # docs/03-implementation-plan.md). Until Apps/project.yml is committed the job succeeds
-    # after reporting that it was skipped.
-    name: App tests (macOS + iOS simulator)
-    runs-on: macos-26
+    # The Xcode app, unit and UI test suites (milestone 2 in docs/03-implementation-plan.md): AppKit and UIKit, the
+    # AutoFill extension shells, and XCUITest, which needs the logged-in GUI session, automation mode and simulators
+    # that only the macOS runner image provides. One leg per platform, so each reports as its own check and a failing
+    # macOS leg does not stop the iOS leg from running. Both block merges through `required` below.
+    name: App tests (${{ matrix.name }})
+    runs-on: xcode-27
     timeout-minutes: 60
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            platform: macos
+          - name: iOS simulator
+            platform: ios
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Select Xcode
-        run: .github/scripts/select-xcode.sh 26.6
-
-      - name: Detect app project
-        id: detect
-        run: |
-          if [ -f Apps/project.yml ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Apps/project.yml not found; app tests skipped"
-          fi
+        run: .github/scripts/select-xcode.sh 27.0
 
       - name: Install mise
-        if: steps.detect.outputs.present == 'true'
         run: .github/scripts/install-mise.sh
 
       # XcodeGen comes from mise.toml, at the version, URL and SHA-256 recorded in mise.lock (docs/07-supply-chain.md
-      # §3.3). `app:generate`, which both test tasks depend on, fails if the xcodegen on PATH is not that version.
+      # §3.3). `app:generate`, which the test task depends on, fails if the xcodegen on PATH is not that version, and
+      # fails outright without Apps/project.yml, so a deleted project turns this check red rather than skipping it.
       - name: Install XcodeGen (mise, locked)
-        if: steps.detect.outputs.present == 'true'
         run: mise install xcodegen
 
-      # Each task regenerates the project from Apps/project.yml first. See mise-tasks/app/test for the signing settings.
-      - name: mise run app:test macos
-        if: steps.detect.outputs.present == 'true'
-        run: mise run app:test macos --results TestResults
-
-      - name: mise run app:test ios
-        if: steps.detect.outputs.present == 'true'
-        run: mise run app:test ios --results TestResults
+      # The task regenerates the project from Apps/project.yml first. See mise-tasks/app/test for the signing settings.
+      - name: mise run app:test ${{ matrix.platform }}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: mise run app:test "$PLATFORM" --results TestResults
 
       # Enabling a third-party AutoFill provider from automation is unreliable on the simulator;
       # this attempt is informational and never blocks the pull request.
       - name: AutoFill extension UI test (best effort)
-        if: steps.detect.outputs.present == 'true'
+        if: matrix.platform == 'ios'
         continue-on-error: true
         run: mise run app:test ios --only-testing WatchwordUITests/AutoFillSettingsTests
 
       - name: Upload result bundles
-        if: always() && steps.detect.outputs.present == 'true'
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: xcresults
+          name: xcresults-${{ matrix.platform }}
           path: TestResults
           if-no-files-found: ignore
+
+  required:
+    # The one check branch protection on `main` requires (docs/08-repository-hardening.md §5). Matrix legs are named
+    # after their runner and Xcode, so a runner bump renames them, and a required check that never reports again
+    # blocks every pull request; this job's name does not change. It fails unless every job above succeeded:
+    # `always()` makes it run (and fail) when one failed or was cancelled, where a plain `needs` would skip it, and a
+    # skipped required check counts as passing.
+    name: Required checks
+    if: always()
+    needs: [package-tests, adversarial-tests, strict-memory-safety, lint, app-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # GitHub-side plumbing with nothing to reproduce locally, so an expression rather than a mise task; each job it
+      # gates names its own. A job result is one of success, failure, cancelled or skipped.
+      - name: Fail unless every gate job succeeded
+        if: >-
+          contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')
+        run: |
+          echo "::error::A required job did not succeed; its own check on this pull request has the failure"
+          exit 1

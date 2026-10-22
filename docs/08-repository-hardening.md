@@ -133,8 +133,7 @@ gh api repos/ericsuh/watchword/code-scanning/alerts \
 a settled one.** Arguments both ways, since this is exactly the sort of thing that gets decided by
 accident:
 
-- *For requiring it:* it does real work, so it is not the "passes by doing nothing" case that keeps
-  `App tests` off the list. A memory-safety or injection finding landing on `main` is the kind of
+- *For requiring it:* it does real work, not a check that passes by doing nothing. A memory-safety or injection finding landing on `main` is the kind of
   regression this project cares about most.
 - *Against:* the queries are versioned by GitHub, so a query-pack update can turn a green `main`
   red without any change here — a different failure mode from the rest of the list, where a red
@@ -142,8 +141,9 @@ accident:
   pinned version (`07-supply-chain.md` §3.4).
 
 Recommendation: leave it advisory until the first month of alerts shows the false-positive rate,
-then require it. If you do require it, add `"Analyze (swift)"` to `contexts` in step 5 **and** to
-the expected-count sentence in step 9 — and re-check both after ever enabling a second language,
+then require it. It cannot join `Required checks` (that job only sees `ci.yml`'s own jobs), so if you
+do require it, add `"Analyze (swift)"` to `contexts` in step 5 **and** to the expected-count sentence
+in step 9 — and re-check both after ever enabling a second language,
 because the context name is derived from the language set.
 
 ## 4. Merge hygiene
@@ -166,10 +166,16 @@ removes the human read of the diff that is the actual control.
 
 ## 5. Branch protection on `main`
 
-Check names must match the job names exactly, including the matrix expansion. These are the five
-required; `App tests (macOS + iOS simulator)` is omitted on purpose because it currently succeeds
-by skipping, and a check that passes by doing nothing is not a gate. Add it in milestone 2 when it
-runs real tests.
+Require one check, `Required checks`: the last job in `ci.yml`, which needs every other job there
+and fails unless each succeeded — both package-test legs, the adversarial suite, strict memory
+safety, lint, and the macOS and iOS-simulator app tests on the `xcode-27` (macOS 27) runner. The
+individual jobs still show as their own checks on a pull request; they are not listed here because
+their names carry the runner and Xcode (`Package tests (Xcode 27 / macOS 27)`), and a required
+check that no longer reports blocks every merge until someone edits this setting. That is what
+moving from macOS 26 to macOS 27 would otherwise have done.
+
+If `main` already requires the old per-job list (`Package tests (Xcode 26 / macOS 26)` and the
+rest), apply this before merging the change that renamed them, or that pull request cannot merge.
 
 ```sh
 gh api -X PUT repos/ericsuh/watchword/branches/main/protection --input - <<'JSON'
@@ -177,11 +183,7 @@ gh api -X PUT repos/ericsuh/watchword/branches/main/protection --input - <<'JSON
   "required_status_checks": {
     "strict": true,
     "contexts": [
-      "Package tests (Xcode 16.4 / macOS 15)",
-      "Package tests (Xcode 26 / macOS 26)",
-      "Adversarial security tests",
-      "Strict memory safety",
-      "swift-format lint"
+      "Required checks"
     ]
   },
   "enforce_admins": true,
@@ -302,12 +304,12 @@ echo "— rulesets —"
 gh api repos/ericsuh/watchword/rulesets --jq '.[] | {name, target, enforcement}'
 ```
 
-Expected: five contexts with `strict: true`, `admins: true`, no force-push, no deletions,
+Expected: one context, `Required checks`, with `strict: true`, `admins: true`, no force-push, no deletions,
 `allowed_actions: "selected"` with `github_owned_allowed: true` and an empty `patterns_allowed`,
 `default_workflow_permissions: "read"`, secret scanning and push protection `enabled`, code
 scanning `configured` for `["swift"]`, and one active tag ruleset.
 
-Five contexts is correct only while `Analyze (swift)` stays advisory (step 3.1). If that decision
+One context is correct only while `Analyze (swift)` stays advisory (step 3.1). If that decision
 is revisited, this sentence is the second place to update.
 
 ## Optional: Dependabot for action pins
