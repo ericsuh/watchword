@@ -171,7 +171,8 @@ Status: **portable half delivered** from a remote session, as the split above in
   discard; `sync_state`/staging tables
   in `SQLiteRecordStore`; device enrolment from the account header on the transport; `CloudKitTransport` and the
   coordinated iCloud Drive wrapper around `FileSyncTransport`; the manual CloudKit workflow; and the adversarial
-  tests repeated with real keys. The device registry (D9) must land before sync ships.
+  tests repeated with real keys; and item history in records of its own, so the never-pruned history (F1.4) no
+  longer counts against an item's 1 MiB payload. The device registry (D9) must land before sync ships.
 
 ## Milestone 4 — Sharing
 

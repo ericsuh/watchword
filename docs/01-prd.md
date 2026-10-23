@@ -110,8 +110,9 @@ Requirement IDs are stable and referenced from the test plan.
   free text, and custom labelled secret or non-secret text.
 - F1.3 An item may hold any combination and multiplicity of field types (S3 has three security
   questions; S1's AWS item has one password and one TOTP).
-- F1.4 Every item version is retained for 90 days ("password history"); the previous password is
-  always retrievable.
+- F1.4 Every item version is retained for good ("password history"): a full audit trail, never pruned
+  by age or by count. The previous password is always retrievable. An edit that would make an item
+  larger than its payload limit (SEC9) is refused, never made room for by dropping history.
 - F1.5 Items can be archived and restored, and permanently deleted after a 30-day trash period.
 
 ### 5.2 Vaults and organisation
@@ -214,9 +215,9 @@ Requirement IDs are stable and referenced from the test plan.
   permanent deletion and an edit its author had not seen give the item back, in the trash, with the edit.
 - F7.7 Sync never throws away data a person entered or a device received without an explicit action by
   the person: conflicting values, history, notes lines and versions refused as implausible are all kept
-  until the person resolves, empties or discards them. *Open:* the local policies of F1.4 (history pruned
-  after 90 days or 100 entries) and F1.5 (trash purged after 30 days) are automatic discards; whether F7.7
-  overrides them is a decision for the owner (`06-adversarial-review.md` §H, Y14).
+  until the person resolves, empties or discards them. History is never pruned (F1.4, decided by the owner
+  on 2026-10-23). *Open:* F1.5's 30-day trash purge is still an automatic discard; whether F7.7
+  overrides it is a decision for the owner (`06-adversarial-review.md` §H, Y14).
 
 ### 5.8 Import and export (F8)
 

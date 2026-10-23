@@ -2,7 +2,7 @@ import Foundation
 import SecureMemory
 import WatchwordKit
 
-/// A wall clock tests move by hand, so time-based policy (F5.4 expiry, F5.5 auto-lock, F1.4/F1.5 retention) is tested
+/// A wall clock tests move by hand, so time-based policy (F5.4 expiry, F5.5 auto-lock, F1.5 retention) is tested
 /// without sleeping (CLAUDE.md, "Tests").
 public actor FakeClock: WallClock {
     private var current: Date

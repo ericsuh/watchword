@@ -148,7 +148,7 @@ public enum ItemMerge {
         merged.createdAt = min(a.createdAt, b.createdAt)
         merged.modifiedAt = max(a.modifiedAt, b.modifiedAt)
         merged.version = max(a.version, b.version)
-        // Both histories, whole: merging never shortens a history (pruning by age is the saving device's policy).
+        // Both histories, whole: merging never shortens a history (PRD F1.4, F7.7).
         merged.history = Array(Set(a.history + b.history)).sorted(by: historyOrder)
         merged.retainedValues = canonicalSet(a.retainedValues + b.retainedValues)
         return merged

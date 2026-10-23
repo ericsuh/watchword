@@ -400,8 +400,9 @@ healthy device it changes nothing; on one whose file was rolled back it restores
 
 Known limits, tracked in `06-adversarial-review.md` §H: every device still holds the account signing key, so
 the device registry (D9) is still needed before sync ships; a device that stops syncing for good holds garbage
-collection back until it is removed; the store can withhold objects (reported, not prevented); merges bring back
-history entries a device pruned by age; and a snapshot may attribute versions to any device (its author is
+collection back until it is removed; the store can withhold objects (reported, not prevented); an item's history
+lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
+refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
 trusted for the vault, so this is an insider's capability).
 
 ## 8. Sharing protocol

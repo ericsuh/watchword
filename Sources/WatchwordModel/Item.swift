@@ -19,7 +19,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
     public var archived: Bool
     /// When the item was moved to the trash; it is purged 30 days later (PRD F1.5).
     public var trashedAt: Date?
-    /// Earlier field values, newest first, retained for 90 days (PRD F1.4).
+    /// Earlier field values, newest first. Never pruned: the full audit trail of the item (PRD F1.4, F7.7).
     public var history: [ItemHistoryEntry]
     /// Keeps the item out of the OS QuickType identity store (PRD F6.8).
     public var excludedFromSuggestions: Bool
