@@ -831,7 +831,8 @@
                 StoreChange(conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
         }
 
-        /// Deletes items that have been in the trash for 30 days (PRD F1.5). Run after every unlock.
+        /// Deletes items that have been in the trash for 30 days (PRD F1.5). Run after every unlock. Not a discard
+        /// without consent (F7.7): the move to the trash was the person's action, confirmed in the UI.
         public func purgeExpiredTrash() async throws {
             let now = await clock.now()
             let expired = try await items().items.filter {

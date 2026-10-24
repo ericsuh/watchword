@@ -53,6 +53,7 @@ struct ItemListView: View {
                     ItemDetailView(item: item, onEdit: { editing = item })
                 } else {
                     ContentUnavailableView("No item selected", systemImage: "key")
+                        .accessibilityIdentifier("detail.empty")
                 }
             }
             #if os(macOS)
