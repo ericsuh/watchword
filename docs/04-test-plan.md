@@ -85,7 +85,8 @@ with password re-entry, import of 1PUX/CSV fixtures.
 - AutoFill in Safari cannot be reliably enabled from automation on the simulator; the job that
   attempts it (via the Settings app) is non-blocking and its result is recorded as an artifact.
 - Milestone 2 status: `OnboardingAndUnlockTests` (onboarding with the short-password error, the
-  Emergency Kit confirmation, item creation with a generated password, lock, wrong password, unlock)
+  Emergency Kit confirmation, item creation with a generated password, lock, wrong password, unlock, and Move to Trash, which only
+  takes effect once its confirmation is accepted)
   runs on the iOS simulator and macOS from `Apps/UITests/Shared`. `AutoFillSettingsTests` skips
   itself until the extension answers requests (milestone 5). The accessibility audit is not wired
   in yet.

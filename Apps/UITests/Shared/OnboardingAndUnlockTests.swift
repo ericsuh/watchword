@@ -1,8 +1,9 @@
 import XCTest
 
 /// Milestone 2 UI smoke test, run on iOS and macOS (docs/04-test-plan.md §5): onboarding with the Emergency Kit
-/// confirmation, item creation, lock, a wrong password, and unlock. The app is launched with `--uitest`, which in Debug
-/// builds swaps in in-memory ports, so no real Keychain or vault is touched.
+/// confirmation, item creation, lock, a wrong password, unlock, and moving the item to the trash, which needs a
+/// confirmation (PRD F1.5, F7.7). The app is launched with `--uitest`, which in Debug builds swaps in in-memory ports,
+/// so no real Keychain or vault is touched.
 final class OnboardingAndUnlockTests: XCTestCase {
     static let password = "correct horse battery staple"
 
@@ -66,7 +67,24 @@ final class OnboardingAndUnlockTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["error"].waitForExistence(timeout: 30))
         unlock.click()
         unlock.typeText(Self.password + "\n")
-        XCTAssertTrue(app.descendants(matching: .any)["items.row.Library"].waitForExistence(timeout: 30))
+        let row = app.descendants(matching: .any)["items.row.Library"]
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+
+        // Move to Trash asks first: the toolbar button only opens the confirmation, and the item stays until the
+        // person confirms. The purge 30 days later does not ask again, so this is the explicit action F7.7 needs.
+        row.click()
+        let trash = app.buttons["detail.trash"]
+        XCTAssertTrue(trash.waitForExistence(timeout: 10), app.debugDescription)
+        trash.click()
+        // The dialog's button may or may not carry its identifier; it is the other button with the same label.
+        let confirmTrash = app.buttons.matching(
+            NSPredicate(format: "label == %@ AND identifier != %@", "Move to Trash", "detail.trash")
+        ).firstMatch
+        XCTAssertTrue(confirmTrash.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["detail.empty"].exists, "trashed before the confirmation")
+        confirmTrash.click()
+        XCTAssertTrue(app.descendants(matching: .any)["detail.empty"].waitForExistence(timeout: 10))
+        XCTAssertTrue(row.waitForNonExistence(timeout: 10), "the trashed item is still listed")
     }
 }
 
