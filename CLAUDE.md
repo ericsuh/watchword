@@ -43,6 +43,7 @@ mise run app:build [ios|macos]                         # both by default; --conf
 mise run app:test [ios|macos]                          # both by default; --only-testing <id> (needs a platform), --results, --simulator
 mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
+mise run ci:gate <gate> [--filter …] [--platform …]   # one gate, ending in a failure summary: what mac-run.yml runs
 ```
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor.
@@ -88,8 +89,9 @@ server, and the base image cannot be replaced. So in a cloud session:
   tools as `mise exec -- <tool>`.
 - Anything importing CryptoKit, Security.framework, CommonCrypto or LocalAuthentication does not
   compile, and `xcodebuild` is absent. `WatchwordCrypto`, `SecureMemory` and the Keychain adapters
-  (`docs/02-architecture.md` §15) can be drafted there but **not** built or tested. Say so rather
-  than reporting a layer as verified; the adversarial test such a change owes has to run on macOS.
+  (`docs/02-architecture.md` §15) can be drafted there but **not** built or tested there. Push the branch and
+  dispatch `.github/workflows/mac-run.yml` on it (`mise run ci:gate`, `docs/09-cloud-sessions.md` §5) to compile and
+  test it on a macOS runner; until a run passes, say so rather than reporting a layer as verified.
 - The toolchain is Swift 6.4, newer than the Xcode 16.4 CI leg. A clean cloud build is not evidence
   that leg passes.
 
@@ -315,7 +317,8 @@ runner bump never strands `main` waiting on a check that no longer reports. Ever
 screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is
 `mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
 runs, libFuzzer harnesses under `Fuzz/` (self-skipping), and an audit that every `uses:` is a 40-hex
-commit SHA.
+commit SHA. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS runner (`mise run ci:gate`), so a cloud
+session can run Mac-only gates before opening a pull request; it gates nothing.
 
 One check on every PR has **no workflow file**: `Analyze (swift)`, from CodeQL *default setup*,
 which GitHub configures in repository settings and runs on a generated workflow you cannot see in
