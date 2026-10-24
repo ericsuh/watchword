@@ -72,8 +72,9 @@ final class OnboardingAndUnlockTests: XCTestCase {
 
         // Move to Trash asks first: the toolbar button only opens the confirmation, and the item stays until the
         // person confirms. The purge 30 days later does not ask again, so this is the explicit action F7.7 needs.
-        row.click()
-        let trash = app.buttons["detail.trash"]
+        // On macOS the row's identifier lands on each of its texts (title and host), so click the first of them.
+        row.firstMatch.click()
+        let trash = app.buttons["detail.trash"].firstMatch
         XCTAssertTrue(trash.waitForExistence(timeout: 10), app.debugDescription)
         trash.click()
         // The dialog's button may or may not carry its identifier; it is the other button with the same label.
