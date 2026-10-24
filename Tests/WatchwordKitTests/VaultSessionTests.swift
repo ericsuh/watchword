@@ -269,7 +269,7 @@
             #expect(try await vault.session.item(id: created.id) == updated)
         }
 
-        @Test("field changes are kept in history for 90 days; the previous password always survives (F1.4)")
+        @Test("field changes are kept in history for good, however old or many (F1.4: a full audit trail)")
         func history() async throws {
             let (vault, vaultID) = try await Self.unlocked()
             var item = try await vault.session.save(login(vaultID, password: "first"))
@@ -279,10 +279,42 @@
                 item = try await vault.session.save(item)
             }
             #expect(item.history.map { $0.fields[1].value } == ["second", "first"])
-            await vault.clock.advance(by: 100 * 86_400)
+            await vault.clock.advance(by: 3 * 365 * 86_400)
             item.title = "touch"
             item = try await vault.session.save(item)
-            #expect(item.history.map { $0.fields[1].value } == ["second"])
+            #expect(item.history.map { $0.fields[1].value } == ["second", "first"], "nothing expires with age")
+
+            for edit in 0..<150 {
+                item.fields[1].value = "pw-\(edit)"
+                item = try await vault.session.save(item)
+            }
+            #expect(item.history.count == 152, "nothing is dropped by count")
+            #expect(item.history.last?.fields[1].value == "first")
+            #expect(try await vault.session.item(id: item.id).history == item.history)
+        }
+
+        @Test("an edit that would outgrow the payload limit is refused, never made room for by pruning (F1.4, SEC9)")
+        func historyNeverPrunedToFit() async throws {
+            let (vault, vaultID) = try await Self.unlocked()
+            let large = String(repeating: "x", count: 200_000)
+            var item = try await vault.session.save(login(vaultID, password: large + "0"))
+            var saved = item
+            var refused = false
+            for edit in 1...8 {
+                item.fields[1].value = large + "\(edit)"
+                do {
+                    saved = try await vault.session.save(item)
+                } catch let error as ItemCodecError {
+                    guard case .payloadTooLarge = error else { throw error }
+                    refused = true
+                    break
+                }
+            }
+            #expect(refused, "six 200 kB versions exceed the 1 MiB payload")
+            let stored = try await vault.session.item(id: item.id)
+            #expect(stored == saved, "the refused edit left the stored version as it was")
+            #expect(stored.history.count == saved.history.count)
+            #expect(stored.history.last?.fields[1].value == large + "0", "the oldest version is still there")
         }
 
         @Test("the caller cannot rewrite history")

@@ -7,6 +7,9 @@ public enum EnvelopeKind: UInt8, Sendable, Hashable, CaseIterable {
     case membership = 2
     case accountHeader = 3
     case logSegment = 4
+    /// A vault snapshot written by the sync layer (docs/02-architecture.md §7.1). A kind of its own, so a snapshot can
+    /// never be presented as a log segment or the reverse.
+    case snapshot = 5
 }
 
 public enum EnvelopeError: Error, Equatable, Sendable {

@@ -32,7 +32,10 @@ Two consequences for how this repository is organised, both of which already poi
 - The four milestone-0 modules import nothing but `Foundation`, `Testing` and `XCTest`, which is exactly
   why they build on Linux. Milestone 2 keeps the ports and policies portable too (`RecordStore`,
   `InMemoryRecordStore`, `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`); `SQLiteRecordStore`, `VaultSession` and
-  `WatchwordPlatform` compile out, so their suites are absent rather than red on Linux. That portability is a property worth keeping, not an accident — it is the
+  `WatchwordPlatform` compile out, so their suites are absent rather than red on Linux. Milestone 3's
+  `WatchwordSync` is portable in full — keys reach it through ports with fakes — so the sync engine, its N-device
+  simulation and the adversarial suite "sync log" run in a cloud session; only its production keyring, merger and
+  transports need a Mac. That portability is a property worth keeping, not an accident — it is the
   same discipline that keeps `WatchwordMatching` from importing AuthenticationServices.
 - The modules still to come that *do* touch Apple frameworks — `WatchwordCrypto`, `SecureMemory`, and
   any Keychain or LocalAuthentication adapter (`02-architecture.md` §15) — are not reviewable in a

@@ -18,11 +18,6 @@
 
     public struct VaultConfiguration: Sendable {
         public static let minimumPasswordLength = 10
-        /// PRD F1.4.
-        public static let historyRetention: TimeInterval = 90 * 24 * 60 * 60
-        /// Bounds an item's payload however often it is edited inside the retention window (SEC9). The newest entry,
-        /// which holds the previous password, is always kept.
-        public static let maximumHistoryEntries = 100
         /// PRD F1.5.
         public static let trashRetention: TimeInterval = 30 * 24 * 60 * 60
 
@@ -850,8 +845,10 @@
                         uniqueKeysWithValues: expired.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
         }
 
-        /// Read-modify-write of one item: the version moves forward, the history is pruned, and the record is sealed
-        /// under the vault's current key.
+        /// Read-modify-write of one item: the version moves forward and the record is sealed under the vault's current
+        /// key. History is never pruned (PRD F1.4: a full audit trail); an item whose payload would outgrow
+        /// `ItemCodec.maximumPayloadLength` is refused with `ItemCodecError.payloadTooLarge`, leaving the stored
+        /// version as it was.
         @discardableResult
         private func write(
             id: UUID,
@@ -879,7 +876,6 @@
             item.id = id
             item.vaultID = targetVault
             item.modifiedAt = now
-            item.history = Self.pruned(item.history, now: now)
             let base = max(highestVersionSeen[targetVault] ?? 0, existing?.version ?? 0)
             guard base < UInt64.max else { throw VaultError.versionOverflow }
             item.version = base + 1
@@ -924,18 +920,6 @@
                 keyID: row.keyID,
                 recordVersion: row.version
             )
-        }
-
-        static func pruned(_ history: [ItemHistoryEntry], now: Date) -> [ItemHistoryEntry] {
-            var kept: [ItemHistoryEntry] = []
-            for (index, entry) in history.enumerated() {
-                let recent = now.timeIntervalSince(entry.replacedAt) < VaultConfiguration.historyRetention
-                if index == 0 || recent {
-                    kept.append(entry)
-                }
-                if kept.count == VaultConfiguration.maximumHistoryEntries { break }
-            }
-            return kept
         }
 
         // MARK: - Helpers

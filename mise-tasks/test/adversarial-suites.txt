@@ -9,3 +9,4 @@ crypto core
 unlock and quick unlock
 local vault store
 Keychain item protection
+sync log
