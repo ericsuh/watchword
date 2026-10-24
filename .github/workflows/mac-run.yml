@@ -1,0 +1,96 @@
+name: Mac run
+
+# One CI gate on one branch, on a macOS runner, started by hand or through the API. This is how a session without
+# Xcode (a Linux cloud session, docs/09-cloud-sessions.md §5) compiles and tests Apple-framework code before pushing it
+# to a pull request: it dispatches this on its branch, then reads the job log. Nothing here gates a merge; ci.yml does.
+#
+# Only someone with write access to the repository can dispatch a workflow, and it uses no secrets. The inputs reach
+# the shell through environment variables, never `${{ }}` in a `run:` line, and `mise run ci:gate` accepts a fixed
+# list of gates and passes the filter as one argument, so an input cannot become a command.
+
+on:
+  workflow_dispatch:
+    inputs:
+      gate:
+        description: The gate to run (a mise task)
+        type: choice
+        options: [test, test:adversarial, build, build:strict, lint, app:test, check]
+        default: test
+      filter:
+        description: "test: a swift test --filter regex. app:test: an -only-testing identifier. Empty for all"
+        type: string
+        default: ""
+      platform:
+        description: "app:test only: which app"
+        type: choice
+        options: [macos, ios, all]
+        default: macos
+      xcode:
+        description: "27.0 runs on xcode-27 (macOS 27); 16.4 on macos-15, ci.yml's oldest leg"
+        type: choice
+        options: ["27.0", "16.4"]
+        default: "27.0"
+
+run-name: "Mac run: ${{ inputs.gate }} on ${{ github.ref_name }} (Xcode ${{ inputs.xcode }})"
+
+# Runs queue rather than cancel one another: each was asked for separately and its log is the answer.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Pinned to full commit SHAs, not tags (docs/07-supply-chain.md).
+#   actions/checkout        v4 -> 11d5960a326750d5838078e36cf38b85af677262
+#   actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
+
+jobs:
+  gate:
+    name: ${{ inputs.gate }} (Xcode ${{ inputs.xcode }})
+    runs-on: ${{ inputs.xcode == '16.4' && 'macos-15' || 'xcode-27' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      # The dispatched ref: the branch named when the run was started.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        env:
+          XCODE_VERSION: ${{ inputs.xcode }}
+        run: .github/scripts/select-xcode.sh "$XCODE_VERSION"
+
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+
+      # As in ci.yml's app-tests job: XcodeGen at the version and SHA-256 in mise.lock.
+      - name: Install XcodeGen (mise, locked)
+        if: inputs.gate == 'app:test'
+        run: mise install xcodegen
+
+      - name: mise run ci:gate ${{ inputs.gate }}
+        env:
+          GATE: ${{ inputs.gate }}
+          FILTER: ${{ inputs.filter }}
+          PLATFORM: ${{ inputs.platform }}
+        # An empty filter means none.
+        run: mise run ci:gate "$GATE" --platform "$PLATFORM" --filter "$FILTER"
+
+      - name: Upload logs and result bundles
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mac-run-${{ github.run_id }}
+          path: |
+            gate.log
+            test-output.log
+            adversarial.log
+            TestResults
+          if-no-files-found: ignore

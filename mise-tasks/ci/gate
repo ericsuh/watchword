@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#MISE description="Run one CI gate by name and end the log with a failure summary (the Mac run workflow's only step)"
+#USAGE arg "<gate>" help="The gate to run, as its mise task name" {
+#USAGE   choices "build" "test" "test:adversarial" "build:strict" "lint" "app:test" "check"
+#USAGE }
+#USAGE flag "--filter <pattern>" help="For `test`: a `swift test --filter` regex. For `app:test`: an xcodebuild `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Other gates take none"
+#USAGE flag "--platform <platform>" default="macos" help="For `app:test`: which app's scheme to test" {
+#USAGE   choices "macos" "ios" "all"
+#USAGE }
+#USAGE flag "--log <file>" default="gate.log" help="Where to keep a copy of the output"
+#
+# `.github/workflows/mac-run.yml` dispatches this so a session without Xcode (a Linux cloud session,
+# docs/09-cloud-sessions.md §5) can run a Mac-only gate on a branch and read the result from the job log. The gate is
+# one of a fixed list and the filter is passed as a single argument, never evaluated, so the dispatch inputs cannot
+# run anything else. Whoever reads the log may only see its tail, so a failed run ends with the lines that say why.
+set -euo pipefail
+
+gate="$usage_gate"
+filter="${usage_filter:-}"
+log="$usage_log"
+
+if [ -n "$filter" ]; then
+  if [ "${#filter}" -gt 300 ] || [[ "$filter" =~ [[:cntrl:]] ]]; then
+    echo "::error::--filter must be one line of at most 300 characters"
+    exit 2
+  fi
+  case "$gate" in
+    test | app:test) ;;
+    *)
+      echo "::error::--filter applies only to test and app:test, not $gate"
+      exit 2
+      ;;
+  esac
+fi
+
+# The same flags the matching ci.yml step passes.
+args=()
+case "$gate" in
+  test)
+    args=(--log test-output.log)
+    if [ -n "$filter" ]; then args+=(--filter "$filter"); fi
+    ;;
+  build:strict) args=(--require) ;;
+  app:test)
+    args=("$usage_platform" --results TestResults)
+    if [ -n "$filter" ]; then args+=(--only-testing "$filter"); fi
+    ;;
+esac
+
+# `${args[@]+...}`: an empty array is an unbound variable under `set -u` in the bash 3.2 macOS ships.
+echo "mise run $gate ${args[*]+${args[*]}}"
+status=0
+mise run "$gate" ${args[@]+"${args[@]}"} 2>&1 | tee "$log" || status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo
+  echo "=== Failure summary: mise run $gate (exit $status) ==="
+  grep -E "error:|✘|FAILED|Failing tests|failed after|\*\* TEST FAILED|^[[:space:]]+[A-Za-z]+Tests[./]" "$log" | tail -n 80 || true
+fi
+exit "$status"
