@@ -766,8 +766,8 @@
             return try openItem(row, keys: try requireKeys(since: epoch))
         }
 
-        /// Creates or updates an item. The vault owns `createdAt`, `modifiedAt`, `version`, `history` and `trashedAt`;
-        /// whatever the caller put there is replaced. Scopes are checked against the scope policy here, the one place
+        /// Creates or updates an item. The vault owns `createdAt`, `modifiedAt`, `version`, `history`, `trashedAt` and
+        /// `keptAfterDeletion`; whatever the caller put there is replaced. Scopes are checked against the scope policy here, the one place
         /// they can enter the vault from the UI (PRD F11.2).
         @discardableResult
         public func save(_ draft: Item) async throws -> Item {
@@ -783,6 +783,7 @@
                 if let existing {
                     item.createdAt = existing.createdAt
                     item.trashedAt = existing.trashedAt
+                    item.keptAfterDeletion = existing.keptAfterDeletion
                     item.history = existing.history
                     if existing.fields != draft.fields {
                         item.history.insert(
@@ -792,17 +793,26 @@
                 } else {
                     item.createdAt = now
                     item.trashedAt = nil
+                    item.keptAfterDeletion = false
                     item.history = []
                 }
             }
         }
 
+        /// Moves an item to the trash, the person's choice (confirmed in the UI) that starts the 30-day purge. An item
+        /// sync kept in the trash becomes the person's from now.
         public func trash(id: UUID) async throws {
-            try await write(id: id) { item, _, now in item.trashedAt = item.trashedAt ?? now }
+            try await write(id: id) { item, _, now in
+                if item.trashedAt == nil || item.keptAfterDeletion { item.trashedAt = now }
+                item.keptAfterDeletion = false
+            }
         }
 
         public func restore(id: UUID) async throws {
-            try await write(id: id) { item, _, _ in item.trashedAt = nil }
+            try await write(id: id) { item, _, _ in
+                item.trashedAt = nil
+                item.keptAfterDeletion = false
+            }
         }
 
         public func setArchived(_ archived: Bool, id: UUID) async throws {
@@ -831,11 +841,14 @@
                 StoreChange(conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
         }
 
-        /// Deletes items that have been in the trash for 30 days (PRD F1.5). Run after every unlock.
+        /// Deletes items that have been in the trash for 30 days (PRD F1.5). Run after every password unlock. Not a
+        /// discard without consent (F7.7): only an item the person moved to the trash, confirmed in the UI, knowing
+        /// everything in it, is purged. Trash that sync left there (`Item.isTrashedByPerson`) stays until the person
+        /// restores, trashes or deletes it.
         public func purgeExpiredTrash() async throws {
             let now = await clock.now()
             let expired = try await items().items.filter {
-                guard let trashedAt = $0.trashedAt else { return false }
+                guard let trashedAt = $0.trashedAt, $0.isTrashedByPerson else { return false }
                 return now.timeIntervalSince(trashedAt) >= VaultConfiguration.trashRetention
             }
             guard !expired.isEmpty else { return }

@@ -17,8 +17,12 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
     /// Lamport version, bound into the record's authenticated data (SEC2). Assigned by the vault on save.
     public var version: UInt64
     public var archived: Bool
-    /// When the item was moved to the trash; it is purged 30 days later (PRD F1.5).
+    /// When the item was moved to the trash; it is purged 30 days later (PRD F1.5) if `isTrashedByPerson`.
     public var trashedAt: Date?
+    /// In the trash because a permanent deletion on another device had not seen an edit in it, which sync keeps
+    /// rather than erases (PRD F7.6, docs/02-architecture.md §7.5); not because a person moved it there. Cleared when a
+    /// person restores or trashes the item.
+    public var keptAfterDeletion: Bool
     /// Earlier field values, newest first. Never pruned: the full audit trail of the item (PRD F1.4, F7.7).
     public var history: [ItemHistoryEntry]
     /// Keeps the item out of the OS QuickType identity store (PRD F6.8).
@@ -54,6 +58,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         version: UInt64 = 0,
         archived: Bool = false,
         trashedAt: Date? = nil,
+        keptAfterDeletion: Bool = false,
         history: [ItemHistoryEntry] = [],
         excludedFromSuggestions: Bool = false,
         revisions: [ItemGroup: GroupStamp] = [:],
@@ -74,6 +79,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         self.version = version
         self.archived = archived
         self.trashedAt = trashedAt
+        self.keptAfterDeletion = keptAfterDeletion
         self.history = history
         self.excludedFromSuggestions = excludedFromSuggestions
         self.revisions = revisions
@@ -85,7 +91,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id, vaultID, title, scopes, fields, tags, notes, createdAt, modifiedAt, version, archived, trashedAt
-        case history, excludedFromSuggestions, revisions, conflicts, retainedValues, clock, noteLines
+        case keptAfterDeletion, history, excludedFromSuggestions, revisions, conflicts, retainedValues, clock, noteLines
     }
 
     /// Synthesised decoding, except that the sync metadata may be absent: payloads written before it existed still open.
@@ -103,6 +109,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         version = try container.decode(UInt64.self, forKey: .version)
         archived = try container.decode(Bool.self, forKey: .archived)
         trashedAt = try container.decodeIfPresent(Date.self, forKey: .trashedAt)
+        keptAfterDeletion = try container.decodeIfPresent(Bool.self, forKey: .keptAfterDeletion) ?? false
         history = try container.decode([ItemHistoryEntry].self, forKey: .history)
         excludedFromSuggestions = try container.decode(Bool.self, forKey: .excludedFromSuggestions)
         revisions = try container.decodeIfPresent([ItemGroup: GroupStamp].self, forKey: .revisions) ?? [:]
@@ -124,6 +131,24 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
 
     public var isTrashed: Bool {
         trashedAt != nil
+    }
+
+    /// Whether the item is in the trash by a person's choice that covered everything it holds, so the 30-day purge
+    /// may remove it (PRD F1.5, F7.7). Sync can leave an item in the trash that nobody chose to discard, and then this
+    /// is false:
+    /// - a version kept after a permanent deletion that had not seen it (`keptAfterDeletion`);
+    /// - a restore written concurrently with the trash, kept as a conflict until the person chooses;
+    /// - an edit the trash was written without seeing: a concurrent edit merged into the trashed item, or one made
+    ///   after it. Like a permanent deletion, the purge removes only what its author had seen (docs/02-architecture.md
+    ///   §7.5), and an item is not split, so it is kept whole.
+    ///
+    /// An item without sync metadata was written in one piece by this device, so its trash saw all of it.
+    public var isTrashedByPerson: Bool {
+        guard isTrashed, !keptAfterDeletion else { return false }
+        if let concurrent = conflicts[.trashedAt], !concurrent.isEmpty { return false }
+        guard !revisions.isEmpty else { return true }
+        guard let trash = revisions[.trashedAt] else { return false }
+        return clock.isCovered(by: trash.seen)
     }
 
     /// Whether any group holds values written concurrently with the one shown (PRD F7.6).

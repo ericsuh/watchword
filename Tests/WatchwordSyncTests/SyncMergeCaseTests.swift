@@ -143,7 +143,17 @@ struct SyncMergeCaseTests {
         for copy in try await Self.everywhere(home, item.id) {
             #expect(copy.isTrashed)
             #expect(copy.field(.password)?.value == "edited-while-trashed")
+            #expect(!copy.isTrashedByPerson, "the trash did not see the edit, so the 30-day purge keeps it")
         }
+    }
+
+    @Test("moving to the trash on one device is a trash the 30-day purge may remove on every device")
+    func trashEverywhere() async throws {
+        let (home, item) = try await Self.household(with: Household.login())
+        try await home.devices[0].edit(item.id) { $0.trashedAt = Date(timeIntervalSince1970: 1_900_000_000) }
+        try await home.settle()
+        try await home.expectConverged()
+        for copy in try await Self.everywhere(home, item.id) { #expect(copy.isTrashedByPerson) }
     }
 
     @Test(
@@ -157,6 +167,8 @@ struct SyncMergeCaseTests {
         for copy in try await Self.everywhere(home, item.id) {
             #expect(copy.isTrashed, "the deletion wins: the item is not back in the vault")
             #expect(copy.field(.password)?.value == "typed-after-the-delete-was-made", "the edit is its last version")
+            #expect(copy.keptAfterDeletion)
+            #expect(!copy.isTrashedByPerson, "nobody chose to discard the edit, so the 30-day purge keeps it")
         }
     }
 

@@ -256,6 +256,39 @@ struct ItemMergeTests {
         #expect(F.merge((restoredMeanwhile, F.b), (trashedAgain, F.c)).isTrashed, "a deletion is shown over a restore")
     }
 
+    /// The 30-day purge removes only a trash that a person chose knowing everything in the item (PRD F1.5, F7.7).
+    @Test("only a trash written knowing the whole item is one the purge may remove")
+    func trashedByPerson() {
+        let base = F.base()
+        let trashed = F.edit(base, by: F.a, at: 2) { $0.trashedAt = Date(timeIntervalSince1970: 1_800_000_100) }
+        #expect(trashed.isTrashedByPerson)
+        #expect(F.merge((trashed, F.a), (base, F.b)).isTrashedByPerson, "a device that only receives the trash agrees")
+        #expect(!base.isTrashedByPerson)
+
+        let edited = F.edit(base, by: F.b, at: 5) { $0.fields[1].value = "edited-meanwhile" }
+        #expect(!F.merge((trashed, F.a), (edited, F.b)).isTrashedByPerson, "an edit the trash never saw")
+        #expect(!F.edit(trashed, by: F.b, at: 3) { $0.title = "Renamed" }.isTrashedByPerson, "an edit after the trash")
+
+        let restoredMeanwhile = F.edit(trashed, by: F.b, at: 6) { $0.trashedAt = nil }
+        let trashedAgain = F.edit(trashed, by: F.c, at: 6) { $0.trashedAt = Date(timeIntervalSince1970: 1_800_000_200) }
+        let disputed = F.merge((restoredMeanwhile, F.b), (trashedAgain, F.c))
+        #expect(!disputed.isTrashedByPerson, "a concurrent restore is the person's too")
+        #expect(
+            F.edit(disputed, by: F.a, at: 7) { $0.trashedAt = Date(timeIntervalSince1970: 1_800_000_300) }
+                .isTrashedByPerson, "trashing again where the conflict is shown settles it")
+
+        var kept = F.edit(edited, by: F.b, at: 8) {
+            $0.trashedAt = $0.modifiedAt
+            $0.keptAfterDeletion = true
+        }
+        #expect(!kept.isTrashedByPerson, "kept after a deletion that had not seen it")
+        kept = F.edit(kept, by: F.a, at: 9) {
+            $0.trashedAt = Date(timeIntervalSince1970: 1_800_000_400)
+            $0.keptAfterDeletion = false
+        }
+        #expect(kept.isTrashedByPerson, "moved to the trash by a person, as `VaultSession.trash` writes it")
+    }
+
     @Test("notes edited in different places on two devices merge line by line")
     func notesDifferentLines() {
         let base = F.base(notes: F.longNotes)

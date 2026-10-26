@@ -114,6 +114,10 @@ Requirement IDs are stable and referenced from the test plan.
   by age or by count. The previous password is always retrievable. An edit that would make an item
   larger than its payload limit (SEC9) is refused, never made room for by dropping history.
 - F1.5 Items can be archived and restored, and permanently deleted after a 30-day trash period.
+  Moving an item to the trash asks for confirmation first, and the dialog says it is deleted
+  permanently after 30 days; that confirmed action is what lets the purge run without asking again
+  (F7.7). An item sync left in the trash without anyone choosing to discard it (F7.7 lists the cases)
+  is never purged; it stays until the person restores or deletes it.
 
 ### 5.2 Vaults and organisation
 
@@ -216,8 +220,13 @@ Requirement IDs are stable and referenced from the test plan.
 - F7.7 Sync never throws away data a person entered or a device received without an explicit action by
   the person: conflicting values, history, notes lines and versions refused as implausible are all kept
   until the person resolves, empties or discards them. History is never pruned (F1.4, decided by the owner
-  on 2026-10-23). *Open:* F1.5's 30-day trash purge is still an automatic discard; whether F7.7
-  overrides it is a decision for the owner (`06-adversarial-review.md` §H, Y14).
+  on 2026-10-23). The 30-day trash purge (F1.5) is not an exception to this rule but an instance of it:
+  it removes only an item a person moved to the trash, confirmed, knowing every edit the item holds
+  (decided by the owner on 2026-10-24, `06-adversarial-review.md` §H, Y14). Sync can also leave an item
+  in the trash that nobody chose to discard, and the purge keeps it until the person restores or deletes
+  it: a version kept after a permanent deletion that had not seen it, a trash with a restore written
+  concurrently, and a trash with an edit it had not seen, merged in or made after it (decided by the
+  owner on 2026-10-25).
 
 ### 5.8 Import and export (F8)
 

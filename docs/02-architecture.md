@@ -197,7 +197,7 @@ decoded `id`, `vaultID` and `version` must equal the storage location's or the r
 
 ```
 Item { id, vaultID, title, scopes: [ServiceScope], fields: [Field], tags, notes,
-       createdAt, modifiedAt, version(lamport), archived, trashedAt?, history: [FieldSnapshot],
+       createdAt, modifiedAt, version(lamport), archived, trashedAt?, keptAfterDeletion, history: [FieldSnapshot],
        revisions: [group: GroupStamp], conflicts: [group: [ConflictingValue]], clock: VersionVector,
        noteLines: [NoteLine] }          // the last four are sync metadata (§7.5); absent before milestone 3
 ServiceScope { host, includeSubdomains, scheme?, path?, excludedHosts: [host], nativeAppIDs: [bundleID] }
@@ -371,7 +371,11 @@ validly signed segment), and acknowledgement and coverage values must be plausib
 - Moving to the trash is the `trashedAt` group, so trashing and a concurrent edit give a trashed item that contains
   the edit. A permanent deletion is a tombstone carrying an *erasure summary*: the version vector of what its author
   had seen. A version it covers is erased; a version holding an edit its author never saw is kept, in the trash, with
-  that edit as its last version — on the deleting device as on every other.
+  that edit as its last version and `keptAfterDeletion` set — on the deleting device as on every other.
+- The 30-day purge (F1.5) removes only what the person who trashed an item had seen, as a deletion does, and never
+  splits an item: it skips one kept after a deletion, one whose `trashedAt` group holds a conflicting restore, and one
+  whose version vector holds an edit the trash's `GroupStamp.seen` does not (`Item.isTrashedByPerson`, F7.7). Those
+  stay in the trash until the person restores or deletes them; moving one to the trash again makes it theirs.
 - Versions above 2^62, or more than 2^20 above the vault's highest, are quarantined rather than merged (review
   finding U5) — and kept in the sync state store until the person discards them (F7.7).
 

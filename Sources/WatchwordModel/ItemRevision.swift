@@ -112,13 +112,14 @@ public struct ItemGroup: Hashable, Sendable, Comparable, RawRepresentable, Codab
     public static let tags = ItemGroup(rawValue: "tags")
     public static let archived = ItemGroup(rawValue: "archived")
     public static let trashedAt = ItemGroup(rawValue: "trashedAt")
+    public static let keptAfterDeletion = ItemGroup(rawValue: "keptAfterDeletion")
     public static let excludedFromSuggestions = ItemGroup(rawValue: "excludedFromSuggestions")
     /// The order of `Item.fields`, separately from their contents.
     public static let fieldOrder = ItemGroup(rawValue: "fieldOrder")
 
     /// Every item-level group; fields add one group each.
     public static let attributes: [ItemGroup] = [
-        .title, .scopes, .tags, .archived, .trashedAt, .excludedFromSuggestions, .fieldOrder,
+        .title, .scopes, .tags, .archived, .trashedAt, .keptAfterDeletion, .excludedFromSuggestions, .fieldOrder,
     ]
 
     static let fieldPrefix = "field."
@@ -175,6 +176,7 @@ public enum ItemGroupValue: Hashable, Sendable, Codable {
     case tags(Set<String>)
     case archived(Bool)
     case trashedAt(Date?)
+    case keptAfterDeletion(Bool)
     case excludedFromSuggestions(Bool)
     case fieldOrder([UUID])
     /// A field's contents, or `nil` where that version had removed the field.

@@ -6,6 +6,7 @@ struct ItemDetailView: View {
     let item: Item
     let onEdit: () -> Void
     @State private var revealed: Set<UUID> = []
+    @State private var confirmingTrash = false
 
     var body: some View {
         Form {
@@ -35,7 +36,21 @@ struct ItemDetailView: View {
         .formStyle(.grouped)
         .toolbar {
             Button("Edit", action: onEdit).accessibilityIdentifier("detail.edit")
+            Button("Move to Trash", role: .destructive) { confirmingTrash = true }
+                .accessibilityIdentifier("detail.trash")
+        }
+        // Moving to the trash starts the 30-day clock after which the item is purged without asking again (PRD F1.5),
+        // so this confirmation is the explicit action F7.7 requires before anything is discarded.
+        .confirmationDialog(
+            "Move “\(item.title.isEmpty ? "Untitled" : item.title)” to the Trash?",
+            isPresented: $confirmingTrash, titleVisibility: .visible
+        ) {
             Button("Move to Trash", role: .destructive) { Task { await model.trash(item) } }
+                .accessibilityIdentifier("detail.trash.confirm")
+            Button("Cancel", role: .cancel) {}
+                .accessibilityIdentifier("detail.trash.cancel")
+        } message: {
+            Text("After 30 days in the Trash it is deleted permanently.")
         }
     }
 
