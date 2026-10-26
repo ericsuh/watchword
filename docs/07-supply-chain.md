@@ -83,8 +83,8 @@ that tag. Both actions in use are pinned to full 40-hex commit SHAs with the ver
 comment:
 
 ```
-actions/checkout        v4 -> 11d5960a326750d5838078e36cf38b85af677262
-actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
+actions/checkout        v7.0.1 -> 3d3c42e5aac5ba805825da76410c181273ba90b1
+actions/upload-artifact v7.0.2 -> cf430e030ddbb5b0abf93d22962f4752f3646cd9
 ```
 
 - **[enforced]** the `action-pinning-audit` job in `security-nightly.yml` fails if any `uses:` in
