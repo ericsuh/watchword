@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#MISE description="Print what each result bundle from app:test knows about a failure: summary, runner logs, crash reports"
+#USAGE arg "[results]" default="TestResults" help="The directory `app:test --results` wrote its .xcresult bundles to"
+#
+# The app-tests CI job runs this when `app:test` fails, so the job log, which anyone (or any tool) can read, carries
+# what is otherwise only inside the uploaded .xcresult, readable only with Xcode's xcresulttool. A UI-test runner that
+# dies before any test runs ("operation never finished bootstrapping") reports one line in xcodebuild's output; its
+# own log and crash report say why. Informational only: it never fails, because the job has already failed.
+set -uo pipefail
+
+results="$usage_results"
+shopt -s nullglob
+bundles=("$results"/*.xcresult)
+if [ ${#bundles[@]} -eq 0 ]; then
+  echo "No result bundles in $results; xcodebuild failed before testing began (see the app:test step)."
+  exit 0
+fi
+
+limit=200 # lines per file, so one runaway log cannot bury the rest
+show() {  # show <file>: its last $limit lines, under a heading
+  echo "--- ${1#"$out"/} ($(wc -l < "$1" | tr -d ' ') lines, last $limit shown)"
+  tail -n "$limit" "$1"
+}
+
+for bundle in "${bundles[@]}"; do
+  name=$(basename "$bundle" .xcresult)
+
+  echo "::group::$name: test summary"
+  xcrun xcresulttool get test-results summary --path "$bundle" --compact | python3 -m json.tool \
+    || echo "::warning::xcresulttool could not read the test summary of $bundle"
+  echo "::endgroup::"
+
+  out=$(mktemp -d)
+  if ! xcrun xcresulttool export diagnostics --path "$bundle" --output-path "$out" > /dev/null; then
+    echo "::warning::xcresulttool could not export the diagnostics of $bundle"
+    continue
+  fi
+
+  echo "::group::$name: diagnostic files"
+  (cd "$out" && find . -type f | sort)
+  echo "::endgroup::"
+
+  # Crash reports, where a runner crash such as handleStalledWait names its faulting thread; the runner's and the
+  # app's standard output; and xcodebuild's session log, where "Failed to initialize for UI testing" and simulator
+  # service errors land.
+  while IFS= read -r -d '' file; do
+    echo "::group::$name: ${file#"$out"/}"
+    show "$file"
+    echo "::endgroup::"
+  done < <(find "$out" -type f \( -name '*.ips' -o -name '*.crash' -o -name 'StandardOutputAndStandardError*.txt' \
+    -o -name 'Session-*.log' \) -print0 | sort -z)
+  rm -rf "$out"
+done
+exit 0

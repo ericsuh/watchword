@@ -315,7 +315,8 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
 - `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator, one matrix leg each on
   `xcode-27`, with the AutoFill Settings attempt marked `continue-on-error`. The iOS leg boots its
   simulator and waits for the boot to finish (`simctl bootstatus -b`) before testing, because a UI-test runner
-  started on a half-booted device dies before any test runs. It no longer skips: a
+  started on a half-booted device dies before any test runs. When a leg fails, `app:diagnose` prints its
+  result bundle's summary, runner logs and crash reports into the job log. It no longer skips: a
   missing `Apps/project.yml` fails `app:generate` [`app:test macos`, `app:test ios`]. The macOS scheme includes the app-hosted
   `WatchwordKeychainTests` bundle, unentitled, so it compiles and its round trip skips; the signed
   run is local only (`app:test-keychain`, §6.2), because CI has no provisioning profile.

@@ -41,6 +41,7 @@ mise run build:strict                                  # -strict-memory-safety, 
 mise run app:generate                                  # xcodegen; refuses an XcodeGen other than mise.toml's
 mise run app:build [ios|macos]                         # both by default; --configuration Release
 mise run app:test [ios|macos]                          # both by default; --only-testing <id> (needs a platform), --results, --simulator
+mise run app:diagnose [TestResults]                    # print a failed run's summary, runner logs and crash reports
 mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
 mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs
