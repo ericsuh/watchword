@@ -15,8 +15,8 @@ import WatchwordModel
 ///   editing the group (`stamped`) or choosing (`resolve`). Sync never discards a conflicting value.
 ///
 /// Moving to the trash is the `trashedAt` group, so trashing and a concurrent edit of anything else resolve to a
-/// trashed item that contains the edit; a concurrent restore and trash keep both, showing the trash. Notes merge line
-/// by line (`NoteText`).
+/// trashed item that contains the edit; a concurrent restore and trash keep both, showing the trash. Neither is a
+/// trash the 30-day purge may remove (`Item.isTrashedByPerson`). Notes merge line by line (`NoteText`).
 ///
 /// The result is a join — independent of the order versions arrive in, how they are grouped and how often one is
 /// applied — except for field order. The latest reorder wins and a concurrent one is not kept (order holds no field's
@@ -176,6 +176,7 @@ public enum ItemMerge {
         case .tags: return .tags
         case .archived: return .archived
         case .trashedAt: return .trashedAt
+        case .keptAfterDeletion: return .keptAfterDeletion
         case .excludedFromSuggestions: return .excludedFromSuggestions
         case .fieldOrder: return .fieldOrder
         case .field(let field): return field.map { .field($0.id) }
@@ -282,6 +283,7 @@ public enum ItemMerge {
         case .tags: return .tags(item.tags)
         case .archived: return .archived(item.archived)
         case .trashedAt: return .trashedAt(item.trashedAt)
+        case .keptAfterDeletion: return .keptAfterDeletion(item.keptAfterDeletion)
         case .excludedFromSuggestions: return .excludedFromSuggestions(item.excludedFromSuggestions)
         case .fieldOrder: return .fieldOrder(item.fields.map(\.id))
         default: return nil
@@ -295,6 +297,7 @@ public enum ItemMerge {
         case .tags(let tags): item.tags = tags
         case .archived(let archived): item.archived = archived
         case .trashedAt(let date): item.trashedAt = date
+        case .keptAfterDeletion(let kept): item.keptAfterDeletion = kept
         case .excludedFromSuggestions(let excluded): item.excludedFromSuggestions = excluded
         case .fieldOrder(let ids):
             let byID = Dictionary(item.fields.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -329,6 +332,7 @@ public enum ItemMerge {
         case .archived(let value): text = "archived:\(value)"
         case .excludedFromSuggestions(let value): text = "excluded:\(value)"
         case .trashedAt(let date): text = "trashed:" + (date.map { String($0.timeIntervalSince1970) } ?? "-")
+        case .keptAfterDeletion(let value): text = "kept:\(value)"
         case .fieldOrder(let ids): text = "order:" + ids.map(\.uuidString).joined(separator: ",")
         case .field(let field):
             let encoded = field.flatMap { (try? encoder.encode($0)).flatMap { String(data: $0, encoding: .utf8) } }

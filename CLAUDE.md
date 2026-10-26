@@ -157,9 +157,11 @@ Ten shipped modules, dependency-ordered, plus test support:
   by one written *knowing about it* (its `GroupStamp.seen` vector contains it); concurrent values all stay, in
   `Item.conflicts`, until the person edits the group or calls `ItemMerge.resolve`. Notes merge line by line
   (`NoteText`). Merges never shorten a history; quarantined versions are kept. A permanent deletion carries an
-  erasure summary and removes only what its author had seen; anything else is kept, trashed. Every
-  discard is the person's: a permanent deletion, `ItemMerge.resolve`, and the 30-day trash purge (F1.5), which only
-  a confirmed Move to Trash starts. Item history is never pruned (F1.4).
+  erasure summary and removes only what its author had seen; anything else is kept, trashed
+  (`Item.keptAfterDeletion`). Every discard is the person's: a permanent deletion, `ItemMerge.resolve`, and the 30-day
+  trash purge (F1.5). Sync can leave an item in the trash that nobody chose to discard, so the purge removes only
+  `Item.isTrashedByPerson`: a trash written knowing every edit the item holds, with no concurrent restore, and not a
+  version kept after a deletion. Item history is never pruned (F1.4).
 - A version must contain its predecessor: `ItemMerge.stamped` on every save (it also keeps `modifiedAt` monotonic).
   The clock records *edits* only; a merge result is sealed through `ItemMerge.written`, which sets the version and
   nothing else, so devices that merged the same edits hold the same state. The long simulation diverged each time one

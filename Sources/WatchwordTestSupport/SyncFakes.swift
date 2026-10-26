@@ -285,6 +285,7 @@ public struct FakeItemMerger: RecordMerger {
         let version = max(record.version, erased.entries.values.max() ?? 0) + 2
         var trashed = item
         trashed.trashedAt = item.modifiedAt
+        trashed.keptAfterDeletion = true
         trashed = ItemMerge.stamped(
             trashed, previous: item, previousOrigin: Self.origin(record),
             revision: Revision(version: version, device: keyring.deviceID))
