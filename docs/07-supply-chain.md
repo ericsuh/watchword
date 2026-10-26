@@ -104,6 +104,14 @@ actions/upload-artifact v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
   `.git/config` for later steps (including any future step that runs third-party code) to read.
 - **[done]** the trigger is `pull_request`, never `pull_request_target`, so a fork's code never
   runs with repository secrets.
+- **[done]** `mac-run.yml`, the dispatch-only workflow a cloud session uses to run a Mac-only gate on a branch
+  (`09-cloud-sessions.md` §5), is held to the same rules. A dispatch runs the workflow file and `mise run ci:gate` as
+  they are on the dispatched branch, so anyone who can dispatch it can change what it runs; its controls are that only
+  write access can dispatch, it uses no secrets, and its token is read-only (`contents: read`, under the repository's
+  read-only default, `08-repository-hardening.md` §1). Two further rules are hygiene rather than a boundary: inputs
+  reach the shell only as environment variables (never `${{ }}` inside `run:`), and `ci:gate` refuses an unknown gate,
+  a filter that looks like an option or matches no test, and combinations `ci.yml` never runs, so a mistyped or
+  prompt-influenced input fails loudly instead of running the wrong thing or passing without testing.
 - **[convention]** the CloudKit integration tests (milestone 3) need an iCloud container and
   therefore secrets. They must stay `workflow_dispatch`-only, in a GitHub Environment with required
   reviewers, and must never be reachable from a `pull_request` trigger.

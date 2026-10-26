@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+#MISE description="Run one CI gate as its ci.yml job does and end the log with a failure summary (the Mac run workflow's only step)"
+#USAGE arg "<gate>" help="The gate to run, as its mise task name" {
+#USAGE   choices "build" "test" "test:adversarial" "build:strict" "lint" "app:test" "check"
+#USAGE }
+#USAGE flag "--filter <pattern>" help="For `test`: a `swift test --filter` regex. For `app:test` (with ios or macos): an xcodebuild `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Other gates take none. It must match at least one test and must not start with `-`; write it as `--filter=<pattern>`"
+#USAGE flag "--platform <platform>" default="macos" help="For `app:test`: which app's scheme to test" {
+#USAGE   choices "macos" "ios" "all"
+#USAGE }
+#USAGE flag "--xcode <version>" help="The Xcode the runner selected, which mac-run.yml passes. With 16.4 only `build` and `test`, the gates ci.yml's Xcode 16.4 leg runs, are accepted" {
+#USAGE   choices "27.0" "16.4"
+#USAGE }
+#USAGE flag "--log <file>" default="gate.log" help="Where to keep a copy of the output"
+#
+# `.github/workflows/mac-run.yml` dispatches this so a session without Xcode (a Linux cloud session,
+# docs/09-cloud-sessions.md §5) can run a Mac-only gate on a branch and read the result from the job log. The checks
+# below refuse a mistyped or misdirected request before it costs a macOS runner, and refuse one that would pass without
+# testing anything; they are not a security boundary, because a dispatch runs this file as it is on the dispatched
+# branch. Whoever reads the log may only see its tail, so a failed run ends with the lines that say why.
+set -euo pipefail
+
+gate="$usage_gate"
+filter="${usage_filter:-}"
+platform="$usage_platform"
+log="$usage_log"
+
+refuse() {
+  echo "::error::$*"
+  exit 2
+}
+
+if [ -n "$filter" ]; then
+  if [ "${#filter}" -gt 300 ] || [[ "$filter" =~ [[:cntrl:]] ]]; then
+    refuse "--filter must be one line of at most 300 characters"
+  fi
+  # mise reads a separate argument that starts with `-` as an option, so `--filter --help` would print this task's
+  # help and exit 0: a green run that tested nothing. mac-run.yml passes `--filter=<value>`, which mise takes literally,
+  # and a value that looks like an option is refused here so it cannot become one in the task it is handed to.
+  case "$filter" in -*) refuse "--filter must not start with '-' (got '$filter')" ;; esac
+  case "$gate" in
+    test) ;;
+    app:test)
+      if [ "$platform" = all ]; then
+        refuse "--filter with app:test needs --platform ios or macos: the two schemes have different test targets"
+      fi
+      ;;
+    *) refuse "--filter applies only to test and app:test, not $gate" ;;
+  esac
+fi
+
+# Xcode 16.4 is ci.yml's floor leg, which runs the package build and tests only; every other job, and anything that
+# needs AppKit, a simulator or a screen, runs on xcode-27 with Xcode 27.0.
+if [ "${usage_xcode:-}" = 16.4 ]; then
+  case "$gate" in
+    build | test) ;;
+    build:strict) refuse "build:strict needs Swift 6.2 (Xcode 26) and fails on Xcode 16.4; ci.yml runs it on 27.0" ;;
+    *) refuse "ci.yml runs $gate on Xcode 27.0 (xcode-27) only; on 16.4 it runs build and test" ;;
+  esac
+fi
+
+# Each gate runs the steps of its ci.yml job, in order, stopping at the first failure as a job does:
+#   build             package-tests' build step: `build -v`
+#   test              package-tests: audit:dependencies, `build -v`, `test --coverage --log test-output.log`. With a
+#                     filter, only `test --filter=<pattern> --log test-output.log`: no coverage, audit or build step
+#   test:adversarial  adversarial-tests
+#   build:strict      strict-memory-safety: `build:strict --require --verbose`, then audit:unsafe
+#   lint              lint
+#   app:test          app-tests: `app:test <platform> --results TestResults`, without the iOS leg's best-effort AutoFill
+#                     step. `all` runs both schemes in one job, where ci.yml runs one job per platform
+#   check             no ci.yml job: mise.toml's local aggregate of lint, audit and test
+failed="" status=0
+step() { # step <task> [args...]: one `mise run`, appended to the log; skipped once a step has failed
+  [ -z "$failed" ] || return 0
+  echo "+ mise run $*" | tee -a "$log"
+  mise run "$@" 2>&1 | tee -a "$log" || status=$?
+  if [ "$status" -ne 0 ]; then failed="mise run $* (exit $status)"; fi
+}
+
+: > "$log"
+case "$gate" in
+  build) step build -v ;;
+  test)
+    if [ -n "$filter" ]; then
+      step test "--filter=$filter" --log test-output.log
+    else
+      step audit:dependencies
+      step build -v
+      step test --coverage --log test-output.log
+    fi
+    ;;
+  test:adversarial) step test:adversarial ;;
+  build:strict)
+    step build:strict --require --verbose
+    step audit:unsafe
+    ;;
+  lint) step lint ;;
+  app:test)
+    if [ -n "$filter" ]; then
+      step app:test "$platform" --results TestResults "--only-testing=$filter"
+    else
+      step app:test "$platform" --results TestResults
+    fi
+    ;;
+  check) step check ;;
+esac
+
+# xcodebuild passes when `-only-testing` names nothing that exists ("Executed 0 tests"), so a filtered run must show
+# in its result bundle that it ran something. `test` checks its own filtered runs (mise-tasks/test/_default).
+if [ -z "$failed" ] && [ "$gate" = app:test ] && [ -n "$filter" ]; then
+  if [ "$platform" = ios ]; then bundle=TestResults/iOS.xcresult; else bundle=TestResults/macOS.xcresult; fi
+  count=$(xcrun xcresulttool get test-results summary --path "$bundle" --compact \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["totalTestCount"])' 2> /dev/null) || count=""
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    echo "::error::Could not read the test count from $bundle" | tee -a "$log"
+    failed="mise run app:test (no test count in $bundle)" status=1
+  elif [ "$count" -eq 0 ]; then
+    echo "::error::--filter $filter matched no tests in the $platform scheme" | tee -a "$log"
+    failed="mise run app:test (the filter matched no tests)" status=1
+  else
+    echo "$count tests matched --filter $filter"
+  fi
+fi
+
+if [ -n "$failed" ]; then
+  echo
+  echo "=== Failure summary: $failed ==="
+  grep -E "error:|✘|FAILED|Failing tests|failed after|\*\* TEST FAILED|^[[:space:]]+[A-Za-z]+Tests[./]" "$log" | tail -n 80 || true
+fi
+exit "$status"

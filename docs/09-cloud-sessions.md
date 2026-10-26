@@ -22,9 +22,9 @@ So the boundary is not a configuration choice, it is the platform:
 | --- | --- | --- |
 | `swift build`, `swift test`, both test frameworks | Yes, after §2 | — |
 | `swift format lint`, `-strict-memory-safety` | Yes, after §2 | — |
-| CryptoKit, Security.framework, CommonCrypto | **No** — Apple SDKs only | macOS: local session or CI |
-| LocalAuthentication, Keychain adapters | **No** | macOS: local session or CI |
-| `xcodebuild`, simulators, XCUITest, AutoFill extension tests | **No** | macOS: local session or CI |
+| CryptoKit, Security.framework, CommonCrypto | **No** — Apple SDKs only | macOS: local session, CI, or a Mac run (§5) |
+| LocalAuthentication, Keychain adapters | **No** | macOS: local session, CI, or a Mac run (§5) |
+| `xcodebuild`, simulators, XCUITest, AutoFill extension tests | **No** | macOS: local session, CI, or a Mac run (§5) |
 | The Xcode MCP server (`BuildProject`, `RunSomeTests`, …) | **No** — needs an Xcode GUI | Local macOS session |
 
 Two consequences for how this repository is organised, both of which already pointed this way:
@@ -41,13 +41,14 @@ Two consequences for how this repository is organised, both of which already poi
   any Keychain or LocalAuthentication adapter (`02-architecture.md` §15) — are not reviewable in a
   cloud session. A cloud session can draft them; it cannot compile or test them. Any PR touching
   crypto, envelope, sharing or `SecureMemory` still owes an adversarial test
-  (`03-implementation-plan.md`, working agreements), and that test has to be run somewhere real.
+  (`03-implementation-plan.md`, working agreements), and that test has to be run somewhere real: from a
+  cloud session, that is a Mac run (§5) on the branch before the pull request.
 
 **If you want Xcode driving an agent, use Remote Control, not a cloud session.** `claude
 --remote-control` (or `/remote-control` in a running session) keeps Claude Code on your own Mac with
 the full toolchain and the Xcode MCP server, and lets you steer it from claude.ai or the phone. It is
-the only arrangement in which an agent reaches `xcodebuild` and a simulator. Cloud sessions and
-Remote Control are different features that solve different halves of this.
+the only arrangement in which an agent works *interactively* with `xcodebuild` and a simulator. Cloud sessions and
+Remote Control are different features that solve different halves of this; §5 is the batch middle ground.
 
 ## 2. Create the environment
 
@@ -216,7 +217,62 @@ Mind the compiler-version gap: a cloud session builds with Swift 6.4, while `ci.
 Xcode 16.4 leg on macOS 15. Something can compile cleanly in a cloud session and still fail that
 older leg. Cloud-session green is a signal, not the gate — `ci.yml` is the gate.
 
-## 5. Related
+## 5. Mac-only gates from a cloud session (`mac-run.yml`)
+
+`.github/workflows/mac-run.yml` runs one gate on one branch on a GitHub macOS runner, and does nothing else. A cloud
+session pushes its work to a branch, dispatches the workflow on that branch, and reads the job log, so CryptoKit code,
+the Keychain adapters and the app's UI tests are compiled and run before anything reaches a pull request. It never
+gates a merge; `ci.yml` does.
+
+| Input | Values | Meaning |
+| --- | --- | --- |
+| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `check` | The steps of the matching `ci.yml` job (below) |
+| `filter` | empty, or one line not starting with `-` | `test`: a `swift test --filter` regex. `app:test` with `ios` or `macos`: an `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Must match at least one test |
+| `platform` | `macos`, `ios`, `all` | `app:test` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
+| `xcode` | `27.0`, `16.4` | `xcode-27` (macOS 27), every gate; or `macos-15`, `ci.yml`'s oldest leg, `build` and `test` only |
+
+Each gate runs what its `ci.yml` job runs: `test` is the package-tests job (`audit:dependencies`, `build -v`,
+`test --coverage`), `build:strict` is the strict-memory-safety job (`build:strict --require`, then `audit:unsafe`),
+and `build`, `test:adversarial`, `lint` and `app:test` are their own job's step. The exceptions: a filtered `test`
+runs only the matching tests, without coverage or the audit and build steps; `app:test` omits the iOS leg's
+best-effort AutoFill step; and `check` has no `ci.yml` job, being `mise.toml`'s local aggregate. A request that
+cannot mean what it says is refused before anything builds: a filter that starts with `-` or is given to a gate
+other than `test` and `app:test`, `app:test all` with a filter, and on Xcode 16.4 any gate but `build` and `test`
+(16.4 cannot build `-strict-memory-safety` at all, and `ci.yml` runs everything else on 27.0). A filtered run that
+executed no test fails too, where `swift test` and `xcodebuild` would report it as passing.
+
+The step is `mise run ci:gate <gate> --platform=<platform> --xcode=<xcode> --filter=<filter>`, which reproduces
+locally on a Mac. Each value is written `--flag=value`, because mise reads a separate argument that starts with `-` as
+an option: `--filter --help` would print the task's help and pass. A failed run ends its log with a failure summary
+(the compiler errors, failing tests and xcodebuild's "Failing tests" list), because a tool reading the log may only
+fetch its tail; the full logs, `coverage.txt` and any `.xcresult` bundles are the run's `mac-run-<run id>` artifact.
+Runs are named after their gate, platform (for `app:test`), filter, branch and Xcode, and repeats of one request share
+a concurrency group: one runs, at most one waits, and a newer dispatch replaces the waiting one. Different requests
+never cancel one another.
+
+Starting a run:
+
+- From a session with the GitHub tools: dispatch `mac-run.yml` with `ref` set to the branch and the inputs above,
+  then fetch the run's job log once it completes.
+- From a terminal: `gh workflow run mac-run.yml --ref <branch> -f gate=app:test -f platform=macos -f
+  filter=WatchwordMacUITests/OnboardingAndUnlockTests`, then `gh run watch` and `gh run view --log-failed`.
+
+What it is not:
+
+- **Interactive.** Each run is a fresh runner: minutes per round trip, no debugger, no simulator on screen, no Xcode
+  MCP server. For pairing with Xcode, use Remote Control on a Mac (§1).
+- **Free on a private repository.** macOS runner minutes count ten times against the plan's included minutes.
+- **Available before it is on `main`.** GitHub dispatches only workflows on the default branch, though it runs them
+  against any branch, using the workflow file as it is on that branch: a branch cut before `mac-run.yml` merged has
+  none, and needs a rebase onto `main` before it can be dispatched.
+- **A security boundary.** A dispatch runs `mac-run.yml` and `ci:gate` as they are on the dispatched branch, and
+  anyone who can dispatch can push an edited copy of either. The controls are the repository's: only an account with
+  write access can dispatch, the workflow holds no secrets, and its token is read-only (`contents: read`, and read is
+  the repository default, `08-repository-hardening.md` §1). What the workflow and `ci:gate` add is narrower: inputs
+  reach the shell only through `env:`, and `ci:gate`'s refusals stop a mistyped or prompt-influenced request from
+  running something other than what was meant, or from passing without testing anything (`07-supply-chain.md` §3.2).
+
+## 6. Related
 
 - [`mise.toml`](../mise.toml) and [`mise-tasks/`](../mise-tasks) — the gates `cloud-verify.sh` runs,
   shared with `ci.yml`; edit a gate there, not in the script.
