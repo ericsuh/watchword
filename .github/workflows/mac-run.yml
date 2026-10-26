@@ -4,9 +4,14 @@ name: Mac run
 # Xcode (a Linux cloud session, docs/09-cloud-sessions.md §5) compiles and tests Apple-framework code before pushing it
 # to a pull request: it dispatches this on its branch, then reads the job log. Nothing here gates a merge; ci.yml does.
 #
-# Only someone with write access to the repository can dispatch a workflow, and it uses no secrets. The inputs reach
-# the shell through environment variables, never `${{ }}` in a `run:` line, and `mise run ci:gate` accepts a fixed
-# list of gates and passes the filter as one argument, so an input cannot become a command.
+# A dispatch runs this file and `mise run ci:gate` as they are on the dispatched branch, so whoever can dispatch it can
+# change what it runs, and a branch cut before this file reached main has no Mac run until it is rebased. The controls
+# are the repository's: only an account with write access can dispatch (or push the branch), the workflow uses no
+# secrets, and its token is read-only (`contents: read` here, and read is the repository default,
+# docs/08-repository-hardening.md §1). What this file and ci:gate add is narrower: inputs reach the shell only through
+# `env:`, never `${{ }}` in a `run:` line, and ci:gate refuses a mistyped or prompt-influenced request (an unknown gate,
+# a filter on a gate that takes none or that looks like an option, a combination ci.yml never runs) before it costs a
+# runner or passes without testing anything.
 
 on:
   workflow_dispatch:
@@ -14,10 +19,10 @@ on:
       gate:
         description: The gate to run (a mise task)
         type: choice
-        options: [test, test:adversarial, build, build:strict, lint, app:test, check]
+        options: [test, "test:adversarial", build, "build:strict", lint, "app:test", check]
         default: test
       filter:
-        description: "test: a swift test --filter regex. app:test: an -only-testing identifier. Empty for all"
+        description: "test: a swift test --filter regex. app:test (ios/macos): an -only-testing identifier. Empty for all"
         type: string
         default: ""
       platform:
@@ -26,16 +31,24 @@ on:
         options: [macos, ios, all]
         default: macos
       xcode:
-        description: "27.0 runs on xcode-27 (macOS 27); 16.4 on macos-15, ci.yml's oldest leg"
+        description: "27.0: xcode-27 (macOS 27), every gate. 16.4: macos-15, ci.yml's oldest leg, build and test only"
         type: choice
         options: ["27.0", "16.4"]
         default: "27.0"
 
-run-name: "Mac run: ${{ inputs.gate }} on ${{ github.ref_name }} (Xcode ${{ inputs.xcode }})"
+# The platform is shown for app:test, the one gate that reads it, and the filter when there is one.
+run-name: >-
+  Mac run: ${{ inputs.gate }}${{ inputs.gate == 'app:test' && format(' {0}', inputs.platform) || '' }}${{
+  inputs.filter != '' && format(' --filter={0}', inputs.filter) || '' }} on ${{ github.ref_name }} (Xcode ${{
+  inputs.xcode }})
 
-# Runs queue rather than cancel one another: each was asked for separately and its log is the answer.
+# One group per request (branch, gate, platform, Xcode, filter), so different requests never cancel one another. For
+# repeats of one request GitHub keeps one run going and one pending, and a newer dispatch cancels the pending one: the
+# only cancelling, and what survives is the later dispatch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    ${{ github.workflow }} ${{ github.ref }} ${{ inputs.gate }} ${{ inputs.platform }} ${{ inputs.xcode }}
+    ${{ inputs.filter }}
   cancel-in-progress: false
 
 permissions:
@@ -51,9 +64,12 @@ defaults:
 
 jobs:
   gate:
-    name: ${{ inputs.gate }} (Xcode ${{ inputs.xcode }})
+    name: >-
+      ${{ inputs.gate }}${{ inputs.gate == 'app:test' && format(' {0}', inputs.platform) || '' }}${{
+      inputs.filter != '' && format(' --filter={0}', inputs.filter) || '' }} (Xcode ${{ inputs.xcode }})
     runs-on: ${{ inputs.xcode == '16.4' && 'macos-15' || 'xcode-27' }}
-    timeout-minutes: 60
+    # ci.yml gives each app-tests platform its own 60-minute job; `all` runs both schemes here, one after the other.
+    timeout-minutes: ${{ inputs.gate == 'app:test' && inputs.platform == 'all' && 120 || 60 }}
     permissions:
       contents: read
     steps:
@@ -80,8 +96,10 @@ jobs:
           GATE: ${{ inputs.gate }}
           FILTER: ${{ inputs.filter }}
           PLATFORM: ${{ inputs.platform }}
+          XCODE_VERSION: ${{ inputs.xcode }}
+        # `--flag=value`, one word each: mise reads a separate value that starts with `-` (`--help`) as an option.
         # An empty filter means none.
-        run: mise run ci:gate "$GATE" --platform "$PLATFORM" --filter "$FILTER"
+        run: mise run ci:gate "$GATE" "--platform=$PLATFORM" "--xcode=$XCODE_VERSION" "--filter=$FILTER"
 
       - name: Upload logs and result bundles
         if: always()
@@ -91,6 +109,7 @@ jobs:
           path: |
             gate.log
             test-output.log
+            coverage.txt
             adversarial.log
             TestResults
           if-no-files-found: ignore

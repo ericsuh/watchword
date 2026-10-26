@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Run the package tests (Swift Testing + XCTest) and check that both frameworks ran"
-#USAGE flag "--filter <pattern>" help="Only run tests matching this regex (`swift test --filter`); skips the checks that both frameworks and every adversarial suite ran, since a filter may select only some"
+#USAGE flag "--filter <pattern>" help="Only run tests matching this regex (`swift test --filter`); skips the checks that both frameworks and every adversarial suite ran, since a filter may select only some, but fails if it selects no test at all"
 #USAGE flag "--coverage" help="Collect code coverage and write an llvm-cov report to coverage.txt (best effort, even if tests fail)"
 #USAGE flag "--log <file>" default="test-output.log" help="Where to keep a copy of the test output"
 #
@@ -37,7 +37,14 @@ if [ "$coverage" = true ]; then
 fi
 
 [ "$status" -eq 0 ] || exit "$status"
-[ -z "${usage_filter:-}" ] || exit 0
+
+# A filter may select one framework or some suites, so the checks further down do not apply, but it must select
+# something: `swift test` exits 0 with "No matching test cases were run" when a filter matches nothing.
+if [ -n "${usage_filter:-}" ]; then
+  grep -Eq "Test run with [1-9][0-9]* tests?|\[[0-9]+/[1-9][0-9]*\] Testing |Test Case .* passed|Executed [1-9][0-9]* tests?" "$log" \
+    || { echo "::error::No tests matched --filter $usage_filter"; exit 1; }
+  exit 0
+fi
 
 grep -Eq "Test run with [1-9][0-9]* tests?" "$log" \
   || { echo "::error::No Swift Testing tests were executed"; exit 1; }
