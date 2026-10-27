@@ -6,9 +6,9 @@ Status: proposed. Date: 2026-10-26.
 The flows with the most at stake — account creation, unlock and quick unlock, the key hierarchy, record sealing,
 password change — live in `WatchwordCrypto`, the PBKDF2 call in `SecureMemory`, and `VaultSession`. All three need
 CryptoKit or CommonCrypto, neither of which exists on Linux, so they were wrapped in `#if canImport(CryptoKit)` (or
-`canImport(CommonCrypto)`) and compiled out there. On Linux, `swift test` went green with 128 of the package's 333
-Swift Testing tests absent, among them two adversarial areas ("crypto core", "unlock and quick unlock") and scenarios
-S1–S4 (`03-implementation-plan.md`, rule 2: absent, not red). Cloud sessions and any Linux CI could draft that code
+`canImport(CommonCrypto)`) and compiled out there. On Linux, `swift test` went green with 151 of the package's 361
+Swift Testing tests absent, among them three adversarial areas ("crypto core", "unlock and quick unlock", "sync with
+real keys") and scenarios S1–S4 (`03-implementation-plan.md`, rule 2: absent, not red). Cloud sessions and any Linux CI could draft that code
 but not compile it; every change round-tripped through `mac-run.yml` or a Mac.
 
 Guards also cost something on the Mac: each one is a place where the code that ships and the code a reader or a
@@ -67,12 +67,13 @@ The three questions `07-supply-chain.md` §2 asks of any dependency:
   (above).
 
 ## Consequences
-- On Linux, 13 more suites and 99 more tests run (205 → 304 of 333 Swift Testing tests; XCTest unchanged at 21):
-  "Adversarial: crypto core", "Adversarial: unlock and quick unlock", "Primitive known answers",
-  "PBKDF2-HMAC-SHA256 known answers", "Two-secret key derivation", "KDF calibration", "Keyset, vault keys and grants",
-  "Record sealing", the three "Vault session" suites, "Scenarios S1–S4 against the vault", and SecureBytes' CryptoKit
-  bridging. Still Mac-only: the SQLite store and "local vault store", the Keychain adapter and "Keychain item
-  protection", the Emergency Kit PDF, and the apps.
+- On Linux, 15 more suites and 116 more tests run (210 → 326 of 361 Swift Testing tests; XCTest unchanged at 21):
+  "Adversarial: crypto core", "Adversarial: unlock and quick unlock", "Adversarial: sync with real keys",
+  "Primitive known answers", "PBKDF2-HMAC-SHA256 known answers", "Two-secret key derivation", "KDF calibration",
+  "Keyset, vault keys and grants", "Record sealing", the four "Vault session" suites (account and unlock, items, quick
+  unlock, sync between devices), "Scenarios S1–S4 against the vault", and SecureBytes' CryptoKit bridging. Still
+  Mac-only: the SQLite stores and "local vault store", the Keychain adapter and "Keychain item protection", the
+  Emergency Kit PDF, and the apps.
 - **Third-party code now ships (T1).** This is the price of one code path. The apps link swift-crypto's `Crypto`
   module: on Apple platforms, the CryptoKit re-export plus a few non-cryptographic helpers (hex encoding, a resource
   bundle lookup, `Optional.withUnsafeBytes`) and a resource bundle, `swift-crypto_Crypto.bundle`, whose privacy manifest
@@ -97,6 +98,6 @@ The three questions `07-supply-chain.md` §2 asks of any dependency:
 - Linux: `swift build --build-tests` and `swift test` on `swift:6.4-noble` (Ubuntu 24.04, **arm64**, Docker on Apple
   silicon), against the same suites at `main` for the before/after counts. Not yet run on the cloud VM's x86_64 or
   through `cloud-verify.sh`.
-- macOS 27, Xcode 27: `mise run test` (333 Swift Testing tests), `build:strict`, `lint`, `audit` (with negative
+- macOS 27, Xcode 27: `mise run test` (361 Swift Testing tests, after merging milestone 3's vault side), `build:strict`, `lint`, `audit` (with negative
   checks: linking `CryptoExtras` unconditionally, changing a pin, and a version range each fail it), and `app:build` for
   iOS and macOS, with the app binaries checked for BoringSSL symbols (none). The Xcode 16.4 leg runs in this PR's CI.

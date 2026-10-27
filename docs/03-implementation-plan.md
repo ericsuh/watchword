@@ -21,7 +21,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | Milestone | Remote/Linux with no loss of verification | Needs a Mac, and for what |
 | --- | --- | --- |
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
-| 1 — cryptographic core (done) | Builds, but the crypto suites are compiled out, not run | CryptoKit, CommonCrypto, Security.framework |
+| 1 — cryptographic core (done) | Yes since ADR 0006: every crypto suite runs, against swift-crypto's BoringSSL | The implementation that ships (CryptoKit, CommonCrypto), Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
 | 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
