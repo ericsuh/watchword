@@ -134,9 +134,11 @@ at run time, so that download is trusted the way the runner image is (§3.3).
     review comments, and a reply in the one thread that mentioned Claude. No build, test or other
     command runs, so nothing in the pull request executes. The repository setting that stops
     workflows approving pull requests (`08-repository-hardening.md` §1) still applies.
-  - **Untrusted content stays out of the workspace root.** The root is the base branch, so the
-    CLAUDE.md that steers Claude is the reviewed one; the pull request's head is checked out into
-    `pr-head/`. The action also restores `.claude/` and CLAUDE.md from the base branch.
+  - **The pull request's files are never checked out.** Only the base branch is on disk, so the
+    CLAUDE.md and `.claude/` that steer Claude are the reviewed ones; Claude reads the change
+    through `gh pr diff`. A checkout of the head, even into a subdirectory, would let a CLAUDE.md
+    or skill the pull request adds load as instructions when Claude reads files there (CodeQL's
+    untrusted-checkout query flags it for that reason).
   - **Event text reaches the shell only through `env:`**, as in `mac-run.yml`.
 
   The residual risk is prompt injection: an admin can ask Claude about a pull request written by
