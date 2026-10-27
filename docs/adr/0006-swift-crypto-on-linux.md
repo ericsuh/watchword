@@ -1,6 +1,6 @@
 # ADR 0006: swift-crypto, so the cryptographic core has one code path on every platform
 
-Status: proposed. Date: 2026-10-26.
+Status: accepted. Date: 2026-10-26.
 
 ## Context
 The flows with the most at stake — account creation, unlock and quick unlock, the key hierarchy, record sealing,
