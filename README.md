@@ -34,7 +34,7 @@ Sources/WatchwordGenerator password, passphrase and PIN generation with entropy 
 Sources/WatchwordEnvelope  envelope header and KDF parameter validation (two-sided bounds)
 Tests/                     Swift Testing suites, XCTest suites, adversarial + phishing suites
 .github/workflows          macOS CI: package tests, adversarial job, strict memory safety, lint
-.github/scripts            Xcode selection and the zero-dependency guard (no third-party actions)
+.github/scripts            Xcode selection and the dependency guard (no third-party actions)
 mise-tasks/                Build, test, audit and app tasks behind `mise run` (CI calls them too)
 ```
 
@@ -55,8 +55,8 @@ mise tasks                      # everything else; `mise run <task> --help` for 
 
 - Two secrets (account password + device-held Secret Key) are required to unlock or sync.
 - Transports (CloudKit, iCloud Drive, Dropbox via the Files app) carry ciphertext only.
-- Native UI, memory-safe Swift, no third-party cryptography, and zero runtime dependencies
-  (enforced in CI).
+- Native UI, memory-safe Swift, no third-party cryptography, and one pinned dependency — Apple's swift-crypto, which
+  re-exports CryptoKit on Apple platforms (ADR 0006) — enforced in CI.
 - A credential is never released on a host an item is not scoped to, and a look-alike site gets a
   warning rather than silence.
 - Every security flow is testable in-process with injected fakes, and adversarial tests are a

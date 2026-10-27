@@ -20,17 +20,20 @@ as such so nobody mistakes an intention for a control.
 | T6 Signing-key thief | Steals the Developer ID or App Store Connect key | Ships a signed malicious build to real users |
 | T7 Developer-machine attacker | Compromises a laptop | Everything above |
 
-## 2. Application code: zero dependencies, enforced
+## 2. Application code: one dependency, enforced
 
-The strongest available position is to have nothing to compromise. Nothing that ships links a third-party package,
-and the package has no binary targets and no build plugins, and that is checked rather than merely intended. The one
-dependency, apple/swift-crypto, is linked on Linux only, so the cryptographic core runs its tests there (ADR 0006).
+The strongest available position is to have nothing to compromise. The package has one dependency, apple/swift-crypto,
+so the cryptographic core has one code path on Apple platforms and Linux (ADR 0006); no binary targets and no build
+plugins; and that is checked rather than merely intended. swift-crypto's `Crypto` module ships in the apps: on Apple
+platforms it re-exports CryptoKit and compiles no cryptography, but a malicious release could change that, so T1 applies
+to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compiles BoringSSL, is linked on Linux only.
 
 - **[enforced]** `.github/scripts/assert-no-dependencies.sh` fails the build if `Package.swift`
   gains a `.binaryTarget`, a `.plugin(`, or `unsafeFlags`; if it depends on any package but swift-crypto at its exact
-  version, or on any of its products but `Crypto` and `CryptoExtras`, or links one on a platform other than Linux;
-  or if `Package.resolved` pins anything but the two commits the script names. Adding or bumping a dependency
-  therefore requires editing the guard in the same pull request, which is visible in review. It also checks the resolved manifest (`swift package dump-package`):
+  version, or on any of its products but `Crypto` and `CryptoExtras`, or links `CryptoExtras` on a platform other
+  than Linux; or if `Package.resolved` pins anything but the two commits the script names. Adding or bumping a
+  dependency therefore requires editing the guard in the same pull request, which is visible in review. It also checks
+  the resolved manifest (`swift package dump-package`):
   only plain Swift source and test targets, each at its conventional path (a custom `path:` could
   compile files no other check scans), no experimental features or C++ interop, and the test-only
   `WatchwordTestSupport` (seeded and deliberately broken RNGs) linked only into test targets.
@@ -43,8 +46,8 @@ dependency, apple/swift-crypto, is linked on Linux only, so the cryptographic co
   the maintenance and audit story, and the pin-and-vendor plan. ADR 0001 already forbids
   third-party cryptography outright.
 - **[enforced]** Shipped cryptography comes only from CryptoKit, Security.framework, and CommonCrypto
-  (reviewed as part of the no-dependency check: a crypto dependency cannot be added, or swift-crypto linked into an
-  Apple build, without tripping it).
+  (reviewed as part of the dependency check: another crypto dependency cannot be added, or BoringSSL linked into an
+  Apple build through `CryptoExtras`, without tripping it).
 
 ### 2.1 Swift macros and plugins (T3)
 

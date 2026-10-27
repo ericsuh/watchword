@@ -5,9 +5,10 @@
 # to compromise. Adding one is a deliberate decision that needs an ADR, so it must not be
 # possible to do it quietly in a pull request.
 #
-# The one exception is swift-crypto, linked on Linux only so the cryptographic core runs its tests there (ADR 0006).
-# It is allowed at exactly the version and commits below, and only behind a Linux platform condition, so no Apple
-# build links it. Bumping it means editing these lines, like an action pin.
+# The one exception is swift-crypto (ADR 0006), so the cryptographic core has one code path on every platform. It is
+# allowed at exactly the version and commits below. Its `Crypto` product may be linked anywhere: on Apple platforms it
+# only re-exports CryptoKit. `CryptoExtras` compiles BoringSSL into whatever links it, so it must stay behind a Linux
+# platform condition. Bumping either means editing these lines, like an action pin.
 set -euo pipefail
 
 fail=0
@@ -15,6 +16,7 @@ fail=0
 export ALLOWED_PACKAGE_URL="https://github.com/apple/swift-crypto.git"
 export ALLOWED_PACKAGE_VERSION="4.5.2"
 export ALLOWED_PRODUCTS="Crypto CryptoExtras"
+export LINUX_ONLY_PRODUCTS="CryptoExtras"
 # identity=revision, for Package.resolved. swift-asn1 comes in through CryptoExtras.
 export ALLOWED_PINS="swift-crypto=da9d28d69ebe3894b18376c8f2395c2f37b8448f swift-asn1=3b6410f7dee09eb33cdd26260c5fd47fda19b0e2"
 
@@ -51,6 +53,7 @@ problems = []
 forbidden_settings = {"unsafeFlags", "enableExperimentalFeature", "interoperabilityMode"}
 allowed_url, allowed_version = os.environ["ALLOWED_PACKAGE_URL"], os.environ["ALLOWED_PACKAGE_VERSION"]
 allowed_products = set(os.environ["ALLOWED_PRODUCTS"].split())
+linux_only_products = set(os.environ["LINUX_ONLY_PRODUCTS"].split())
 for package in manifest["dependencies"]:
     source = package.get("sourceControl", [{}])[0]
     url = source.get("location", {}).get("remote", [{}])[0].get("urlString")
@@ -74,8 +77,8 @@ for target in manifest["targets"]:
             product, package, _, condition = dependency["product"]
             if package is not None and product not in allowed_products:
                 problems.append(f"{name}: product {product} of {package} is not allowed (ADR 0006)")
-            if package is not None and (condition or {}).get("platformNames") != ["linux"]:
-                problems.append(f"{name}: {product} must be linked on Linux only, so no Apple build links it (ADR 0006)")
+            if product in linux_only_products and (condition or {}).get("platformNames") != ["linux"]:
+                problems.append(f"{name}: {product} compiles BoringSSL and must be linked on Linux only (ADR 0006)")
         if kind != "test" and "WatchwordTestSupport" in names:
             problems.append(f"{name}: production target depends on WatchwordTestSupport")
 for problem in problems:
@@ -109,6 +112,6 @@ if [ -f Apps/project.yml ]; then
 fi
 
 if [ "$fail" -eq 0 ]; then
-  echo "No third-party dependencies beyond Linux-only swift-crypto, binary targets, build plugins, custom target paths, or compiler-relaxing settings."
+  echo "No third-party dependencies beyond swift-crypto (CryptoExtras on Linux only), binary targets, build plugins, custom target paths, or compiler-relaxing settings."
 fi
 exit "$fail"

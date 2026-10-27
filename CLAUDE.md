@@ -90,8 +90,9 @@ server, and the base image cannot be replaced. So in a cloud session:
   tools as `mise exec -- <tool>`.
 - Anything importing Security.framework, LocalAuthentication, SQLite3 or CoreGraphics does not compile, and
   `xcodebuild` is absent. The Keychain adapters, the SQLite store and the PDF (`docs/02-architecture.md` §15) can be
-  drafted there but **not** built or tested there. `WatchwordCrypto`, PBKDF2 and `VaultSession` do build and test,
-  against swift-crypto rather than CryptoKit (ADR 0006): evidence about the logic, not about what ships. Push the branch and
+  drafted there but **not** built or tested there. `WatchwordCrypto`, PBKDF2 and `VaultSession` do build and test:
+  `import Crypto` is CryptoKit on Apple platforms and swift-crypto's BoringSSL on Linux (ADR 0006), so a Linux pass is
+  evidence about the logic, not about what ships. Push the branch and
   dispatch `.github/workflows/mac-run.yml` on it (`mise run ci:gate`, `docs/09-cloud-sessions.md` §5) to compile and
   test it on a macOS runner; until a run passes, say so rather than reporting a layer as verified.
 - The toolchain is Swift 6.4, newer than the Xcode 16.4 CI leg. A clean cloud build is not evidence
@@ -254,20 +255,22 @@ directions are tested; keep both when adjusting constants.
   `Keyset.unwrap` and `VaultKeyGrant.open(as:from:vaultID:keyID:)` all follow this.
 - Production code never copies key material out with `Array(secureBytes)`; use `unprotectedCopy()` for
   non-secret values so every escape is searchable.
-- Files that need CryptoKit are wrapped in `#if canImport(CryptoKit) || os(Linux)` and import `CryptoKit` where it
-  exists, `Crypto` (apple/swift-crypto, linked on Linux only) otherwise; PBKDF2 likewise takes CommonCrypto's or
-  swift-crypto's (ADR 0006). Apple builds never link swift-crypto. Linux results are evidence about the logic; the
-  macOS CI matrix, against CryptoKit, is the gate.
+- Crypto code imports `Crypto` (apple/swift-crypto), never `CryptoKit`, and carries no platform conditional: on Apple
+  platforms `Crypto` re-exports CryptoKit, on Linux it is the same API over BoringSSL (ADR 0006). The one exception is
+  `PBKDF2.swift`, which calls CommonCrypto on Apple platforms and swift-crypto's `CryptoExtras` (linked on Linux only,
+  because it compiles BoringSSL) elsewhere; keep the conditional there. Linux results are evidence about the logic;
+  the macOS CI matrix, against CryptoKit, is the gate.
 
 ## Conventions
 
 - **Swift 6 language mode**, strict concurrency. Public types are `Sendable` and usually `Hashable`.
 - **Errors, not optionals, for security decisions.** Typed error enums (`HostNormalizationError`,
   `FillRefusal`, `KDFValidationError`, `EnvelopeError`) name the reason so tests assert on it.
-- **No third-party dependencies, ever, without an ADR.** The one exception is swift-crypto, Linux-only (ADR 0006).
-  `.github/scripts/assert-no-dependencies.sh` fails CI on any other package, a version or `Package.resolved` commit
-  other than the ones it names, a swift-crypto product linked on a non-Linux platform, `.binaryTarget`, `.plugin(`
-  or `unsafeFlags`. Shipped crypto comes only from CryptoKit, Security.framework and CommonCrypto.
+- **No third-party dependencies, ever, without an ADR.** The one exception is swift-crypto (ADR 0006).
+  `.github/scripts/assert-no-dependencies.sh` fails CI on any other package or product, a version or
+  `Package.resolved` commit other than the ones it names, `CryptoExtras` linked on a non-Linux platform,
+  `.binaryTarget`, `.plugin(` or `unsafeFlags`. Shipped crypto comes only from CryptoKit, Security.framework and
+  CommonCrypto.
 - **No unsafe constructs** outside `SecureMemory` — enforced by the `strict-memory-safety` job plus the
   `.github/scripts/assert-unsafe-confined.sh` tripwire (a marked construct would compile anywhere, and
   `@_silgen_name`-style bindings are not flagged by the compiler at all). No symlinks or non-Swift files

@@ -66,11 +66,12 @@ Alternatives rejected:
 "the module that holds key material". Its review standard is unchanged; a new binding needs the same
 justification as any other unsafe construct.
 
-## Amendment (2026-10-26): Linux test builds
+## Amendment (2026-10-26): swift-crypto
 
-"Cryptography comes only from Apple frameworks" applies to every build that ships. Linux builds, which exist only to
-run the tests, take CryptoKit's API from apple/swift-crypto (BoringSSL), linked on Linux alone and pinned by commit;
-ADR 0006 records why and what it costs.
+"Cryptography comes only from Apple frameworks" applies to every primitive a shipped build runs. The code imports
+CryptoKit's API through apple/swift-crypto's `Crypto` module, which re-exports CryptoKit on Apple platforms and
+supplies the same API over BoringSSL on Linux, where builds exist only to run the tests. ADR 0006 records why, and
+what it costs: swift-crypto's module ships in the apps, pinned by commit.
 
 ## Consequences
 - Developers must justify any new `unsafe` use in review and place it in `SecureMemory`.
