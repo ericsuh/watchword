@@ -48,6 +48,11 @@ if [ "$platform" = ios ] || [ "$platform" = all ]; then
 devices = json.load(sys.stdin)["devices"]
 print(next(d["udid"] for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")))')
   fi
+  # Boot the simulator and wait until it has finished booting before xcodebuild starts the UI-test runner. Left to
+  # itself, xcodebuild boots a shut-down simulator and launches the runner while a fresh CI device is still on its
+  # first boot; the runner then dies before any test runs ("Timed out waiting for AX loaded notification", or a
+  # crash in XCTWaiter's handleStalledWait while preparing). A booted simulator returns at once.
+  xcrun simctl bootstatus "$udid" -b
   run_tests Watchword-iOS "platform=iOS Simulator,id=$udid" iOS "${ios_signing[@]}" || failed="$failed iOS"
 fi
 

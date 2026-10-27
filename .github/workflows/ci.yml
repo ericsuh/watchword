@@ -188,6 +188,12 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: mise run app:test "$PLATFORM" --results TestResults
 
+      # Puts the failed run's summary, runner logs and crash reports into this log, which is readable without
+      # downloading the result bundle or having Xcode's xcresulttool.
+      - name: mise run app:diagnose TestResults
+        if: failure()
+        run: mise run app:diagnose TestResults
+
       # Enabling a third-party AutoFill provider from automation is unreliable on the simulator;
       # this attempt is informational and never blocks the pull request.
       - name: AutoFill extension UI test (best effort)
