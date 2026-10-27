@@ -39,7 +39,7 @@ defaults:
     shell: bash
 
 # Third-party actions are pinned to full commit SHAs (docs/07-supply-chain.md §3.1).
-#   actions/checkout              v4       -> 11d5960a326750d5838078e36cf38b85af677262
+#   actions/checkout              v7.0.1   -> 3d3c42e5aac5ba805825da76410c181273ba90b1
 #   anthropics/claude-code-action v1.0.263 -> 8041f1d17e0e7d2f2cfe35002962e9f26237c0bb
 
 jobs:
@@ -101,13 +101,13 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
     steps:
       - name: Check out the base branch
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Check out the pull request into pr-head/
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ env.PR_NUMBER }}/head
           path: pr-head
