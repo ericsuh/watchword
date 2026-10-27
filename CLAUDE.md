@@ -8,7 +8,8 @@ Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
-`WatchwordPlatform`), and the portable half of milestone 3's sync (`WatchwordSync`). `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+`WatchwordPlatform`), and milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
+its CloudKit and iCloud Drive transports. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -47,7 +48,9 @@ mise run clean                                         # .build, generated proje
 mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs
 ```
 
-UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor.
+UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and
+syncs over an in-memory transport with `UITestPeer`, a second session of the same account the test drives from a
+Debug-only Settings section (it unlocks with `WATCHWORD_UITEST_PASSWORD` from the launch environment).
 macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
 have it. Real Keychain round trips need a signed, entitled process, so `swift test` and CI skip them.
 `app:test-keychain` runs `SystemKeychainStoreTests` in the `WatchwordKeychainTests` bundle, hosted by a do-nothing
@@ -134,10 +137,13 @@ Ten shipped modules, dependency-ordered, plus test support:
 - **`WatchwordSync`** — milestone 3's portable half: object layout, the `SyncTransport` port with
   `InMemorySyncTransport` and `FileSyncTransport`, signed sealed segments and snapshots (`SyncPayload`,
   `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, conflict-keeping `ItemMerge` and
-  line-level `NoteText`, `SyncEngine`, and `DeletionRecordingStore`. Depends on `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`; no CryptoKit.
+  line-level `NoteText`, `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `SyncEngine`,
+  `DeletionRecordingStore`, and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
+  `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
-  history, trash, password change, deletion), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `EmergencyKit`, and
-  the ports (`KeychainStore`, `BiometricGate`, `WallClock`).
+  history, trash, password change, deletion, `sync()`, conflict resolution), `UnlockPolicy`, `AutoLockPolicy`,
+  `ItemCodec`, `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`), and `VaultSyncAdapter`, the
+  production `SyncKeyring` and `ItemSealer` (`VaultSession+Sync.swift`).
 - **`WatchwordPlatform`** — Apple adapters: `SystemKeychainStore`, `LocalAuthenticationGate`, the Emergency Kit
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
@@ -147,8 +153,8 @@ Ten shipped modules, dependency-ordered, plus test support:
 
 `docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`, `WatchwordHygiene`,
 `WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
-`docs/03-implementation-plan.md` milestone 3 lists the Mac half still open (production keyring and merger in
-`VaultSession`, SQLite sync state, CloudKit and iCloud Drive transports).
+§7.6 the vault side (keyring, saves, state, conflict UI); `docs/03-implementation-plan.md` milestone 3 lists what is
+still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds).
 
 ### `SyncEngine` invariants
 
@@ -179,6 +185,10 @@ Ten shipped modules, dependency-ordered, plus test support:
 - The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;
   a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
+- Signatures cover `name ‖ 0x00 ‖ envelope` under `SignatureDomain.logSegment`; verifying while locked uses the
+  Keychain's `accountSigningKey` copy, and with no trusted key every object is refused (`trustedKeyUnavailable`).
+- Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
+  `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
 
 ### `VaultSession` invariants
 
@@ -188,7 +198,12 @@ Ten shipped modules, dependency-ordered, plus test support:
 - The actor is re-entrant across `await`: after every suspension, re-check the lock epoch (`requireKeys(since:)`)
   before touching key material, so `lock()` always wins.
 - Read contexts come from the store row, and a decrypted item's `id`/`vaultID`/`version` must equal the row's.
-- Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends.
+- Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends (and in `resolveConflict`).
+- The vault owns sync metadata: every write goes through `ItemMerge.stamped` and commits conditionally on the row it
+  read (`commitItem`); a caller's `revisions`, `clock` or `conflicts` are never trusted. The session's deletions go
+  through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.
+- The sync adapter holds the session, never a key; every key operation re-enters the actor and throws
+  `SyncKeyringError.locked` after `lock()`.
 
 ### The matching pipeline is the whole point of `WatchwordMatching`
 
@@ -300,7 +315,7 @@ directions are tested; keep both when adjusting constants.
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`, `"sync log"`), so **renaming a suite breaks CI deliberately** — update
+  `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication

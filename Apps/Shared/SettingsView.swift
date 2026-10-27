@@ -31,6 +31,33 @@ struct SettingsView: View {
                     )
                     .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section("Sync") {
+                    if model.isSyncConfigured {
+                        Button("Sync Now") { Task { await model.syncNow() } }
+                            .disabled(model.isWorking)
+                            .accessibilityIdentifier("settings.syncNow")
+                        if let status = model.syncStatus {
+                            Text(status).font(.footnote).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("settings.syncStatus")
+                        }
+                    } else {
+                        Text("Sync between your devices is not available in this version yet.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                #if DEBUG
+                    if model.uiTestPeer != nil {
+                        Section("UI test: another device") {
+                            Button("Rename items on the other device") { Task { await model.renameOnOtherDevice() } }
+                                .disabled(model.isWorking)
+                                .accessibilityIdentifier("debug.peerRename")
+                            if let status = model.uiTestPeerStatus {
+                                Text(status).font(.footnote).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("debug.peerStatus")
+                            }
+                        }
+                    }
+                #endif
                 Section("Emergency Kit") {
                     Button("Show Emergency Kit…") { Task { kit = await model.emergencyKit() } }
                 }
@@ -38,7 +65,11 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
             .navigationTitle("Settings")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.accessibilityIdentifier("settings.done")
+                }
+            }
             .alert("Enter your account password", isPresented: $askingPassword) {
                 SecureField("Account password", text: $password)
                 Button("Turn On") {

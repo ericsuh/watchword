@@ -44,6 +44,8 @@ targetTemplates:
       - package: Watchword
         product: WatchwordStore
       - package: Watchword
+        product: WatchwordSync
+      - package: Watchword
         product: WatchwordModel
       - package: Watchword
         product: WatchwordMatching

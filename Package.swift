@@ -57,14 +57,19 @@ let package = Package(
         // Change-log segments, snapshots, field-level merge and the SyncTransport port (§7; milestone 3). Pure: segment
         // sealing, signing and item decryption reach it through ports, so nothing here imports CryptoKit and the whole
         // engine runs under `swift test` on Linux (docs/03-implementation-plan.md, "Where each milestone is built").
-        .target(name: "WatchwordSync", dependencies: ["WatchwordModel", "WatchwordEnvelope", "WatchwordStore"]),
+        // SecureMemory only for `SQLiteConnection`, behind the SQLite sync-state store's `#if canImport(SQLite3)`.
+        .target(
+            name: "WatchwordSync",
+            dependencies: ["WatchwordModel", "WatchwordEnvelope", "WatchwordStore", "SecureMemory"]
+        ),
 
-        // VaultSession façade, unlock and auto-lock policies, and the ports the UI and adapters plug into (§10, §15).
+        // VaultSession façade, unlock and auto-lock policies, and the ports the UI and adapters plug into (§10, §15). Also
+        // the production SyncKeyring and ItemSealer, since they need the keys VaultSession holds (§7; milestone 3).
         .target(
             name: "WatchwordKit",
             dependencies: [
                 "WatchwordModel", "WatchwordMatching", "WatchwordEnvelope", "WatchwordCrypto", "WatchwordStore",
-                "SecureMemory",
+                "WatchwordSync", "SecureMemory",
             ]
         ),
 
@@ -105,14 +110,14 @@ let package = Package(
             name: "WatchwordSyncTests",
             dependencies: [
                 "WatchwordSync", "WatchwordModel", "WatchwordStore", "WatchwordEnvelope", "WatchwordKit",
-                "WatchwordTestSupport",
+                "SecureMemory", "WatchwordTestSupport",
             ]
         ),
         .testTarget(
             name: "WatchwordKitTests",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordMatching", "WatchwordStore", "WatchwordCrypto",
-                "WatchwordEnvelope", "SecureMemory", "WatchwordTestSupport",
+                "WatchwordEnvelope", "WatchwordSync", "SecureMemory", "WatchwordTestSupport",
             ]
         ),
         .testTarget(

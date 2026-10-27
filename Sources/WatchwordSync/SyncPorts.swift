@@ -12,15 +12,19 @@ public enum SyncKeyringError: Error, Equatable, Sendable {
     case untrustedAuthor(UUID)
     /// Signature or decryption failed. One error for every cause, as in `CryptoError.authenticationFailed`.
     case authenticationFailed
+    /// The vault is locked and this device holds no copy of the key signatures are checked against (it was never
+    /// unlocked since enrolment, or the Keychain could not be read or written). Nothing verifies until the next unlock
+    /// refreshes the copy; the object stays on the transport.
+    case trustedKeyUnavailable
 }
 
 /// The sync layer's only access to keys (docs/02-architecture.md §7.1, §15). Keeping sealing, opening, signing and
 /// verifying behind this port is what keeps `WatchwordSync` free of CryptoKit, and so testable on Linux
 /// (docs/03-implementation-plan.md, rule 3).
 ///
-/// Production (milestone 3's Mac half): `RecordCipher` under the vault key for sealing and opening, and the account's
-/// Ed25519 key — plus, once the device registry (review finding D9) lands, the device's Secure Enclave key — for
-/// signatures. Tests: `WatchwordTestSupport.FakeSyncKeyring`.
+/// Production: `VaultSession`'s sync adapter (`WatchwordKit`), with `RecordCipher` under the vault key for sealing and
+/// opening and the account's Ed25519 key for signatures — plus, once the device registry (review finding D9) lands,
+/// the device's Secure Enclave key. Tests: `WatchwordTestSupport.FakeSyncKeyring`.
 public protocol SyncKeyring: Sendable {
     /// Seals `payload` under the vault's current key, as an envelope bound to `location`
     /// (`location.envelopeContext(keyID:)`). Throws `locked` when no key is resident.
@@ -52,8 +56,8 @@ public enum MergeDecision: Sendable, Hashable {
 /// (docs/02-architecture.md §7.5, PRD F7.4, F7.6). The engine calls `merge` only when both versions exist and differ,
 /// and `resolveErasure` whenever a version of an erased record is in question; it handles absence and versions itself.
 ///
-/// Production (Mac half): `VaultSession`, which opens both items under the vault key, calls `ItemMerge.merge`, and
-/// seals the result. Tests: `WatchwordTestSupport.FakeItemMerger`, the same logic over the fake keyring.
+/// Implementation: `ItemRecordMerger`, which opens both items, calls `ItemMerge.merge`, and seals the result through
+/// an `ItemSealer` — `VaultSession`'s sync adapter in production, `FakeSyncKeyring` in tests.
 ///
 /// A merger that cannot open the remote version (it does not decrypt, or decodes to another item) throws; the engine
 /// then rejects the object carrying it, keeps the local version, and the stream waits — nothing is applied in part and

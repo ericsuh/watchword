@@ -5,6 +5,7 @@ import WatchwordEnvelope
 import WatchwordMatching
 import WatchwordModel
 import WatchwordStore
+import WatchwordSync
 
 /// How a new account (or a password change) chooses its PBKDF2 parameters.
 public enum KDFStrategy: Sendable, Hashable {
@@ -35,6 +36,23 @@ public struct VaultConfiguration: Sendable {
         self.kdf = kdf
         self.quickUnlock = quickUnlock
         self.autoLock = autoLock
+    }
+}
+
+/// Where a vault syncs to, and where this device keeps what it knows about that (docs/02-architecture.md §7).
+public struct SyncSettings: Sendable {
+    public var state: any SyncStateStore
+    public var transport: any SyncTransport
+    public var configuration: SyncConfiguration
+
+    public init(
+        state: any SyncStateStore,
+        transport: any SyncTransport,
+        configuration: SyncConfiguration = SyncConfiguration(schemaVersions: [.item: ItemCodec.schemaVersion])
+    ) {
+        self.state = state
+        self.transport = transport
+        self.configuration = configuration
     }
 }
 
@@ -102,15 +120,17 @@ public actor VaultSession {
     let biometrics: any BiometricGate
     let clock: any WallClock
     let configuration: VaultConfiguration
-    private var random: InjectedGenerator
+    let syncSettings: SyncSettings?
+    var random: InjectedGenerator
 
     var keys: UnlockedKeys?
-    private var account: AccountRecord?
-    private var lockEpoch: UInt64 = 0
+    var account: AccountRecord?
+    var lockEpoch: UInt64 = 0
     private var lastActivity: Date?
     private var backgroundedAt: Date?
     /// Lamport high-water mark per vault, so one record with an absurd version cannot freeze writes elsewhere.
-    private var highestVersionSeen: [UUID: UInt64] = [:]
+    var highestVersionSeen: [UUID: UInt64] = [:]
+    var syncInFlight = false
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(
@@ -119,6 +139,7 @@ public actor VaultSession {
         biometrics: any BiometricGate,
         clock: any WallClock = SystemWallClock(),
         configuration: VaultConfiguration,
+        sync: SyncSettings? = nil,
         random: any RandomNumberGenerator & Sendable = SystemRandomNumberGenerator()
     ) {
         self.store = store
@@ -126,7 +147,22 @@ public actor VaultSession {
         self.biometrics = biometrics
         self.clock = clock
         self.configuration = configuration
+        self.syncSettings = sync
         self.random = InjectedGenerator(base: random)
+    }
+
+    /// The store the session's own writes go through. With sync on, a `DeletionRecordingStore`, so every deletion
+    /// the person makes becomes an explicit tombstone for the sync layer to publish; the sync engine writes to
+    /// `store` directly, so the deletions it applies are not published again (docs/02-architecture.md §7.1).
+    func writer(for account: AccountRecord) -> any RecordStore {
+        guard let syncState else { return store }
+        return DeletionRecordingStore(base: store, syncState: syncState, deviceID: account.deviceID)
+    }
+
+    /// The configured sync state store, behind the wrapper that signs pending deletions as they are recorded and
+    /// ignores any that does not verify (`AuthenticatedSyncState`).
+    var syncState: (any SyncStateStore)? {
+        syncSettings.map { AuthenticatedSyncState(base: $0.state, session: self) }
     }
 
     // MARK: - State
@@ -160,13 +196,13 @@ public actor VaultSession {
         )
     }
 
-    private func loadAccount() async throws -> AccountRecord? {
+    func loadAccount() async throws -> AccountRecord? {
         if let account { return account }
         account = try await store.loadAccount()
         return account
     }
 
-    private func requireKeys(since epoch: UInt64? = nil) throws -> UnlockedKeys {
+    func requireKeys(since epoch: UInt64? = nil) throws -> UnlockedKeys {
         if let epoch, epoch != lockEpoch { throw VaultError.locked }
         guard let keys else { throw VaultError.locked }
         return keys
@@ -232,6 +268,7 @@ public actor VaultSession {
             throw VaultError.lockedDuringUnlock
         }
         install(newKeys, at: now)
+        try? await refreshSigningKey(account: record, keys: newKeys)
         return kit
     }
 
@@ -320,6 +357,7 @@ public actor VaultSession {
         install(newKeys, at: now)
         // Best effort: a Keychain hiccup here must not turn a correct password into a failed unlock.
         try? await refreshQuickUnlock(after: now, account: record)
+        try? await refreshSigningKey(account: record, keys: newKeys)
         try? await purgeExpiredTrash()
     }
 
@@ -416,6 +454,7 @@ public actor VaultSession {
         install(newKeys, at: now)
         state.failedAttempts = 0
         try? await saveQuickUnlockState(state, accountID: accountID)
+        try? await refreshSigningKey(account: record, keys: newKeys)
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).
@@ -705,14 +744,14 @@ public actor VaultSession {
             record.wrappedKeyset, accountID: record.accountID, with: verified, recordVersion: record.keysetVersion
         ).zeroise()
         lock()
-        try await store.eraseAll()
+        try await writer(for: record).eraseAll()
         account = nil
         // Every item is attempted even if one fails, so a Keychain error cannot leave the Secret Key behind just
         // because an earlier deletion threw; anything left over is reported.
         var leftovers: [KeychainItem] = []
         for item in [
             KeychainItem.secretKey(accountID: record.accountID), .quickUnlockKey(accountID: record.accountID),
-            .quickUnlockState(accountID: record.accountID),
+            .quickUnlockState(accountID: record.accountID), .accountSigningKey(accountID: record.accountID),
         ] {
             do {
                 try await keychain.delete(item)
@@ -834,8 +873,9 @@ public actor VaultSession {
         let item = try await item(id: id)
         guard item.isTrashed else { throw VaultError.itemNotTrashed(id) }
         _ = try requireKeys()
+        guard let record = try await loadAccount() else { throw VaultError.noAccount }
         // Conditional on the version just read, so a restore that lands in between is not silently undone.
-        try await store.commit(
+        try await writer(for: record).commit(
             StoreChange(conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
     }
 
@@ -849,8 +889,8 @@ public actor VaultSession {
             guard let trashedAt = $0.trashedAt, $0.isTrashedByPerson else { return false }
             return now.timeIntervalSince(trashedAt) >= VaultConfiguration.trashRetention
         }
-        guard !expired.isEmpty else { return }
-        try await store.commit(
+        guard !expired.isEmpty, let record = try await loadAccount() else { return }
+        try await writer(for: record).commit(
             StoreChange(
                 conditionalDeletions: Dictionary(
                     uniqueKeysWithValues: expired.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
@@ -887,24 +927,53 @@ public actor VaultSession {
         item.id = id
         item.vaultID = targetVault
         item.modifiedAt = now
-        let base = max(highestVersionSeen[targetVault] ?? 0, existing?.version ?? 0)
-        guard base < UInt64.max else { throw VaultError.versionOverflow }
-        item.version = base + 1
-
-        let plaintext = try ItemCodec.encode(item)
-        defer { plaintext.zeroise() }
-        let row = StoredRecord(
-            recordID: item.id, kind: .item, vaultID: targetVault, keyID: vaultKey.key.keyID, version: item.version,
-            deviceID: record.deviceID, envelope: [])
-        var sealed = row
-        sealed.envelope = try RecordCipher.seal(
-            plaintext, context: Self.itemContext(row), key: vaultKey.key, using: &random)
-        try await store.commit(StoreChange(upserts: [sealed]))
-        highestVersionSeen[targetVault] = max(highestVersionSeen[targetVault] ?? 0, item.version)
+        let revision = try nextRevision(in: targetVault, above: existingRow, account: record)
+        item.version = revision.version
+        // The vault owns the sync metadata as it owns the version: every group the edit changed is stamped with
+        // what this device has seen, the rest keep theirs (PRD F7.4, F7.6). The caller's stamps are ignored.
+        item = ItemMerge.stamped(
+            item, previous: existing, previousOrigin: existingRow.map(Self.origin), revision: revision)
+        try await commitItem(item, replacing: existingRow, vaultKey: vaultKey, account: record)
         return item
     }
 
-    private func openItem(_ row: StoredRecord, keys: UnlockedKeys) throws -> Item {
+    /// The revision of the next write in `vaultID`: above every version this device has seen there, and above the
+    /// row being replaced.
+    func nextRevision(in vaultID: UUID, above row: StoredRecord?, account: AccountRecord) throws -> Revision {
+        let base = max(highestVersionSeen[vaultID] ?? 0, row?.version ?? 0)
+        guard base < UInt64.max else { throw VaultError.versionOverflow }
+        return Revision(version: base + 1, device: account.deviceID)
+    }
+
+    /// Seals `item` as a row written by this device and commits it, conditional on the row it replaces still being
+    /// the one read (`StoreChange.expectations`): the actor is re-entrant, and a sync merge may have stored a newer
+    /// version while this write was waiting.
+    func commitItem(_ item: Item, replacing existing: StoredRecord?, vaultKey: VaultKey, account: AccountRecord)
+        async throws
+    {
+        let sealed = try sealItem(item, vaultKey: vaultKey, account: account)
+        var change = StoreChange(upserts: [sealed])
+        change.expectations[sealed.key] = existing.map { .version($0.version) } ?? .absent
+        try await writer(for: account).commit(change)
+        highestVersionSeen[item.vaultID] = max(highestVersionSeen[item.vaultID] ?? 0, item.version)
+    }
+
+    func sealItem(_ item: Item, vaultKey: VaultKey, account: AccountRecord) throws -> StoredRecord {
+        let plaintext = try ItemCodec.encode(item)
+        defer { plaintext.zeroise() }
+        var row = StoredRecord(
+            recordID: item.id, kind: .item, vaultID: item.vaultID, keyID: vaultKey.key.keyID, version: item.version,
+            deviceID: account.deviceID, envelope: [])
+        row.envelope = try RecordCipher.seal(
+            plaintext, context: Self.itemContext(row), key: vaultKey.key, using: &random)
+        return row
+    }
+
+    static func origin(_ row: StoredRecord) -> Revision {
+        Revision(version: row.version, device: row.deviceID)
+    }
+
+    func openItem(_ row: StoredRecord, keys: UnlockedKeys) throws -> Item {
         guard let vaultKey = keys.vaultKeys[row.keyID], vaultKey.vaultID == row.vaultID else {
             throw VaultError.unknownVault(row.vaultID)
         }
