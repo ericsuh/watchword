@@ -375,6 +375,15 @@
             }
         }
 
+        /// The account signing key copy (milestone 3) is a trust root for locked downloads: if it shared a Keychain
+        /// account name with another item, storing one would replace the other.
+        @Test("every item has its own Keychain account name")
+        func distinctNames() {
+            let names = Self.items.compactMap { Self.store.baseQuery(for: $0)[kSecAttrAccount as String] as? String }
+            #expect(names.count == Self.items.count)
+            #expect(Set(names).count == names.count)
+        }
+
         @Test("the Local Unlock Key needs the current biometric set, with no passcode or any-biometry fallback")
         func biometricFlags() {
             let flags = SystemKeychainStore.biometricFlags

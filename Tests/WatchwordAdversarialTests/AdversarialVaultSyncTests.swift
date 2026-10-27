@@ -152,12 +152,57 @@
             await reader.session.lock()
             await reader.keychain.delete(.accountSigningKey(accountID: accountID))
             let locked = try await reader.session.sync()
-            #expect(locked.rejected.map(\.reason) == [.keyring(.untrustedAuthor(Self.deviceB))])
+            #expect(locked.rejected.map(\.reason) == [.keyring(.trustedKeyUnavailable)], "the report says why")
             #expect(try await reader.sync?.state.staged(vaultID: f.vaultID).isEmpty == true)
 
             try await reader.session.unlock(password: TestVault.password)
             #expect(await reader.keychain.contains(.accountSigningKey(accountID: accountID)))
             #expect(try await reader.session.sync().applied == 1)
+        }
+
+        /// Threat: A8, with the local sync state file, plants pending deletions of items that still exist — copies of
+        /// their real rows, so the erasure summary would open — hoping the next sync publishes them as tombstones
+        /// signed with the account key and erases the items on every device. Each row is unsigned, signed with garbage,
+        /// signed by another key, or genuinely signed but for another device; none is published, and the items survive
+        /// everywhere. A deletion the person makes is still published.
+        @Test("a pending deletion planted in the local sync state is never published")
+        func plantedPendingDeletion() async throws {
+            let f = try await Self.fixture()
+            try await f.a.session.sync()
+            let rows = try await f.a.store.records(in: f.vaultID, kind: .item)
+            let row = try #require(rows.first)
+            let accountID = try #require(try await f.a.session.status().accountID)
+            let deviceA = try #require(try await f.a.store.loadAccount()?.deviceID)
+            let stamp = RecordStamp(version: row.version + 1, device: deviceA, deleted: true)
+            let stranger = Keyset.generate(accountID: accountID)
+            var foreign = PendingDeletion(stamp: stamp, record: row)
+            foreign.authenticator = try stranger.sign(
+                VaultSession.pendingDeletionMessage(foreign), domain: .pendingDeletion)
+            // B's session signs its own deletion genuinely; copied into A's file it names the wrong device.
+            let otherDevice = try await f.b.session.authenticatePendingDeletion(
+                PendingDeletion(
+                    stamp: RecordStamp(version: row.version + 1, device: Self.deviceB, deleted: true), record: row))
+            let base = try #require(f.a.sync?.state)
+            for planted in [
+                PendingDeletion(stamp: stamp, record: row),
+                PendingDeletion(stamp: stamp, record: row, authenticator: Array(repeating: 0x5A, count: 64)),
+                foreign, otherDevice,
+            ] {
+                try await base.eraseAll()
+                try await base.addPendingDeletion(planted)
+                let report = try await f.a.session.sync(reconcile: true)
+                #expect(report.pushedEntries == 0, "a planted deletion was published")
+                try await f.b.session.sync()
+                #expect(try await f.b.session.items().items.map(\.id) == [row.recordID])
+            }
+
+            try await f.a.session.trash(id: row.recordID)
+            try await f.a.session.deletePermanently(id: row.recordID)
+            let pending = try await base.pendingDeletions(vaultID: f.vaultID)
+            #expect(pending[row.key]?.authenticator.isEmpty == false, "the session signs its own deletions")
+            try await f.a.session.sync()
+            try await f.b.session.sync()
+            #expect(try await f.b.session.items().items.isEmpty, "the person's deletion still reaches B")
         }
 
         /// Threat: code that kept the sync adapter past a `lock()` (an engine mid-sync, a stray task) tries to use the

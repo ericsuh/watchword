@@ -20,7 +20,7 @@
         /// `deferredUntilUnlock` says so (§7.4).
         @discardableResult
         public func sync(reconcile: Bool = false) async throws -> SyncReport {
-            guard let syncSettings else { throw VaultError.syncNotConfigured }
+            guard let syncSettings, let syncState else { throw VaultError.syncNotConfigured }
             guard let record = try await loadAccount() else { throw VaultError.noAccount }
             guard !syncInFlight else { throw SyncError.syncInProgress }
             syncInFlight = true
@@ -28,7 +28,7 @@
             let adapter = VaultSyncAdapter(session: self)
             let engine = SyncEngine(
                 vaultID: record.personalVaultID, deviceID: record.deviceID, store: store,
-                syncState: syncSettings.state, transport: syncSettings.transport, keyring: adapter,
+                syncState: syncState, transport: syncSettings.transport, keyring: adapter,
                 merger: ItemRecordMerger(sealer: adapter, deviceID: record.deviceID),
                 configuration: syncSettings.configuration)
             return try await engine.sync(reconcile: reconcile)
@@ -132,7 +132,10 @@
 
         /// Checks a signature against the account's Ed25519 key: the keyset's own while unlocked, otherwise the copy in
         /// the Keychain. Until the device registry (review finding D9) lands, any device of the account may write; an
-        /// object signed by any other key is refused.
+        /// object signed by any other key is refused. With no copy to check against (never unlocked since enrolment,
+        /// or the Keychain refresh at the last unlock failed), every object is refused as `trustedKeyUnavailable`, so
+        /// the report says why rather than blaming the author. The read cannot show UI: `SystemKeychainStore` sets
+        /// `interactionNotAllowed` for every item but the Local Unlock Key.
         func syncVerify(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
             guard let record = try await loadAccount(), location.vaultID == record.personalVaultID else {
                 throw SyncKeyringError.untrustedAuthor(location.author)
@@ -143,7 +146,7 @@
             } else {
                 guard
                     let stored = try? await keychain.read(.accountSigningKey(accountID: record.accountID), prompt: "")
-                else { throw SyncKeyringError.untrustedAuthor(location.author) }
+                else { throw SyncKeyringError.trustedKeyUnavailable }
                 defer { stored.zeroise() }
                 signingKey = stored.unprotectedCopy()
             }
@@ -177,11 +180,117 @@
             return row
         }
 
+        // MARK: - Pending deletions (called by `AuthenticatedSyncState`)
+
+        /// What a pending deletion's signature covers: every field of it, fixed-length fields first and the deleted
+        /// row's envelope last, so the encoding is unambiguous.
+        static func pendingDeletionMessage(_ deletion: PendingDeletion) -> [UInt8] {
+            let row = deletion.record
+            func bytes(_ id: UUID) -> [UInt8] {
+                let u = id.uuid
+                return [u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7, u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15]
+            }
+            func bytes(_ value: UInt64) -> [UInt8] {
+                (0..<8).map { UInt8(truncatingIfNeeded: value >> (56 - 8 * $0)) }
+            }
+            return bytes(row.vaultID) + bytes(row.recordID) + [row.kind.rawValue] + bytes(deletion.stamp.version)
+                + bytes(deletion.stamp.device) + bytes(row.keyID) + bytes(row.version) + bytes(row.deviceID)
+                + row.envelope
+        }
+
+        /// Signs a deletion this session just committed, so the sync layer can tell it from one planted in the state
+        /// store's file (A8).
+        func authenticatePendingDeletion(_ deletion: PendingDeletion) throws -> PendingDeletion {
+            let (keys, record) = try syncKeys()
+            guard deletion.stamp.device == record.deviceID, deletion.stamp.deleted,
+                deletion.record.vaultID == record.personalVaultID
+            else { throw SyncKeyringError.untrustedAuthor(deletion.stamp.device) }
+            var signed = deletion
+            signed.authenticator = try keys.keyset.sign(
+                Self.pendingDeletionMessage(deletion), domain: .pendingDeletion)
+            return signed
+        }
+
+        /// The pending deletions this device's session made: each must be this device's, in the personal vault, and
+        /// signed by the account key. Any other row is ignored — never published, never treated as an erasure — so
+        /// editing the file cannot erase an item everywhere. Needs the keyset; the engine reads pending deletions only
+        /// to merge or publish, both of which need the vault unlocked anyway.
+        func verifiedPendingDeletions(_ deletions: [RecordKey: PendingDeletion]) throws -> [RecordKey: PendingDeletion]
+        {
+            let (keys, record) = try syncKeys()
+            let signingKey = try keys.keyset.publicKeyBundle().signingKey
+            return deletions.filter { key, deletion in
+                guard key == deletion.record.key, deletion.stamp.device == record.deviceID, deletion.stamp.deleted,
+                    deletion.record.vaultID == record.personalVaultID
+                else { return false }
+                return
+                    (try? Signatures.verify(
+                        deletion.authenticator, for: Self.pendingDeletionMessage(deletion), domain: .pendingDeletion,
+                        signingKey: signingKey)) != nil
+            }
+        }
+
         /// Copies the account's public signing key to the Keychain, for checking downloads while locked.
         func refreshSigningKey(account: AccountRecord, keys: UnlockedKeys) async throws {
             var signingKey = try keys.keyset.publicKeyBundle().signingKey
             try await keychain.store(
                 SecureBytes(wiping: &signingKey), for: .accountSigningKey(accountID: account.accountID))
+        }
+    }
+
+    /// The sync state store the session and its engine use: everything passes through to `base`, except that pending
+    /// deletions are signed by the session as they are recorded and checked as they are read
+    /// (`PendingDeletion.authenticator`, review of milestone 3).
+    struct AuthenticatedSyncState: SyncStateStore {
+        let base: any SyncStateStore
+        let session: VaultSession
+
+        func loadState(vaultID: UUID) async throws -> SyncState? {
+            try await base.loadState(vaultID: vaultID)
+        }
+
+        func saveState(_ state: SyncState) async throws {
+            try await base.saveState(state)
+        }
+
+        func stage(_ object: StagedObject) async throws {
+            try await base.stage(object)
+        }
+
+        func staged(vaultID: UUID) async throws -> [StagedObject] {
+            try await base.staged(vaultID: vaultID)
+        }
+
+        func unstage(_ locations: [SyncObjectLocation]) async throws {
+            try await base.unstage(locations)
+        }
+
+        func addPendingDeletion(_ deletion: PendingDeletion) async throws {
+            try await base.addPendingDeletion(try await session.authenticatePendingDeletion(deletion))
+        }
+
+        func pendingDeletions(vaultID: UUID) async throws -> [RecordKey: PendingDeletion] {
+            try await session.verifiedPendingDeletions(try await base.pendingDeletions(vaultID: vaultID))
+        }
+
+        func removePendingDeletions(_ deletions: [RecordKey: RecordStamp], vaultID: UUID) async throws {
+            try await base.removePendingDeletions(deletions, vaultID: vaultID)
+        }
+
+        func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws {
+            try await base.quarantine(entry, vaultID: vaultID)
+        }
+
+        func quarantined(vaultID: UUID) async throws -> [SyncEntry] {
+            try await base.quarantined(vaultID: vaultID)
+        }
+
+        func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async throws {
+            try await base.discardQuarantined(entries, vaultID: vaultID)
+        }
+
+        func eraseAll() async throws {
+            try await base.eraseAll()
         }
     }
 

@@ -238,8 +238,11 @@ keys", `VaultSession` as the keyring): a byte flipped anywhere in a segment seal
 Ed25519; a genuine envelope signed by a key of the attacker's own, refused locked (Keychain copy) and unlocked
 (keyset); a genuine segment moved to another stream or number, refused at download while locked because the name
 is signed; an insider's record swap inside a validly sealed and signed segment, refused by the record's own AEAD
-context; a locked device with no trusted key in the Keychain, which refuses everything until the next unlock; the
-sync adapter used after `lock()`; and the keyring refusing to sign as another device. Still to come with
+context; a locked device with no trusted key in the Keychain, which refuses everything (`trustedKeyUnavailable`)
+until the next unlock; pending deletions planted in the local sync state (A8) — unsigned, badly signed, signed by
+another key, or another device's — none of which is published; the sync adapter used after `lock()`; and the
+keyring refusing to sign as another device. The Keychain item protection suite checks the new `accountSigningKey`
+item like the others and that every item has its own account name. Still to come with
 milestone 4: member key substitution, membership records, revocation and read-only enforcement.
 
 ### 6.5 Interchange (milestone 7)

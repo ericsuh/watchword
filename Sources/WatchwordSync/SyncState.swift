@@ -87,10 +87,17 @@ public struct Erasure: Sendable, Hashable {
 public struct PendingDeletion: Sendable, Hashable {
     public var stamp: RecordStamp
     public var record: StoredRecord
+    /// Proof that this device's session made the deletion, set by the store wrapper that records it. A pending
+    /// deletion becomes a signed tombstone that erases the record on every device, and the state store is a file an
+    /// attacker can edit (A8), so production checks this before publishing or merging with it: `VaultSession` signs
+    /// the deletion with the account key (`SignatureDomain.pendingDeletion`) and ignores any row whose signature does
+    /// not verify. Empty in the fakes, which keep their state in memory.
+    public var authenticator: [UInt8]
 
-    public init(stamp: RecordStamp, record: StoredRecord) {
+    public init(stamp: RecordStamp, record: StoredRecord, authenticator: [UInt8] = []) {
         self.stamp = stamp
         self.record = record
+        self.authenticator = authenticator
     }
 }
 

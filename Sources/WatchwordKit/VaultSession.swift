@@ -156,8 +156,14 @@
         /// the person makes becomes an explicit tombstone for the sync layer to publish; the sync engine writes to
         /// `store` directly, so the deletions it applies are not published again (docs/02-architecture.md §7.1).
         func writer(for account: AccountRecord) -> any RecordStore {
-            guard let syncSettings else { return store }
-            return DeletionRecordingStore(base: store, syncState: syncSettings.state, deviceID: account.deviceID)
+            guard let syncState else { return store }
+            return DeletionRecordingStore(base: store, syncState: syncState, deviceID: account.deviceID)
+        }
+
+        /// The configured sync state store, behind the wrapper that signs pending deletions as they are recorded and
+        /// ignores any that does not verify (`AuthenticatedSyncState`).
+        var syncState: (any SyncStateStore)? {
+            syncSettings.map { AuthenticatedSyncState(base: $0.state, session: self) }
         }
 
         // MARK: - State

@@ -424,8 +424,8 @@ current key, in the context `SyncObjectLocation.envelopeContext` gives; items wi
 Signatures are the account's Ed25519 key, domain `logSegment`, over `name ‖ 0x00 ‖ envelope`: the envelope already
 binds the location, but only once the vault key opens it, so binding the name into the signature also refuses a moved
 object at download, while locked. Verification uses the keyset's own public key while unlocked and the Keychain copy
-(`accountSigningKey`, §6) while locked; with neither, every object is refused (`untrustedAuthor`) rather than trusted,
-and the next unlock restores the copy. The keyring signs only as its own device. Until the device registry (D9)
+(`accountSigningKey`, §6) while locked; with neither, every object is refused (`trustedKeyUnavailable`, so the report
+says why) rather than trusted, and the next unlock restores the copy. The keyring signs only as its own device. Until the device registry (D9)
 lands, any device holding the account key may write to the vault.
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
@@ -441,7 +441,11 @@ the actor is re-entrant, so a merge can store a newer version while a save waits
 (`conflictValueNotHeld` otherwise), and checks a chosen scope with `ScopePolicy` like any save.
 
 **State.** `SQLiteSyncStateStore` (§6). Deleting the account erases it with the record store, and the Keychain copy
-of the signing key with the other Keychain items.
+of the signing key with the other Keychain items. A pending deletion is the one thing in that file sync acts on rather
+than rebuilds — it becomes a tombstone that erases the record everywhere — so the session reaches the store through
+`AuthenticatedSyncState`: each deletion it commits is signed with the account key (`SignatureDomain.pendingDeletion`,
+over every field and the deleted row's envelope), and a pending deletion that is not this device's, or does not verify,
+is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing.
 
 **App.** Settings has Sync Now and the last report in words; a list row with conflicting values shows a badge, and
 the item's detail lists each conflicting group with the shown value first and each alternative after it, every one

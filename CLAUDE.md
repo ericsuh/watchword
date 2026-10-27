@@ -183,7 +183,9 @@ still open (CloudKit and iCloud Drive transports, enrolment, sync in production 
   a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
 - Signatures cover `name ‖ 0x00 ‖ envelope` under `SignatureDomain.logSegment`; verifying while locked uses the
-  Keychain's `accountSigningKey` copy, and with no trusted key every object is refused, never accepted.
+  Keychain's `accountSigningKey` copy, and with no trusted key every object is refused (`trustedKeyUnavailable`).
+- Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
+  `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
 
 ### `VaultSession` invariants
 

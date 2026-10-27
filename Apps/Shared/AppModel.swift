@@ -268,6 +268,9 @@ final class AppModel {
 
     static func describe(_ report: SyncReport) -> String {
         if report.transportUnavailable { return "Sync storage could not be reached. Nothing was sent." }
+        if !report.rejected.isEmpty, report.rejected.allSatisfy({ $0.reason == .keyring(.trustedKeyUnavailable) }) {
+            return "Changes will be downloaded and checked after you unlock."
+        }
         if report.deferredUntilUnlock { return "Changes were downloaded and will be applied when you unlock." }
         var parts: [String] = []
         if report.applied > 0 { parts.append("\(report.applied) change(s) received") }

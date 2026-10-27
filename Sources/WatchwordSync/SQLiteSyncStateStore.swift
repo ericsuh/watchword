@@ -12,7 +12,9 @@
     /// is treated as absent, which makes the next sync a full replay from the signed log; staged objects that do not
     /// parse are skipped, and every staged object is verified again before it is merged. Pending deletions and the
     /// quarantine cannot be rebuilt from the log, so a malformed row of either is reported as `malformedRow`, never
-    /// dropped.
+    /// dropped. A well-formed pending deletion is still not trusted: each carries the authenticator the session made
+    /// (`PendingDeletion.authenticator`), and `VaultSession` ignores any that does not verify, so a row planted here
+    /// cannot become a tombstone.
     ///
     /// A separate file rather than tables in the record store keeps `WatchwordStore` ignorant of sync. Nothing needs
     /// both in one transaction: tombstones are recorded after the deletion commits (`DeletionRecordingStore`) and the
@@ -69,6 +71,7 @@
                 version INTEGER NOT NULL,
                 device_id BLOB NOT NULL CHECK (length(device_id) = 16),
                 envelope BLOB NOT NULL,
+                authenticator BLOB NOT NULL,
                 PRIMARY KEY (vault_id, record_id, kind)
             ) STRICT
             """
@@ -190,15 +193,15 @@
                 try connection.query(
                     """
                     INSERT OR REPLACE INTO pending_deletions (vault_id, record_id, kind, stamp_version, stamp_device,
-                        key_id, version, device_id, envelope)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        key_id, version, device_id, envelope, authenticator)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         SQLiteRecordStore.value(record.vaultID), SQLiteRecordStore.value(record.recordID),
                         .integer(Int64(record.kind.rawValue)), .integer(Int64(bitPattern: deletion.stamp.version)),
                         SQLiteRecordStore.value(deletion.stamp.device), SQLiteRecordStore.value(record.keyID),
                         .integer(Int64(bitPattern: record.version)), SQLiteRecordStore.value(record.deviceID),
-                        .blob(record.envelope),
+                        .blob(record.envelope), .blob(deletion.authenticator),
                     ])
             }
         }
@@ -206,20 +209,20 @@
         public func pendingDeletions(vaultID: UUID) throws -> [RecordKey: PendingDeletion] {
             let rows = try connection.query(
                 """
-                SELECT record_id, kind, stamp_version, stamp_device, key_id, version, device_id, envelope
+                SELECT record_id, kind, stamp_version, stamp_device, key_id, version, device_id, envelope, authenticator
                 FROM pending_deletions WHERE vault_id = ?
                 """,
                 [SQLiteRecordStore.value(vaultID)])
             var result: [RecordKey: PendingDeletion] = [:]
             for row in rows {
-                guard row.count == 8 else { throw RecordStoreError.malformedRow("pending_deletions") }
+                guard row.count == 9 else { throw RecordStoreError.malformedRow("pending_deletions") }
                 let record = StoredRecord(
                     recordID: try Self.uuid(row[0]), kind: try Self.kind(row[1]), vaultID: vaultID,
                     keyID: try Self.uuid(row[4]), version: try Self.version(row[5]), deviceID: try Self.uuid(row[6]),
                     envelope: try Self.blob(row[7]))
                 result[record.key] = PendingDeletion(
                     stamp: RecordStamp(version: try Self.version(row[2]), device: try Self.uuid(row[3]), deleted: true),
-                    record: record)
+                    record: record, authenticator: try Self.blob(row[8]))
             }
             return result
         }

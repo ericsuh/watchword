@@ -10,6 +10,9 @@
         case vaultKeyGrant = 2
         case membership = 3
         case logSegment = 4
+        /// A deletion this device's session made and has not yet published, kept in the local sync state store
+        /// (`PendingDeletion.authenticator`), so a row planted in that file cannot become a tombstone.
+        case pendingDeletion = 5
     }
 
     public enum Signatures {

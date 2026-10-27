@@ -12,6 +12,10 @@ public enum SyncKeyringError: Error, Equatable, Sendable {
     case untrustedAuthor(UUID)
     /// Signature or decryption failed. One error for every cause, as in `CryptoError.authenticationFailed`.
     case authenticationFailed
+    /// The vault is locked and this device holds no copy of the key signatures are checked against (it was never
+    /// unlocked since enrolment, or the Keychain could not be read or written). Nothing verifies until the next unlock
+    /// refreshes the copy; the object stays on the transport.
+    case trustedKeyUnavailable
 }
 
 /// The sync layer's only access to keys (docs/02-architecture.md §7.1, §15). Keeping sealing, opening, signing and
