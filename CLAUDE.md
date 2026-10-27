@@ -326,6 +326,13 @@ commit SHA. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS r
 session can run Mac-only gates before opening a pull request; it gates nothing. A dispatch runs the workflow and
 `ci:gate` as they are on that branch (one cut before mac-run.yml merged needs a rebase first), so `ci:gate`'s refusals
 catch mistyped requests, not attackers: write access, no secrets and the read-only token are the controls.
+`claude-pr.yml` — Claude reviews a PR an admin opens ready for review or marks ready, and answers an admin's `@claude`
+in a PR comment, review or review comment (in the thread, or on the whole PR for a re-review). It is the one workflow
+with a secret and a write-scoped token (`pull-requests: write`, never `contents: write`); its Claude job alone runs in
+the `staging` environment, which holds that secret. Its controls are in
+`docs/07-supply-chain.md` §3.2. `issue_comment` runs the default branch's copy of the file; the other triggers run the
+PR's. Its action is the one third-party action, so it needs its own entry in the repository's allowed-actions list
+(`docs/08-repository-hardening.md` §1).
 
 One check on every PR has **no workflow file**: `Analyze (swift)`, from CodeQL *default setup*,
 which GitHub configures in repository settings and runs on a generated workflow you cannot see in

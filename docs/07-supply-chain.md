@@ -79,13 +79,19 @@ verified data, and the estimator's output drives advice rather than any security
 ### 3.1 Actions pinned to commit SHAs (T2)
 
 A tag is mutable. `actions/checkout@v4` is a standing grant of code execution to whoever can move
-that tag. Both actions in use are pinned to full 40-hex commit SHAs with the version in a trailing
+that tag. Every action in use is pinned to a full 40-hex commit SHA with the version in a trailing
 comment:
 
 ```
-actions/checkout        v7.0.1 -> 3d3c42e5aac5ba805825da76410c181273ba90b1
-actions/upload-artifact v7.0.2 -> cf430e030ddbb5b0abf93d22962f4752f3646cd9
+actions/checkout              v7.0.1   -> 3d3c42e5aac5ba805825da76410c181273ba90b1
+actions/upload-artifact       v7.0.2   -> cf430e030ddbb5b0abf93d22962f4752f3646cd9
+anthropics/claude-code-action v1.0.263 -> 8041f1d17e0e7d2f2cfe35002962e9f26237c0bb
 ```
+
+`anthropics/claude-code-action` (`claude-pr.yml`, §3.2) is the one third-party action. Its pin
+covers its own code and its nested `oven-sh/setup-bun`, which it pins to a SHA itself; the Claude
+Code CLI it installs is pinned by version inside the action but fetched from `claude.ai/install.sh`
+at run time, so that download is trusted the way the runner image is (§3.3).
 
 - **[enforced]** the `action-pinning-audit` job in `security-nightly.yml` fails if any `uses:` in
   any workflow is not a 40-hex SHA.
@@ -99,7 +105,7 @@ actions/upload-artifact v7.0.2 -> cf430e030ddbb5b0abf93d22962f4752f3646cd9
 ### 3.2 Token and secret exposure (T5)
 
 - **[done]** `permissions: contents: read` at workflow level and repeated per job. No job needs
-  write access.
+  write access, except the Claude job in `claude-pr.yml` (below).
 - **[done]** `persist-credentials: false` on every checkout, so the `GITHUB_TOKEN` is not left in
   `.git/config` for later steps (including any future step that runs third-party code) to read.
 - **[done]** the trigger is `pull_request`, never `pull_request_target`, so a fork's code never
@@ -112,6 +118,37 @@ actions/upload-artifact v7.0.2 -> cf430e030ddbb5b0abf93d22962f4752f3646cd9
   reach the shell only as environment variables (never `${{ }}` inside `run:`), and `ci:gate` refuses an unknown gate,
   a filter that looks like an option or matches no test, and combinations `ci.yml` never runs, so a mistyped or
   prompt-influenced input fails loudly instead of running the wrong thing or passing without testing.
+- **[done]** `claude-pr.yml` runs Claude Code on pull requests: a review when an admin opens one
+  ready for review or marks it ready, and an answer when an admin writes `@claude` in a PR comment,
+  review or review comment. It is the one workflow that holds a secret (`ANTHROPIC_API_KEY` or
+  `CLAUDE_CODE_OAUTH_TOKEN`) and a token that can write, and its `issue_comment` trigger runs the
+  default branch's copy with secrets even when the pull request comes from a fork. Its controls:
+  - **Admin only.** A separate `authorize` job, read-only and without secrets, asks the API for the
+    sender's permission; the Claude job runs only on `admin`. Bots never pass. The action also
+    requires write access and a human actor. Fork pull requests are skipped on the `pull_request`
+    and review triggers, which get no secrets.
+  - **One job sees the secret.** The Claude job runs in the `staging` GitHub Environment, so the
+    key can be an environment secret that the `authorize` job and every other workflow cannot
+    read, and staging's protection rules (required reviewers, deployment branches) gate it.
+  - **Comment, not change.** The Claude job has `contents: read` and `pull-requests: write`, and
+    uses the job's own `GITHUB_TOKEN` rather than the Claude GitHub App's broader one. The tool
+    allowlist admits reading files, `gh pr view`/`diff`/`comment` on that pull request, inline
+    review comments, and a reply in the one thread that mentioned Claude. No build, test or other
+    command runs, so nothing in the pull request executes. The repository setting that stops
+    workflows approving pull requests (`08-repository-hardening.md` §1) still applies.
+  - **The pull request's files are never checked out.** Only the base branch is on disk, so the
+    CLAUDE.md and `.claude/` that steer Claude are the reviewed ones; Claude reads the change
+    through `gh pr diff`. A checkout of the head, even into a subdirectory, would let a CLAUDE.md
+    or skill the pull request adds load as instructions when Claude reads files there (CodeQL's
+    untrusted-checkout query flags it for that reason).
+  - **Event text reaches the shell only through `env:`**, as in `mac-run.yml`.
+  - **Allowed by name.** The repository runs GitHub-owned actions only, so the action and its
+    nested `oven-sh/setup-bun` each have a SHA-pinned entry in `patterns_allowed`
+    (`08-repository-hardening.md` §1); a bump changes those entries with the pin.
+
+  The residual risk is prompt injection: an admin can ask Claude about a pull request written by
+  someone else, whose text can try to steer what Claude posts. The tool allowlist bounds what it
+  can do to commenting on that one pull request.
 - **[convention]** the CloudKit integration tests (milestone 3) need an iCloud container and
   therefore secrets. They must stay `workflow_dispatch`-only, in a GitHub Environment with required
   reviewers, and must never be reachable from a `pull_request` trigger.
