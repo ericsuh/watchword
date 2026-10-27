@@ -19,9 +19,11 @@ name: Claude PR
 # `issue_comment` runs this file as it is on the default branch, with secrets even on a fork's PR; the other triggers
 # run the PR's own copy, and on a fork's PR get no secrets, so those are skipped.
 #
-# Needs one repository secret: ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`). The
-# repository allows GitHub-owned actions only, so this action and the `oven-sh/setup-bun` it uses must be added to
-# `patterns_allowed` at their SHAs (docs/08-repository-hardening.md §1); until then every run is a startup failure.
+# The Claude job runs in the `staging` environment, so its secret, ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (from
+# `claude setup-token`), can be an environment secret that no other job can read, and staging's protection rules apply
+# to it. The repository allows GitHub-owned actions only, so this action and the `oven-sh/setup-bun` it uses are
+# listed in `patterns_allowed` at their SHAs (docs/08-repository-hardening.md §1); without that, every run is a startup
+# failure.
 
 on:
   pull_request:
@@ -96,6 +98,10 @@ jobs:
       (github.event_name == 'issue_comment' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Only this job holds the secret, so only it names the environment. Each run also records a deployment to staging
+    # on the PR. A deployment-branch rule on staging must admit the default branch (issue_comment) and PR merge refs
+    # (the other triggers), or those runs are refused.
+    environment: staging
     permissions:
       contents: read
       pull-requests: write

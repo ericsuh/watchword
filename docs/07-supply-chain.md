@@ -127,6 +127,9 @@ at run time, so that download is trusted the way the runner image is (§3.3).
     sender's permission; the Claude job runs only on `admin`. Bots never pass. The action also
     requires write access and a human actor. Fork pull requests are skipped on the `pull_request`
     and review triggers, which get no secrets.
+  - **One job sees the secret.** The Claude job runs in the `staging` GitHub Environment, so the
+    key can be an environment secret that the `authorize` job and every other workflow cannot
+    read, and staging's protection rules (required reviewers, deployment branches) gate it.
   - **Comment, not change.** The Claude job has `contents: read` and `pull-requests: write`, and
     uses the job's own `GITHUB_TOKEN` rather than the Claude GitHub App's broader one. The tool
     allowlist admits reading files, `gh pr view`/`diff`/`comment` on that pull request, inline
