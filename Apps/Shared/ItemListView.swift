@@ -19,10 +19,18 @@ struct ItemListView: View {
                     .foregroundStyle(.orange)
                 }
                 ForEach(filtered) { item in
-                    VStack(alignment: .leading) {
-                        Text(item.title.isEmpty ? "Untitled" : item.title)
-                        if let host = item.scopes.first?.host {
-                            Text(host).font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(item.title.isEmpty ? "Untitled" : item.title)
+                            if let host = item.scopes.first?.host {
+                                Text(host).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        if item.hasConflicts {
+                            Spacer()
+                            Image(systemName: "arrow.triangle.branch")
+                                .foregroundStyle(.orange)
+                                .accessibilityLabel("Changed on more than one device")
                         }
                     }
                     .tag(item.id)

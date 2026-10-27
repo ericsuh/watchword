@@ -10,8 +10,9 @@ struct ItemDetailView: View {
 
     var body: some View {
         Form {
+            ConflictSection(item: item)
             Section {
-                Text(item.title).font(.title2.bold())
+                Text(item.title).font(.title2.bold()).accessibilityIdentifier("detail.title")
                 ForEach(item.scopes, id: \.host) { scope in
                     Label(scope.host, systemImage: "globe")
                 }

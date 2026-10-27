@@ -23,7 +23,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
 | 1 — cryptographic core (done) | Builds, but the crypto suites are compiled out, not run | CryptoKit, CommonCrypto, Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
-| 3 — sync (portable half done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | the production keyring and merger in `VaultSession`, sync state in the App Group database, `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
+| 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
 | 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
 | 6 — hygiene | HIBP client, scheduling, strength estimator, reuse/age/2FA checks | the Watchtower-style report UI and its snapshot tests |
@@ -137,7 +137,8 @@ Status: delivered, with these scoping notes.
   fake, so nothing in `WatchwordSync` imports CryptoKit. `CloudKitTransport` and the iCloud Drive
   `FileTransport` are Mac-only, as is the manually triggered CloudKit integration workflow.
 
-Status: **portable half delivered** from a remote session, as the split above intended; the Mac half is open.
+Status: **portable half delivered** from a remote session, as the split above intended; **the vault side of the Mac
+half delivered** on a Mac; the transports are open.
 
 - Delivered (`WatchwordSync`, verified by `swift test` on Linux): the object layout and names; the `SyncTransport`
   port with `InMemorySyncTransport` and `FileSyncTransport` (a plain directory: create-once by hard link, no
@@ -163,16 +164,26 @@ Status: **portable half delivered** from a remote session, as the split above in
   objects, withheld segments, forgeries, record swaps inside a validly signed segment, versions for another device
   or vault, implausible versions (U5), stale snapshots, local rollback, tampered staging, parser mutations and
   planted symbolic links. Signatures and encryption are fakes there; real primitives are the crypto core suite's.
-- **Mac half, not done:** the production `SyncKeyring` (vault keys and `RecordCipher` for segments, the account
-  Ed25519 key, later the device key) and `RecordMerger` in `VaultSession` (`merge`, `erasureSummary`,
-  `resolveErasure`, sealing results through `ItemMerge.written`), with `VaultSession.write` stamping every save
-  through `ItemMerge.stamped` (ignoring the caller's sync metadata) and writing through `DeletionRecordingStore`; a
-  conflict UI over `ItemMerge.conflicts` and `ItemMerge.resolve`, and listing the quarantine for the person to
-  discard; `sync_state`/staging tables
-  in `SQLiteRecordStore`; device enrolment from the account header on the transport; `CloudKitTransport` and the
-  coordinated iCloud Drive wrapper around `FileSyncTransport`; the manual CloudKit workflow; and the adversarial
-  tests repeated with real keys; and item history in records of its own, so the never-pruned history (F1.4) no
-  longer counts against an item's 1 MiB payload. The device registry (D9) must land before sync ships.
+- **Vault side, delivered (Mac):** `VaultSession` is the production `SyncKeyring` and `ItemSealer` (AES-GCM under the
+  vault key; the account's Ed25519 key over the object's name and envelope, checked while locked against a Keychain
+  copy of the public key) and runs `SyncEngine` from `sync()`; the merger is `ItemRecordMerger`, moved into
+  `WatchwordSync` so the app and the simulations share it. Every save is stamped through `ItemMerge.stamped`,
+  ignoring the caller's sync metadata, and committed conditionally on the row it read; the session's deletions go
+  through `DeletionRecordingStore`. `resolveConflict`, `quarantinedVersions` and `discardQuarantined` are the
+  person's side of F7.6 and F7.7. `SQLiteSyncStateStore` persists the state in `sync.sqlite` beside the record store.
+  The app has Sync Now in Settings, a conflict badge in the list and a conflict section in the item detail;
+  `SyncConflictTests` (XCUITest, iOS simulator and macOS) renames one item on two devices — the second is `UITestPeer`,
+  an in-process session of the same account — and resolves the conflict through the UI. Architecture §7.6 describes
+  it. Tests: suite "Vault session: sync between devices" (two real sessions: round trip, ciphertext only, conflict
+  and resolution, locked download, deletion against an unseen edit, the purge, SQLite across a relaunch), "Sync state
+  store contract" over both stores, and the adversarial suite "sync with real keys" (byte flips, a foreign signer,
+  moved objects, an insider's record swap, a missing Keychain key, the adapter after lock).
+- **Still open (Mac):** `CloudKitTransport` and the coordinated iCloud Drive wrapper around `FileSyncTransport`, and
+  with them sync in production builds (until then the app is built without `SyncSettings`) and automatic syncing;
+  the manual CloudKit workflow; device enrolment from the account header on the transport (tests and `UITestPeer`
+  copy the account header, vault-key wraps and Secret Key directly); a quarantine list in the UI; and item history in
+  records of its own, so the never-pruned history (F1.4) no longer counts against an item's 1 MiB payload. The device
+  registry (D9) must land before sync ships.
 
 ## Milestone 4 — Sharing
 

@@ -14,10 +14,15 @@ public enum KeychainItem: Hashable, Sendable {
     /// `QuickUnlockState`: the wrapped AUK and the policy inputs of F5.4. Not secret on its own (it is useless without
     /// the Local Unlock Key) but kept in the Keychain so the failure counter cannot be reset by editing a file.
     case quickUnlockState(accountID: UUID)
+    /// The account's 32-byte Ed25519 public key, copied from the keyset at every unlock, so sync can check signatures
+    /// on downloads while the vault is locked (docs/02-architecture.md §7.4). Not secret; kept in the Keychain rather
+    /// than the database so an attacker with the file (A8) cannot substitute a key of their own.
+    case accountSigningKey(accountID: UUID)
 
     public var accountID: UUID {
         switch self {
-        case .secretKey(let id), .quickUnlockKey(let id), .quickUnlockState(let id): return id
+        case .secretKey(let id), .quickUnlockKey(let id), .quickUnlockState(let id), .accountSigningKey(let id):
+            return id
         }
     }
 }
