@@ -3,6 +3,8 @@ import Observation
 import WatchwordCrypto
 import WatchwordKit
 import WatchwordModel
+import WatchwordStore
+import WatchwordSync
 
 /// UI state over a `VaultSession`. Holds decrypted items only while unlocked and drops them on every lock.
 @MainActor
@@ -22,15 +24,26 @@ final class AppModel {
     private(set) var unreadableCount = 0
     private(set) var quickUnlockEnabled = false
     private(set) var quickUnlockAllowed = false
+    /// What the last sync did, in words, for Settings.
+    private(set) var syncStatus: String?
     var errorMessage: String?
     var isWorking = false
 
     let session: VaultSession?
+    #if DEBUG
+        private(set) var uiTestPeer: UITestPeer?
+        private(set) var uiTestPeerStatus: String?
+    #endif
 
     init(environment: AppEnvironment) {
         switch environment {
         case .ready(let session):
             self.session = session
+        #if DEBUG
+            case .uiTest(let session, let peer):
+                self.session = session
+                uiTestPeer = peer
+        #endif
         case .unavailable(let message):
             session = nil
             phase = .unavailable(message)
@@ -216,6 +229,58 @@ final class AppModel {
         }
     }
 
+    // MARK: Sync (PRD F7)
+
+    var isSyncConfigured: Bool {
+        session?.isSyncConfigured ?? false
+    }
+
+    func syncNow() async {
+        guard let session, session.isSyncConfigured else { return }
+        syncStatus = nil
+        await perform {
+            let report = try await session.sync()
+            self.syncStatus = Self.describe(report)
+            if self.phase == .unlocked { try await self.reload() }
+        }
+    }
+
+    /// The person's choice between conflicting values (PRD F7.6); the values not chosen are discarded.
+    func resolveConflict(_ item: Item, group: ItemGroup, choosing value: ItemGroupValue) async {
+        guard let session else { return }
+        await perform {
+            try await session.resolveConflict(itemID: item.id, group: group, choosing: value)
+            try await self.reload()
+        }
+    }
+
+    #if DEBUG
+        /// UI tests only: the simulated other device renames every item, as if edited there.
+        func renameOnOtherDevice() async {
+            guard let uiTestPeer else { return }
+            uiTestPeerStatus = nil
+            await perform {
+                try await uiTestPeer.renameItems(appending: " elsewhere")
+                self.uiTestPeerStatus = "Renamed on the other device."
+            }
+        }
+    #endif
+
+    static func describe(_ report: SyncReport) -> String {
+        if report.transportUnavailable { return "Sync storage could not be reached. Nothing was sent." }
+        if report.deferredUntilUnlock { return "Changes were downloaded and will be applied when you unlock." }
+        var parts: [String] = []
+        if report.applied > 0 { parts.append("\(report.applied) change(s) received") }
+        if report.pushedEntries > 0 { parts.append("\(report.pushedEntries) change(s) sent") }
+        if !report.rejected.isEmpty {
+            parts.append("\(report.rejected.count) object(s) failed verification and were ignored")
+        }
+        if !report.quarantined.isEmpty {
+            parts.append("\(report.quarantined.count) implausible change(s) held for review")
+        }
+        return parts.isEmpty ? "Up to date." : parts.joined(separator: "; ") + "."
+    }
+
     func emergencyKit() async -> EmergencyKit? {
         guard let session else { return nil }
         do {
@@ -270,6 +335,12 @@ final class AppModel {
             return "Not recognised. Try again or enter your password."
         case KeychainError.userCancelled:
             return ""
+        case SyncError.syncInProgress:
+            return "A sync is already running."
+        case VaultError.conflictValueNotHeld:
+            return "That choice is no longer available. Review the item and try again."
+        case RecordStoreError.versionConflict:
+            return "This item changed while you were editing it. Review it and try again."
         default:
             return "Something went wrong. Your vault is unchanged."
         }

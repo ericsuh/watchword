@@ -353,7 +353,7 @@
         static let accountID = UUID()
         static let items: [KeychainItem] = [
             .secretKey(accountID: accountID), .quickUnlockKey(accountID: accountID),
-            .quickUnlockState(accountID: accountID),
+            .quickUnlockState(accountID: accountID), .accountSigningKey(accountID: accountID),
         ]
 
         @Test("every item is device-only, non-synchronisable and in the shared access group")

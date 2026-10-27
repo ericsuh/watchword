@@ -220,10 +220,13 @@ milestone 2 stores full item records only.
   tables, both `STRICT` with length checks on every UUID column: `account` (one row: account ID,
   device ID, personal vault and key IDs, KDF parameters, salt, AUK key ID, the wrapped keyset and
   its version, the credential generation, Emergency Kit confirmation) and `records(record_id, kind,
-  vault_id, key_id, version, device_id, envelope BLOB)` keyed by `(record_id, kind)`. Still to come: the
-  sync layer's state, staged downloads and pending deletions (`WatchwordSync.SyncStateStore`, held in memory
-  until milestone 3's Mac half adds the tables, since the SQLite store cannot be built on Linux) and
-  `hibp_cache` (milestone 6). The schema version is `PRAGMA user_version`; a newer one is refused, not
+  vault_id, key_id, version, device_id, envelope BLOB)` keyed by `(record_id, kind)`. The sync layer's
+  state, staged downloads, pending deletions and quarantine (`WatchwordSync.SyncStateStore`) are in a second
+  database beside it, `sync.sqlite` (`SQLiteSyncStateStore`, milestone 3), opened and schema-checked the
+  same way; a separate file keeps `WatchwordStore` ignorant of sync, and nothing needs both in one
+  transaction (tombstones are recorded after the deletion commits, and the engine's state can be rebuilt by a
+  reconciling sync, so a state row that does not decode is read as no state). Still to come: `hibp_cache`
+  (milestone 6). The schema version is `PRAGMA user_version`; a newer one is refused, not
   misread. A commit may name the version it read of each record (`StoreChange.expectations`), so a writer
   that awaited something in between — the sync engine waiting on its merger while the person saves the same
   item — fails with `versionConflict` instead of overwriting the newer save.
@@ -260,6 +263,9 @@ milestone 2 stores full item records only.
     version, credential generation, biometric domain state) and the AUK sealed under the LUK as an
     `.accountHeader` envelope bound to the AUK's key ID and the credential generation. Kept in the
     Keychain rather than the database so the failure counter cannot be reset by editing a file.
+  - `accountSigningKey` — the account's Ed25519 *public* key, copied from the keyset at every unlock, so
+    sync can check signatures on downloads while the vault is locked (§7.4). Not secret; in the Keychain
+    rather than the database so that A8, who can edit the file, cannot substitute a key of their own.
   - All items: `kSecUseDataProtectionKeychain` (iOS semantics on macOS), non-synchronisable,
     accessed through `WatchwordPlatform.SystemKeychainStore`.
   - `deviceSigningKey` — Secure Enclave P-256 key used to sign this device's change-log segments
@@ -328,9 +334,9 @@ VK, so merge is deferred until unlock. The AutoFill extension works from the las
 `WatchwordSync` imports no Apple framework: sealing, opening, signing and verifying reach it through the
 `SyncKeyring` port, and field-level merging through the `RecordMerger` port, both implemented with fakes in
 `WatchwordTestSupport`, so the whole engine — including the N-device partition simulation and the adversarial
-suite "sync log" — runs under `swift test` on Linux. What it does not yet have: the production keyring and
-merger (CryptoKit, in `VaultSession`), persistence of its state in the App Group database, and the CloudKit and
-iCloud Drive transports. Those are milestone 3's Mac half (`03-implementation-plan.md`).
+suite "sync log" — runs under `swift test` on Linux. The production keyring, the persistent state store and the
+app's conflict UI are described in §7.6; the CloudKit and iCloud Drive transports are still to come
+(`03-implementation-plan.md`, milestone 3).
 
 **Objects.** A transport holds `SignedObject`s: `"WWSO" ‖ version ‖ signature ‖ envelope`, where the envelope
 is of kind `logSegment` or `snapshot`, sealed under the vault key, with the object's location bound into its
@@ -408,6 +414,41 @@ collection back until it is removed; the store can withhold objects (reported, n
 lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
 refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
 trusted for the vault, so this is an insider's capability).
+
+### 7.6 As built in milestone 3 (the vault side, on a Mac)
+
+**Keyring.** `VaultSession` is the production `SyncKeyring` and `ItemSealer`, through `VaultSyncAdapter`, which
+holds the session and never a key: every call goes back to the actor, which throws `SyncKeyringError.locked` once
+`lock()` has zeroised the keys. Segments and snapshots are sealed with `RecordCipher` under the personal vault's
+current key, in the context `SyncObjectLocation.envelopeContext` gives; items with the same code path as a save.
+Signatures are the account's Ed25519 key, domain `logSegment`, over `name ‖ 0x00 ‖ envelope`: the envelope already
+binds the location, but only once the vault key opens it, so binding the name into the signature also refuses a moved
+object at download, while locked. Verification uses the keyset's own public key while unlocked and the Keychain copy
+(`accountSigningKey`, §6) while locked; with neither, every object is refused (`untrustedAuthor`) rather than trusted,
+and the next unlock restores the copy. The keyring signs only as its own device. Until the device registry (D9)
+lands, any device holding the account key may write to the vault.
+
+**Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
+versions through an `ItemSealer`, calls `ItemMerge.merge` and seals the result through `ItemMerge.written`. The app
+and the simulations run the same merger; only the sealer differs (`VaultSession` or `FakeSyncKeyring`).
+
+**Saving.** Every write is stamped through `ItemMerge.stamped` with the version the vault assigns, ignoring whatever
+sync metadata the caller passed, and is committed conditionally on the row it replaces (`StoreChange.expectations`):
+the actor is re-entrant, so a merge can store a newer version while a save waits, and the save then fails with
+`versionConflict` instead of overwriting it. With sync configured, the session's own deletions go through
+`DeletionRecordingStore`; the engine writes to the base store, so the deletions it applies are not published again.
+`resolveConflict` accepts only a value the item holds for that group, shown or conflicting
+(`conflictValueNotHeld` otherwise), and checks a chosen scope with `ScopePolicy` like any save.
+
+**State.** `SQLiteSyncStateStore` (§6). Deleting the account erases it with the record store, and the Keychain copy
+of the signing key with the other Keychain items.
+
+**App.** Settings has Sync Now and the last report in words; a list row with conflicting values shows a badge, and
+the item's detail lists each conflicting group with the shown value first and each alternative after it, every one
+behind its own Keep button, secrets hidden until shown. Production builds are built without `SyncSettings` until a
+transport exists. UI-test launches (`--uitest`) sync over an in-memory transport with `UITestPeer`, a second session
+of the same account in the process, so XCUITest drives a concurrent rename through the real keyring
+(`SyncConflictTests`).
 
 ## 8. Sharing protocol
 
@@ -622,7 +663,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordCrypto       2SKD, keyset, vault keys, HPKE wrap  (CryptoKit)   [milestone 1, done]
   Sources/SecureMemory          SecureBytes (only unsafe code)                      [milestone 1, done]
   Sources/WatchwordStore        record-store port, in-memory and SQLite stores     [milestone 2, done]
-  Sources/WatchwordSync         change log, merge, SyncTransport protocol          [milestone 3, portable half]
+  Sources/WatchwordSync         change log, merge, SyncTransport protocol,
+                                SQLite sync state                                  [milestone 3; transports open]
   Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
   Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 6]
   Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
@@ -641,7 +683,9 @@ Ports (protocols) injected into the core: `KeychainStore`, `BiometricGate`, `Ran
 has `RecordStore`, `KeychainStore`, `BiometricGate` and `WallClock`; randomness is an injected
 `RandomNumberGenerator`. Milestone 3 adds `SyncTransport`, `SyncKeyring`, `RecordMerger` and `SyncStateStore`,
 with `InMemorySyncTransport`, `FileSyncTransport` and `InMemorySyncStateStore` in the module and the fakes
-(`FakeSyncKeyring`, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`) in `WatchwordTestSupport`. Production adapters live in the package (`WatchwordPlatform`,
+(`FakeSyncKeyring`, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`) in `WatchwordTestSupport`; the
+production keyring is `VaultSession` (an `ItemSealer` for the shared `ItemRecordMerger`) and the production state
+store `SQLiteSyncStateStore`. Production adapters live in the package (`WatchwordPlatform`,
 `SQLiteRecordStore`) rather than `Apps/`, so the strict-memory-safety job, the unsafe tripwire,
 lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live in
 `WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`).

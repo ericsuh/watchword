@@ -246,8 +246,9 @@
         }
 
         /// The physical path of a directory. `URL.resolvingSymlinksInPath()` cannot be used: it deliberately turns
-        /// `/private/var/…` back into the symlinked `/var/…`.
-        static func resolvingSymlinks(_ path: String) throws -> String {
+        /// `/private/var/…` back into the symlinked `/var/…`. Public for `SQLiteSyncStateStore`, which opens its file
+        /// the same way.
+        public static func resolvingSymlinks(_ path: String) throws -> String {
             var pending = Array((path as NSString).pathComponents.dropFirst())
             var resolved: [String] = []
             var hops = 0
@@ -297,7 +298,8 @@
             )
         }
 
-        static func value(_ uuid: UUID) -> SQLiteValue {
+        /// A UUID as the 16-byte blob every table stores.
+        public static func value(_ uuid: UUID) -> SQLiteValue {
             let u = uuid.uuid
             return .blob([
                 u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7, u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15,

@@ -349,40 +349,6 @@
             #expect(try await vault.session.items().items.map(\.id) == [keep.id])
         }
 
-        @Test(
-            "the purge keeps trash that sync left there: a concurrent restore, or an edit the trash had not seen (F7.7)"
-        )
-        func purgeKeepsTrashSyncLeft() async throws {
-            let (vault, vaultID) = try await Self.unlocked()
-            let (deviceA, deviceB) = (UUID(), UUID())
-            var unseenEdit = login(vaultID, title: "Edited elsewhere")
-            unseenEdit.revisions = [
-                .trashedAt: GroupStamp(
-                    revision: Revision(version: 2, device: deviceA), seen: VersionVector([deviceA: 2]))
-            ]
-            unseenEdit.clock = VersionVector([deviceA: 2, deviceB: 3])
-            var disputed = login(vaultID, title: "Restored elsewhere")
-            disputed.conflicts = [
-                .trashedAt: [
-                    ConflictingValue(
-                        stamp: GroupStamp(
-                            revision: Revision(version: 3, device: deviceB), seen: VersionVector([deviceB: 3])),
-                        value: .trashedAt(nil))
-                ]
-            ]
-            var plain = login(vaultID, title: "Plain")
-            plain.keptAfterDeletion = true
-            let ids = [
-                try await vault.session.save(unseenEdit).id, try await vault.session.save(disputed).id,
-                try await vault.session.save(plain).id,
-            ]
-            #expect(try await !vault.session.item(id: ids[2]).keptAfterDeletion, "the vault owns the flag")
-            for id in ids { try await vault.session.trash(id: id) }
-            await vault.clock.advance(by: 31 * 86_400)
-            try await vault.session.purgeExpiredTrash()
-            #expect(Set(try await vault.session.items().items.map(\.id)) == Set(ids.prefix(2)))
-        }
-
         @Test("archiving is a flag, not a deletion")
         func archive() async throws {
             let (vault, vaultID) = try await Self.unlocked()

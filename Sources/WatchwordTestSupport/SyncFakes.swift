@@ -234,66 +234,27 @@ public actor FakeSyncKeyring: SyncKeyring {
     }
 }
 
-/// The merger `VaultSession` will be, over the fake keyring: open both versions, `ItemMerge.merge`, seal the result
-/// (docs/02-architecture.md §7.1). The production one is milestone 3's Mac half.
+/// `ItemRecordMerger` over the fake keyring: the production merger, with only the sealing faked.
 public struct FakeItemMerger: RecordMerger {
     public let keyring: FakeSyncKeyring
+    let base: ItemRecordMerger
 
     public init(keyring: FakeSyncKeyring) {
         self.keyring = keyring
+        base = ItemRecordMerger(sealer: keyring, deviceID: keyring.deviceID)
     }
 
     public func merge(local: StoredRecord, remote: StoredRecord) async throws -> MergeDecision {
-        let remoteItem = try await keyring.openItem(remote)
-        let localItem: Item
-        do {
-            localItem = try await keyring.openItem(local)
-        } catch SyncKeyringError.locked {
-            throw SyncKeyringError.locked
-        } catch {
-            // A local row that does not open is damage, not a version: the remote one replaces it.
-            if remote.version > local.version { return .adoptRemote }
-            let item = ItemMerge.written(
-                remoteItem, as: Revision(version: local.version + 1, device: keyring.deviceID))
-            return .replace(try await keyring.sealItem(item))
-        }
-        let merged = ItemMerge.merge(
-            localItem, origin: Revision(version: local.version, device: local.deviceID),
-            remoteItem, origin: Revision(version: remote.version, device: remote.deviceID))
-        if ItemMerge.sameState(merged, remoteItem), remote.version > local.version { return .adoptRemote }
-        if ItemMerge.sameState(merged, localItem) { return .keepLocal }
-        let item = ItemMerge.written(
-            merged, as: Revision(version: max(local.version, remote.version) + 1, device: keyring.deviceID))
-        return .replace(try await keyring.sealItem(item))
+        try await base.merge(local: local, remote: remote)
     }
 
-    /// The item's version vector, as JSON.
     public func erasureSummary(of record: StoredRecord) async throws -> [UInt8] {
-        let item = try await keyring.openItem(record)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return Array(try encoder.encode(ItemMerge.effectiveClock(item, origin: Self.origin(record))))
+        try await base.erasureSummary(of: record)
     }
 
     public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
-        let item = try await keyring.openItem(record)
-        // A summary that does not decode claims to have seen nothing, so nothing is erased because of it.
-        let erased = (try? JSONDecoder().decode(VersionVector.self, from: Data(summary))) ?? VersionVector()
-        if ItemMerge.isCovered(item, origin: Self.origin(record), byErasure: erased) { return .erase }
-        if item.isTrashed { return .keep }
-        // Above the record and above any erasure of what the erased vector names (an erasure is one past the row).
-        let version = max(record.version, erased.entries.values.max() ?? 0) + 2
-        var trashed = item
-        trashed.trashedAt = item.modifiedAt
-        trashed.keptAfterDeletion = true
-        trashed = ItemMerge.stamped(
-            trashed, previous: item, previousOrigin: Self.origin(record),
-            revision: Revision(version: version, device: keyring.deviceID))
-        trashed.version = version
-        return .replace(try await keyring.sealItem(trashed))
-    }
-
-    static func origin(_ record: StoredRecord) -> Revision {
-        Revision(version: record.version, device: record.deviceID)
+        try await base.resolveErasure(summary, of: record)
     }
 }
+
+extension FakeSyncKeyring: ItemSealer {}

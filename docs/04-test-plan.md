@@ -49,7 +49,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
-| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract"; milestone 3) |
+| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
@@ -87,7 +87,10 @@ with password re-entry, import of 1PUX/CSV fixtures.
 - Milestone 2 status: `OnboardingAndUnlockTests` (onboarding with the short-password error, the
   Emergency Kit confirmation, item creation with a generated password, lock, wrong password, unlock, and Move to Trash, which only
   takes effect once its confirmation is accepted)
-  runs on the iOS simulator and macOS from `Apps/UITests/Shared`. `AutoFillSettingsTests` skips
+  runs on the iOS simulator and macOS from `Apps/UITests/Shared`. Milestone 3 adds `SyncConflictTests`: an item
+  renamed here and, concurrently, on another device (`UITestPeer`, a second `VaultSession` of the same account in the
+  app's process, driven from a Debug-only Settings section) shows both names after Sync Now; keeping the other one
+  clears the conflict and is published like any edit. `AutoFillSettingsTests` skips
   itself until the extension answers requests (milestone 5). The accessibility audit is not wired
   in yet.
 - Accessibility audit (`XCUIApplication.performAccessibilityAudit()`) runs on every screen.
@@ -228,9 +231,16 @@ rejected before staging, a former device's segments, a record swap or relabel in
 segment carrying another device's versions, a record ID of another vault, implausible versions (U5), no plaintext
 on the transport, a row rolled back or deleted in the local file (A8) restored by reconciling, a tampered staged
 download, mutated payloads and containers, sequence numbers and vectors near the integer limit, and symbolic links
-planted in a file transport's directory (at the file and higher up). Quarantined versions are kept, not dropped. Still to
-come with milestone 4: member key substitution, membership records, revocation and read-only enforcement — and,
-with milestone 3's Mac half, the same suite over the real keyring.
+planted in a file transport's directory (at the file and higher up). Quarantined versions are kept, not dropped.
+
+**Implemented in milestone 3, with real keys** (`AdversarialVaultSyncTests`, suite "Adversarial: sync with real
+keys", `VaultSession` as the keyring): a byte flipped anywhere in a segment sealed with AES-GCM and signed with
+Ed25519; a genuine envelope signed by a key of the attacker's own, refused locked (Keychain copy) and unlocked
+(keyset); a genuine segment moved to another stream or number, refused at download while locked because the name
+is signed; an insider's record swap inside a validly sealed and signed segment, refused by the record's own AEAD
+context; a locked device with no trusted key in the Keychain, which refuses everything until the next unlock; the
+sync adapter used after `lock()`; and the keyring refusing to sign as another device. Still to come with
+milestone 4: member key substitution, membership records, revocation and read-only enforcement.
 
 ### 6.5 Interchange (milestone 7)
 - Zip-slip entry names, nested zip bombs beyond the ratio cap, 1PUX with 10^6 items, CSV cells

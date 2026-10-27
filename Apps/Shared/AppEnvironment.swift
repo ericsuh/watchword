@@ -2,14 +2,23 @@ import Foundation
 import WatchwordKit
 import WatchwordPlatform
 import WatchwordStore
+import WatchwordSync
 
 /// Builds the `VaultSession` and its ports for this launch (docs/02-architecture.md §15).
 ///
 /// Production wiring: the SQLite store in the App Group container, the system Keychain in the shared access group, and
 /// LocalAuthentication. Debug builds launched with `--uitest` instead use in-memory ports and the KDF floor, so UI tests
-/// never touch a real vault or Keychain (docs/04-test-plan.md §2). That switch does not exist in Release builds.
+/// never touch a real vault or Keychain (docs/04-test-plan.md §2), and sync over an in-memory transport shared with a
+/// simulated second device (`UITestPeer`). That switch does not exist in Release builds.
+///
+/// Production builds do not sync yet: the CloudKit and iCloud Drive transports are milestone 3's open work, and the
+/// session is built without `SyncSettings` until one exists.
 enum AppEnvironment {
     case ready(VaultSession)
+    #if DEBUG
+        /// A UI-test launch: in-memory ports, and another device of the same account the test drives from Settings.
+        case uiTest(VaultSession, UITestPeer)
+    #endif
     /// The App Group container is missing (an unsigned build, or a provisioning problem).
     case unavailable(String)
 
@@ -25,13 +34,18 @@ enum AppEnvironment {
     static func make(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         #if DEBUG
             if arguments.contains("--uitest") {
-                return .ready(
+                let store = InMemoryRecordStore()
+                let keychain = InMemoryKeychainStore()
+                let transport = InMemorySyncTransport()
+                return .uiTest(
                     VaultSession(
-                        store: InMemoryRecordStore(),
-                        keychain: InMemoryKeychainStore(),
+                        store: store,
+                        keychain: keychain,
                         biometrics: UnavailableBiometricGate(),
-                        configuration: VaultConfiguration(appVersion: appVersion, kdf: .fixed(.baseline))
-                    ))
+                        configuration: VaultConfiguration(appVersion: appVersion, kdf: .fixed(.baseline)),
+                        sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport)
+                    ),
+                    UITestPeer(primaryStore: store, primaryKeychain: keychain, transport: transport))
             }
         #endif
         let info = Bundle.main.infoDictionary ?? [:]

@@ -103,6 +103,12 @@ public enum ItemMerge {
         item.conflicts.filter { !$0.value.isEmpty }
     }
 
+    /// The value `item` shows for `group`, for showing beside its conflicting values; `nil` for a group this client
+    /// does not know.
+    public static func currentValue(of group: ItemGroup, in item: Item) -> ItemGroupValue? {
+        value(of: group, in: item)
+    }
+
     // MARK: - Merging
 
     /// Merges two versions of the same item. `originA` and `originB` are the version and device of the rows each was
