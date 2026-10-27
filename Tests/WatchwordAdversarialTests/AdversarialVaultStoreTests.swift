@@ -1,4 +1,4 @@
-#if canImport(CryptoKit) && canImport(CommonCrypto) && canImport(SQLite3)
+#if canImport(SQLite3)
     import Foundation
     import SecureMemory
     import Testing

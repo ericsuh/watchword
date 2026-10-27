@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+
 @testable import WatchwordEnvelope
 
 @Suite("Envelope header")

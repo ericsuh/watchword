@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Testing
 import WatchwordTestSupport
@@ -179,61 +180,55 @@ struct NonceLedgerTests {
     }
 }
 
-#if canImport(CryptoKit)
-    import CryptoKit
+@Suite("Secure bytes: CryptoKit bridging")
+struct SecureBytesCryptoKitTests {
+    @Test("SymmetricKey round-trips through SecureBytes")
+    func symmetricKeyRoundTrip() {
+        let key = SymmetricKey(data: Array(0..<32) as [UInt8])
+        let secure = SecureBytes(copying: key)
+        #expect(Array(secure) == Array(0..<32))
+        #expect(secure.symmetricKey == key)
+    }
+}
 
-    @Suite("Secure bytes: CryptoKit bridging")
-    struct SecureBytesCryptoKitTests {
-        @Test("SymmetricKey round-trips through SecureBytes")
-        func symmetricKeyRoundTrip() {
-            let key = SymmetricKey(data: Array(0..<32) as [UInt8])
-            let secure = SecureBytes(copying: key)
-            #expect(Array(secure) == Array(0..<32))
-            #expect(secure.symmetricKey == key)
+@Suite("PBKDF2-HMAC-SHA256 known answers")
+struct PBKDF2Tests {
+    /// RFC 7914 §11, cross-checked against Python's `hashlib.pbkdf2_hmac`.
+    @Test(
+        "matches the RFC 7914 vectors",
+        arguments: [
+            (
+                "passwd", "salt", UInt32(1),
+                "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+                    + "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"
+            ),
+            (
+                "Password", "NaCl", UInt32(80_000),
+                "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
+                    + "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d"
+            ),
+        ])
+    func knownAnswers(_ password: String, _ salt: String, _ iterations: UInt32, _ expected: String) throws {
+        let derived = try PBKDF2.sha256(
+            password: SecureBytes(copying: Array(password.utf8)),
+            salt: Array(salt.utf8),
+            iterations: iterations,
+            outputByteCount: 64
+        )
+        #expect(Array(derived) == [UInt8](hex: expected))
+    }
+
+    @Test("rejects zero iterations, an empty salt and an empty output")
+    func invalidParameters() {
+        let password = SecureBytes(copying: [1])
+        #expect(throws: PBKDF2.Failure.invalidParameters) {
+            try PBKDF2.sha256(password: password, salt: [1], iterations: 0, outputByteCount: 32)
+        }
+        #expect(throws: PBKDF2.Failure.invalidParameters) {
+            try PBKDF2.sha256(password: password, salt: [], iterations: 1, outputByteCount: 32)
+        }
+        #expect(throws: PBKDF2.Failure.invalidParameters) {
+            try PBKDF2.sha256(password: password, salt: [1], iterations: 1, outputByteCount: 0)
         }
     }
-#endif
-
-#if canImport(CommonCrypto)
-    @Suite("PBKDF2-HMAC-SHA256 known answers")
-    struct PBKDF2Tests {
-        /// RFC 7914 §11, cross-checked against Python's `hashlib.pbkdf2_hmac`.
-        @Test(
-            "matches the RFC 7914 vectors",
-            arguments: [
-                (
-                    "passwd", "salt", UInt32(1),
-                    "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
-                        + "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"
-                ),
-                (
-                    "Password", "NaCl", UInt32(80_000),
-                    "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
-                        + "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d"
-                ),
-            ])
-        func knownAnswers(_ password: String, _ salt: String, _ iterations: UInt32, _ expected: String) throws {
-            let derived = try PBKDF2.sha256(
-                password: SecureBytes(copying: Array(password.utf8)),
-                salt: Array(salt.utf8),
-                iterations: iterations,
-                outputByteCount: 64
-            )
-            #expect(Array(derived) == [UInt8](hex: expected))
-        }
-
-        @Test("rejects zero iterations, an empty salt and an empty output")
-        func invalidParameters() {
-            let password = SecureBytes(copying: [1])
-            #expect(throws: PBKDF2.Failure.invalidParameters) {
-                try PBKDF2.sha256(password: password, salt: [1], iterations: 0, outputByteCount: 32)
-            }
-            #expect(throws: PBKDF2.Failure.invalidParameters) {
-                try PBKDF2.sha256(password: password, salt: [], iterations: 1, outputByteCount: 32)
-            }
-            #expect(throws: PBKDF2.Failure.invalidParameters) {
-                try PBKDF2.sha256(password: password, salt: [1], iterations: 1, outputByteCount: 0)
-            }
-        }
-    }
-#endif
+}

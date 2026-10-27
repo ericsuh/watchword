@@ -21,7 +21,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | Milestone | Remote/Linux with no loss of verification | Needs a Mac, and for what |
 | --- | --- | --- |
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
-| 1 — cryptographic core (done) | Builds, but the crypto suites are compiled out, not run | CryptoKit, CommonCrypto, Security.framework |
+| 1 — cryptographic core (done) | Yes since ADR 0006: every crypto suite runs, against swift-crypto's BoringSSL | The implementation that ships (CryptoKit, CommonCrypto), Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
 | 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
@@ -35,9 +35,10 @@ Four rules this split implies, all of which outlive the milestones they came fro
 1. **A remote session can draft Apple-framework code; it cannot verify it.** Pair such a session with
    a Mac one that runs the suites before the pull request opens. The adversarial-test obligation in
    the working agreements below is discharged on the Mac, not in the session that wrote the test.
-2. **`#if canImport(CryptoKit)` fails silently.** On Linux the crypto suites are *absent*, not red:
-   `swift test` goes green with whole files never compiled. Count tests rather than reading the exit
-   code, and treat Linux green as a signal, never as the gate (`09-cloud-sessions.md` §4).
+2. **`#if canImport(…)` fails silently.** On Linux a guarded suite is *absent*, not red: `swift test` goes green
+   with whole files never compiled. Since ADR 0006 the crypto core, `VaultSession` and their suites have no guard and
+   build there against swift-crypto; the SQLite store, the Keychain and the PDF still compile out. Count tests rather than
+   reading the exit code, and treat Linux green as a signal, never as the gate (`09-cloud-sessions.md` §4).
 3. **Remote-capability is a design lever, not a fact about a milestone.** Milestone 3's merge logic is
    portable exactly as long as segment signing stays behind a port with a fake in
    `WatchwordTestSupport`; the moment `WatchwordSync` imports CryptoKit, the whole milestone becomes
@@ -77,8 +78,8 @@ Status: delivered as specified, with these scoping notes.
 - `VaultKeyGrant` has no persisted encoding yet; it arrives with the membership records it travels
   in (milestone 4).
 - Secure Enclave wrapping of the Secret Key is part of the Keychain adapter (milestone 2).
-- Crypto tests need CryptoKit and run on the macOS CI matrix; the files are wrapped in
-  `#if canImport(CryptoKit)` so the package still builds and tests on Linux.
+- Crypto tests need CryptoKit and run on the macOS CI matrix; since ADR 0006 they also run on Linux against
+  swift-crypto, which is evidence about the logic and not about the implementation that ships.
 
 ## Milestone 2 — Local vault and unlock (done)
 

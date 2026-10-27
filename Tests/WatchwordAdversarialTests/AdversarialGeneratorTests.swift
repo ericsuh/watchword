@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+
 @testable import WatchwordGenerator
 
 @Suite("Adversarial: password generator", .tags(.adversarial))
