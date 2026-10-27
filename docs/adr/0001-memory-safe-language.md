@@ -66,6 +66,12 @@ Alternatives rejected:
 "the module that holds key material". Its review standard is unchanged; a new binding needs the same
 justification as any other unsafe construct.
 
+## Amendment (2026-10-26): Linux test builds
+
+"Cryptography comes only from Apple frameworks" applies to every build that ships. Linux builds, which exist only to
+run the tests, take CryptoKit's API from apple/swift-crypto (BoringSSL), linked on Linux alone and pinned by commit;
+ADR 0006 records why and what it costs.
+
 ## Consequences
 - Developers must justify any new `unsafe` use in review and place it in `SecureMemory`.
 - Argon2id is unavailable without third-party code; see ADR 0003.

@@ -1,6 +1,14 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
+// CryptoKit's API over BoringSSL, on Linux only (ADR 0006), so the cryptographic core, VaultSession and their tests
+// build and run where CryptoKit does not exist. Apple builds never link it: they use CryptoKit and CommonCrypto.
+let linuxCrypto = Target.Dependency.product(
+    name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux]))
+// PBKDF2 (`KDF.Insecure.PBKDF2`), standing in for CommonCrypto's on Linux.
+let linuxCryptoExtras = Target.Dependency.product(
+    name: "CryptoExtras", package: "swift-crypto", condition: .when(platforms: [.linux]))
+
 let package = Package(
     name: "Watchword",
     platforms: [
@@ -19,6 +27,10 @@ let package = Package(
         .library(name: "WatchwordKit", targets: ["WatchwordKit"]),
         .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
     ],
+    dependencies: [
+        // Exact version, and Package.resolved pins the commit (ADR 0006).
+        .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.2")
+    ],
     targets: [
         // Pure data types shared by every other module.
         .target(name: "WatchwordModel"),
@@ -32,12 +44,12 @@ let package = Package(
         // Envelope header and KDF parameter validation with anti-downgrade floors (§5, ADR 0003).
         .target(name: "WatchwordEnvelope"),
 
-        // Zeroising, page-locked buffers for key material, and the one CommonCrypto call that needs raw pointers.
+        // Zeroising, page-locked buffers for key material, and PBKDF2 (CommonCrypto; swift-crypto on Linux).
         // The only module allowed unsafe constructs; each one is marked `unsafe` (§11, ADR 0001).
-        .target(name: "SecureMemory"),
+        .target(name: "SecureMemory", dependencies: [linuxCrypto, linuxCryptoExtras]),
 
         // Secret Key, 2SKD, keyset, vault keys, HPKE grants, signatures, record sealing (§4, §5; milestone 1).
-        .target(name: "WatchwordCrypto", dependencies: ["SecureMemory", "WatchwordEnvelope"]),
+        .target(name: "WatchwordCrypto", dependencies: ["SecureMemory", "WatchwordEnvelope", linuxCrypto]),
 
         // Local ciphertext store: the port, an in-memory implementation and the SQLite database (§6; milestone 2).
         .target(name: "WatchwordStore", dependencies: ["SecureMemory", "WatchwordEnvelope"]),
@@ -77,10 +89,12 @@ let package = Package(
         // Swift Testing suites.
         .testTarget(name: "WatchwordGeneratorTests", dependencies: ["WatchwordGenerator", "WatchwordTestSupport"]),
         .testTarget(name: "WatchwordEnvelopeTests", dependencies: ["WatchwordEnvelope", "WatchwordTestSupport"]),
-        .testTarget(name: "SecureMemoryTests", dependencies: ["SecureMemory", "WatchwordTestSupport"]),
+        .testTarget(name: "SecureMemoryTests", dependencies: ["SecureMemory", "WatchwordTestSupport", linuxCrypto]),
         .testTarget(
             name: "WatchwordCryptoTests",
-            dependencies: ["WatchwordCrypto", "SecureMemory", "WatchwordEnvelope", "WatchwordTestSupport"]
+            dependencies: [
+                "WatchwordCrypto", "SecureMemory", "WatchwordEnvelope", "WatchwordTestSupport", linuxCrypto,
+            ]
         ),
 
         .testTarget(
@@ -112,7 +126,7 @@ let package = Package(
             dependencies: [
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
                 "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordKit", "WatchwordPlatform",
-                "WatchwordTestSupport",
+                "WatchwordTestSupport", linuxCrypto,
             ]
         ),
     ],

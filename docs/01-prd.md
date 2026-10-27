@@ -84,7 +84,8 @@ Apple Passwords.
 - P3. **Platform floor.** iOS/iPadOS 17 and macOS 14 (for HPKE, passkey identities, `CKSyncEngine`).
   Features that depend on newer OS versions (OTP AutoFill on 18/15, Credential Exchange on 26) are
   gated at runtime and degrade gracefully.
-- P4. **No third-party cryptography.** Only CryptoKit, Security.framework, and CommonCrypto.
+- P4. **No third-party cryptography.** Only CryptoKit, Security.framework, and CommonCrypto, in every build that
+  ships. Linux test builds stand swift-crypto in for CryptoKit and link it nowhere else (ADR 0006).
   Third-party Swift packages are limited to non-security utilities and must be pinned and vendored
   or checksum-locked.
 - P5. **Testability.** All business and security logic lives in platform-independent Swift packages

@@ -1,4 +1,4 @@
-#if canImport(CryptoKit) && canImport(CommonCrypto)
+#if canImport(CryptoKit) || os(Linux)
     import Foundation
     import Testing
     import WatchwordCrypto

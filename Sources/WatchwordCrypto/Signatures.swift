@@ -1,5 +1,9 @@
-#if canImport(CryptoKit)
-    import CryptoKit
+#if canImport(CryptoKit) || os(Linux)
+    #if canImport(CryptoKit)
+        import CryptoKit
+    #else
+        import Crypto
+    #endif
     import Foundation
 
     /// What a signature is for. Every Ed25519 signature covers `"WW-sig-v1" ‖ 0x00 ‖ domain ‖ message`, so a signature

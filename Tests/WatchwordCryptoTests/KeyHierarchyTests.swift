@@ -1,5 +1,9 @@
-#if canImport(CryptoKit)
-    import CryptoKit
+#if canImport(CryptoKit) || os(Linux)
+    #if canImport(CryptoKit)
+        import CryptoKit
+    #else
+        import Crypto
+    #endif
     import Foundation
     import SecureMemory
     import Testing

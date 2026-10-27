@@ -22,14 +22,15 @@ as such so nobody mistakes an intention for a control.
 
 ## 2. Application code: zero dependencies, enforced
 
-The strongest available position is to have nothing to compromise. The package has no third-party
-dependencies, no binary targets, and no build plugins, and that is now checked rather than merely
-intended.
+The strongest available position is to have nothing to compromise. Nothing that ships links a third-party package,
+and the package has no binary targets and no build plugins, and that is checked rather than merely intended. The one
+dependency, apple/swift-crypto, is linked on Linux only, so the cryptographic core runs its tests there (ADR 0006).
 
 - **[enforced]** `.github/scripts/assert-no-dependencies.sh` fails the build if `Package.swift`
-  gains a `.package(`, a `.binaryTarget`, a `.plugin(`, or `unsafeFlags`, or if `Package.resolved`
-  pins anything. Adding a dependency therefore requires editing the guard in the same pull request,
-  which is visible in review. It also checks the resolved manifest (`swift package dump-package`):
+  gains a `.binaryTarget`, a `.plugin(`, or `unsafeFlags`; if it depends on any package but swift-crypto at its exact
+  version, or on any of its products but `Crypto` and `CryptoExtras`, or links one on a platform other than Linux;
+  or if `Package.resolved` pins anything but the two commits the script names. Adding or bumping a dependency
+  therefore requires editing the guard in the same pull request, which is visible in review. It also checks the resolved manifest (`swift package dump-package`):
   only plain Swift source and test targets, each at its conventional path (a custom `path:` could
   compile files no other check scans), no experimental features or C++ interop, and the test-only
   `WatchwordTestSupport` (seeded and deliberately broken RNGs) linked only into test targets.
@@ -41,9 +42,9 @@ intended.
 - **[convention]** Any new dependency requires an ADR covering: why no first-party API suffices,
   the maintenance and audit story, and the pin-and-vendor plan. ADR 0001 already forbids
   third-party cryptography outright.
-- **[enforced]** Cryptography comes only from CryptoKit, Security.framework, and CommonCrypto
-  (reviewed as part of the no-dependency check: a crypto dependency cannot be added without
-  tripping it).
+- **[enforced]** Shipped cryptography comes only from CryptoKit, Security.framework, and CommonCrypto
+  (reviewed as part of the no-dependency check: a crypto dependency cannot be added, or swift-crypto linked into an
+  Apple build, without tripping it).
 
 ### 2.1 Swift macros and plugins (T3)
 

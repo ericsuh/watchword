@@ -179,8 +179,12 @@ struct NonceLedgerTests {
     }
 }
 
-#if canImport(CryptoKit)
-    import CryptoKit
+#if canImport(CryptoKit) || os(Linux)
+    #if canImport(CryptoKit)
+        import CryptoKit
+    #else
+        import Crypto
+    #endif
 
     @Suite("Secure bytes: CryptoKit bridging")
     struct SecureBytesCryptoKitTests {
@@ -194,7 +198,7 @@ struct NonceLedgerTests {
     }
 #endif
 
-#if canImport(CommonCrypto)
+#if canImport(CommonCrypto) || os(Linux)
     @Suite("PBKDF2-HMAC-SHA256 known answers")
     struct PBKDF2Tests {
         /// RFC 7914 §11, cross-checked against Python's `hashlib.pbkdf2_hmac`.

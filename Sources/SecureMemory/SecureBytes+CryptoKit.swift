@@ -1,5 +1,9 @@
-#if canImport(CryptoKit)
-    import CryptoKit
+#if canImport(CryptoKit) || os(Linux)
+    #if canImport(CryptoKit)
+        import CryptoKit
+    #else
+        import Crypto
+    #endif
 
     /// `SymmetricKey` bridging (docs/02-architecture.md §11). CryptoKit keeps its own copy of a key's bytes, zeroised when
     /// the key is released, so `symmetricKey` is meant to live for one operation; the long-lived copy is the

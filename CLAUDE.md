@@ -88,9 +88,10 @@ server, and the base image cannot be replaced. So in a cloud session:
   only), but best-effort: without a working `mise`, `cloud-verify.sh` warns and falls back to plain
   `swift` commands, which skip the audits. The shims are not on `PATH` in the Bash tool, so run pinned
   tools as `mise exec -- <tool>`.
-- Anything importing CryptoKit, Security.framework, CommonCrypto or LocalAuthentication does not
-  compile, and `xcodebuild` is absent. `WatchwordCrypto`, `SecureMemory` and the Keychain adapters
-  (`docs/02-architecture.md` §15) can be drafted there but **not** built or tested there. Push the branch and
+- Anything importing Security.framework, LocalAuthentication, SQLite3 or CoreGraphics does not compile, and
+  `xcodebuild` is absent. The Keychain adapters, the SQLite store and the PDF (`docs/02-architecture.md` §15) can be
+  drafted there but **not** built or tested there. `WatchwordCrypto`, PBKDF2 and `VaultSession` do build and test,
+  against swift-crypto rather than CryptoKit (ADR 0006): evidence about the logic, not about what ships. Push the branch and
   dispatch `.github/workflows/mac-run.yml` on it (`mise run ci:gate`, `docs/09-cloud-sessions.md` §5) to compile and
   test it on a macOS runner; until a run passes, say so rather than reporting a layer as verified.
 - The toolchain is Swift 6.4, newer than the Xcode 16.4 CI leg. A clean cloud build is not evidence
@@ -104,8 +105,9 @@ simulator and the Xcode MCP server.
 `Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
 property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` and `RecordMerger` ports, and the day it
 imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
-policies and ports are portable too; `SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard
-test helpers that name it), `VaultSession` (CryptoKit) and all of `WatchwordPlatform` are not.
+policies and ports are portable too, and so are `WatchwordCrypto` and `VaultSession` through swift-crypto (ADR 0006);
+`SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and all of
+`WatchwordPlatform` are not.
 
 ## Architecture
 
@@ -252,19 +254,20 @@ directions are tested; keep both when adjusting constants.
   `Keyset.unwrap` and `VaultKeyGrant.open(as:from:vaultID:keyID:)` all follow this.
 - Production code never copies key material out with `Array(secureBytes)`; use `unprotectedCopy()` for
   non-secret values so every escape is searchable.
-- Files that need CryptoKit or CommonCrypto are wrapped in `#if canImport(CryptoKit)` (and
-  `&& canImport(CommonCrypto)`), so `swift build`/`swift test` still work on Linux; those suites only run
-  on the macOS CI matrix. `SecretKey`, `SecureBytes` and the envelope layer are platform-independent and
-  run everywhere.
+- Files that need CryptoKit are wrapped in `#if canImport(CryptoKit) || os(Linux)` and import `CryptoKit` where it
+  exists, `Crypto` (apple/swift-crypto, linked on Linux only) otherwise; PBKDF2 likewise takes CommonCrypto's or
+  swift-crypto's (ADR 0006). Apple builds never link swift-crypto. Linux results are evidence about the logic; the
+  macOS CI matrix, against CryptoKit, is the gate.
 
 ## Conventions
 
 - **Swift 6 language mode**, strict concurrency. Public types are `Sendable` and usually `Hashable`.
 - **Errors, not optionals, for security decisions.** Typed error enums (`HostNormalizationError`,
   `FillRefusal`, `KDFValidationError`, `EnvelopeError`) name the reason so tests assert on it.
-- **No third-party dependencies, ever, without an ADR.** `.github/scripts/assert-no-dependencies.sh`
-  fails CI on any `.package(`, `.binaryTarget`, `.plugin(`, `unsafeFlags`, or non-empty
-  `Package.resolved`. Crypto comes only from CryptoKit, Security.framework and CommonCrypto.
+- **No third-party dependencies, ever, without an ADR.** The one exception is swift-crypto, Linux-only (ADR 0006).
+  `.github/scripts/assert-no-dependencies.sh` fails CI on any other package, a version or `Package.resolved` commit
+  other than the ones it names, a swift-crypto product linked on a non-Linux platform, `.binaryTarget`, `.plugin(`
+  or `unsafeFlags`. Shipped crypto comes only from CryptoKit, Security.framework and CommonCrypto.
 - **No unsafe constructs** outside `SecureMemory` — enforced by the `strict-memory-safety` job plus the
   `.github/scripts/assert-unsafe-confined.sh` tripwire (a marked construct would compile anywhere, and
   `@_silgen_name`-style bindings are not flagged by the compiler at all). No symlinks or non-Swift files
