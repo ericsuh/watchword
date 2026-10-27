@@ -121,9 +121,8 @@ at run time, so that download is trusted the way the runner image is (§3.3).
 - **[done]** `claude-pr.yml` runs Claude Code on pull requests: a review when an admin opens one
   ready for review or marks it ready, and an answer when an admin writes `@claude` in a PR comment,
   review or review comment. It is the one workflow that holds a secret (`ANTHROPIC_API_KEY` or
-  `CLAUDE_CODE_OAUTH_TOKEN`) and a token that can write, and its comment triggers
-  (`issue_comment`, `pull_request_review`, `pull_request_review_comment`) run with secrets even when
-  the pull request comes from a fork. Its controls:
+  `CLAUDE_CODE_OAUTH_TOKEN`) and a token that can write, and its `issue_comment` trigger runs the
+  default branch's copy with secrets even when the pull request comes from a fork. Its controls:
   - **Admin only.** A separate `authorize` job, read-only and without secrets, asks the API for the
     sender's permission; the Claude job runs only on `admin`. Bots never pass. The action also
     requires write access and a human actor. Fork pull requests are skipped on the `pull_request`
@@ -140,6 +139,9 @@ at run time, so that download is trusted the way the runner image is (§3.3).
     or skill the pull request adds load as instructions when Claude reads files there (CodeQL's
     untrusted-checkout query flags it for that reason).
   - **Event text reaches the shell only through `env:`**, as in `mac-run.yml`.
+  - **Allowed by name.** The repository runs GitHub-owned actions only, so the action and its
+    nested `oven-sh/setup-bun` each have a SHA-pinned entry in `patterns_allowed`
+    (`08-repository-hardening.md` §1); a bump changes those entries with the pin.
 
   The residual risk is prompt injection: an admin can ask Claude about a pull request written by
   someone else, whose text can try to steer what Claude posts. The tool allowlist bounds what it

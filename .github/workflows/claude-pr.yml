@@ -16,10 +16,12 @@ name: Claude PR
 #     reads the change through `gh pr diff`.
 #   - Event text reaches the shell only through `env:`, never `${{ }}` inside `run:`.
 #
-# Comment and review events run this file as it is on the default branch, so mention handling starts working once it
-# is merged; `pull_request` events run the PR's own copy. Pull requests from forks get no secrets, so they are skipped.
+# `issue_comment` runs this file as it is on the default branch, with secrets even on a fork's PR; the other triggers
+# run the PR's own copy, and on a fork's PR get no secrets, so those are skipped.
 #
-# Needs one repository secret: ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`).
+# Needs one repository secret: ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`). The
+# repository allows GitHub-owned actions only, so this action and the `oven-sh/setup-bun` it uses must be added to
+# `patterns_allowed` at their SHAs (docs/08-repository-hardening.md §1); until then every run is a startup failure.
 
 on:
   pull_request:

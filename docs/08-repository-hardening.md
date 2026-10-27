@@ -33,8 +33,11 @@ Steps 1–7 are safe to run with PR #1 open. Step 8 (signatures) is the one to d
 ## 1. Make the default token read-only and allow only GitHub-owned actions
 
 The highest-value pair, and it pairs directly with the SHA pinning in `07-supply-chain.md` §3.1.
-With `setup-xcode` removed, the only actions in use are `actions/checkout` and
-`actions/upload-artifact`, both GitHub-owned — so the allowlist can be closed completely.
+With `setup-xcode` removed, the actions in use are `actions/checkout` and `actions/upload-artifact`,
+both GitHub-owned, plus one exception: `anthropics/claude-code-action` in `claude-pr.yml`
+(`07-supply-chain.md` §3.2), a composite action that itself runs `oven-sh/setup-bun`. Both are
+allowed by name at the SHAs the workflow and the action pin; nothing else third-party may run, and a
+workflow naming anything else fails to start.
 
 ```sh
 # Default GITHUB_TOKEN is read-only; workflows cannot approve PRs.
@@ -46,19 +49,25 @@ gh api -X PUT repos/ericsuh/watchword/actions/permissions/workflow \
 gh api -X PUT repos/ericsuh/watchword/actions/permissions \
   -F enabled=true -f allowed_actions=selected
 
-# That selected set is: GitHub-owned only. No third-party, not even "verified creator".
+# That selected set is: GitHub-owned, plus claude-code-action and the setup-bun it pins, each at one SHA.
+# No other third-party action, not even "verified creator".
 gh api -X PUT repos/ericsuh/watchword/actions/permissions/selected-actions \
   --input - <<'JSON'
 {
   "github_owned_allowed": true,
   "verified_allowed": false,
-  "patterns_allowed": []
+  "patterns_allowed": [
+    "anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb",
+    "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+  ]
 }
 JSON
 ```
 
-If a third-party action is ever genuinely needed, add it to `patterns_allowed` **pinned to a SHA**
-(`owner/repo@<40-hex>`), which also keeps the nightly `action-pinning-audit` job happy.
+If another third-party action is ever genuinely needed, add it to `patterns_allowed` **pinned to a
+SHA** (`owner/repo@<40-hex>`), which also keeps the nightly `action-pinning-audit` job happy. Bumping
+`claude-code-action` means updating both entries: its own SHA, and the `setup-bun` SHA in that
+release's `action.yml`.
 
 ## 2. Set up commit signing locally (prerequisite for step 8)
 
@@ -305,7 +314,8 @@ gh api repos/ericsuh/watchword/rulesets --jq '.[] | {name, target, enforcement}'
 ```
 
 Expected: one context, `Required checks`, with `strict: true`, `admins: true`, no force-push, no deletions,
-`allowed_actions: "selected"` with `github_owned_allowed: true` and an empty `patterns_allowed`,
+`allowed_actions: "selected"` with `github_owned_allowed: true` and `patterns_allowed` holding exactly the two
+SHA-pinned entries above,
 `default_workflow_permissions: "read"`, secret scanning and push protection `enabled`, code
 scanning `configured` for `["swift"]`, and one active tag ruleset.
 
