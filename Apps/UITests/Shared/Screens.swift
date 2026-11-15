@@ -87,12 +87,16 @@ enum Screens {
                 XCTFail("no window to capture for \(label)", file: file, line: line)
                 return
             }
-            let screenshot = window.screenshot()
+            let attachment = XCTAttachment(screenshot: window.screenshot())
         #else
             let screenshot = XCUIScreen.main.screenshot()
+            let attachment: XCTAttachment
+            if let png = upright(screenshot.image)?.pngData() {
+                attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            } else {
+                attachment = XCTAttachment(screenshot: screenshot)
+            }
         #endif
-
-        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = label
         attachment.lifetime = .keepAlways
         XCTContext.runActivity(named: "Screen \(label)") { $0.add(attachment) }
@@ -100,6 +104,20 @@ enum Screens {
         let oneLine = caption.split(whereSeparator: { $0.isNewline || $0 == "\t" }).joined(separator: " ")
         captured.append((name, oneLine))
     }
+
+    #if !os(macOS)
+        /// A capture of a rotated device holds the pixels as the screen has them in portrait, with the rotation as
+        /// metadata that a PNG file does not carry, so written out as it is a landscape screen comes out on its side.
+        /// Redrawing bakes the rotation into the pixels. Nil when the picture is upright already.
+        private static func upright(_ image: UIImage) -> UIImage? {
+            guard image.imageOrientation != .up else { return nil }
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = image.scale
+            return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+                image.draw(in: CGRect(origin: .zero, size: image.size))
+            }
+        }
+    #endif
 
     /// Attaches the list of everything captured so far in this run. A tour calls it last: a tour that fails part way
     /// attaches no index, and the task reports that rather than an incomplete set.
