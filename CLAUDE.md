@@ -136,8 +136,9 @@ Ten shipped modules, dependency-ordered, plus test support:
   ciphertext database). Envelopes plus storage locations only; never keys.
 - **`WatchwordSync`** — milestone 3's portable half: object layout, the `SyncTransport` port with
   `InMemorySyncTransport` and `FileSyncTransport`, signed sealed segments and snapshots (`SyncPayload`,
-  `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, conflict-keeping `ItemMerge` and
-  line-level `NoteText`, `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `SyncEngine`,
+  `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, conflict-keeping `ItemMerge` over
+  `ItemState` (the item as a state-based CRDT, `docs/10-sync-correctness.md`) and line-level `NoteText`,
+  `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `SyncEngine`,
   `DeletionRecordingStore`, and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
@@ -153,7 +154,8 @@ Ten shipped modules, dependency-ordered, plus test support:
 
 `docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`, `WatchwordHygiene`,
 `WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
-§7.6 the vault side (keyring, saves, state, conflict UI); `docs/03-implementation-plan.md` milestone 3 lists what is
+§7.6 the vault side (keyring, saves, state, conflict UI); `docs/10-sync-correctness.md` is the model of an item as a
+CRDT and the argument that sync converges; `docs/03-implementation-plan.md` milestone 3 lists what is
 still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds).
 
 ### `SyncEngine` invariants
@@ -178,8 +180,24 @@ still open (CloudKit and iCloud Drive transports, enrolment, sync in production 
   The clock records *edits* only; a merge result is sealed through `ItemMerge.written`, which sets the version and
   nothing else, so devices that merged the same edits hold the same state. The long simulation diverged each time one
   of these was broken.
+- **The merge is a join, and must stay one** (`docs/10-sync-correctness.md`): `ItemMerge.merge` is commutative,
+  associative and idempotent on whole items, on any metadata, and every update (`stamped`, `resolve`, `settle`)
+  contains the version it was made on. Every component of `ItemState` is a semilattice — registers (the values no
+  other supersedes, where "supersedes" is strict coverage of the stamps' vectors), field order (`Item.fieldOrder`,
+  last-writer-wins), note lines (`NoteText.join` per ID), history (union), retained values less what
+  `Item.discards` covers. Never drop a value at merge time for any reason but a value that supersedes it (not even an
+  equal one), never truncate, and never order by anything but `CanonicalWriter` bytes — each of those was a
+  convergence bug (Y18, Y22). A change here runs `LongRunningItemMergeLawTests` and
+  `LongRunningItemMergeExhaustiveTests`, whose asserted counts change only for a reason you can state.
+- Sync metadata is a writer's claim. Every item is read through `ItemState.init` (`ItemMerge.canonical`): no count
+  above the row's version, no value under a group it does not belong to, repeated identifiers joined. Do not read
+  `revisions`, `conflicts` or `noteLines` of a stored item any other way in merge code.
 - An edit of a group that holds a conflict moves the conflicting values to `Item.retainedValues`; only
-  `ItemMerge.resolve` (an explicit choice) discards them.
+  `ItemMerge.resolve` (an explicit choice) discards them, and records what it had seen in `Item.discards` so they
+  stay discarded.
+- A permanent deletion, applied to a version it does not cover, is one write by the deleting device at the
+  tombstone's revision (`ItemMerge.settle`, from the `ItemErasure` the tombstone carries): the same on every device,
+  never a fresh edit per device.
 - Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
   counts as an erasure while merging. The outbox compares rows with `SyncState.published`, not `known`.
 - The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;
@@ -315,7 +333,7 @@ directions are tested; keep both when adjusting constants.
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`), so **renaming a suite breaks CI deliberately** — update
+  `"Keychain item protection"`, `"sync log"`, `"sync log, item metadata"`, `"sync with real keys"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
@@ -327,7 +345,8 @@ directions are tested; keep both when adjusting constants.
 - `WATCHWORD_LONG_TESTS=1` and `WATCHWORD_TEST_SEED` are the nightly workflow's knobs for extended
   randomised runs; new long-running tests should honour them via `TestEnvironment`. `test:long` runs the
   adversarial target plus any test whose identifier contains `LongRunning` (the sync simulation is
-  `LongRunningSyncSimulationTests`), so name a new randomised suite that way to have the nightly widen it.
+  `LongRunningSyncSimulationTests`; the merge's laws are `LongRunningItemMergeLawTests` and
+  `LongRunningItemMergeExhaustiveTests`), so name a new randomised suite that way to have the nightly widen it.
 - Known-answer vectors come from the RFC that defines the primitive, or from an independent
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 
