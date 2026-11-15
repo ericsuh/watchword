@@ -275,17 +275,18 @@ jobs:
           name='[0-9]{2}-[a-z0-9]+(-[a-z0-9]+)*'
 
           platform() { # platform <title> <screen names> <images artifact id> <contact sheet artifact id>
-            local title="$1" screens="$2" images="$3" sheet="$4" count links=""
+            local title="$1" screens="$2" images="$3" sheet="$4" count noun=screens links=""
             if [ "${#screens}" -gt 8000 ] || ! [[ "$screens" =~ ^$name(,$name)*$ ]]; then
               echo "- **$title:** the capture failed or is incomplete. The [run]($run) says why."
               return
             fi
             count=$(tr ',' '\n' <<<"$screens" | wc -l | tr -d ' ')
+            if [ "$count" -eq 1 ]; then noun=screen; fi
             if [[ "$sheet" =~ ^[0-9]+$ ]]; then links="[contact sheet]($run/artifacts/$sheet), one HTML file"; fi
             if [[ "$images" =~ ^[0-9]+$ ]]; then links+="${links:+; }[every PNG]($run/artifacts/$images), zipped"; fi
-            echo "- **$title:** $count screens. ${links:-No artifact was uploaded.}"
+            echo "- **$title:** $count $noun. ${links:-No artifact was uploaded.}"
             echo
-            echo "  <details><summary>The $count screens, in the order the tour meets them</summary>"
+            echo "  <details><summary>The $count $noun, in the order the tour meets them</summary>"
             echo
             tr ',' '\n' <<<"$screens" | sed 's/.*/  - `&`/'
             echo

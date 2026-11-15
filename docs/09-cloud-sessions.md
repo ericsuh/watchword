@@ -291,8 +291,9 @@ wrote. It is how a session without a Mac checks a screen it added to the tour, a
    it, a cloud session can verify a capture only from the log (step 3), and should say so: the pictures themselves
    are then checked by whoever opens the artifact or the pull request's screenshot comment in a browser.
 
-A capture takes about as long as the matching `app:test` run, since most of it is the build: a few minutes on
-macOS, ten to fifteen on the iOS simulator, whose first boot on a fresh runner dominates.
+A capture is mostly the build and, on iOS, the simulator's first boot on a fresh runner; the tour itself runs for
+about a minute and a half. Measured on `xcode-27`: three to four minutes for the macOS job, nine to twelve for the
+iOS simulator job.
 
 What it is not:
 

@@ -206,7 +206,9 @@ at run time, so that download is trusted the way the runner image is (§3.3).
   the workflow token start no workflows.
 
   The residual risks: the artifacts and the job summary are whatever the pull request's code produced (they are
-  labelled with the commit, and a reviewer reads them as that code's output, as with a test log); and a
+  labelled with the commit, and a reviewer reads them as that code's output, as with a test log). That includes the
+  contact sheet: the one this repository's task writes has no script, but a hostile pull request can upload any
+  HTML under that name, so open a stranger's sheet as you would any file their build produced. And a
   same-repository pull request can edit this file, as it can any workflow, so the split protects the write token
   from the build, not from someone who already has write access.
 - **[convention]** the CloudKit integration tests (milestone 3) need an iCloud container and

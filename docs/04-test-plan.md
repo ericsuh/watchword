@@ -122,7 +122,10 @@ job, runs it with the other UI tests, and a flow that breaks fails it there.
 - **The picture.** On macOS it is the app's window, not the screen, so nothing else on the machine is in it; on
   iOS it is the whole screen, so the keyboard and system dialogs are. Attachments are kept whether or not the test
   passes (`XCTAttachment.lifetime = .keepAlways`), and the tour ends by attaching `screens-index`, the list of what
-  it captured.
+  it captured. Two things a reader of the pictures should expect: iOS leaves the keyboard out of a capture while a
+  password field has the focus, so `onboarding` and `locked` show an empty band where it is on a device; and where
+  the list and the item share the window (macOS, an iPad in landscape) `item-list-conflict` and
+  `conflict-resolution` are the same picture, because the conflicted item is already selected.
 - **`mise run app:screenshots [ios|macos|all]`** runs the tour alone, exports the result bundle's attachments with
   the selected Xcode's `xcresulttool export attachments`, and writes `Screenshots/<set>/<NN-name>.png`, `index.md`,
   `index.html` (a contact sheet over the files beside it) and `Screenshots/watchword-screens-<set>.html` (the same

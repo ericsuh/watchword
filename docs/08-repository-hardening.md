@@ -74,10 +74,11 @@ release's `action.yml`.
 `screenshots.yml` (`07-supply-chain.md` §3.2) captures a pull request's screens when the pull request carries the
 `screenshots` label. It uses GitHub-owned actions only, so the allowed-actions list above needs no entry for it, and
 the read-only default token is right for it: its one comment job asks for `pull-requests: write` in the file.
-The label has to exist before it can be applied:
+The label exists: it was created, plain grey and without a description, the first time it was applied through the
+API. Give it a description, or recreate it in a repository that lacks it, with:
 
 ```sh
-gh label create screenshots --repo ericsuh/watchword --color 5319E7 \
+gh label create screenshots --repo ericsuh/watchword --color 5319E7 --force \
   --description "Capture the app's screens for this pull request and attach them (screenshots.yml)"
 ```
 
