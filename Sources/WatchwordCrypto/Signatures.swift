@@ -7,6 +7,9 @@ import Foundation
 public enum SignatureDomain: UInt8, Sendable, CaseIterable {
     case publicKeyBundle = 1
     case vaultKeyGrant = 2
+    /// Every signature of the sharing protocol (docs/02-architecture.md §8.2): membership records, leave requests,
+    /// and the two pieces of local state a device signs for itself (contact pins, ledger checkpoints). Each of those
+    /// messages begins with its own four-byte magic, so one never verifies as another.
     case membership = 3
     case logSegment = 4
     /// A deletion this device's session made and has not yet published, kept in the local sync state store
