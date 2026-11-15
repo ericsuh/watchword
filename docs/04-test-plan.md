@@ -50,7 +50,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
-| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
+| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests (`WatchwordInterchangeTests`: "CSV reader and writer (RFC 4180)", "Password CSV import and export", "1PUX import and export", "Credential Exchange Format import and export", "ZIP reader and writer", "DEFLATE inflater and CRC-32" — against streams from Python's `zlib` and archives from Python's `zipfile` —, "Bounded JSON reader and writer", "Import mapping into the vault", "Duplicate detection", "Interchange instructions"; milestone 7). Still to come with the integration step: the session's password re-entry and file protection, the encrypted archive, and the Credential Exchange calls |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
 | SEC1–SEC10 | Section 6 below |
@@ -251,6 +251,37 @@ milestone 4: member key substitution, membership records, revocation and read-on
   newlines/quotes, invalid UTF-8, BOMs, and a 2 GB declared size → bounded time and memory, no
   crash, clear error.
 - CXF payloads with unknown types, duplicate IDs, and oversized blobs.
+
+Done in milestone 7, as "Adversarial: import parsers" (`AdversarialInterchangeTests`, adversary A7), with
+every case above and the attacks a parser author would add to them:
+
+- ZIP: twenty escaping member names, in an archive whose wanted member is a good one; undecodable and empty
+  names; a bomb that is honest about its size (refused on the declaration), one that lies (stopped at the
+  lie) and the bare stream (stopped at the ratio); declared sizes of 2 GB and 4 GB; a nested archive that is
+  never opened and a nested bomb; overlapping members; more members than the limit; encryption, ZIP64,
+  multi-disk and nine unknown compression methods, each refused by name; archives that can be read two ways
+  (repeated names, local headers that disagree, a wrong CRC-32, a directory that is not where the end record
+  says, trailing bytes); and every prefix and every single-byte change of a valid archive, each ending in a
+  typed error or the true contents.
+- DEFLATE: hand-assembled streams for each defect (reserved block type, stored-length mismatch, a distance
+  before the start of output, reserved symbols, too many codes, missing, incomplete and over-subscribed code
+  sets, a repeat with nothing to repeat, a run past the declared lengths, a block that cannot end), every
+  prefix of valid streams, and seeded random damage.
+- CSV: formula payloads imported exactly and exported inert; record structure hidden inside quoted cells;
+  invalid UTF-8 and UTF-16; a byte-order mark before the header; an unterminated quote, an over-long row, too
+  many columns and 50,001 rows, each stopped at its limit; a file over 100 MB refused in every format before
+  it is parsed.
+- 1PUX and CXF: 10^6 items; 200,000 levels of nesting wherever it can sit; oversized items skipped while
+  their neighbours import; a flood of warnings capped; repeated keys refused; hostile URLs that never become
+  scopes, and the property that every imported scope passes `ScopePolicy`; an entry that names an existing
+  item's identifier, another vault, a version or a trash date, none of which reach the draft; unknown
+  credential types, repeated identifiers, an oversized key and a bomb in a passkey's large blob; a collection
+  tree built to multiply its own size; and one-time passwords that could not work, which never become working
+  fields.
+- Every parser over seeded random and mutated files: a value or an `InterchangeError`, nothing else.
+
+Still to come with the integration step: that a plaintext export cannot be produced without re-entering the
+account password, and that the file is written with the protection class §14 names.
 
 ### 6.6 Hygiene (milestone 6)
 - HIBP responses with padding, missing padding, non-hex lines, huge bodies, HTTP 429/5xx; the

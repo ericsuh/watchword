@@ -26,6 +26,7 @@ let package = Package(
         .library(name: "WatchwordSync", targets: ["WatchwordSync"]),
         .library(name: "WatchwordKit", targets: ["WatchwordKit"]),
         .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
+        .library(name: "WatchwordInterchange", targets: ["WatchwordInterchange"]),
     ],
     dependencies: [
         // Exact version, and Package.resolved pins the commit (ADR 0006).
@@ -78,6 +79,11 @@ let package = Package(
         // tripwire, lint and `swift test` all cover them.
         .target(name: "WatchwordPlatform", dependencies: ["WatchwordKit", "WatchwordStore", "SecureMemory"]),
 
+        // Import and export of other password managers' formats: CSV, 1PUX and the Credential Exchange Format, with the
+        // ZIP reader and DEFLATE inflater 1PUX needs (§14; milestone 7). Foundation only, and no cryptography: parsers are
+        // pure functions from hostile bytes to item drafts and a report, so all of it runs under `swift test` on Linux.
+        .target(name: "WatchwordInterchange", dependencies: ["WatchwordModel", "WatchwordMatching"]),
+
         // Seeded and deliberately broken generators and vector helpers, for test targets only (§15). Not a product,
         // and no production target may depend on it.
         .target(
@@ -126,13 +132,18 @@ let package = Package(
             dependencies: ["WatchwordPlatform", "WatchwordKit", "SecureMemory", "WatchwordTestSupport"]
         ),
 
+        .testTarget(
+            name: "WatchwordInterchangeTests",
+            dependencies: ["WatchwordInterchange", "WatchwordModel", "WatchwordMatching", "WatchwordTestSupport"]
+        ),
+
         // Adversarial security suite (Swift Testing, tag .adversarial, run as its own CI job).
         .testTarget(
             name: "WatchwordAdversarialTests",
             dependencies: [
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
                 "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordKit", "WatchwordPlatform",
-                "WatchwordTestSupport", crypto,
+                "WatchwordInterchange", "WatchwordTestSupport", crypto,
             ]
         ),
     ],

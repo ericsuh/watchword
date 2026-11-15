@@ -8,8 +8,9 @@ Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
-`WatchwordPlatform`), and milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
-its CloudKit and iCloud Drive transports. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+`WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
+its CloudKit and iCloud Drive transports, and milestone 7's import and export parsers (`WatchwordInterchange`) short of
+their wiring into the session and the apps. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -105,8 +106,8 @@ If an agent needs the real toolchain, the answer is Remote Control on a Mac (`cl
 --remote-control`), not a cloud session — that is the only arrangement with `xcodebuild`, a
 simulator and the Xcode MCP server.
 
-`WatchwordModel`, `WatchwordMatching`, `WatchwordGenerator`, `WatchwordEnvelope` and `WatchwordSync` import only
-`Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
+`WatchwordModel`, `WatchwordMatching`, `WatchwordGenerator`, `WatchwordEnvelope`, `WatchwordSync` and
+`WatchwordInterchange` import only `Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
 property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` and `RecordMerger` ports, and the day it
 imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
 policies and ports are portable too, and so are `WatchwordCrypto` and `VaultSession` through swift-crypto (ADR 0006);
@@ -119,7 +120,7 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Ten shipped modules, dependency-ordered, plus test support:
+Eleven shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
@@ -146,15 +147,43 @@ Ten shipped modules, dependency-ordered, plus test support:
   production `SyncKeyring` and `ItemSealer` (`VaultSession+Sync.swift`).
 - **`WatchwordPlatform`** — Apple adapters: `SystemKeychainStore`, `LocalAuthenticationGate`, the Emergency Kit
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
+- **`WatchwordInterchange`** — import and export of other password managers' formats (milestone 7): `CSVReader`/
+  `CSVWriter` and `PasswordCSV` (1Password and Apple Passwords CSV), `OnePUX`, `CredentialExchange` (CXF 1.0), the
+  `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `DuplicateDetector`, `InterchangeGuide`. Depends on
+  `WatchwordModel` and `WatchwordMatching`; Foundation only, no keys, files or clocks.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
-  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`). Test targets only; not a product, and no
-  production target may depend on it.
+  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for imports `ZIPFixture`
+  and `DeflateFixture`, which build the archives and streams no real writer produces). Test targets only; not a
+  product, and no production target may depend on it.
 
-`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`, `WatchwordHygiene`,
-`WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
+`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`, `WatchwordHygiene`) and which
+milestone each belongs to; §14 describes import and export as built; §7.5 describes sync as built, and
 §7.6 the vault side (keyring, saves, state, conflict UI); `docs/03-implementation-plan.md` milestone 3 lists what is
 still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds).
+
+### `WatchwordInterchange` invariants
+
+An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the description. Before editing:
+
+- Limits are enforced before or while the cost is incurred (`InterchangeLimits`; an initialiser can tighten one, never
+  loosen it). A file ends in one `InterchangeError`; a bad entry is skipped or degraded and listed in the
+  `ImportReport`. Never drop, change or refuse something without a line in the report.
+- Every format hands its entries to `ImportAssembler`, the one place drafts are made: IDs from the injected generator
+  and the vault ID from the caller, never from the file; a URL becomes a scope only through `ScopeDerivation`
+  (`HostNormalizer`, then `ScopePolicy`) and otherwise stays a `url` field with a warning; TOTP values go through
+  `OTPParameters`, passkeys through `PasskeyCredential`. Don't build an `Item` in a format's parser.
+- The ZIP reader validates every member and decompresses only the one asked for. Nothing is extracted to disk, nested
+  archives are never opened, and anything with two readings is refused. Don't add leniency to "support" a real-world
+  archive without an adversarial test for what the leniency admits.
+- JSON is walked one item at a time (`JSONReader.readBoundedValue`); don't materialise a document. No
+  `JSONSerialization`: its behaviour differs between Linux and Apple platforms.
+- Invalid UTF-8 is refused, never repaired. Cells and fields are data on import; only CSV *export* neutralises
+  formulas.
+- Searches over an entry's fields, URLs or sections use sets or dictionaries: a file can make any list long, and the
+  adversarial suite assumes linear work.
+- Exporters return plaintext bytes and a report and do nothing else. Password re-entry, file protection and the OS
+  Credential Exchange calls belong to the session and the apps.
 
 ### `SyncEngine` invariants
 
@@ -315,7 +344,7 @@ directions are tested; keep both when adjusting constants.
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`), so **renaming a suite breaks CI deliberately** — update
+  `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`, `"import parsers"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
