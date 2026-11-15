@@ -1,0 +1,440 @@
+import Foundation
+import SecureMemory
+import WatchwordMatching
+import WatchwordModel
+
+/// Passkeys (PRD F6.2, F11.8; docs/02-architecture.md §9.1).
+///
+/// A passkey is bound twice. The credential stores its relying party ID and `PasskeyAuthenticator` signs for no
+/// other; and the item holding it must pass `AutoFillGate` for that relying party as a host, like any release
+/// (F11.1). A passkey created here always passes: it goes into an item the gate already authorises for the relying
+/// party, or into a new item scoped to it.
+extension CredentialProviderModel {
+    /// Most relying parties list a handful of credentials; this bounds what a page can make the model walk.
+    static let maximumCredentialListCount = 256
+    static let maximumNameLength = PasskeyCredential.maximumNameLength
+
+    // MARK: Assertion
+
+    /// An assertion with the passkey the person chose in the extension's list.
+    public func passkeyAssertion(
+        for choice: FieldChoice, request: PasskeyAssertionRequest, presence: PersonPresence
+    ) async -> Outcome<PasskeyAssertionResult> {
+        await outcome {
+            try await self.makeAssertion(
+                itemID: choice.itemID, fieldID: choice.fieldID, request: request, presence: presence)
+        }
+    }
+
+    /// An assertion for a passkey the person chose in the system's own sheet, with no extension UI.
+    ///
+    /// The gate must authorise the item, but unlike a password it need not be the only match: the system sheet shows
+    /// each passkey by account, the choice is of one credential, and an assertion is useless to any party but the
+    /// one it names. `presence` is what actually happened in this request; a relying party that requires
+    /// verification the person has not given gets `requiresInteraction`, not an assertion with the flag set anyway.
+    public func passkeyAssertionWithoutInteraction(
+        request: PasskeyAssertionRequest, identity: PasskeyIdentityRequest, presence: PersonPresence
+    ) async -> SilentOutcome<PasskeyAssertionResult> {
+        await silentOutcome {
+            guard let record = RecordIdentifier(identity.recordIdentifier), let fieldID = record.fieldID else {
+                throw Blocked.refused(.unknownRecord)
+            }
+            do {
+                return .success(
+                    try await self.makeAssertion(
+                        itemID: record.itemID, fieldID: fieldID, request: request, presence: presence,
+                        expecting: identity.credentialID))
+            } catch {
+                switch Self.blocked(error) {
+                case .refused(.passkey(.userVerificationRequired)): return .requiresInteraction(.userVerification)
+                case .refused(.passkey(.userPresenceRequired)): return .requiresInteraction(.userPresence)
+                case let blocked: throw blocked
+                }
+            }
+        }
+    }
+
+    private func makeAssertion(
+        itemID: UUID, fieldID: UUID, request: PasskeyAssertionRequest, presence: PersonPresence,
+        expecting credentialID: Data? = nil
+    ) async throws -> PasskeyAssertionResult {
+        let relyingParty = try Self.relyingParty(request.relyingPartyID)
+        try Self.checkClientDataHash(request.clientDataHash)
+        try Self.checkCredentialList(request.allowedCredentialIDs)
+        if case .write(let blob) = request.extensions.largeBlob,
+            blob.count > PasskeyCredential.maximumLargeBlobLength
+        {
+            throw Blocked.refused(.passkey(.largeBlobTooLong))
+        }
+
+        let snapshot = try await load()
+        let authorization = try Self.unwrap(
+            ReleaseGate.authorize(itemID: itemID, for: [relyingParty.serviceIdentifier], in: snapshot))
+        var credential = try Self.unwrap(authorization.passkey(fieldID: fieldID))
+        // Before anything else is done with it: the stored relying party, exactly (the authenticator checks again).
+        guard credential.relyingPartyID == relyingParty.value else {
+            throw Blocked.refused(.passkey(.relyingPartyMismatch))
+        }
+        if let credentialID, credentialID != credential.credentialID { throw Blocked.refused(.unknownRecord) }
+        guard
+            request.allowedCredentialIDs.isEmpty || request.allowedCredentialIDs.contains(credential.credentialID)
+        else { throw Blocked.refused(.unknownRecord) }
+        guard presence != .absent else { throw Blocked.refused(.passkey(.userPresenceRequired)) }
+        guard request.userVerification != .required || presence == .verified else {
+            throw Blocked.refused(.passkey(.userVerificationRequired))
+        }
+
+        var prf: PRFOutputValues?
+        if let input = request.extensions.prf,
+            let values = input.perCredential[credential.credentialID] ?? input.inputValues,
+            let secret = credential.prfSecret
+        {
+            prf = try Self.passkey { try PasskeyPRF.evaluate(secret: secret, inputs: values) }
+        }
+
+        var largeBlob: LargeBlobAssertionOutput?
+        switch request.extensions.largeBlob {
+        case .read:
+            largeBlob = .read(credential.largeBlob)
+        case .write(let blob):
+            // Written before signing, so a vault that locks here yields no assertion at all. A write that loses a
+            // race is reported as not written; the assertion is still good.
+            if credential.largeBlob == blob {
+                largeBlob = .write(didWrite: true)
+            } else {
+                credential.largeBlob = blob
+                largeBlob = .write(
+                    didWrite: try await storeLargeBlob(credential, fieldID: fieldID, in: authorization.item))
+            }
+        case nil:
+            break
+        }
+
+        let backedUp = try await backedUp()
+        let assertion = try Self.passkey {
+            try PasskeyAuthenticator.assertion(
+                with: credential, for: relyingParty, clientDataHash: request.clientDataHash, presence: presence,
+                backedUp: backedUp)
+        }
+        return PasskeyAssertionResult(assertion: assertion, prf: prf, largeBlob: largeBlob)
+    }
+
+    private func storeLargeBlob(_ credential: PasskeyCredential, fieldID: UUID, in item: Item) async throws -> Bool {
+        guard let position = item.fields.firstIndex(where: { $0.id == fieldID }),
+            let value = try? credential.fieldValue()
+        else { return false }
+        var updated = item
+        updated.fields[position].value = value
+        do {
+            _ = try await save(updated, replacing: item)
+            return true
+        } catch {
+            if case .locked = Self.blocked(error) { throw Blocked.locked }
+            return false
+        }
+    }
+
+    // MARK: Registration
+
+    /// What the registration sheet shows: the relying party, the account, and where the passkey could go.
+    public func passkeyRegistrationOptions(
+        for request: PasskeyRegistrationRequest
+    ) async -> Outcome<PasskeyRegistrationOptions> {
+        await outcome {
+            let relyingParty = try Self.validate(request)
+            let snapshot = try await self.load()
+            try Self.checkNotExcluded(request, relyingParty: relyingParty, in: snapshot)
+            let candidates = Self.registrationCandidates(for: relyingParty, userName: request.user.name, in: snapshot)
+            let named = candidates.filter(\.matchesUserName)
+            return PasskeyRegistrationOptions(
+                relyingPartyID: relyingParty.value, userName: request.user.name, existingItems: candidates,
+                suggested: named.count == 1 ? .existingItem(named[0].itemID) : .newItem)
+        }
+    }
+
+    /// Creates a passkey and stores it where the person chose.
+    ///
+    /// An existing item must be one the gate authorises for the relying party; its scopes are never changed. A new
+    /// item is titled by the relying party ID and scoped to it, an ID that has already passed the scope policy.
+    public func registerPasskey(
+        _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence
+    ) async -> Outcome<PasskeyRegistrationResult> {
+        await outcome {
+            guard presence != .absent else { throw Blocked.refused(.passkey(.userPresenceRequired)) }
+            return try await self.register(request, destination: destination, presence: presence)
+        }
+    }
+
+    /// Conditional registration: a site that has just signed the person in with a saved password asks for a passkey
+    /// to be added quietly (PRD F6.2, F11.8).
+    ///
+    /// Nobody is asked, so this only ever upgrades: there must be exactly one item the gate would fill for the
+    /// relying party, it must hold a password and the user name the site gives, and it must not already hold a
+    /// passkey for that account. A page can therefore not use this request to plant items in the vault, only to
+    /// add a passkey to the login the person already keeps for that very site. Anything else is
+    /// `refused(.noItemToUpgrade)`, and the site is free to ask again with UI.
+    public func registerPasskeyWithoutInteraction(
+        _ request: PasskeyRegistrationRequest, presence: PersonPresence = .absent
+    ) async -> SilentOutcome<PasskeyRegistrationResult> {
+        await silentOutcome {
+            let relyingParty = try Self.validate(request)
+            guard request.userVerification != .required || presence == .verified else {
+                return .requiresInteraction(.userVerification)
+            }
+            let snapshot = try await self.load()
+            guard !request.user.name.isEmpty,
+                case .fill(let match) = AutoFillGate.decide(
+                    for: relyingParty.serviceIdentifier, among: snapshot.rankable),
+                !match.item.archived, match.item.field(.password) != nil,
+                match.item.loginNames.contains(request.user.name),
+                !Self.credentials(in: match.item).contains(where: {
+                    $0.credential.relyingPartyID == relyingParty.value
+                        && $0.credential.userHandle == request.user.handle
+                })
+            else { throw Blocked.refused(.noItemToUpgrade) }
+            return .success(
+                try await self.register(request, destination: .existingItem(match.item.id), presence: presence))
+        }
+    }
+
+    private func register(
+        _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence
+    ) async throws -> PasskeyRegistrationResult {
+        let relyingParty = try Self.validate(request)
+        guard request.userVerification != .required || presence == .verified else {
+            throw Blocked.refused(.passkey(.userVerificationRequired))
+        }
+        let snapshot = try await load()
+        try Self.checkNotExcluded(request, relyingParty: relyingParty, in: snapshot)
+
+        // Authorise the destination before any key exists.
+        var existing: Item?
+        if case .existingItem(let itemID) = destination {
+            existing =
+                try Self.unwrap(
+                    ReleaseGate.authorize(itemID: itemID, for: [relyingParty.serviceIdentifier], in: snapshot)
+                ).item
+        }
+        let backedUp = try await backedUp()
+        let now = await clock.now()
+        var generator = random
+        let registration: PasskeyRegistration
+        do {
+            registration = try Self.passkey {
+                try PasskeyAuthenticator.register(
+                    relyingParty: relyingParty, user: request.user, presence: presence, backedUp: backedUp, now: now,
+                    using: &generator)
+            }
+        } catch {
+            random = generator
+            throw error
+        }
+        let fieldID = UUID.random(using: &generator)
+        let itemID = UUID.random(using: &generator)
+        random = generator
+
+        let credential = registration.credential
+        // A credential ID seen before means the random source repeats; the key would repeat with it.
+        let held = snapshot.all.flatMap { Self.credentials(in: $0) }
+        guard !held.contains(where: { $0.credential.credentialID == credential.credentialID }) else {
+            throw Blocked.refused(.passkey(.credentialIDCollision))
+        }
+
+        var prf: PRFRegistrationOutput?
+        switch request.extensions.prf {
+        case .checkForSupport:
+            prf = PRFRegistrationOutput(isSupported: true, values: nil)
+        case .evaluate(let inputs):
+            let secret = credential.prfSecret ?? Data()
+            prf = PRFRegistrationOutput(
+                isSupported: true, values: try Self.passkey { try PasskeyPRF.evaluate(secret: secret, inputs: inputs) })
+        case nil:
+            break
+        }
+
+        let field: Field
+        do {
+            field = try Field.passkey(credential, id: fieldID)
+        } catch {
+            throw Blocked.refused(.passkey(.malformedCredential((error as? PasskeyCodingError) ?? .malformed)))
+        }
+        let stored: Item
+        if let existing {
+            var updated = existing
+            updated.fields.append(field)
+            stored = try await save(updated, replacing: existing)
+        } else {
+            var fields: [Field] = []
+            if !request.user.name.isEmpty {
+                fields.append(
+                    Field(id: UUID.random(using: &random), kind: .username, label: "Username", value: request.user.name)
+                )
+            }
+            fields.append(field)
+            let vaultID: UUID
+            do {
+                vaultID = try await vault.defaultVaultID()
+            } catch {
+                throw Self.blocked(error)
+            }
+            stored = try await save(
+                Item(
+                    id: itemID, vaultID: vaultID, title: relyingParty.value, scopes: [relyingParty.scope],
+                    fields: fields),
+                replacing: nil)
+        }
+        return PasskeyRegistrationResult(
+            relyingPartyID: relyingParty.value, credentialID: credential.credentialID,
+            clientDataHash: request.clientDataHash, attestationObject: registration.attestationObject,
+            itemID: stored.id, fieldID: fieldID, createdItem: existing == nil, prf: prf,
+            largeBlobSupported: request.extensions.largeBlobRequested ? true : nil)
+    }
+
+    // MARK: Checks
+
+    func backedUp() async throws -> Bool {
+        do {
+            return try await vault.isBackedUp()
+        } catch {
+            throw Self.blocked(error)
+        }
+    }
+
+    static func relyingParty(_ raw: String) throws -> RelyingPartyID {
+        do {
+            return try RelyingPartyID(raw)
+        } catch let error as RelyingPartyIDError {
+            throw Blocked.refused(.passkey(.relyingPartyRejected(error)))
+        }
+    }
+
+    /// Runs an authenticator call, turning its errors into refusals.
+    static func passkey<Value>(_ body: () throws -> Value) throws -> Value {
+        do {
+            return try body()
+        } catch let error as PasskeyError {
+            throw Blocked.refused(.passkey(error))
+        }
+    }
+
+    static func checkClientDataHash(_ hash: Data) throws {
+        guard hash.count == PasskeyAuthenticator.clientDataHashLength else {
+            throw Blocked.refused(.passkey(.clientDataHashLength(hash.count)))
+        }
+    }
+
+    static func checkCredentialList(_ list: [Data]) throws {
+        guard list.count <= maximumCredentialListCount,
+            list.allSatisfy({ $0.count <= PasskeyCredential.credentialIDLengthRange.upperBound })
+        else { throw Blocked.refused(.passkey(.listTooLong)) }
+    }
+
+    /// Everything about a registration request that can be checked without the vault.
+    static func validate(_ request: PasskeyRegistrationRequest) throws -> RelyingPartyID {
+        let relyingParty = try relyingParty(request.relyingPartyID)
+        try checkClientDataHash(request.clientDataHash)
+        try checkCredentialList(request.excludedCredentialIDs)
+        guard request.supportedAlgorithms.count <= maximumCredentialListCount,
+            request.supportedAlgorithms.contains(PasskeyAuthenticator.es256)
+        else { throw Blocked.refused(.passkey(.noSupportedAlgorithm)) }
+        guard PasskeyCredential.userHandleLengthRange.contains(request.user.handle.count) else {
+            throw Blocked.refused(.passkey(.invalidUser("userHandle")))
+        }
+        guard isDisplayable(request.user.name) else { throw Blocked.refused(.passkey(.invalidUser("userName"))) }
+        guard isDisplayable(request.user.displayName) else {
+            throw Blocked.refused(.passkey(.invalidUser("userDisplayName")))
+        }
+        if case .evaluate(let inputs) = request.extensions.prf,
+            inputs.first.count > PasskeyPRF.maximumInputLength
+                || (inputs.second?.count ?? 0) > PasskeyPRF.maximumInputLength
+        {
+            throw Blocked.refused(.passkey(.prfInputTooLong))
+        }
+        return relyingParty
+    }
+
+    /// A name a page supplies and the person will later read in a list: bounded, and without the control and
+    /// direction-override characters that make text display as something else.
+    static func isDisplayable(_ text: String) -> Bool {
+        guard text.utf8.count <= maximumNameLength else { return false }
+        return !text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x00...0x1F, 0x7F...0x9F, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069, 0x2028, 0x2029:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    /// WebAuthn's `excludeCredentials`: refuse to create a second credential where the vault holds a listed one.
+    static func checkNotExcluded(
+        _ request: PasskeyRegistrationRequest, relyingParty: RelyingPartyID, in snapshot: VaultSnapshot
+    ) throws {
+        guard !request.excludedCredentialIDs.isEmpty else { return }
+        let excluded = Set(request.excludedCredentialIDs)
+        for item in snapshot.rankable {
+            for held in credentials(in: item)
+            where held.credential.relyingPartyID == relyingParty.value
+                && excluded.contains(held.credential.credentialID)
+            {
+                throw Blocked.refused(.passkey(.credentialExcluded))
+            }
+        }
+    }
+
+    /// The passkeys an item holds that decode. A field that does not is skipped: it can be neither offered nor used.
+    static func credentials(in item: Item) -> [(field: Field, credential: PasskeyCredential)] {
+        item.fields.compactMap { field in
+            guard field.kind == .passkey, let credential = try? field.passkeyCredential() else { return nil }
+            return (field, credential)
+        }
+    }
+
+    /// The passkeys the gate will release for `relyingParty`, optionally limited to an allow-list.
+    static func passkeyEntries(
+        for relyingParty: RelyingPartyID, allowed: [Data], in snapshot: VaultSnapshot
+    ) -> [PasskeyEntry] {
+        var entries: [PasskeyEntry] = []
+        for authorization in ReleaseGate.authorizedItems(for: relyingParty.serviceIdentifier, in: snapshot) {
+            let item = authorization.item
+            for (field, credential) in credentials(in: item)
+            where credential.relyingPartyID == relyingParty.value
+                && (allowed.isEmpty || allowed.contains(credential.credentialID))
+            {
+                entries.append(
+                    PasskeyEntry(
+                        itemID: item.id, fieldID: field.id, title: item.title, userName: credential.userName,
+                        relyingPartyID: credential.relyingPartyID, credentialID: credential.credentialID,
+                        reportedUnknown: field.reportedUnknownAt != nil))
+            }
+        }
+        return entries
+    }
+
+    /// Items in use the gate authorises for the relying party: where a new passkey may be added.
+    static func registrationCandidates(
+        for relyingParty: RelyingPartyID, userName: String, in snapshot: VaultSnapshot
+    ) -> [PasskeyRegistrationCandidate] {
+        let candidates = ReleaseGate.authorizedItems(for: relyingParty.serviceIdentifier, in: snapshot).map {
+            PasskeyRegistrationCandidate(
+                itemID: $0.item.id, title: $0.item.title, userName: $0.item.loginNames.first { !$0.isEmpty } ?? "",
+                matchesUserName: !userName.isEmpty && $0.item.loginNames.contains(userName))
+        }
+        return candidates.filter(\.matchesUserName) + candidates.filter { !$0.matchesUserName }
+    }
+}
+
+extension UUID {
+    /// A version-4 UUID from `generator`, so IDs are reproducible under a seeded test generator.
+    static func random(using generator: inout some RandomNumberGenerator) -> UUID {
+        var bytes = SecureBytes(randomCount: 16, using: &generator).unprotectedCopy()
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(
+            uuid: (
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+                bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+            ))
+    }
+}
