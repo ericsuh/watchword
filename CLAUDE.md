@@ -239,7 +239,8 @@ still open (CloudKit and iCloud Drive transports, enrolment, sync in production 
   reports, BE always, BS from `CredentialVault.isBackedUp()`; the counter is zero; no extension data in
   authenticator data. `prf` is evaluated only when the person was verified (one secret per credential).
 - A page cannot plant or widen: a saved login is scoped to the exact host, without subdomains, titled by the host,
-  through `ScopePolicy`; an update changes a password and never a scope; a conditional registration only adds a
+  through `ScopePolicy`; an update changes a password and never a scope, and is never made without UI, nor is a
+  second account added where one already fills; a conditional registration only adds a
   passkey to the one saved password login for that relying party and user.
 - A remote party never deletes: reports set or clear `Field.meta` flags or rename a passkey's account, only on items
   the gate would release to the reporter, at most once per field per `reportInterval` (history is never pruned).

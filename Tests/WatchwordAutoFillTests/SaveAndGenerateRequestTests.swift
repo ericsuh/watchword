@@ -113,6 +113,8 @@ struct SaveAndGenerateRequestTests {
         }
         #expect(proposal.scopeHost == "www.amazon.com")
         #expect(proposal.warning == nil)
+        // Not unasked: a second account would tie with the first and stop it filling without UI.
+        #expect(await harness.model.savePasswordWithoutInteraction(request) == .requiresInteraction(.confirmation))
         // Forcing the update onto the other account is refused.
         #expect(
             await harness.model.savePassword(request, to: .existingItem(Fixtures.amazonRetail.id))

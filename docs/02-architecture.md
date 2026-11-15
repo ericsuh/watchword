@@ -627,6 +627,8 @@ What holds across all of them:
 - **A page cannot plant or widen.** A new login is scoped to the exact host it was made on,
   without subdomains, titled by that host (never by the page), and goes through `ScopePolicy`. An
   update touches the password of an item the gate would fill on that host and never its scopes.
+  Without UI a login is saved only for a host nothing is saved for; anything that would change or
+  tie with an existing account waits for the person.
   A conditional passkey registration only ever adds a passkey to the one saved password login for
   that relying party and user; it creates nothing.
 - **A remote party never deletes.** A report sets or clears a flag in `Field.meta`

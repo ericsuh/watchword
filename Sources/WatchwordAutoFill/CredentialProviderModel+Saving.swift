@@ -55,16 +55,17 @@ extension CredentialProviderModel {
         }
     }
 
-    /// A save the system asks for with no UI. Only what cannot damage anything is done unasked: nothing at all when
-    /// the login is already saved, or a new item for a host that resembles no saved site. Changing a saved
-    /// password, choosing between accounts, and saving on a look-alike host all need the person.
+    /// A save the system asks for with no UI. Only what cannot disturb anything is done unasked: nothing at all when
+    /// the login is already saved, or a new item for a host nothing is saved for and that resembles no saved site.
+    /// Changing a saved password, adding a second account where one already fills (it would tie with the first,
+    /// and a tie stops the first from filling unasked), and saving on a look-alike host all need the person.
     public func savePasswordWithoutInteraction(_ request: SavePasswordRequest) async -> SilentOutcome<SavedPassword> {
         func run() async throws -> SilentOutcome<SavedPassword> {
             let planned = try Self.plan(for: request, in: try await self.load())
             switch planned.plan {
             case .alreadySaved(let itemID):
                 return .success(SavedPassword(itemID: itemID, createdItem: false))
-            case .createItem(let proposal) where proposal.warning == nil:
+            case .createItem(let proposal) where proposal.warning == nil && planned.isNewSite:
                 return .success(try await self.createLogin(request, scope: planned.scope, title: planned.host.value))
             case .createItem, .offerUpdate:
                 return .requiresInteraction(.confirmation)
@@ -79,7 +80,7 @@ extension CredentialProviderModel {
 
     private static func plan(
         for request: SavePasswordRequest, in snapshot: VaultSnapshot
-    ) throws -> (plan: SavePasswordPlan, host: NormalizedHost, scope: ServiceScope) {
+    ) throws -> (plan: SavePasswordPlan, host: NormalizedHost, scope: ServiceScope, isNewSite: Bool) {
         guard !request.password.isEmpty, request.password.utf8.count <= maximumPasswordLength,
             !request.password.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
         else { throw Blocked.refused(.invalidRequest("password")) }
@@ -118,16 +119,16 @@ extension CredentialProviderModel {
             return sameBytes(current.value, request.password)
                 && (request.userName.isEmpty || names(of: match.item).contains(request.userName))
         }) {
-            return (.alreadySaved(itemID: saved.item.id), host, scope)
+            return (.alreadySaved(itemID: saved.item.id), host, scope, false)
         }
-        guard !candidates.isEmpty else { return (.createItem(proposal), host, scope) }
+        guard !candidates.isEmpty else { return (.createItem(proposal), host, scope, matches.isEmpty) }
         let offered = candidates.map { match in
             SaveCandidate(
                 itemID: match.item.id, title: match.item.title, userName: names(of: match.item).first ?? "",
                 matchedHost: match.match.scope.host,
                 passwordDiffers: !sameBytes(match.item.field(.password)?.value ?? "", request.password))
         }
-        return (.offerUpdate(candidates: offered, newItem: proposal), host, scope)
+        return (.offerUpdate(candidates: offered, newItem: proposal), host, scope, false)
     }
 
     private static func names(of item: Item) -> [String] {
