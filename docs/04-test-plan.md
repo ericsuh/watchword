@@ -49,7 +49,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
-| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
+| F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Item merge audit regressions", "Item merge laws under random histories" and "Item merge, every small history" — the merge as a CRDT (`10-sync-correctness.md` §7): the specification of a multi-value register at every step, the semilattice laws on whole items, every update inflationary, the same versions in any order with repeats, convergence and nothing typed lost, with the number of histories explored asserted —, "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
@@ -232,6 +232,17 @@ segment carrying another device's versions, a record ID of another vault, implau
 on the transport, a row rolled back or deleted in the local file (A8) restored by reconciling, a tampered staged
 download, mutated payloads and containers, sequence numbers and vectors near the integer limit, and symbolic links
 planted in a file transport's directory (at the file and higher up). Quarantined versions are kept, not dropped.
+
+**Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
+item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
+that decodes): counts up to `UInt64.max` in stamps, clocks and line IDs (read as at most the record's version, so a
+later edit still supersedes); note lines planted under the IDs of another device's next edit; cyclic, dangling,
+self-anchored and repeated note lines and a chain thousands deep; values filed under groups they do not belong to,
+unknown groups and second spellings; repeated field IDs, devices and stamps, and stamps that claim to supersede each
+other; records at the payload limit full of mutually incomparable values, under a time limit; the semilattice laws
+and "no honest value dropped unless a value of its group claims to supersede it" on randomly corrupted records
+(widened nightly); erasure summaries that overflow, lie or do not decode; and records that open to different items.
+One test is recorded as a known issue until the engine passes the tombstone's version to the merger (Y28).
 
 **Implemented in milestone 3, with real keys** (`AdversarialVaultSyncTests`, suite "Adversarial: sync with real
 keys", `VaultSession` as the keyring): a byte flipped anywhere in a segment sealed with AES-GCM and signed with

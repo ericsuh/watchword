@@ -369,15 +369,31 @@ validly signed segment), and acknowledgement and coverage values must be plausib
   others to `Item.retainedValues`, still kept. Identical concurrent values are one value. The version vector records
   edits only, never the versions that carry merge results, so devices that merged the same edits hold the same state.
   Notes are a line-level sequence CRDT (`NoteText`, an RGA over lines): concurrent edits to different lines all
-  survive, and two edits of the same line both appear. Histories are unioned, never shortened by a merge. The merge is
-  a join — the same versions in any order give the same item — except that field order is last-writer-wins (it
-  holds no field's contents) with one corner the deterministic choice settles one exchange later. The merger answers
-  keep, adopt, or a new version above both, and the commit names the local version it read
+  survive, and two edits of the same line both appear. Histories are unioned, never shortened by a merge. The order
+  of the fields is a last-writer-wins register of its own (`Item.fieldOrder`, stored, so a field removed and brought
+  back returns to its place); it holds no field's contents, so of two concurrent reorders the later stands. A
+  resolution records what the person had before them (`Item.discards`), so the values it discards stay discarded
+  when a copy that still holds them is merged in. The merge is a join — commutative, associative and idempotent, so
+  the same versions in any order, grouping and number give the same item — and every edit contains the version it was
+  made on: an item is a state-based CRDT. `10-sync-correctness.md` states the model and the argument, component by
+  component, and how it is checked (random histories, every small history, and arbitrary metadata). The merger
+  answers keep, adopt, or a new version above both, and the commit names the local version it read
   (`StoreChange.expectations`).
+- Sync metadata is a claim by whoever wrote the record (an account device, or from milestone 4 a vault member, A4),
+  so every record is read the same bounded way before it is merged (`ItemState.init`, `10-sync-correctness.md` §6):
+  no count in it may exceed the record's own version, a value filed under a group it does not belong to is not read,
+  and repeated identifiers are joined rather than chosen from. The laws above hold for any metadata, not only for
+  honest devices'.
 - Moving to the trash is the `trashedAt` group, so trashing and a concurrent edit give a trashed item that contains
-  the edit. A permanent deletion is a tombstone carrying an *erasure summary*: the version vector of what its author
-  had seen. A version it covers is erased; a version holding an edit its author never saw is kept, in the trash, with
-  that edit as its last version and `keptAfterDeletion` set — on the deleting device as on every other.
+  the edit. A permanent deletion is a tombstone carrying an *erasure summary* (`ItemErasure`): the version vector of
+  what its author had seen, the version of the row erased, the erasing device and when that row was last modified. A
+  version it covers is erased; a version holding an edit its author never saw is kept, in the trash, with that edit
+  as its last version and `keptAfterDeletion` set — on the deleting device as on every other. To such a version the
+  deletion is *a write by the deleting device at the tombstone's revision* (`ItemMerge.settle`), the same on every
+  device, so devices that kept the same edits hold the same item; a restore made after it supersedes it and is not
+  undone when the tombstone is met again, and one made without seeing it stays beside it as a conflict. Erasing a
+  covered version whole is the one step that is not a join (an item is never split); `10-sync-correctness.md` §5
+  says what holds instead: no edit the erasure had not seen is ever lost, and devices cannot end up different.
 - The 30-day purge (F1.5) removes only what the person who trashed an item had seen, as a deletion does, and never
   splits an item: it skips one kept after a deletion, one whose `trashedAt` group holds a conflicting restore, and one
   whose version vector holds an edit the trash's `GroupStamp.seen` does not (`Item.isTrashedByPerson`, F7.7). Those
@@ -413,7 +429,10 @@ the device registry (D9) is still needed before sync ships; a device that stops 
 collection back until it is removed; the store can withhold objects (reported, not prevented); an item's history
 lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
 refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
-trusted for the vault, so this is an insider's capability).
+trusted for the vault, so this is an insider's capability). From the audit of the merge (Y28–Y30): the engine does
+not yet pass a tombstone's version to the merger, which therefore believes the erasure summary about it; the session
+does not yet refuse a draft made from an older version than the one stored; and items are shown as stored rather
+than as the merge reads them.
 
 ### 7.6 As built in milestone 3 (the vault side, on a Mac)
 
@@ -429,7 +448,8 @@ says why) rather than trusted, and the next unlock restores the copy. The keyrin
 lands, any device holding the account key may write to the vault.
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
-versions through an `ItemSealer`, calls `ItemMerge.merge` and seals the result through `ItemMerge.written`. The app
+versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
+result through `ItemMerge.written`; it settles versions against erasures with `ItemMerge.settle`. The app
 and the simulations run the same merger; only the sealer differs (`VaultSession` or `FakeSyncKeyring`).
 
 **Saving.** Every write is stamped through `ItemMerge.stamped` with the version the vault assigns, ignoring whatever

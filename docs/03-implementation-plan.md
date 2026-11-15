@@ -161,6 +161,16 @@ half delivered** on a Mac; the transports are open.
   different places and on the same line, one field edited on three devices, trash or permanent delete against a
   concurrent edit. The transport contract runs against both transports. The CloudKit
   integration workflow is not built.
+- **Audit of the merge as a CRDT, delivered** (remote session; `10-sync-correctness.md`, `06-adversarial-review.md`
+  §H, Y18–Y30). The item merge is now an exact join on every component — field order included (a stored
+  last-writer-wins register), and resolutions' discards (a version vector per group) — on any metadata, not only on
+  honest devices'; a permanent deletion is one deterministic write to the versions it does not cover; and a record's
+  metadata is bounded by the record's own version as it is read. Checked against the specification of a multi-value
+  register under random histories, over every history of small configurations (counts asserted), and on arbitrary
+  metadata (suite "sync log, item metadata"). Thirteen findings: ten fixed with regression tests, three outside the
+  merge tracked with tests recorded as known issues or a named remedy — the engine must pass a tombstone's version to
+  the merger (Y28), `VaultSession.save` must refuse a draft made from an older version (Y29), and the session should
+  show items as the merge reads them (Y30).
 - Adversarial suite "sync log" (A1, insider and former devices, A8): byte flips anywhere, moved and replayed
   objects, withheld segments, forgeries, record swaps inside a validly signed segment, versions for another device
   or vault, implausible versions (U5), stale snapshots, local rollback, tampered staging, parser mutations and
