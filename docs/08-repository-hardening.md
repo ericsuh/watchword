@@ -82,7 +82,11 @@ gh label create screenshots --repo ericsuh/watchword --color 5319E7 --force \
   --description "Capture the app's screens for this pull request and attach them (screenshots.yml)"
 ```
 
-Applying a label needs triage access, which is who may start a capture this way. Do not add any `Screenshots` job
+Applying a label needs triage access, which is who may start a capture this way. (The other way, a line that is
+exactly `[screenshots]` in a head commit's message, works only on a branch of this repository, where pushing needs
+write access.) GitHub treats label names that differ only in case as one label, and so does the workflow, so a
+label created as `Screenshots` works too. The comment job asks for `actions: read` beside `pull-requests: write`, to
+list the run's own artifacts; neither needs a repository setting changed. Do not add any `Screenshots` job
 to the required checks in step 5: the workflow skips most pull requests, and a required check that is skipped counts
 as passing while one that never reports blocks the merge.
 

@@ -32,6 +32,7 @@ mise run test --filter WatchwordMatchingTests.ItemRankerTests   # one XCTest cla
 mise run test --coverage                               # also writes an llvm-cov report to coverage.txt
 mise run test:adversarial                              # security suite only (its own CI job)
 mise run test:long --seed 1234                         # the nightly long randomised run; replay a nightly's seed
+mise run test:scripts                                  # the repository's own scripts (screenshots.yml's steps, app:screenshots), against stand-in tools
 mise run fuzz --max-total-time 60                      # libFuzzer harness (skips until Fuzz/ exists)
 
 mise run lint                                          # swift format lint --strict (alias fmt:check)
@@ -44,7 +45,7 @@ mise run app:generate                                  # xcodegen; refuses an Xc
 mise run app:build [ios|macos]                         # both by default; --configuration Release
 mise run app:test [ios|macos]                          # both by default; --only-testing <id> (needs a platform), --results, --simulator
 mise run app:diagnose [TestResults]                    # print a failed run's summary, runner logs and crash reports
-mise run app:screenshots [ios|macos]                   # the screenshot tour: Screenshots/<set>/*.png, index and contact sheet; --appearance dark, --device ipad
+mise run app:screenshots [ios|macos]                   # the screenshot tour: Screenshots/<set>/*.png, index and a one-PNG contact sheet; --appearance dark, --device ipad
 mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
 mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs (app:screenshots too)
@@ -58,8 +59,11 @@ screen (`Screens.capture("name", in: app)`, numbered in capture order, the app's
 iOS). A new screen is one `Screens.capture` line where the tour reaches it; capture after a tap or keystroke, or after
 waiting for the element that proves the screen is complete, never after a sleep. `app:test` runs the tour as an
 ordinary end-to-end test; `app:screenshots` runs it alone and writes `Screenshots/<set>/<NN-name>.png`, `index.md`,
-`index.html` and a self-contained `Screenshots/watchword-screens-<set>.html`, failing on a missing or blank picture.
-`--uitest-dark` (Debug only, with `--uitest`) draws the app dark for the `--appearance dark` set.
+`index.html` and `Screenshots/watchword-screens-<set>.png` (every screen in one picture), failing on a missing or blank
+picture or a set in the wrong appearance. Only a complete set is written there: anything less goes to
+`Screenshots/<set>-incomplete/`, whose index says first what is wrong, with XCUITest's own failure screenshots.
+`--uitest-appearance=light` or `=dark` (Debug only, with `--uitest`) draws the app in that appearance whatever the
+machine's is; the task passes one for every set, so `Screenshots/macos` is light on a Mac in Dark Mode.
 macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
 have it. Real Keychain round trips need a signed, entitled process, so `swift test` and CI skip them.
 `app:test-keychain` runs `SystemKeychainStoreTests` in the `WatchwordKeychainTests` bundle, hosted by a do-nothing
@@ -403,6 +407,11 @@ directions are tested; keep both when adjusting constants.
 - Known-answer vectors come from the RFC that defines the primitive, or from an independent
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 
+- **Script tests** (`Tests/ScriptTests`, Python `unittest`, `mise run test:scripts`) cover the scripts Swift tests
+  cannot reach: `screenshots-index.py`, the `app:screenshots` task, and the inline steps of `screenshots.yml`, each run
+  as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun` and `sips`. Standard library only, Python 3.9 syntax
+  (Xcode's `python3`), and bash that macOS's 3.2 runs.
+
 `docs/04-test-plan.md` maps every requirement to its obligated tests and is the place to check before
 claiming a layer is covered.
 
@@ -427,12 +436,17 @@ the `staging` environment, which holds that secret. Its controls are in
 PR's. Its action is the one third-party action, so it needs its own entry in the repository's allowed-actions list
 (`docs/08-repository-hardening.md` §1).
 `screenshots.yml` — captures the tour's screens for a PR and attaches them: on the `screenshots` label (and each push
-while it is on), on a head commit whose message contains `[screenshots]`, or on dispatch. `decide` (read-only, no
+while it is on), on a same-repository head commit whose message has a line that is exactly `[screenshots]` (never a
+fork's: the marker is honoured only where pushing needs write access), or on dispatch. `decide` (read-only, no
 checkout) chooses; `capture` runs the PR's code (`mise run app:screenshots`, read-only token, no secrets, one leg per
-platform) and uploads each set and an unzipped one-file contact sheet; `comment`, the only job with
-`pull-requests: write`, checks nothing out, validates the screen names and artifact ids it is handed, and creates or
-updates one sticky comment. It is not a required check, and there is deliberately no comment command
-(`docs/07-supply-chain.md` §3.2). Its two no-checkout jobs are inline `gh api`, the one place a mise task cannot go.
+platform) and uploads each set and, unzipped, its one-PNG contact sheet; `comment`, the only job with
+`pull-requests: write` (plus `actions: read`), checks nothing out, takes only the screen names from `capture`
+(pattern, 40 characters, 99 names), finds the artifacts itself by name among the run's own, links the sheet only if
+GitHub will serve it as `image/png`, and creates or updates one sticky comment, recognised by its whole header and
+never by the bot author alone (`claude-pr.yml` posts as the same account). It is not a required check, and there is
+deliberately no comment command (`docs/07-supply-chain.md` §3.2). Its two no-checkout jobs are inline `gh api`, the one
+place a mise task cannot go; `mise run test:scripts` (in the `lint` job) runs those two scripts as they are in the file
+against a stand-in `gh`, so a change to either needs its test in `Tests/ScriptTests`.
 The same capture is the `app:screenshots` gate of `mac-run.yml`.
 
 One check on every PR has **no workflow file**: `Analyze (swift)`, from CodeQL *default setup*,
