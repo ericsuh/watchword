@@ -39,6 +39,48 @@ public protocol SyncKeyring: Sendable {
     /// `location.vaultID`. Needs public keys only, so it works while locked. Throws `untrustedAuthor` or
     /// `authenticationFailed`.
     func verify(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws
+    /// The devices revoked from writing to `vaultID` (docs/02-architecture.md §7.8). `verify` refuses their objects;
+    /// the engine also stops reading their streams, stops waiting for their acknowledgements before collecting
+    /// garbage (review finding Y6), never waits for them to write a snapshot, and hands on what it had already
+    /// merged from them in a snapshot of its own. Needs public keys only. Empty when the keyring cannot tell (the
+    /// registry is unavailable): `verify` then refuses everything, so nothing depends on the answer.
+    func retiredAuthors(vaultID: UUID) async -> Set<UUID>
+}
+
+extension SyncKeyring {
+    public func retiredAuthors(vaultID: UUID) async -> Set<UUID> { [] }
+}
+
+/// A `RecordMerger` that hands each record to the merger for its kind (items to `ItemRecordMerger`, vault metadata
+/// to the vault's own). A kind with no merger is refused, so the engine rejects the object carrying it.
+public struct KindRoutingMerger: RecordMerger {
+    public struct NoMerger: Error, Equatable, Sendable {
+        public let kind: EnvelopeKind
+    }
+
+    public let mergers: [EnvelopeKind: any RecordMerger]
+
+    public init(_ mergers: [EnvelopeKind: any RecordMerger]) {
+        self.mergers = mergers
+    }
+
+    private func merger(for record: StoredRecord) throws -> any RecordMerger {
+        guard let merger = mergers[record.kind] else { throw NoMerger(kind: record.kind) }
+        return merger
+    }
+
+    public func merge(local: StoredRecord, remote: StoredRecord) async throws -> MergeDecision {
+        guard local.kind == remote.kind else { throw NoMerger(kind: remote.kind) }
+        return try await merger(for: remote).merge(local: local, remote: remote)
+    }
+
+    public func erasureSummary(of record: StoredRecord) async throws -> [UInt8] {
+        try await merger(for: record).erasureSummary(of: record)
+    }
+
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
+        try await merger(for: record).resolveErasure(summary, of: record)
+    }
 }
 
 /// What to do when a remote version of a record meets the local one.

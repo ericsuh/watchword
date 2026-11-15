@@ -1,5 +1,6 @@
 import Foundation
 import SecureMemory
+import WatchwordCrypto
 import WatchwordKit
 
 /// A wall clock tests move by hand, so time-based policy (F5.4 expiry, F5.5 auto-lock, F1.5 retention) is tested
@@ -116,5 +117,54 @@ public actor FakeKeychain: KeychainStore {
 
     public var isEmpty: Bool {
         items.isEmpty
+    }
+}
+
+/// A `DeviceKeyStore` in memory: a software Ed25519 key per account, as `KeychainDeviceKeyStore` keeps, with handles
+/// for what a test needs to do to it (docs/02-architecture.md §7.8).
+public actor FakeDeviceKeyStore: DeviceKeyStore {
+    private var held: [UUID: (deviceID: UUID, key: SoftwareDeviceKey)] = [:]
+    private var generator: SeededGenerator
+    public private(set) var signatures = 0
+
+    public init(seed: UInt64 = 1) {
+        generator = SeededGenerator(seed: seed)
+    }
+
+    public func create(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey {
+        let key = SoftwareDeviceKey.generate(using: &generator)
+        held[accountID] = (deviceID, key)
+        return try key.publicKey()
+    }
+
+    public func publicKey(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey? {
+        guard let entry = held[accountID], entry.deviceID == deviceID else { return nil }
+        return try entry.key.publicKey()
+    }
+
+    public func sign(_ prepared: [UInt8], accountID: UUID, deviceID: UUID) throws -> [UInt8] {
+        guard let entry = held[accountID], entry.deviceID == deviceID else { throw DeviceKeyError.keyMissing }
+        signatures += 1
+        return try entry.key.sign(prepared: prepared)
+    }
+
+    public func delete(accountID: UUID) {
+        held[accountID] = nil
+    }
+
+    // MARK: - Test seams
+
+    /// Loses the key, as a store restored onto other hardware does (Keychain items never leave a device).
+    public func forget(accountID: UUID) {
+        held[accountID] = nil
+    }
+
+    /// The key itself: what someone who extracted it from the device holds.
+    public func extracted(accountID: UUID) -> SoftwareDeviceKey? {
+        held[accountID]?.key
+    }
+
+    public func isEmpty() -> Bool {
+        held.isEmpty
     }
 }

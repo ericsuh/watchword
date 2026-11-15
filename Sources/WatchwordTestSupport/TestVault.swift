@@ -17,6 +17,8 @@ public struct TestVault: Sendable {
     public let clock: FakeClock
     /// The sync settings the session was built with, if any.
     public let sync: SyncSettings?
+    /// This device's signing key, in software, with handles to script it.
+    public let deviceKeys: FakeDeviceKeyStore
 
     /// A session over fresh fakes. KDF parameters are the floor (`KDFParameters.baseline`), which is the cheapest
     /// derivation the policy accepts; there is no test-only weaker setting.
@@ -27,51 +29,59 @@ public struct TestVault: Sendable {
         clock: FakeClock = FakeClock(),
         appVersion: String = TestVault.appVersion,
         sync: SyncSettings? = nil,
-        seed: UInt64 = 7
+        seed: UInt64 = 7,
+        deviceName: String = "",
+        deviceKeys: FakeDeviceKeyStore? = nil
     ) {
+        let deviceKeys = deviceKeys ?? FakeDeviceKeyStore(seed: TestEnvironment.seed(fallback: seed) &+ 0x5EED)
         self.store = store
         self.keychain = keychain
         self.biometrics = biometrics
         self.clock = clock
         self.sync = sync
+        self.deviceKeys = deviceKeys
         session = VaultSession(
             store: store,
             keychain: keychain,
             biometrics: biometrics,
             clock: clock,
-            configuration: VaultConfiguration(appVersion: appVersion, kdf: .fixed(.baseline)),
+            configuration: VaultConfiguration(
+                appVersion: appVersion, kdf: .fixed(.baseline), deviceName: deviceName),
             sync: sync,
+            deviceKeys: deviceKeys,
             random: SeededGenerator(seed: TestEnvironment.seed(fallback: seed))
         )
     }
 
     /// A session that syncs over `transport`, with in-memory sync state.
     public static func syncing(
-        over transport: any SyncTransport, clock: FakeClock = FakeClock(), seed: UInt64 = 7
+        over transport: any SyncTransport, clock: FakeClock = FakeClock(), seed: UInt64 = 7, name: String = ""
     ) -> TestVault {
         TestVault(
-            clock: clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport), seed: seed)
+            clock: clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport), seed: seed,
+            deviceName: name)
     }
 
-    /// Another device of this vault's account, syncing over `transport`: the account header and vault-key wraps
-    /// copied into a fresh store under a new device ID, and the Secret Key into a fresh Keychain. This stands in
-    /// for enrolment from the account header on the transport, which is milestone 3's open work; what it copies is
-    /// what that enrolment will deliver. Locked until unlocked with the password.
+    /// Another device of this vault's account, enrolled the way a real one is (PRD F5.2): this device publishes the
+    /// account header, the device registry and the vault directory with a sync, and the new one joins from the
+    /// transport alone, with the account password and the Secret Key off the Emergency Kit. `deviceID` names the new
+    /// device, so a test can address its stream. Returned locked, as a device is until someone unlocks it.
     public func enrolledDevice(
-        deviceID: UUID, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64 = 13
+        deviceID: UUID, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64? = nil,
+        password: String = TestVault.password, name: String = ""
     ) async throws -> TestVault {
-        guard var account = try await store.loadAccount() else { throw VaultError.noAccount }
-        let wraps = try await store.records(in: account.personalVaultID, kind: .vaultKeyWrap)
-        account.deviceID = deviceID
-        let newStore = InMemoryRecordStore()
-        try await newStore.commit(StoreChange(account: .create(account), upserts: wraps))
-        let newKeychain = FakeKeychain()
-        if let secretKey = await keychain.raw(.secretKey(accountID: account.accountID)) {
-            await newKeychain.overwrite(.secretKey(accountID: account.accountID), with: secretKey)
-        }
-        return TestVault(
-            store: newStore, keychain: newKeychain, clock: clock ?? self.clock,
-            sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport), seed: seed)
+        try await session.sync()
+        let kit = try await session.emergencyKit()
+        // Each device its own randomness, and so its own signing key: the registry refuses one key for two devices.
+        let ownSeed =
+            seed ?? deviceID.uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }
+        let device = TestVault(
+            clock: clock ?? self.clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport),
+            seed: ownSeed, deviceName: name)
+        try await device.session.enrol(
+            password: password, secretKey: kit.secretKey, accountID: kit.accountID, assigningDeviceID: deviceID)
+        await device.session.lock()
+        return device
     }
 
     /// The same store, Keychain, biometrics and clock seen by a new session: a relaunch, or the app after an update
@@ -79,7 +89,7 @@ public struct TestVault: Sendable {
     public func relaunched(appVersion: String = TestVault.appVersion, seed: UInt64 = 11) -> TestVault {
         TestVault(
             store: store, keychain: keychain, biometrics: biometrics, clock: clock, appVersion: appVersion,
-            sync: sync, seed: seed)
+            sync: sync, seed: seed, deviceKeys: deviceKeys)
     }
 
     /// Creates the account and returns its Emergency Kit; the vault is left unlocked.

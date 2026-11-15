@@ -82,6 +82,8 @@
             case .quickUnlockKey(let id): return "quick-unlock-key." + id.uuidString
             case .quickUnlockState(let id): return "quick-unlock-state." + id.uuidString
             case .accountSigningKey(let id): return "account-signing-key." + id.uuidString
+            case .deviceSigningKey(let id): return "device-signing-key." + id.uuidString
+            case .deviceRegistryAnchor(let id): return "device-registry-anchor." + id.uuidString
             }
         }
 

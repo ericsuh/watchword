@@ -84,7 +84,7 @@ let package = Package(
             name: "WatchwordTestSupport",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordStore", "WatchwordSync", "WatchwordEnvelope",
-                "SecureMemory",
+                "WatchwordCrypto", "SecureMemory",
             ]
         ),
 
