@@ -20,7 +20,8 @@ import WatchwordCrypto
 enum MembershipRules {
     /// Verifies a genesis record against the owner whose fingerprint was verified out of band.
     static func genesisState(
-        _ record: MembershipRecord, hash: MembershipHash, vaultID: UUID, owner: PublicKeyBundle
+        _ record: MembershipRecord, hash: MembershipHash, vaultID: UUID, owner: PublicKeyBundle,
+        signatureChecks: inout Int
     ) throws -> MembershipState {
         guard record.vaultID == vaultID else {
             throw MembershipError.wrongVault(expected: vaultID, actual: record.vaultID)
@@ -34,21 +35,30 @@ enum MembershipRules {
             entry.accountID == owner.accountID, entry.role == .owner, entry.since == 0,
             entry.agreementKey == owner.agreementKey, entry.signingKey == owner.signingKey
         else { throw MembershipError.ownerMismatch }
+        signatureChecks += 1
         try verifySignature(of: record, signingKey: owner.signingKey)
         return MembershipState(
             vaultID: vaultID, epoch: 0, hash: hash, members: [try entry.member()],
             vaultKeyID: record.vaultKeyID, keyEpoch: 0, isDeleted: false)
     }
 
+    static func genesisState(
+        _ record: MembershipRecord, hash: MembershipHash, vaultID: UUID, owner: PublicKeyBundle
+    ) throws -> MembershipState {
+        var signatureChecks = 0
+        return try genesisState(record, hash: hash, vaultID: vaultID, owner: owner, signatureChecks: &signatureChecks)
+    }
+
     /// Verifies `record` as the successor of `previous` and returns the state it produces.
     ///
     /// Order: the checks that cost nothing (position in the chain, the signer's standing, what the operation is
-    /// allowed to do, the key rule), then the record's signature, and only then anything that validates material the
-    /// record brought with it (a new member's key bundle, a leave request). Unsigned junk therefore costs at most one
-    /// signature check.
+    /// allowed to do, the shape of the key change), then the record's signature, and only then anything that costs
+    /// work or validates material the record brought with it (whether its branch used the key before, a new member's
+    /// key bundle, a leave request). Unsigned junk therefore costs exactly one signature check and nothing more
+    /// (review finding S22); `signatureChecks` counts them.
     static func nextState(
         _ record: MembershipRecord, hash: MembershipHash, after previous: MembershipState,
-        keyUsedBefore: (UUID) -> Bool
+        keyUsedBefore: (UUID) -> Bool, signatureChecks: inout Int
     ) throws -> MembershipState {
         guard !previous.isDeleted else { throw MembershipError.vaultDeleted }
         guard record.vaultID == previous.vaultID else {
@@ -67,9 +77,13 @@ enum MembershipRules {
             throw MembershipError.epochReservedForOwner
         }
         try authorise(record.operation, by: signer, in: previous)
-        try checkKey(of: record, after: previous, keyUsedBefore: keyUsedBefore)
+        try checkKeyChange(of: record, after: previous)
+        signatureChecks += 1
         try verifySignature(of: record, signingKey: signer.bundle.signingKey)
 
+        if record.operation.rotatesKey, keyUsedBefore(record.vaultKeyID) {
+            throw MembershipError.keyReused(record.vaultKeyID)
+        }
         let members = try resultingMembers(of: record, after: previous)
         guard record.entries == members.map(MembershipRecord.Entry.init) else {
             throw MembershipError.resultingMembersMismatch
@@ -77,6 +91,15 @@ enum MembershipRules {
         return MembershipState(
             vaultID: previous.vaultID, epoch: record.epoch, hash: hash, members: members,
             vaultKeyID: record.vaultKeyID, keyEpoch: record.keyEpoch, isDeleted: record.operation == .deleteVault)
+    }
+
+    static func nextState(
+        _ record: MembershipRecord, hash: MembershipHash, after previous: MembershipState,
+        keyUsedBefore: (UUID) -> Bool
+    ) throws -> MembershipState {
+        var signatureChecks = 0
+        return try nextState(
+            record, hash: hash, after: previous, keyUsedBefore: keyUsedBefore, signatureChecks: &signatureChecks)
     }
 
     /// Whether `signer` may perform `operation` on `state`. No cryptography.
@@ -113,16 +136,13 @@ enum MembershipRules {
     }
 
     /// Principle 5: a removal or departure always introduces a key the departed member never held, and nothing else
-    /// but an explicit rotation changes the key. A key ID is never used twice, so "the record that introduced this
-    /// key" is one record (§8.5).
-    private static func checkKey(
-        of record: MembershipRecord, after previous: MembershipState, keyUsedBefore: (UUID) -> Bool
-    ) throws {
+    /// but an explicit rotation changes the key. The part of the rule that needs no history; that a key ID is never
+    /// used twice on a branch, so "the record that introduced this key" is one record (§8.5), is checked after the
+    /// signature.
+    private static func checkKeyChange(of record: MembershipRecord, after previous: MembershipState) throws {
         if record.operation.rotatesKey {
             guard record.vaultKeyID != previous.vaultKeyID else { throw MembershipError.keyNotRotated }
-            guard record.vaultKeyID != .sharingZero, !keyUsedBefore(record.vaultKeyID) else {
-                throw MembershipError.keyReused(record.vaultKeyID)
-            }
+            guard record.vaultKeyID != .sharingZero else { throw MembershipError.keyReused(record.vaultKeyID) }
             guard record.keyEpoch == record.epoch else { throw MembershipError.unexpectedKeyChange }
         } else {
             guard record.vaultKeyID == previous.vaultKeyID, record.keyEpoch == previous.keyEpoch else {

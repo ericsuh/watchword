@@ -1,36 +1,54 @@
 import Foundation
 import WatchwordCrypto
 
-/// One device's verified copy of a vault's membership chain, and the only source of `MembershipState`
+/// One device's verified copy of a vault's membership records, and the only source of `MembershipState`
 /// (docs/02-architecture.md §8.3).
 ///
 /// **Trust anchor.** Two things, both local: the owner's key bundle, pinned when the vault was created or when the
-/// person accepting an invitation confirmed the owner's fingerprint out of band (a `VerifiedContact`); and the chain
-/// this device has already accepted, which the ledger holds. Everything a sync store offers is a candidate, checked
-/// against those two.
+/// person accepting an invitation confirmed the owner's fingerprint out of band (a `VerifiedContact`); and every
+/// valid record this device has already seen, which the ledger holds: the accepted chain and the records on branches
+/// that lost a fork. Everything a sync store offers is a candidate, checked against those two.
 ///
-/// **What the store cannot do** (A1), because candidates are only ever added to the accepted chain's tree:
-/// - *Forge*: every record is signed by an account that the state before it lists as an administrator, back to the
-///   owner's pinned key.
-/// - *Roll back*: a shorter chain is a subset of what the ledger holds, so it changes nothing.
-/// - *Fork at will*: a second record at an epoch needs a genuine administrator's signature, and which branch wins
-///   is the rule below, not the store's choice or the order of arrival.
-/// - *Withhold* is all that is left to it, as everywhere in sync: the ledger then simply stays where it is.
+/// **A grow-only set of records, and a function of it.** The ledger only ever *adds* valid records to what it holds,
+/// and the accepted chain is a pure function of that set (the fork rule below). So devices that have seen the same
+/// records agree, in whatever order and in however many calls the records arrived; a record that loses a fork is
+/// kept, so a record built on it later still connects and can change the outcome (review finding S17).
 ///
-/// **Concurrent administrators.** Records are named by their hash, so two administrators acting on the same epoch
-/// produce two objects, and every device chooses between them the same way (`MembershipLedger.ingest`): at each fork
-/// the branch whose first owner-signed record comes earliest wins, and between branches with none (or the same
-/// epoch) the lower hash of the fork-point record. A device that had accepted the losing record reorganises, and the
-/// loser's author proposes again on the new head (`RotationStatus.superseded`).
+/// **What the store can and cannot do** (A1):
+/// - *Forge*: no. Every record is signed by an account that the state before it lists as an administrator, back to
+///   the owner's pinned key.
+/// - *Serve less*: a subset of what the ledger holds changes nothing, so an old listing rolls nothing back.
+/// - *Withhold*: yes, as everywhere in sync. The ledger then stays where it is. And by withholding the newest head
+///   from an administrator's device it can have that device sign on a stale one, which makes a fork between two
+///   honest records. The rule below settles that the same way on every device; what the losing record did is done
+///   again by its author (`status(of:)`), and a removal that lost is done again by any device that may
+///   (`owedRemovals`). The store chooses *when* a fork becomes visible, never which record wins it.
 ///
-/// Why this rule: the accounts that may sign change only in owner-signed records (`MembershipRules`). So between
-/// branches without an owner-signed record every signer is an administrator on both, and the choice is between
-/// equals. And a former administrator, whose removal or demotion the owner signed, can publish a competing record
-/// at an earlier epoch, but its branch holds no owner-signed record at or before that removal, so it loses on every
-/// device, however it is timed (review finding S1). Because the owner is never removed and may always sign, no
-/// outcome leaves a vault without someone able to administer it.
+/// **The fork rule.** Among all the paths from the genesis through the valid records held, the accepted chain is the
+/// one with
+/// 1. the most records signed by the owner; then
+/// 2. the most records; then
+/// 3. at the first record where two such paths part, the lower hash.
+///
+/// Why: the accounts that may sign change only in owner-signed records (`MembershipRules`). A former administrator,
+/// whose removal or demotion the owner signed, can go back to an epoch at which they still were one and publish
+/// a branch of any length, with hashes ground as low as they like; but that branch lacks the owner's record that
+/// ended their authority, so it holds fewer owner-signed records and loses on every device, however it is timed
+/// (review finding S1). Between paths the owner signed equally often and that part *after* the owner's last record,
+/// every signer is an administrator on both: the choice is between equals, and the longer path is the one more
+/// devices have built on, so a single record signed on a stale head and released late displaces nothing that has
+/// been built on since (S18). A stale device of the owner's own is no different (S19). Because the owner is never
+/// removed and may always sign, no outcome leaves a vault without someone able to administer it.
+///
+/// **Removal wins.** A reorganisation can still drop a record that removed a member (two paths of equal standing, or
+/// an isolated device of the owner's). The ledger keeps that record, and while its signer may still remove that
+/// member in the accepted state the removal is *owed*: `owedRemovals` lists it, `writePermission` refuses the
+/// member's writes, `recordsToReseal` re-seals nothing towards a key the member holds, and the next device that may
+/// sign the removal plans it again. A former administrator's records on dead branches owe nothing: their signer has
+/// no standing in the accepted state. Nor does a removal that its own branch went on to take back by adding the
+/// member again.
 public struct MembershipLedger: Sendable {
-    /// One accepted record with the state it produced.
+    /// One valid record with the state it produced.
     public struct Link: Sendable, Hashable {
         public let record: MembershipRecord
         public let state: MembershipState
@@ -38,17 +56,34 @@ public struct MembershipLedger: Sendable {
         public let encoded: [UInt8]
     }
 
+    /// A removal on a branch that lost a fork, which still has to happen (the type's documentation, "removal wins").
+    public struct OwedRemoval: Sendable, Hashable {
+        public let accountID: UUID
+        /// What to plan: `.removal`, or `.departure` with the member's own request when they asked to leave.
+        public let reason: RotationReason
+        /// The record that carried it out on the losing branch.
+        public let record: MembershipRecord
+    }
+
     public let vaultID: UUID
     /// The owner's key bundle this ledger is anchored to.
     public let owner: PublicKeyBundle
     /// The accepted chain; never empty, and `chain[n]` is the record of epoch `n`.
     public private(set) var chain: [Link]
+    /// The valid records held that are not in the accepted chain, in order of epoch and then hash. Each one's
+    /// predecessor is in `chain` or earlier in this list. At most `MembershipLimits.maximumRetainedBranchRecords`.
+    public private(set) var branches: [Link]
+    /// Removals carried out on a branch that lost, by a signer who may still remove that member: one per member, in
+    /// account order. Plan each again (`RotationPlanner.plan` with `reason`) on a device whose account may.
+    public private(set) var owedRemovals: [OwedRemoval]
 
-    init(vaultID: UUID, owner: PublicKeyBundle, chain: [Link]) {
+    init(vaultID: UUID, owner: PublicKeyBundle, chain: [Link], branches: [Link], owedRemovals: [OwedRemoval]) {
         precondition(!chain.isEmpty)
         self.vaultID = vaultID
         self.owner = owner
         self.chain = chain
+        self.branches = branches
+        self.owedRemovals = owedRemovals
     }
 
     /// The current verified state.
@@ -65,13 +100,46 @@ public struct MembershipLedger: Sendable {
         chain.contains { $0.state.hash == hash }
     }
 
-    /// Whether `accountID` may write to the vault as of `epoch` (PRD F4.5): `MembershipState.writePermission`, for a
-    /// state this ledger verified. Ask about the ledger's current epoch when deciding whether to merge someone
-    /// else's write: a former member can date a write as they please, so the membership that counts is the newest
-    /// one this device knows. Not cryptographic; see `MembershipState.writePermission(for:)`.
+    /// Whether the ledger already holds the record with this hash, in the accepted chain or on a losing branch.
+    public func holds(_ hash: MembershipHash) -> Bool {
+        contains(hash) || branches.contains { $0.state.hash == hash }
+    }
+
+    /// Whether the ledger already holds the record a membership object's name says it is. An integrator listing a
+    /// store skips fetching such an object: every copy of a record has the one hash, whatever its signature bytes.
+    /// The name is only a hint (a store can file anything under it), which is safe here: a name that lies costs a
+    /// fetch, or hides a record its author also published under its true name.
+    public func holds(_ location: SharingObjectLocation) -> Bool {
+        guard location.vaultID == vaultID, case .membership(let epoch, let hash, _) = location.kind else {
+            return false
+        }
+        if let accepted = state(atEpoch: epoch), accepted.hash == hash { return true }
+        return branches.contains { $0.state.epoch == epoch && $0.state.hash == hash }
+    }
+
+    /// Whether `accountID` may write to the vault now (PRD F4.5): the question to ask before this device's own
+    /// writes and before merging anyone else's. `MembershipState.writePermission` for the current state, except that
+    /// a member whose removal is owed is refused (`WriteRefusal.removalPending`).
+    ///
+    /// It is asked about *now*, not about the time a write claims: a former member holds the keys of their time and
+    /// can date a write as they please, so only the newest membership this device knows can refuse them. The other
+    /// half of that rule is that what a device has already merged stays merged, and is published again by a member
+    /// who may write when its author no longer may (`recordsToReseal`), so nothing a member wrote while entitled is
+    /// stranded by their demotion or removal (§8.7; review finding S25). Not cryptographic; see
+    /// `MembershipState.writePermission(for:)`.
+    public func writePermission(for accountID: UUID) -> WritePermission {
+        let permission = state.writePermission(for: accountID)
+        guard permission.isAllowed, owedRemovals.contains(where: { $0.accountID == accountID }) else {
+            return permission
+        }
+        return .refused(.removalPending)
+    }
+
+    /// Whether `accountID` could write to the vault as of `epoch` of the accepted chain: for showing history, never
+    /// for deciding whether to merge a write (`writePermission(for:)`, which the current epoch gives here too).
     public func writePermission(for accountID: UUID, atEpoch epoch: UInt64) -> WritePermission {
         guard let state = state(atEpoch: epoch) else { return .refused(.unknownEpoch) }
-        return state.writePermission(for: accountID)
+        return epoch == self.state.epoch ? writePermission(for: accountID) : state.writePermission(for: accountID)
     }
 
     // MARK: - Creating and joining
@@ -87,19 +155,25 @@ public struct MembershipLedger: Sendable {
             record, hash: record.hash, vaultID: vaultKey.vaultID, owner: bundle)
         return MembershipLedger(
             vaultID: vaultKey.vaultID, owner: bundle,
-            chain: [Link(record: record, state: state, encoded: record.encoded())])
+            chain: [Link(record: record, state: state, encoded: record.encoded())], branches: [], owedRemovals: [])
     }
 
     /// Builds a ledger from records a store offers, anchored to an owner whose fingerprint has been verified.
     /// Throws `LedgerError.noGenesis` if none of them is that owner's genesis for `vaultID`.
+    ///
+    /// For a vault this device has never held. A device that holds, or ever held, a ledger for the vault ingests
+    /// into that one instead, so that what it had accepted still counts (`IncomingInvitation.accept`).
     public static func join(vaultID: UUID, owner: VerifiedContact, candidates: [[UInt8]]) throws
         -> (ledger: MembershipLedger, report: IngestReport)
     {
-        let resolution = try resolve(
-            vaultID: vaultID, owner: owner.bundle, accepted: [], candidates: candidates,
-            limit: MembershipLimits.maximumJoinCandidates)
+        let resolution = resolve(vaultID: vaultID, owner: owner.bundle, chain: [], branches: [], candidates: candidates)
         guard !resolution.chain.isEmpty else { throw LedgerError.noGenesis }
-        return (MembershipLedger(vaultID: vaultID, owner: owner.bundle, chain: resolution.chain), resolution.report)
+        return (
+            MembershipLedger(
+                vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
+                owedRemovals: resolution.owed),
+            resolution.report
+        )
     }
 
     // MARK: - Ingesting
@@ -108,10 +182,13 @@ public struct MembershipLedger: Sendable {
     public struct IngestReport: Sendable, Hashable {
         public struct Rejection: Sendable, Hashable {
             public enum Reason: Sendable, Hashable {
+                /// Not a membership record. Permanent: the same bytes are never one.
                 case malformed(SharingFormatError)
+                /// Refused by the state before it. Permanent: a record names its predecessor by hash, so the state
+                /// it is checked against never changes.
                 case invalid(MembershipError)
-                /// Its predecessor is neither in the accepted chain nor among the valid candidates. Offer it again
-                /// once the records before it have arrived.
+                /// Its predecessor is not among the valid records held or offered. Not permanent: offer it again
+                /// when more has arrived.
                 case unconnected
             }
             /// Position in the candidates passed to `ingest`.
@@ -121,40 +198,65 @@ public struct MembershipLedger: Sendable {
 
         /// Records newly in the accepted chain, in epoch order.
         public var adopted: [MembershipRecord] = []
-        /// Records that were in the accepted chain and lost a fork to `adopted`. Their effects are undone: whoever
-        /// wrote them proposes again, and a vault key one of them introduced is no longer the vault's (keep it
-        /// until nothing is sealed under it).
+        /// Records that were in the accepted chain and lost a fork to `adopted`. Their effects are undone, and they
+        /// are still held. A removal among them is planned again (`owedRemovals`); a vault key one of them
+        /// introduced is no longer the vault's (keep it until nothing is sealed under it).
         public var superseded: [MembershipRecord] = []
-        /// Valid candidates on a branch that lost. Not an attack by itself: two administrators acted at once.
+        /// Valid candidates on a branch that lost. Not an attack by itself: two administrators acted at once. A
+        /// device's own record can land here on its first ingest; ask `status(of:)` about what it proposed.
         public var outranked: [MembershipRecord] = []
         public var rejected: [Rejection] = []
+        /// How many valid records on losing branches were let go because the ledger holds
+        /// `MembershipLimits.maximumRetainedBranchRecords`. Zero unless someone who is or was an administrator has
+        /// signed that many competing records. Nothing is wrong with the accepted chain; but until this is zero
+        /// again, offer the store's whole listing in each call rather than only what is new.
+        public var forgotten = 0
+        /// Signature checks made on candidates: at most one each.
+        public var signatureChecks = 0
+        /// Steps taken through branches' key histories: at most one per rotation on a candidate's own path.
+        public var keyHistorySteps = 0
 
         public var changedHead: Bool {
             !adopted.isEmpty
         }
     }
 
-    /// Offers records from a store to the ledger. Throws only when there are too many to examine; a bad record is
-    /// reported in `IngestReport.rejected` and changes nothing.
+    /// Offers records from a store to the ledger. A bad record is reported in `IngestReport.rejected` and changes
+    /// nothing; any number of candidates is examined, each at the cost of parsing it and at most one signature check,
+    /// so a flood costs time in proportion to itself and hides nothing (review finding S17).
     ///
-    /// Pass every record under the vault's membership prefix that is not already known, in name order (names sort
-    /// by epoch); a chain longer than `MembershipLimits.maximumCandidates` is fed in batches.
-    public mutating func ingest(_ candidates: [[UInt8]]) throws -> IngestReport {
-        let resolution = try MembershipLedger.resolve(
-            vaultID: vaultID, owner: owner, accepted: chain, candidates: candidates,
-            limit: MembershipLimits.maximumCandidates)
+    /// The result depends only on the valid records held and offered, not on their order or on how they are split
+    /// across calls. Offer whatever the store lists under the vault's membership prefix that the ledger does not
+    /// hold (`holds`), and offer a record reported `unconnected` again later; offering everything every time is
+    /// always right.
+    @discardableResult
+    public mutating func ingest(_ candidates: [[UInt8]]) -> IngestReport {
+        let resolution = MembershipLedger.resolve(
+            vaultID: vaultID, owner: owner, chain: chain, branches: branches, candidates: candidates)
         chain = resolution.chain
+        branches = resolution.branches
+        owedRemovals = resolution.owed
         return resolution.report
     }
 
     private struct Node {
-        let record: MembershipRecord
-        let state: MembershipState
-        let encoded: [UInt8]
+        let link: Link
         let parent: Int?
+        /// Owner-signed records on the path from the genesis to this record, itself included.
+        let ownerRecords: Int
+        /// The nearest record on that path, this one included, that introduced a vault key.
+        let introducer: Int
+        /// Offered in this call rather than held before it.
+        let isNew: Bool
         var children: [Int] = []
-        /// The epoch of the first owner-signed record on the best path from here; `UInt64.max` if there is none.
-        var ownerEpoch = UInt64.max
+        /// The best path through this record: its count of owner-signed records, then its last epoch.
+        var bestOwnerRecords = 0
+        var bestEpoch: UInt64 = 0
+        var isOnChain = false
+        /// The epoch at which this record's path leaves the accepted chain; `nil` if they share no record.
+        var forkEpoch: UInt64?
+        /// This record, or one built on it, is an owed removal.
+        var isProtected = false
     }
 
     private struct Pending {
@@ -164,24 +266,52 @@ public struct MembershipLedger: Sendable {
         let encoded: [UInt8]
     }
 
-    /// The fork rule (the type's documentation says why): builds the tree of valid records from the accepted chain
-    /// and the candidates, and walks it from the genesis choosing, at each fork, the child with the earliest
-    /// owner-signed record below it, then the lowest hash.
-    private static func resolve(
-        vaultID: UUID, owner: PublicKeyBundle, accepted: [Link], candidates: [[UInt8]], limit: Int
-    ) throws -> (chain: [Link], report: IngestReport) {
-        guard candidates.count <= limit else { throw LedgerError.tooManyCandidates(candidates.count) }
-        var report = IngestReport()
+    private struct Resolution {
+        var chain: [Link]
+        var branches: [Link]
+        var owed: [OwedRemoval]
+        var report: IngestReport
+    }
 
+    /// Adds the valid candidates to the tree of records held and applies the fork rule to the result (the type's
+    /// documentation says what the rule is and why). `chain` and `branches` were verified when they were first held
+    /// and are not verified again.
+    private static func resolve(
+        vaultID: UUID, owner: PublicKeyBundle, chain accepted: [Link], branches held: [Link], candidates: [[UInt8]]
+    ) -> Resolution {
+        var report = IngestReport()
         var nodes: [Node] = []
         var indexByHash: [MembershipHash: Int] = [:]
-        for (position, link) in accepted.enumerated() {
+        // A record is always appended after its predecessor, so a parent's index is below its children's.
+        func append(_ link: Link, parent: Int?, isNew: Bool) -> Int {
+            let index = nodes.count
+            let signedByOwner = link.record.signer == owner.accountID ? 1 : 0
+            let introducer: Int
+            if let parent, link.state.keyEpoch != link.state.epoch {
+                introducer = nodes[parent].introducer
+            } else {
+                introducer = index
+            }
             nodes.append(
                 Node(
-                    record: link.record, state: link.state, encoded: link.encoded,
-                    parent: position == 0 ? nil : position - 1))
-            indexByHash[link.state.hash] = position
-            if position > 0 { nodes[position - 1].children.append(position) }
+                    link: link, parent: parent,
+                    ownerRecords: (parent.map { nodes[$0].ownerRecords } ?? 0) + signedByOwner,
+                    introducer: introducer, isNew: isNew))
+            indexByHash[link.state.hash] = index
+            if let parent { nodes[parent].children.append(index) }
+            return index
+        }
+        for (position, link) in accepted.enumerated() {
+            _ = append(link, parent: position == 0 ? nil : position - 1, isNew: false)
+        }
+        for link in held {
+            // `branches` is in epoch order, so a held record's predecessor is already here; one whose predecessor
+            // is not (a second genesis apart) has no place in the tree and is let go.
+            if link.record.previousHash == .none {
+                _ = append(link, parent: nil, isNew: false)
+            } else if let parent = indexByHash[link.record.previousHash] {
+                _ = append(link, parent: parent, isNew: false)
+            }
         }
 
         // Parse. Nothing here costs a signature check. Exact copies are dropped; two candidates with one hash but
@@ -196,6 +326,9 @@ public struct MembershipLedger: Sendable {
             } catch let error as SharingFormatError {
                 report.rejected.append(.init(index: index, reason: .malformed(error)))
                 continue
+            } catch {
+                report.rejected.append(.init(index: index, reason: .malformed(.truncated)))
+                continue
             }
             guard record.vaultID == vaultID else {
                 report.rejected.append(
@@ -203,60 +336,54 @@ public struct MembershipLedger: Sendable {
                 continue
             }
             let hash = record.hash
-            // A copy of a record already accepted, whatever its signature bytes say, is the record already accepted.
+            // A copy of a record already held, whatever its signature bytes say, is the record already held.
             guard indexByHash[hash] == nil, seen.insert(bytes).inserted else { continue }
             pendingByParent[record.previousHash, default: []].append(
                 Pending(index: index, record: record, hash: hash, encoded: bytes))
         }
 
-        // Which nodes introduced each vault key, so that "has this branch used the key before" is a dictionary miss
-        // for every honest record and costs a walk only for an actual attempt at reuse.
-        var introducers: [UUID: [Int]] = [:]
-        for (position, link) in accepted.enumerated() where link.state.keyEpoch == link.state.epoch {
-            introducers[link.state.vaultKeyID, default: []].append(position)
-        }
-        func isAncestor(_ ancestor: Int, of node: Int) -> Bool {
-            let target = nodes[ancestor].state.epoch
-            var cursor: Int? = node
-            while let index = cursor, nodes[index].state.epoch > target {
-                // An accepted node's ancestors are the accepted chain, where position is epoch.
-                cursor = index < accepted.count ? Int(target) : nodes[index].parent
+        // Whether the path to `node` has used `keyID`: a walk over that path's rotations only, however many records
+        // elsewhere in the tree introduced the same ID (review finding S22).
+        var keyHistorySteps = 0
+        func keyUsed(_ keyID: UUID, onPathTo node: Int) -> Bool {
+            var cursor: Int? = nodes[node].introducer
+            while let index = cursor {
+                keyHistorySteps += 1
+                if nodes[index].link.state.vaultKeyID == keyID { return true }
+                cursor = nodes[index].parent.map { nodes[$0].introducer }
             }
-            return cursor == ancestor
-        }
-        func keyUsed(_ keyID: UUID, upTo node: Int) -> Bool {
-            (introducers[keyID] ?? []).contains { isAncestor($0, of: node) }
-        }
-        func append(_ pending: Pending, state: MembershipState, parent: Int?) -> Int {
-            nodes.append(Node(record: pending.record, state: state, encoded: pending.encoded, parent: parent))
-            let index = nodes.count - 1
-            indexByHash[pending.hash] = index
-            if state.keyEpoch == state.epoch { introducers[state.vaultKeyID, default: []].append(index) }
-            if let parent { nodes[parent].children.append(index) }
-            return index
+            return false
         }
 
         // Verify, outwards from what is already verified.
+        var signatureChecks = 0
         var worklist = Array(nodes.indices)
         for pending in pendingByParent.removeValue(forKey: .none) ?? [] where indexByHash[pending.hash] == nil {
             do {
                 let state = try MembershipRules.genesisState(
-                    pending.record, hash: pending.hash, vaultID: vaultID, owner: owner)
-                worklist.append(append(pending, state: state, parent: nil))
+                    pending.record, hash: pending.hash, vaultID: vaultID, owner: owner,
+                    signatureChecks: &signatureChecks)
+                let link = Link(record: pending.record, state: state, encoded: pending.encoded)
+                worklist.append(append(link, parent: nil, isNew: true))
             } catch let error as MembershipError {
                 report.rejected.append(.init(index: pending.index, reason: .invalid(error)))
+            } catch {
+                report.rejected.append(.init(index: pending.index, reason: .invalid(.signatureInvalid)))
             }
         }
         while let parent = worklist.popLast() {
-            for pending in pendingByParent.removeValue(forKey: nodes[parent].state.hash) ?? []
+            for pending in pendingByParent.removeValue(forKey: nodes[parent].link.state.hash) ?? []
             where indexByHash[pending.hash] == nil {
                 do {
                     let state = try MembershipRules.nextState(
-                        pending.record, hash: pending.hash, after: nodes[parent].state,
-                        keyUsedBefore: { keyUsed($0, upTo: parent) })
-                    worklist.append(append(pending, state: state, parent: parent))
+                        pending.record, hash: pending.hash, after: nodes[parent].link.state,
+                        keyUsedBefore: { keyUsed($0, onPathTo: parent) }, signatureChecks: &signatureChecks)
+                    let link = Link(record: pending.record, state: state, encoded: pending.encoded)
+                    worklist.append(append(link, parent: parent, isNew: true))
                 } catch let error as MembershipError {
                     report.rejected.append(.init(index: pending.index, reason: .invalid(error)))
+                } catch {
+                    report.rejected.append(.init(index: pending.index, reason: .invalid(.signatureInvalid)))
                 }
             }
         }
@@ -264,48 +391,149 @@ public struct MembershipLedger: Sendable {
             report.rejected.append(.init(index: pending.index, reason: .unconnected))
         }
         report.rejected.sort { $0.index < $1.index }
+        report.signatureChecks = signatureChecks
+        report.keyHistorySteps = keyHistorySteps
+        guard !nodes.isEmpty else { return Resolution(chain: [], branches: [], owed: [], report: report) }
 
-        // Rank: children before parents.
-        for index in nodes.indices.sorted(by: { nodes[$0].state.epoch > nodes[$1].state.epoch }) {
-            if nodes[index].record.signer == owner.accountID {
-                nodes[index].ownerEpoch = nodes[index].state.epoch
-            } else {
-                nodes[index].ownerEpoch = nodes[index].children.map { nodes[$0].ownerEpoch }.min() ?? .max
+        // Rank: children before parents, which is descending index.
+        for index in nodes.indices.reversed() {
+            var best = (nodes[index].ownerRecords, nodes[index].link.state.epoch)
+            for child in nodes[index].children {
+                let through = (nodes[child].bestOwnerRecords, nodes[child].bestEpoch)
+                if through > best { best = through }
             }
+            nodes[index].bestOwnerRecords = best.0
+            nodes[index].bestEpoch = best.1
         }
-        func best(of indices: [Int]) -> Int? {
-            indices.min { a, b in
-                (nodes[a].ownerEpoch, nodes[a].state.hash) < (nodes[b].ownerEpoch, nodes[b].state.hash)
-            }
+        func preferred(_ a: Int, _ b: Int) -> Bool {
+            let left = (nodes[a].bestOwnerRecords, nodes[a].bestEpoch)
+            let right = (nodes[b].bestOwnerRecords, nodes[b].bestEpoch)
+            return left == right ? nodes[a].link.state.hash < nodes[b].link.state.hash : left > right
         }
 
         // Walk.
         var path: [Int] = []
-        var next = best(of: nodes.indices.filter { nodes[$0].parent == nil })
+        var next = nodes.indices.filter { nodes[$0].parent == nil }.min(by: preferred)
         while let index = next {
             path.append(index)
-            next = best(of: nodes[index].children)
+            nodes[index].isOnChain = true
+            next = nodes[index].children.min(by: preferred)
         }
-        let chain = path.map { Link(record: nodes[$0].record, state: nodes[$0].state, encoded: nodes[$0].encoded) }
+        let chain = path.map { nodes[$0].link }
+        // `path` is never empty here, and its last element is the head.
+        let head = nodes[path[path.count - 1]].link.state
+        for index in nodes.indices {
+            nodes[index].forkEpoch =
+                nodes[index].isOnChain
+                ? nodes[index].link.state.epoch : nodes[index].parent.flatMap { nodes[$0].forkEpoch }
+        }
 
-        let chosen = Set(path)
+        // Removal wins: which records on losing branches still have to happen. Not one that its own branch went
+        // on to take back by adding the member again: what that branch last meant is that they are a member.
+        var carriers: [Int: OwedRemoval] = [:]
+        for index in nodes.indices where !nodes[index].isOnChain {
+            guard let owed = owedRemoval(of: nodes[index], parent: nodes[index].parent.map { nodes[$0] }, in: head)
+            else { continue }
+            var takenBack = false
+            var cursor = nodes[index].children.min(by: preferred)
+            while let below = cursor, !takenBack {
+                if case .addMember(let added, _) = nodes[below].link.record.operation, added == owed.accountID {
+                    takenBack = true
+                }
+                cursor = nodes[below].children.min(by: preferred)
+            }
+            if !takenBack { carriers[index] = owed }
+        }
+        for index in nodes.indices.reversed() {
+            nodes[index].isProtected =
+                carriers[index] != nil || nodes[index].children.contains { nodes[$0].isProtected }
+        }
+
+        // Keep the losing branches, best-ranked first when there are too many. The order puts every record after
+        // its predecessor, so what is kept is still a tree.
+        var side = nodes.indices.filter { !nodes[$0].isOnChain }
+        if side.count > MembershipLimits.maximumRetainedBranchRecords {
+            side.sort { a, b in
+                let left = nodes[a]
+                let right = nodes[b]
+                if left.isProtected != right.isProtected { return left.isProtected }
+                if left.bestOwnerRecords != right.bestOwnerRecords {
+                    return left.bestOwnerRecords > right.bestOwnerRecords
+                }
+                if left.link.state.epoch != right.link.state.epoch {
+                    return left.link.state.epoch < right.link.state.epoch
+                }
+                return left.link.state.hash < right.link.state.hash
+            }
+            report.forgotten = side.count - MembershipLimits.maximumRetainedBranchRecords
+            side.removeLast(report.forgotten)
+        }
+        let branches = side.map { nodes[$0].link }.sorted {
+            ($0.state.epoch, $0.state.hash) < ($1.state.epoch, $1.state.hash)
+        }
+        var owedByAccount: [UUID: OwedRemoval] = [:]
+        for index in side.sorted(by: {
+            (nodes[$0].link.state.epoch, nodes[$0].link.state.hash)
+                < (nodes[$1].link.state.epoch, nodes[$1].link.state.hash)
+        }) {
+            guard let owed = carriers[index] else { continue }
+            if let existing = owedByAccount[owed.accountID] {
+                // The member's own request says more than an administrator's removal.
+                if case .removal = existing.reason, case .departure = owed.reason {
+                    owedByAccount[owed.accountID] = owed
+                }
+            } else {
+                owedByAccount[owed.accountID] = owed
+            }
+        }
+        let owed = owedByAccount.values.sorted { $0.accountID.sharingPrecedes($1.accountID) }
+
         var shared = 0
         while shared < accepted.count, shared < chain.count, accepted[shared].state.hash == chain[shared].state.hash {
             shared += 1
         }
         report.adopted = chain[shared...].map(\.record)
         report.superseded = accepted[shared...].map(\.record)
-        report.outranked = nodes.indices
-            .filter { $0 >= accepted.count && !chosen.contains($0) }
-            .map { nodes[$0].record }
+        report.outranked = nodes.filter { $0.isNew && !$0.isOnChain }.map(\.link.record)
             .sorted { ($0.epoch, $0.hash) < ($1.epoch, $1.hash) }
-        return (chain, report)
+        return Resolution(chain: chain, branches: branches, owed: owed, report: report)
+    }
+
+    /// Whether `node`, a record on a losing branch, is a removal that still has to happen in `head`: it removes a
+    /// member who is still in `head` in the same stint of membership (added by a record both paths share), and for a
+    /// removal by an administrator, its signer may still remove that member in `head`. A departure needs no such
+    /// standing: the member's own signature asked for it.
+    private static func owedRemoval(of node: Node, parent: Node?, in head: MembershipState) -> OwedRemoval? {
+        guard !head.isDeleted, let parent, let forkEpoch = node.forkEpoch else { return nil }
+        let record = node.link.record
+        func sameStint(_ accountID: UUID) -> Member? {
+            guard let now = head.member(accountID), let then = parent.link.state.member(accountID),
+                now.since == then.since, now.since <= forkEpoch
+            else { return nil }
+            return now
+        }
+        switch record.operation {
+        case .removeMember(let accountID):
+            guard sameStint(accountID) != nil, let signer = head.member(record.signer),
+                signer.role.isAdministrator,
+                (try? MembershipRules.authorise(record.operation, by: signer, in: head)) != nil
+            else { return nil }
+            return OwedRemoval(accountID: accountID, reason: .removal(accountID), record: record)
+        case .memberLeft(let accountID, let requestSignature):
+            guard let member = sameStint(accountID) else { return nil }
+            let request = LeaveRequest(
+                vaultID: head.vaultID, accountID: accountID, memberSince: member.since,
+                signature: requestSignature)
+            return OwedRemoval(accountID: accountID, reason: .departure(request), record: record)
+        case .createVault, .addMember, .changeRole, .rotateKey, .deleteVault:
+            return nil
+        }
     }
 
     // MARK: - Persistence
 
     static let checkpointMagic: [UInt8] = Array("WWML".utf8)
-    static let checkpointVersion: UInt8 = 1
+    static let checkpointVersion: UInt8 = 2
 
     private static func checkpointContent(
         account: UUID, vaultID: UUID, owner: PublicKeyBundle, epoch: UInt64, hash: MembershipHash
@@ -315,22 +543,25 @@ public struct MembershipLedger: Sendable {
     }
 
     /// The ledger as one blob for local storage: a checkpoint (this account, the vault, the owner's bundle, the head)
-    /// signed by this account's key, then the accepted records.
+    /// signed by this account's key, then the accepted records, then the records held on losing branches.
     ///
     /// ```
-    /// magic "WWML"  formatVersion u8 = 1  account 16  vaultID 16  SHA-256(owner's account ID and keys) 32
+    /// magic "WWML"  formatVersion u8 = 2  account 16  vaultID 16  SHA-256(owner's account ID and keys) 32
     /// headEpoch u64  headHash 32  signature 64
-    /// recordCount u32, then per record: length u16, record
+    /// recordCount u32, then per record: length u16, record        (the accepted chain)
+    /// branchCount u32, then per record: length u16, record        (losing branches)
     /// ```
     ///
-    /// Save it after every `ingest` that changed the head.
+    /// Save it after every `ingest` that adopted, outranked or forgot anything.
     public func persisted(signedBy keyset: Keyset) throws -> [UInt8] {
         let content = MembershipLedger.checkpointContent(
             account: keyset.accountID, vaultID: vaultID, owner: owner, epoch: state.epoch, hash: state.hash)
         var out = content + (try keyset.sign(content, domain: .membership))
-        out += SharingBytes.littleEndian(UInt32(chain.count))
-        for link in chain {
-            out += SharingBytes.littleEndian(UInt16(link.encoded.count)) + link.encoded
+        for links in [chain, branches] {
+            out += SharingBytes.littleEndian(UInt32(links.count))
+            for link in links {
+                out += SharingBytes.littleEndian(UInt16(link.encoded.count)) + link.encoded
+            }
         }
         return out
     }
@@ -339,10 +570,10 @@ public struct MembershipLedger: Sendable {
     ///
     /// Local storage is not trusted either (A8, with the file): the checkpoint must carry this account's signature
     /// and name this vault and this owner, every record is verified again from the genesis exactly as if a store had
-    /// offered it, and the result must reach the head the checkpoint names. A blob that was truncated, had records
-    /// replaced, or was planted whole fails closed (`LedgerError`). What the signature cannot detect is an older blob
-    /// of this device's own put back in place of a newer one; the next `ingest` from the transport moves it forward
-    /// again.
+    /// offered it, every record must be valid, and the fork rule applied to them must reach the head the checkpoint
+    /// names. A blob that was truncated, had records replaced or added, or was planted whole fails closed
+    /// (`LedgerError`). What the signature cannot detect is an older blob of this device's own put back in place of a
+    /// newer one; the next `ingest` from the transport moves it forward again.
     public static func restore(
         _ bytes: [UInt8], vaultID: UUID, owner: VerifiedContact, account: PublicKeyBundle
     ) throws -> MembershipLedger {
@@ -364,24 +595,26 @@ public struct MembershipLedger: Sendable {
                 != nil
         else { throw LedgerError.checkpointInvalid }
 
-        let count = Int(try reader.uint32())
-        guard count <= Int(MembershipLimits.maximumEpoch) + 1, count <= reader.remaining / 2 else {
-            throw SharingFormatError.countTooLarge
-        }
         var records: [[UInt8]] = []
-        records.reserveCapacity(count)
-        for _ in 0..<count {
-            let length = Int(try reader.uint16())
-            guard length <= MembershipRecord.maximumLength else { throw SharingFormatError.tooLarge(length) }
-            records.append(try reader.read(length))
+        for limit in [Int(MembershipLimits.maximumEpoch) + 1, MembershipLimits.maximumRetainedBranchRecords] {
+            let count = Int(try reader.uint32())
+            guard count <= limit, count <= reader.remaining / 2 else { throw SharingFormatError.countTooLarge }
+            records.reserveCapacity(records.count + count)
+            for _ in 0..<count {
+                let length = Int(try reader.uint16())
+                guard length <= MembershipRecord.maximumLength else { throw SharingFormatError.tooLarge(length) }
+                records.append(try reader.read(length))
+            }
         }
         try reader.finish()
 
-        let resolution = try resolve(
-            vaultID: vaultID, owner: owner.bundle, accepted: [], candidates: records, limit: records.count)
-        guard epoch < UInt64(resolution.chain.count), resolution.chain[Int(epoch)].state.hash == hash else {
+        let resolution = resolve(vaultID: vaultID, owner: owner.bundle, chain: [], branches: [], candidates: records)
+        guard resolution.report.rejected.isEmpty else { throw LedgerError.savedRecordInvalid }
+        guard UInt64(resolution.chain.count) == epoch + 1, resolution.chain[Int(epoch)].state.hash == hash else {
             throw LedgerError.rolledBack(expectedEpoch: epoch)
         }
-        return MembershipLedger(vaultID: vaultID, owner: owner.bundle, chain: resolution.chain)
+        return MembershipLedger(
+            vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
+            owedRemovals: resolution.owed)
     }
 }

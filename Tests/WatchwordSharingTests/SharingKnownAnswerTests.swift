@@ -108,9 +108,11 @@ struct SharingKnownAnswerTests {
             #expect(try MembershipRecord.parse(bytes).encoded() == bytes)
         }
         let departure = try MembershipRecord.parse([UInt8](hex: Self.departure))
+        // The object's name ends in SHA-256 of the whole object (hashlib, over the vector above).
         #expect(
             SharingObjectLocation.membership(departure).name
-                == "sharing/11111111-2222-4333-8444-555555555555/membership/00000000000000000002-" + Self.hashes[2])
+                == "sharing/11111111-2222-4333-8444-555555555555/membership/00000000000000000002-" + Self.hashes[2]
+                + "-11ce53bb0384baf8c1fe63f00ef3304d1f28e730e689492dc04c00418b64055d")
     }
 
     @Test("a published bundle and a leave request written independently parse, validate and re-encode")

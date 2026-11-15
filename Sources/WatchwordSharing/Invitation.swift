@@ -38,7 +38,10 @@ public struct Invitation: Sendable, Hashable {
 /// What issuing an invitation produces: the objects to publish and the invitation to send.
 public struct InvitationPackage: Sendable, Hashable {
     public let invitation: Invitation
-    /// The membership record that adds the invitee.
+    /// The membership record that adds the invitee. Keep it until `MembershipLedger.status(of:)` says it was
+    /// adopted; if it is superseded, issue the invitation again on the new head.
+    public let proposal: MembershipRecord
+    /// That record as an object to publish.
     public let record: SharingObject
     /// The current vault key wrapped to the invitee.
     public let grant: SharingObject
@@ -120,7 +123,7 @@ public struct OutgoingInvitation: Sendable {
             let grant = try VaultKeyGrantRecord(VaultKeyGrant.seal(vaultKey, to: contact.bundle, from: keyset))
             let package = InvitationPackage(
                 invitation: Invitation(vaultID: vaultID, ownerAccountID: ledger.owner.accountID),
-                record: SharingObject(record), grant: SharingObject(grant))
+                proposal: record, record: SharingObject(record), grant: SharingObject(grant))
             state = .issued(package)
             return package
         }
@@ -200,16 +203,34 @@ public struct IncomingInvitation: Sendable {
     ///   - grants: every object under `SharingObjectLocation.grantPrefix` for the chain's current key and this
     ///     account. Since the current key is known only once the chain is verified, an integrator may simply pass
     ///     everything under the vault's `grant/` prefix; what does not apply is skipped.
+    ///   - existing: the ledger this device holds for the invitation's vault ID, or `nil` only if it has never held
+    ///     one. A member who was removed and is invited back still has the ledger of their earlier time (keep it:
+    ///     §8.8), and the invitation continues that ledger rather than starting a new one. Their earlier membership,
+    ///     and the grant of the old key to them, are a valid prefix of the chain; a store that hid everything from
+    ///     their removal onwards would otherwise have them "join" a state older than one their own device had
+    ///     verified, in which members removed since are still listed and the old key is current (review finding
+    ///     S26). Continued, the ledger stays at the newest head it knows, and the invitation is accepted only once
+    ///     the record that adds this account again is in it.
     public mutating func accept(
-        membership candidates: [[UInt8]], grants: [(name: String, contents: [UInt8])], as keyset: Keyset
+        membership candidates: [[UInt8]], grants: [(name: String, contents: [UInt8])], as keyset: Keyset,
+        continuing existing: MembershipLedger?
     ) throws -> JoinedVault {
         switch state {
         case .awaitingVerification: throw SharingError.fingerprintNotVerified
         case .accepted: throw SharingError.invitationAlreadyCompleted
         case .verified(let owner):
-            let ledger = try MembershipLedger.join(
-                vaultID: invitation.vaultID, owner: owner, candidates: candidates
-            ).ledger
+            var ledger: MembershipLedger
+            if let existing {
+                guard existing.vaultID == invitation.vaultID, existing.owner.hasSameKeys(as: owner.bundle) else {
+                    throw SharingError.vaultOwnerConflict(vaultID: invitation.vaultID)
+                }
+                ledger = existing
+                ledger.ingest(candidates)
+            } else {
+                ledger = try MembershipLedger.join(
+                    vaultID: invitation.vaultID, owner: owner, candidates: candidates
+                ).ledger
+            }
             let current = ledger.state
             guard !current.isDeleted else { throw SharingError.vaultDeleted }
             guard let me = current.member(keyset.accountID) else {

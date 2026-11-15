@@ -105,11 +105,19 @@ extension MembershipLedger {
     }
 
     /// Wraps `vaultKey` to a member, as the account entitled to (`grantSender`). The recipient's key is the one the
-    /// verified chain lists, which an administrator put there only after confirming its fingerprint.
-    public func makeGrant(of vaultKey: VaultKey, to recipient: UUID, from keyset: Keyset) throws
-        -> VaultKeyGrantRecord
-    {
+    /// verified chain lists, which an administrator put there only after confirming its fingerprint; `memberKeys`
+    /// (`checkMemberKeys`, on the current head) is this device's own comparison of that key with its verified
+    /// contacts, and a recipient whose listed keys are not the pinned ones is refused (`keySubstituted`).
+    public func makeGrant(
+        of vaultKey: VaultKey, to recipient: UUID, memberKeys: MemberKeyCheck, from keyset: Keyset
+    ) throws -> VaultKeyGrantRecord {
         guard vaultKey.vaultID == vaultID else { throw SharingError.grantMisfiled }
+        guard memberKeys.vaultID == vaultID, memberKeys.head == state.hash else {
+            throw SharingError.memberKeysNotChecked
+        }
+        guard !memberKeys.substituted.contains(recipient) else {
+            throw SharingError.keySubstituted(accountID: recipient)
+        }
         let sender = try grantSender(forKey: vaultKey.key.keyID, to: recipient)
         guard sender.accountID == keyset.accountID else { throw SharingError.notPermitted }
         guard
@@ -141,22 +149,19 @@ extension MembershipLedger {
     /// Opens the first acceptable grant of `keyID` among objects listed under
     /// `SharingObjectLocation.grantPrefix(vaultID:keyID:recipient:)`. Objects that are not acceptable are skipped:
     /// anyone with write access to the store can put junk under that prefix, and it must not hide the real grant.
+    /// So every object is looked at, names first, and there is no bound on how many: one filed for this key and this
+    /// member under its own digest costs a signature check, and anything else costs nothing (S10, S24).
     public func openGrant(of keyID: UUID, from objects: [(name: String, contents: [UInt8])], as keyset: Keyset)
         throws -> VaultKey
     {
         // Establishes that someone is entitled at all, so the caller learns why nothing can match.
         _ = try grantSender(forKey: keyID, to: keyset.accountID)
-        // Names first, which cost nothing, so that a flood of objects for other keys or other members cannot crowd
-        // the real grant out of the ones examined.
-        let addressed = objects.lazy.compactMap { object -> (SharingObjectLocation, [UInt8])? in
+        for object in objects {
             guard let location = SharingObjectLocation(name: object.name), location.vaultID == vaultID,
                 case .grant(let found, let recipient, _) = location.kind, found == keyID,
-                recipient == keyset.accountID
-            else { return nil }
-            return (location, object.contents)
-        }
-        for (location, contents) in addressed.prefix(MembershipLimits.maximumCandidates) {
-            if let key = try? openGrant(contents, at: location, as: keyset) { return key }
+                recipient == keyset.accountID, object.contents.count == KeyGrantCodec.encodedLength
+            else { continue }
+            if let key = try? openGrant(object.contents, at: location, as: keyset) { return key }
         }
         throw SharingError.grantNotFound
     }

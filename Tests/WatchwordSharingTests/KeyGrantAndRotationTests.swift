@@ -176,14 +176,23 @@ struct KeyGrantAndRotationTests {
         #expect(throws: SharingError.leaveRequestInvalid, "signed by someone else") {
             try forged.validate(against: household.state)
         }
-        #expect(household.ledger.pendingLeaveRequests(among: [bytes, bytes, forged.encoded(), [1, 2]]) == [request])
+        let listed = [request, request, forged].map { (name: SharingObject($0).name, contents: $0.encoded()) }
+        #expect(
+            household.ledger.pendingLeaveRequests(among: listed + [(name: listed[0].name, contents: [1, 2])])
+                == [request])
+        // Found only where it belongs: under the vault's leave prefix, the member's account and its own digest.
+        let elsewhere = SharingObject(forged).name
+        let wrongDigest = String(listed[0].name.dropLast(1)) + (listed[0].name.hasSuffix("0") ? "1" : "0")
+        for name in [elsewhere, wrongDigest, "leave/\(writer.accountID.uuidString)/x", ""] {
+            #expect(household.ledger.pendingLeaveRequests(among: [(name: name, contents: bytes)]).isEmpty)
+        }
 
         try household.rotate(.departure(request), by: household.administrator)
         #expect(household.state.member(writer.accountID) == nil)
         #expect(
             household.ledger.chain.last?.record.operation
                 == .memberLeft(writer.accountID, requestSignature: request.signature))
-        #expect(household.ledger.pendingLeaveRequests(among: [bytes]).isEmpty)
+        #expect(household.ledger.pendingLeaveRequests(among: [request]).isEmpty)
         #expect(throws: SharingError.nothingToDo) {
             _ = try RotationPlanner.plan(
                 .departure(request), ledger: household.ledger, signedBy: household.owner.keyset)
@@ -218,9 +227,11 @@ struct KeyGrantAndRotationTests {
             using: &generator)
         #expect(plan.baseEpoch == 3 && plan.baseHash == household.state.hash)
         #expect(plan.grants.count == 3)
+        let reader = household.reader.accountID
         #expect(
-            plan.steps == [.revokeTransportAccess(household.reader.accountID)] + plan.grants.map(RotationStep.publish)
-                + [.publish(plan.record), .resealRecords])
+            plan.steps(in: household.ledger)
+                == [.revokeTransportAccess(reader), .mergeOutstandingWrites(reader)]
+                + plan.grants.map(RotationStep.publish) + [.publish(plan.record), .resealRecords])
         let record = try MembershipRecord.parse(plan.record.contents)
         #expect(record.operation == .removeMember(household.reader.accountID))
         #expect(record.vaultKeyID == plan.newKeyID && record.hash == plan.recordHash)
@@ -229,8 +240,19 @@ struct KeyGrantAndRotationTests {
         let routine = try RotationPlanner.plan(
             .routine, ledger: household.ledger, signedBy: household.administrator.keyset, using: &generator)
         #expect(routine.grants.count == 4)
-        #expect(routine.steps.first == .publish(routine.grants[0]), "nobody to take off the share")
+        #expect(
+            routine.steps(in: household.ledger).first == .publish(routine.grants[0]), "nobody to take off the share")
         #expect(RotationReason.routine.departingAccount == nil)
+
+        // What is left to do is read from the ledger, so a plan carried out again does only what is still right.
+        var after = household
+        try after.adopt(plan.record.contents)
+        #expect(plan.steps(in: after.ledger) == [.revokeTransportAccess(reader), .resealRecords])
+        #expect(routine.steps(in: after.ledger).isEmpty, "superseded: nothing of it is published")
+        try await after.add(after.reader, as: .readOnly, by: after.owner)
+        #expect(
+            plan.steps(in: after.ledger) == [.resealRecords],
+            "a member invited back since is not taken off the share by an old plan")
     }
 
     @Test("a plan survives being written to disk, and a plan altered there is refused")
@@ -242,18 +264,32 @@ struct KeyGrantAndRotationTests {
             let plan = try RotationPlanner.plan(
                 reason, ledger: household.ledger, signedBy: household.owner.keyset, using: &generator)
             let bytes = plan.encoded()
-            #expect(try RotationPlan.parse(bytes) == plan)
+            let me = household.owner.bundle
+            #expect(bytes.count <= RotationPlan.maximumLength)
+            #expect(try RotationPlan.parse(bytes, account: me) == plan)
+            #expect(try RotationPlan.parse(bytes, account: me).reason == reason, "read back from the record")
             for length in stride(from: 0, to: bytes.count, by: 17) {
                 #expect(throws: SharingFormatError.self, "length \(length)") {
-                    _ = try RotationPlan.parse(Array(bytes[0..<length]))
+                    _ = try RotationPlan.parse(Array(bytes[0..<length]), account: me)
                 }
             }
-            #expect(throws: SharingFormatError.self) { _ = try RotationPlan.parse(bytes + [0]) }
-            for offset in [5, 21, 29, 61] {
+            #expect(throws: SharingFormatError.self) { _ = try RotationPlan.parse(bytes + [0], account: me) }
+            for offset in [21, 37, 45, 77] {
                 var altered = bytes
                 altered[offset] ^= 1
                 #expect(throws: SharingFormatError.self, "vault, epoch, hash or key at \(offset)") {
-                    _ = try RotationPlan.parse(altered)
+                    _ = try RotationPlan.parse(altered, account: me)
+                }
+            }
+            // Signed by the account that made it: nobody else's plan is this account's, and no byte of it changes.
+            #expect(throws: SharingError.savedPlanInvalid) {
+                _ = try RotationPlan.parse(bytes, account: household.administrator.bundle)
+            }
+            for offset in stride(from: 0, to: bytes.count, by: 7) {
+                var altered = bytes
+                altered[offset] ^= 0x40
+                #expect(throws: (any Error).self, "byte \(offset)") {
+                    _ = try RotationPlan.parse(altered, account: me)
                 }
             }
         }
@@ -267,8 +303,9 @@ struct KeyGrantAndRotationTests {
         let plan = try RotationPlanner.plan(
             .removal(household.reader.accountID), ledger: household.ledger, signedBy: household.owner.keyset,
             using: &generator)
-        let a = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 4)
-        let b = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1)
+        let author = household.owner.accountID
+        let a = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 4, author: author)
+        let b = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1, author: author)
         #expect(plan.status(in: household.ledger, inventory: [a, b]) == .awaitingPublication)
         #expect(household.ledger.recordsToReseal(in: [a, b]).isEmpty, "nothing to re-seal before the key changes")
 
@@ -279,10 +316,54 @@ struct KeyGrantAndRotationTests {
             household.ledger.recordsToReseal(in: [a, b]) == household.ledger.recordsToReseal(in: [b, a]),
             "a stable order, so an interrupted pass resumes")
 
-        let resealed = SealedRecordReference(recordID: a.recordID, kind: .item, keyID: plan.newKeyID, version: 5)
+        let resealed = SealedRecordReference(
+            recordID: a.recordID, kind: .item, keyID: plan.newKeyID, version: 5, author: author)
         #expect(plan.status(in: household.ledger, inventory: [resealed, b]) == .resealing(remaining: 1))
         #expect(plan.status(in: household.ledger, inventory: [resealed]) == .complete)
         #expect(plan.status(in: household.ledger, inventory: []) == .complete)
+    }
+
+    @Test("records last written by an account that may no longer write are listed for sealing again by one who may")
+    func resealAfterLosingWritePermission() async throws {
+        var household = try await SharingHousehold.make()
+        let key = household.state.vaultKeyID
+        func reference(by author: SharingParty, under keyID: UUID) -> SealedRecordReference {
+            SealedRecordReference(recordID: UUID(), kind: .item, keyID: keyID, version: 1, author: author.accountID)
+        }
+        let owners = reference(by: household.owner, under: key)
+        let writers = reference(by: household.writer, under: key)
+        let admins = reference(by: household.administrator, under: key)
+        #expect(household.ledger.recordsToReseal(in: [owners, writers, admins]).isEmpty)
+
+        // Made read-only: nothing rotates, and what the member wrote is published again by someone who may write.
+        try household.adopt(
+            household.ledger.proposeRoleChange(
+                of: household.writer.accountID, to: .readOnly, signedBy: household.administrator.keyset
+            ).encoded())
+        #expect(household.ledger.recordsToReseal(in: [owners, writers, admins]) == [writers])
+        #expect(
+            household.ledger.pendingRotation(
+                plan: nil, leaveRequests: [], inventory: [owners, writers, admins], heldKeyIDs: [key])
+                == [.resealing(remaining: 1)])
+        // Read-write again: their own version stands.
+        try household.adopt(
+            household.ledger.proposeRoleChange(
+                of: household.writer.accountID, to: .readWrite, signedBy: household.administrator.keyset
+            ).encoded())
+        #expect(household.ledger.recordsToReseal(in: [owners, writers, admins]).isEmpty)
+
+        // Removed: everything is under an earlier key anyway; afterwards, a version of theirs under the new key
+        // (which they never held, so it is not theirs) and one by a stranger are listed as well.
+        let plan = try household.rotate(.removal(household.administrator.accountID), by: household.owner)
+        #expect(Set(household.ledger.recordsToReseal(in: [owners, writers, admins])) == [owners, writers, admins])
+        let current = reference(by: household.owner, under: plan.newKeyID)
+        let claimed = reference(by: household.administrator, under: plan.newKeyID)
+        let strangers = reference(by: household.outsider, under: plan.newKeyID)
+        #expect(Set(household.ledger.recordsToReseal(in: [current, claimed, strangers])) == [claimed, strangers])
+
+        // A deleted vault takes no writes, so nothing is listed.
+        try household.adopt(household.ledger.proposeDeletion(signedBy: household.owner.keyset).encoded())
+        #expect(household.ledger.recordsToReseal(in: [owners, claimed]).isEmpty)
     }
 
     @Test("a plan that lost its place in the chain is superseded, and planning again knows when nothing is left to do")
@@ -296,11 +377,11 @@ struct KeyGrantAndRotationTests {
             .removal(reader), ledger: household.ledger, signedBy: household.owner.keyset, using: &generator)
 
         var ledger = household.ledger
-        _ = try ledger.ingest([admins.record.contents])
+        ledger.ingest([admins.record.contents])
         #expect(admins.status(in: ledger, inventory: []) == .complete)
         #expect(owners.status(in: ledger, inventory: []) == .superseded, "someone else's record is at that epoch")
 
-        let report = try ledger.ingest([owners.record.contents])
+        let report = ledger.ingest([owners.record.contents])
         #expect(report.superseded.map(\.hash) == [admins.recordHash], "the owner's record outranks it")
         #expect(admins.status(in: ledger, inventory: []) == .superseded)
         #expect(owners.status(in: ledger, inventory: []) == .complete)
@@ -315,7 +396,9 @@ struct KeyGrantAndRotationTests {
     func pendingRotation() async throws {
         var household = try await SharingHousehold.make()
         let oldKey = household.state.vaultKeyID
-        let record = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1)
+        let author = household.owner.accountID
+        let record = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1, author: author)
+        let listed = { (request: LeaveRequest) in [(name: SharingObject(request).name, contents: request.encoded())] }
         #expect(
             household.ledger.pendingRotation(plan: nil, leaveRequests: [], inventory: [record], heldKeyIDs: [oldKey])
                 .isEmpty)
@@ -323,7 +406,7 @@ struct KeyGrantAndRotationTests {
         let request = try LeaveRequest.make(leaving: household.state, as: household.writer.keyset)
         #expect(
             household.ledger.pendingRotation(
-                plan: nil, leaveRequests: [request.encoded()], inventory: [record], heldKeyIDs: [oldKey])
+                plan: nil, leaveRequests: listed(request), inventory: [record], heldKeyIDs: [oldKey])
                 == [.departureRequested(household.writer.accountID)])
 
         var generator = SeededGenerator(seed: 9)
@@ -331,19 +414,20 @@ struct KeyGrantAndRotationTests {
             .departure(request), ledger: household.ledger, signedBy: household.owner.keyset, using: &generator)
         #expect(
             household.ledger.pendingRotation(
-                plan: plan, leaveRequests: [request.encoded()], inventory: [record], heldKeyIDs: [oldKey])
+                plan: plan, leaveRequests: listed(request), inventory: [record], heldKeyIDs: [oldKey])
                 == [.departureRequested(household.writer.accountID), .awaitingPublication(plan.reason)])
 
         try household.adopt(plan.record.contents)
         #expect(
             household.ledger.pendingRotation(
-                plan: plan, leaveRequests: [request.encoded()], inventory: [record], heldKeyIDs: [oldKey])
+                plan: plan, leaveRequests: listed(request), inventory: [record], heldKeyIDs: [oldKey])
                 == [.awaitingKey(plan.newKeyID), .resealing(remaining: 1)])
         #expect(
             household.ledger.pendingRotation(
                 plan: plan, leaveRequests: [],
                 inventory: [
-                    SealedRecordReference(recordID: record.recordID, kind: .item, keyID: plan.newKeyID, version: 2)
+                    SealedRecordReference(
+                        recordID: record.recordID, kind: .item, keyID: plan.newKeyID, version: 2, author: author)
                 ],
                 heldKeyIDs: [oldKey, plan.newKeyID]
             ).isEmpty)

@@ -1,7 +1,36 @@
 import Foundation
 import WatchwordCrypto
 
+/// Where a record this device proposed stands in its ledger (docs/02-architecture.md §8.3).
+public enum ProposalStatus: Sendable, Hashable {
+    /// Not in the accepted chain, and nothing else is at its epoch: publish it (again) and ingest.
+    case awaitingPublication
+    /// In the accepted chain. A later reorganisation can still displace it (`IngestReport.superseded`).
+    case adopted
+    /// Another record is at its epoch, or the chain beneath it changed. The record is dead: if the change is still
+    /// wanted, propose it again on the new head (the proposing function throws if it has already happened).
+    case superseded
+}
+
 extension MembershipLedger {
+    /// Where `proposal` stands. Ask after every `ingest` about each record this device has proposed and not yet
+    /// seen adopted, and keep those records (`MembershipRecord.encoded()`) across restarts until they are adopted or
+    /// deliberately given up.
+    ///
+    /// A device's own record is not in its chain until it has ingested it, and if a competing record reached the
+    /// store first the device's record is merely `outranked` in that first report; an integrator that watched only
+    /// `IngestReport.superseded` would drop an invitation, a role change or a deletion without a word (review
+    /// finding S27). And a record must never be published once it is `superseded`: `propose…` always builds on the
+    /// current head, so ingest first, propose, check the status is `awaitingPublication`, then publish.
+    public func status(of proposal: MembershipRecord) -> ProposalStatus {
+        guard proposal.vaultID == vaultID else { return .superseded }
+        if let accepted = state(atEpoch: proposal.epoch) {
+            return accepted.hash == proposal.hash ? .adopted : .superseded
+        }
+        return proposal.epoch == state.epoch + 1 && proposal.previousHash == state.hash
+            ? .awaitingPublication : .superseded
+    }
+
     /// Signs the record that adds a verified contact to the vault (PRD F4.1). `contact` is a `VerifiedContact`, so the
     /// fingerprint comparison of F4.2 cannot be skipped. Only the owner may add an administrator.
     ///

@@ -77,13 +77,13 @@ public enum MembershipError: Error, Hashable, Sendable {
 public enum LedgerError: Error, Hashable, Sendable {
     /// No valid genesis for the vault among the records offered.
     case noGenesis
-    /// More candidates than one call accepts; feed the chain in batches, in name order.
-    case tooManyCandidates(Int)
     /// The persisted ledger's checkpoint was not signed by this account, or names another vault or owner.
     case checkpointInvalid
     /// The persisted records do not reach the head this device signed for: local state was truncated, replaced or
     /// forked. The device must not continue from it (§8.3).
     case rolledBack(expectedEpoch: UInt64)
+    /// A record in the persisted ledger does not verify: local state was altered (§8.3).
+    case savedRecordInvalid
 }
 
 /// Why a sharing operation refused (docs/02-architecture.md §8).
@@ -129,4 +129,8 @@ public enum SharingError: Error, Hashable, Sendable {
     case leaveRequestInvalid
     /// What a rotation was planned for is already true of the vault (the member is gone).
     case nothingToDo
+    /// The `MemberKeyCheck` offered was made for another vault or for an earlier head: check again.
+    case memberKeysNotChecked
+    /// A rotation plan read from local storage was not signed by this account: it was altered or planted (§8.6).
+    case savedPlanInvalid
 }

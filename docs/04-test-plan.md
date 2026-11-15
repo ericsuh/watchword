@@ -265,17 +265,39 @@ membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):
   writes by a former member and by a read-only member reaching the store and being refused by every remaining
   member; a write in another member's name.
 - *Fork and rollback*: a store serving an older chain; a saved ledger truncated, spliced, altered byte by byte or
-  planted; a store showing two halves of a household different branches.
+  planted; a store showing two halves of a household different branches; a former administrator's rewrite fed a
+  page, or an object, at a time in any order; a record signed on a stale head and released after the chain was built
+  on (displaces nothing) or before (the removal it displaces is owed, the member's writes stay refused, nothing is
+  re-sealed towards their key, and another administrator carries it out again); a stale device of the owner's, one
+  record and two; removals a former administrator signs on a dead branch (owed by nobody); a member invited back
+  while the store hides everything since their removal.
 - *Role escalation*: every way a member or an administrator can sign for more than their role, including roles
   changed on the side inside another operation's member list; an administrator using up the chain's epochs.
 - *Leave requests*: replayed after the member was invited back, into another vault, relabelled, or signed by
-  someone else.
+  someone else; a genuine request behind thousands of junk objects in the leave directory and hundreds filed as the
+  member's own.
 - *Two administrators*: removing each other at once (nobody is removed, the owner can still act); the owner's
   removal of an administrator against that administrator's own record at the same epoch, in every order.
-- *Local state*: pins planted in the contacts store.
+- *Names and proposals*: a predictable record's object created first with a signature nobody made (a role change
+  and a deletion); a change that loses a fork proposed again by its author's device.
+- *Pins against the chain*: a member removed and added back under the same account ID with other keys: reported,
+  nothing wrapped to them by a rotation or a grant, a stale comparison refused, resolved by removal or by replacing
+  the pin.
+- *Local state*: pins planted in the contacts store; a rotation plan altered byte by byte, with the departing
+  account replaced, or planted (another administrator's, a stranger's, re-signed).
 - *Oversized and malformed*: seeded damage to every format (throws, or returns exactly what the bytes say);
-  megabyte inputs to every parser; inflated counts; more candidates than a call examines; a flood of unsigned
-  records naming a reused key.
+  megabyte inputs to every parser; inflated counts; tens of thousands of candidates in one call; thousands of junk
+  objects in the membership directory, some shaped like the next record (the next record is still adopted, and the
+  flood is paid for once); a flood of unsigned records naming a reused key (one signature check each, no walk); a
+  comb of signed branches reusing one key ID (work bounded by each record's own path); grant objects filed in a
+  member's own grant directory.
+
+Beside the adversarial suite, `LongRunningMembershipForkTests` holds the property the fork rule is built on: over
+randomly generated histories with forks at many depths (stale owner and administrator devices), a ledger fed random
+subsets in random order, with repeats, is at every step exactly what a fresh device makes of the same records, and
+ends equal to the ledger fed everything at once (`orderAndBatchingDoNotMatter`; the nightly `test:long` widens it).
+`SharingScenarioTests` covers what a demoted and a removed member wrote reaching those who remain and a member
+invited afterwards, and two concurrent removals ending with both members gone.
 
 Known answers for the formats (records, hashes, a leave request, published bundles, the fingerprint code) come from
 an independent Python implementation (`SharingKnownAnswerTests`). Still to come with integration: the same

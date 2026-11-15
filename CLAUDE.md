@@ -143,12 +143,13 @@ Eleven shipped modules, dependency-ordered, plus test support:
   `DeletionRecordingStore`, and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
 - **`WatchwordSharing`** — milestone 4's protocol core for shared vaults: the signed membership chain
-  (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `MembershipState.writePermission`), fingerprint
-  verification (`FingerprintCode`, `VerifiedContacts` and its `VerifiedContact` token), both sides of an invitation,
-  key grants (`KeyGrantCodec`, `grantSender`/`openGrant`), `LeaveRequest`, and rotation as data (`RotationPlanner`,
-  `RotationPlan`, `PendingRotation`). Ports: `KeyBundleDirectory`, `VerifiedContactStore`. Depends on
-  `WatchwordEnvelope`, `WatchwordCrypto` and `SecureMemory`; not on `WatchwordSync` or `WatchwordKit`, and nothing
-  depends on it yet (`docs/02-architecture.md` §8.8 is what the integration will call).
+  (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `writePermission`, `status(of:)`), fingerprint
+  verification (`FingerprintCode`, `VerifiedContacts` and its `VerifiedContact` token, `MemberKeyCheck`), both sides
+  of an invitation, key grants (`KeyGrantCodec`, `grantSender`/`openGrant`), `LeaveRequest`, and rotation as data
+  (`RotationPlanner`, `RotationPlan`, `PendingRotation`, `recordsToReseal`). Ports: `KeyBundleDirectory`,
+  `VerifiedContactStore`. Depends on `WatchwordEnvelope`, `WatchwordCrypto` and `SecureMemory`; not on
+  `WatchwordSync` or `WatchwordKit`, and nothing depends on it yet (`docs/02-architecture.md` §8.8 is what the
+  integration will call).
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
   history, trash, password change, deletion, `sync()`, conflict resolution), `UnlockPolicy`, `AutoLockPolicy`,
   `ItemCodec`, `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`), and `VaultSyncAdapter`, the
@@ -158,8 +159,9 @@ Eleven shipped modules, dependency-ordered, plus test support:
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
   checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for sharing, with real
-  keys, `HostileSharingStore`, `SimulatedMember`, `SharingHousehold` and `ForgedRecord`, an encoder of its own for
-  records the module would never sign). Test targets only; not a product, and no production target may depend on it.
+  keys, `HostileSharingStore`, `SimulatedMember` (the reference for the integration's sync pass, §8.8),
+  `SharingHousehold` and `ForgedRecord`, an encoder of its own for records the module would never sign). Test
+  targets only; not a product, and no production target may depend on it.
 
 `docs/02-architecture.md` §15 lists the modules still to come (`WatchwordHygiene`,
 `WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
@@ -212,24 +214,42 @@ built; milestone 4 lists what is open there (wiring into `VaultSession` and sync
   bundle, a leave request). The member list in a record must equal the previous list with the operation applied.
 - A removal or departure always names a vault key ID the chain has never used; nothing but those and `rotateKey`
   changes the key (principle 5; ADR 0007: rotation re-encrypts, there are no per-item keys).
-- **Fork rule** (`MembershipLedger.resolve`): at each fork, the branch whose first owner-signed record is earliest
-  wins, then the lower hash of the fork-point record. It is a pure function of the valid records known, so every
-  device agrees whatever the order of arrival; a hash-only rule would let a former administrator rewrite history
-  from before their removal (review finding S1). The ledger only ever *adds* candidates to its accepted chain's tree.
+- **The ledger is a grow-only set of valid records, and the accepted chain is a pure function of it**
+  (`MembershipLedger.resolve`): records that lose a fork are kept (`branches`, bounded, persisted), `ingest` only
+  ever adds, never throws for count and never depends on order or batching. A change that makes the result depend on
+  the order of arrival breaks convergence; `LongRunningMembershipForkTests` is the property test.
+- **Fork rule**: most owner-signed records on the path, then most records, then the lower hash where two such
+  paths part. Owner-signed first, because a hash-only or length-only rule lets a former administrator rewrite history
+  from before their removal (S1); length before hash, so a record signed on a stale head and released late displaces
+  nothing built since (S18, S19).
+- **Removal wins**: a removal on a losing branch whose signer may still remove that member is owed
+  (`owedRemovals`): the member's writes are refused, `recordsToReseal` is empty, and any device that may sign it
+  plans it again. Everything else that loses is proposed again by its author (`status(of:)`); a device ingests
+  before it proposes and never publishes a record that is not `awaitingPublication`.
 - A record's hash covers its signed content, not its signature; candidates sharing a hash are each examined until
-  one verifies (S3, S4).
+  one verifies (S3, S4). Every object *name* ends in a digest of the whole object, signature included, so nobody can
+  take a predictable record's name (S20).
+- Cheap checks, then the signature, then anything that costs work: unsigned junk costs one signature check, and no
+  examination is bounded by a count that junk can fill (ledger candidates, grants, leave requests).
 - Nothing is wrapped to, and no chain is anchored on, a bundle that is not a `VerifiedContact`; only
-  `VerifiedContacts` makes one. Keep that typing, as with `NormalizedHost`.
+  `VerifiedContacts` makes one. Keep that typing, as with `NormalizedHost`. Wrapping to the bundles a chain lists
+  (a rotation, `makeGrant`) takes a `MemberKeyCheck` made on the current head, which only
+  `MembershipLedger.checkMemberKeys` makes: a member whose listed keys differ from the pin is refused.
+  (`MemberKeyCheck.unchecked` is for `WatchwordTestSupport`; no production target calls it.)
 - Bundles are compared with `hasSameKeys`, never `==`: Ed25519 signing is randomised on CryptoKit, so the same keyset
   gives a different self-signature each time. A Linux pass cannot show a mistake here.
 - A grant's vault, key ID and recipient come from its storage location, and its sender must be the one account
   `grantSender` names: the signer of the record that entitled the recipient to that key. Not "any administrator".
-- Read-only and "former member" are client rules, not cryptography (F4.5): `writePermission`, asked about the
-  ledger's *current* epoch when judging someone else's write.
-- Local state is signed by the account's own key and re-verified on load (pins, the saved ledger); a plan on disk has
-  its object names derived again from its contents. A pin or checkpoint that does not verify is ignored or refused.
+- Read-only and "former member" are client rules, not cryptography (F4.5): `writePermission(for:)`, asked about
+  *now* when merging someone else's write. What is merged stays merged, and `recordsToReseal` lists records whose
+  stored author may no longer write, so a demotion or removal strands nothing (S25).
+- An invitation to a vault the device ever held continues that ledger (`accept(…, continuing:)`); it is never
+  rebuilt from the store (S26).
+- Local state is signed by the account's own key and re-verified on load (pins, the saved ledger, a rotation plan);
+  a plan's object names and the account it removes are derived again from its signed contents. One that does not
+  verify is ignored or refused.
 - Every signature here uses `SignatureDomain.membership`, and every signed message starts with its own magic
-  (`WWMR`, `WWLR`, `WWCP`, `WWML`). A new signed message needs a new magic.
+  (`WWMR`, `WWLR`, `WWCP`, `WWML`, `WWRP`). A new signed message needs a new magic.
 - Every parser is bounded and exact (size before copying, counts before allocating, one canonical encoding); the
   module imports no `WatchwordSync` or `WatchwordKit`, and its transport names live under `sharing/`, outside what
   the sync engine lists.
@@ -371,7 +391,8 @@ directions are tested; keep both when adjusting constants.
 - `WATCHWORD_LONG_TESTS=1` and `WATCHWORD_TEST_SEED` are the nightly workflow's knobs for extended
   randomised runs; new long-running tests should honour them via `TestEnvironment`. `test:long` runs the
   adversarial target plus any test whose identifier contains `LongRunning` (the sync simulation is
-  `LongRunningSyncSimulationTests`), so name a new randomised suite that way to have the nightly widen it.
+  `LongRunningSyncSimulationTests`, the membership ledger's convergence property `LongRunningMembershipForkTests`),
+  so name a new randomised suite that way to have the nightly widen it.
 - Known-answer vectors come from the RFC that defines the primitive, or from an independent
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 

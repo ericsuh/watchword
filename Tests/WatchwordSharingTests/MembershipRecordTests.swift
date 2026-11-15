@@ -196,11 +196,34 @@ struct MembershipRecordTests {
         }
         let request = try LeaveRequest.make(leaving: household.state, as: household.writer.keyset)
         let leave = SharingObject(request)
+        #expect(leave.location.isName(of: leave.contents) && !leave.location.isName(of: leave.contents + [0]))
         #expect(SharingObjectLocation(name: leave.name) == leave.location)
         #expect(leave.name.hasPrefix(SharingObjectLocation.leavePrefix(household.vaultID)))
 
+        // A record's name carries its epoch, its hash and a digest of the whole object, signature included: a copy
+        // with another signature is the same record under another name.
+        guard case .membership(let epoch, let hash, let digest) = location.kind else {
+            Issue.record("not a membership location")
+            return
+        }
+        #expect(epoch == 1 && hash == record.hash && digest == SharingBytes.sha256(record.encoded()))
+        var resigned = record.encoded()
+        resigned[resigned.count - 1] ^= 1
+        let copy = try MembershipRecord.parse(resigned)
+        #expect(copy.hash == record.hash)
+        #expect(SharingObject(copy).name != location.name)
+        #expect(SharingObject(copy).name.dropLast(64) == location.name.dropLast(64))
+        #expect(location.isName(of: record.encoded()) && !location.isName(of: resigned))
+
         let name = location.name
-        let bad = [
+        let withoutDigest = String(name.dropLast(64))
+        let zeros = String(repeating: "0", count: 64)
+        let notHex = String(repeating: "g", count: 64)
+        let bad: [String] = [
+            String(name.dropLast(65)),
+            name + "-" + zeros,
+            withoutDigest,
+            withoutDigest + notHex,
             name.lowercased(),
             name.uppercased(),
             name + "/",

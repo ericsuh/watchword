@@ -36,11 +36,10 @@ public enum MembershipLimits {
     /// The last epoch a record signed by an administrator other than the owner may have. The rest are reserved for
     /// the owner, so an administrator cannot use up the chain and leave the owner unable to remove them.
     public static let maximumAdministratorEpoch: UInt64 = maximumEpoch - 4_096
-    /// The most candidate records one `MembershipLedger.ingest` examines.
-    public static let maximumCandidates = 4_096
-    /// The most `MembershipLedger.join` examines: a whole chain of the greatest length, and as many strays again as
-    /// one `ingest` allows.
-    public static let maximumJoinCandidates = Int(maximumEpoch) + 1 + maximumCandidates
+    /// The most valid records outside its accepted chain that a `MembershipLedger` keeps (records on branches that
+    /// lost a fork). Only an account that is or was an administrator can sign one, and a household produces a handful
+    /// in years; past this the ledger keeps the best-ranked and says so (`IngestReport.forgotten`).
+    public static let maximumRetainedBranchRecords = 1_024
 }
 
 /// One member of a vault, as a verified chain lists it.
@@ -84,6 +83,10 @@ public enum WriteRefusal: Sendable, Hashable {
     case vaultDeleted
     /// The ledger holds no state for the epoch asked about.
     case unknownEpoch
+    /// A record that removes the member, signed by an account that may still remove them, is on a branch that lost a
+    /// fork (`MembershipLedger.owedRemovals`). The removal is about to be planned again; until it is, the member's
+    /// writes are not merged.
+    case removalPending
 }
 
 /// A vault's membership after one verified record: who the members are, in which roles, and which vault key is

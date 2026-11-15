@@ -339,7 +339,7 @@ struct VerificationAndInvitationTests {
         #expect(incoming.state == .awaitingVerification(owner.bundle))
         #expect(incoming.fingerprintToConfirm == owner.bundle.fingerprint)
         #expect(throws: SharingError.fingerprintNotVerified) {
-            _ = try incoming.accept(membership: records, grants: grants, as: guest.keyset)
+            _ = try incoming.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
         }
         await #expect(throws: SharingError.fingerprintMismatch) {
             try await incoming.confirm(
@@ -350,14 +350,14 @@ struct VerificationAndInvitationTests {
             .scannedCode(FingerprintCode(bundle: owner.bundle).payload), contacts: setup.guestContacts,
             signedBy: guest.keyset, at: Self.now)
 
-        let joined = try incoming.accept(membership: records, grants: grants, as: guest.keyset)
+        let joined = try incoming.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
         #expect(incoming.state == .accepted)
         #expect(joined.ledger.state == setup.household.state)
         #expect(joined.vaultKey.key.keyID == setup.household.vaultKey.key.keyID)
         #expect(joined.vaultKey.key.material.constantTimeEquals(setup.household.vaultKey.key.material))
         #expect(joined.vaultKey.vaultID == setup.household.vaultID)
         #expect(throws: SharingError.invitationAlreadyCompleted) {
-            _ = try incoming.accept(membership: records, grants: grants, as: guest.keyset)
+            _ = try incoming.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
         }
         #expect(try await setup.guestContacts.pinned(owner.accountID)?.method == .scannedCode)
     }
@@ -373,7 +373,7 @@ struct VerificationAndInvitationTests {
         var incoming = try await IncomingInvitation.begin(
             invitation, knownOwner: nil, directory: setup.directory, contacts: setup.guestContacts)
         try await incoming.confirm(.comparedByEye, contacts: setup.guestContacts, signedBy: guest.keyset, at: Self.now)
-        let joined = try incoming.accept(membership: records, grants: grants, as: guest.keyset)
+        let joined = try incoming.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
         #expect(joined.ledger.state.member(guest.accountID)?.role == .readWrite)
         #expect(
             try joined.ledger.grantSender(forKey: joined.vaultKey.key.keyID, to: guest.accountID).accountID
@@ -398,23 +398,23 @@ struct VerificationAndInvitationTests {
 
         var incoming = try await verified()
         #expect(throws: SharingError.notAMember(guest.accountID), "the record adding the invitee was withheld") {
-            _ = try incoming.accept(membership: beforeInvitation, grants: grants, as: guest.keyset)
+            _ = try incoming.accept(membership: beforeInvitation, grants: grants, as: guest.keyset, continuing: nil)
         }
         #expect(throws: SharingError.grantNotFound) {
-            _ = try incoming.accept(membership: records, grants: [], as: guest.keyset)
+            _ = try incoming.accept(membership: records, grants: [], as: guest.keyset, continuing: nil)
         }
         #expect(throws: LedgerError.noGenesis) {
-            _ = try incoming.accept(membership: [], grants: grants, as: guest.keyset)
+            _ = try incoming.accept(membership: [], grants: grants, as: guest.keyset, continuing: nil)
         }
         #expect(incoming.state != .accepted, "nothing was accepted, and a later attempt may still succeed")
-        _ = try incoming.accept(membership: records, grants: grants, as: guest.keyset)
+        _ = try incoming.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
 
         // An invitation whose vault ID was altered on the way finds no chain for that vault.
         var misdirected = try await IncomingInvitation.begin(
             Invitation(vaultID: UUID(), ownerAccountID: invitation.ownerAccountID), knownOwner: nil,
             directory: setup.directory, contacts: setup.guestContacts)
         #expect(throws: LedgerError.noGenesis) {
-            _ = try misdirected.accept(membership: records, grants: grants, as: guest.keyset)
+            _ = try misdirected.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
         }
     }
 

@@ -80,10 +80,14 @@ public enum ContactTrust: Sendable, Hashable {
 /// The account's verified contacts: the pin made when a fingerprint is confirmed, and the check every later use of
 /// that account's keys goes through (docs/02-architecture.md §8.4; PRD F4.2, SEC3).
 ///
-/// Once an account is pinned, a different bundle for it is never accepted silently, wherever it comes from (the key
-/// directory, a membership record, an invitation): `trust(of:)` and `verify` throw `SharingError.keySubstituted`,
-/// which the UI reports. Replacing a pin is a separate, explicit act (`verify(…, replacingPin: true)`), for the case
-/// where the other person really does have new keys and has been verified again.
+/// Once an account is pinned, a different bundle for it is never accepted silently, wherever it comes from:
+/// `trust(of:)` and `verify` throw `SharingError.keySubstituted`, which the UI reports. Three places ask. The two
+/// sides of an invitation ask about the bundle the key directory returned. And `MembershipLedger.checkMemberKeys`
+/// asks about every member a chain lists: its result is what `RotationPlanner.plan` and `MembershipLedger.makeGrant`
+/// require before they wrap a key to the chain's bundles, so a member whose keys were swapped in the chain is
+/// reported and is not wrapped to (`MemberKeyCheck`). Replacing a pin is a separate, explicit act
+/// (`verify(…, replacingPin: true)`), for the case where the other person really does have new keys and has been
+/// verified again.
 ///
 /// A pin is
 ///

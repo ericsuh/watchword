@@ -54,12 +54,12 @@ struct AdversarialSharingTests {
             for mask: UInt8 in [0x01, 0x80] {
                 var mutated = genuine
                 mutated[position] ^= mask
-                let report = try ledger.ingest([mutated])
+                let report = ledger.ingest([mutated])
                 #expect(report.rejected.count == 1, "flip \(mask) at byte \(position)")
                 #expect(ledger.state == household.state, "flip \(mask) at byte \(position)")
             }
         }
-        #expect(try ledger.ingest([genuine]).adopted.count == 1)
+        #expect(ledger.ingest([genuine]).adopted.count == 1)
         #expect(ledger.state.member(guest.accountID)?.role == .readWrite)
     }
 
@@ -74,7 +74,7 @@ struct AdversarialSharingTests {
             .addMember(attacker.accountID, role: .readWrite), signer: household.owner, adding: attacker.bundle)
         let asThemselves = household.forgery(
             .addMember(attacker.accountID, role: .readWrite), signer: attacker, adding: attacker.bundle)
-        let report = try ledger.ingest([
+        let report = ledger.ingest([
             addsAttacker.withSignature([UInt8](repeating: 0, count: 64)),
             try addsAttacker.signed(by: attacker.keyset),
             try asThemselves.signed(by: attacker.keyset),
@@ -135,13 +135,13 @@ struct AdversarialSharingTests {
         var spoilt = genuine
         spoilt[spoilt.count - 1] ^= 1
         var ledger = household.ledger
-        let report = try ledger.ingest([spoilt, genuine, spoilt])
+        let report = ledger.ingest([spoilt, genuine, spoilt])
         #expect(ledger.state.member(household.reader.accountID)?.role == .readWrite)
         #expect(report.rejected.map(\.index) == [0])
         #expect(report.rejected.map(\.reason) == [.invalid(.signatureInvalid)])
 
         // And once the genuine record is held, the spoilt copy is just a copy.
-        #expect(try ledger.ingest([spoilt]).rejected.isEmpty)
+        #expect(ledger.ingest([spoilt]).rejected.isEmpty)
     }
 
     /// A4, a member with their account key: tries to pass one kind of signature off as another, a signature they
@@ -155,7 +155,7 @@ struct AdversarialSharingTests {
         var ledger = household.ledger
         for domain in SignatureDomain.allCases where domain != .membership {
             let signature = try admin.keyset.sign(forged.content, domain: domain)
-            let report = try ledger.ingest([forged.withSignature(signature)])
+            let report = ledger.ingest([forged.withSignature(signature)])
             #expect(report.rejected.map(\.reason) == [.invalid(.signatureInvalid)], "domain \(domain)")
         }
         // Their own leave request, signed under the membership domain, is not a membership record either.
@@ -181,8 +181,8 @@ struct AdversarialSharingTests {
                 of: former.accountID, to: .readWrite, signedBy: household.owner.keyset
             ).encoded())
         var ledger = household.ledger
-        var report = try ledger.ingest([
-            household.forgery(.rotateKey, signer: former, newKeyID: UUID()).signed(by: former.keyset)
+        var report = ledger.ingest([
+            try household.forgery(.rotateKey, signer: former, newKeyID: UUID()).signed(by: former.keyset)
         ])
         #expect(report.rejected.map(\.reason) == [.invalid(.signerNotAdministrator(former.accountID))])
         #expect(throws: SharingError.notPermitted) {
@@ -191,9 +191,9 @@ struct AdversarialSharingTests {
 
         try household.rotate(.removal(former.accountID), by: household.owner)
         ledger = household.ledger
-        report = try ledger.ingest([
-            household.forgery(.rotateKey, signer: former, newKeyID: UUID()).signed(by: former.keyset),
-            household.forgery(
+        report = ledger.ingest([
+            try household.forgery(.rotateKey, signer: former, newKeyID: UUID()).signed(by: former.keyset),
+            try household.forgery(
                 .addMember(former.accountID, role: .administrator), signer: former, adding: former.bundle
             ).signed(by: former.keyset),
         ])
@@ -230,13 +230,13 @@ struct AdversarialSharingTests {
         // every device accepted there, and a branch built on it.
         let rewrite = try Self.groundRotation(below: overwritten, on: forkPoint, by: former, seed: 43)
         var branch = forkPoint
-        _ = try branch.ingest([rewrite.record.contents])
+        branch.ingest([rewrite.record.contents])
         let further = try RotationPlanner.plan(.routine, ledger: branch, signedBy: former.keyset)
         let attack = [rewrite.record.contents, further.record.contents]
 
         // A device that has the real chain is not moved.
         var informed = household.ledger
-        let report = try informed.ingest(attack)
+        let report = informed.ingest(attack)
         #expect(informed.state == household.state)
         #expect(!report.changedHead)
         #expect(report.outranked.count == 2)
@@ -249,9 +249,9 @@ struct AdversarialSharingTests {
         // A device the store showed only the attacker's branch follows it (it cannot know better: until it sees the
         // removal, the former administrator is one), and comes back the moment the owner's record arrives.
         var misled = forkPoint
-        _ = try misled.ingest(attack)
+        misled.ingest(attack)
         #expect(misled.state.member(former.accountID) != nil)
-        let correction = try misled.ingest(genuine)
+        let correction = misled.ingest(genuine)
         #expect(misled.state == household.state)
         #expect(correction.superseded.count == 2)
     }
@@ -278,7 +278,7 @@ struct AdversarialSharingTests {
             // And that old record itself, as it was.
             originalAddition,
         ]
-        let report = try ledger.ingest(attempts)
+        let report = ledger.ingest(attempts)
         #expect(
             report.rejected.map(\.reason) == [
                 .invalid(.signerNotAMember(former.accountID)), .invalid(.signatureInvalid),
@@ -398,7 +398,7 @@ struct AdversarialSharingTests {
         #expect(throws: SharingError.ownKeySubstituted) {
             _ = try incoming.accept(
                 membership: household.ledger.chain.map(\.encoded),
-                grants: [(name: grant.location.name, contents: grant.encoded)], as: guest.keyset)
+                grants: [(name: grant.location.name, contents: grant.encoded)], as: guest.keyset, continuing: nil)
         }
         #expect(throws: CryptoError.grantMismatch, "and the grant is not addressed to their real key") {
             _ = try household.ledger.openGrant(grant.encoded, at: grant.location, as: guest.keyset)
@@ -520,24 +520,53 @@ struct AdversarialSharingTests {
     }
 
     /// A4, a member with write access to the store: fills the vault's grant directory with objects for other keys
-    /// and other recipients, more than a reader examines, so that a newly invited member never reaches their own
-    /// grant (review finding S10).
-    @Test("a flood of grant objects for other keys and members does not hide a member's own grant")
+    /// and other recipients, and the victim's own grant directory with objects that are filed correctly and are
+    /// not their grant, more than any bound a reader might put on what it examines, so that a newly invited member
+    /// never reaches their own grant (review findings S10 and S24).
+    @Test("a flood of grant objects, for other keys and members or filed as the member's own, does not hide the grant")
     func grantFlood() async throws {
         var household = try await SharingHousehold.make()
         let plan = try household.rotate(.routine, by: household.owner)
-        let junk = (0...MembershipLimits.maximumCandidates).map { index -> (name: String, contents: [UInt8]) in
+        let victim = household.writer
+        let elsewhere = (0..<5_000).map { index -> (name: String, contents: [UInt8]) in
             let contents = [UInt8(truncatingIfNeeded: index), UInt8(truncatingIfNeeded: index >> 8)]
             let location = SharingObjectLocation.grant(
                 vaultID: household.vaultID, keyID: index.isMultiple(of: 2) ? plan.newKeyID : UUID(),
-                recipient: index.isMultiple(of: 2) ? household.outsider.accountID : household.writer.accountID,
+                recipient: index.isMultiple(of: 2) ? household.outsider.accountID : victim.accountID,
                 contents: contents)
             return (location.name, contents)
         }
-        let listing = junk + plan.grants.map { (name: $0.name, contents: $0.contents) }
-        #expect(listing.count > MembershipLimits.maximumCandidates)
-        let key = try household.ledger.openGrant(of: plan.newKeyID, from: listing, as: household.writer.keyset)
+        // Filed exactly where the victim's grant belongs, under their own digests: somebody else's genuine grant,
+        // and grants of the right shape that nobody entitled signed.
+        let others = plan.grants.filter {
+            if case .grant(_, let recipient, _) = $0.location.kind { return recipient != victim.accountID }
+            return false
+        }
+        var generator = SeededGenerator(seed: 52)
+        let planted = VaultKey.generate(vaultID: household.vaultID, using: &generator)
+        let forged = try KeyGrantCodec.encode(
+            VaultKeyGrant.seal(
+                VaultKey(
+                    vaultID: household.vaultID,
+                    key: try EncryptionKey(keyID: plan.newKeyID, material: planted.key.material)),
+                to: victim.bundle, from: household.reader.keyset))
+        let inPlace =
+            ((0..<400).map { index -> [UInt8] in
+                var junk = forged
+                junk[junk.count - 1 - index % 64] ^= UInt8(truncatingIfNeeded: index / 64 + 1)
+                return junk
+            } + others.map(\.contents) + [forged]).map { contents -> (name: String, contents: [UInt8]) in
+                let location = SharingObjectLocation.grant(
+                    vaultID: household.vaultID, keyID: plan.newKeyID, recipient: victim.accountID, contents: contents)
+                return (location.name, contents)
+            }
+        let listing = elsewhere + inPlace + plan.grants.map { (name: $0.name, contents: $0.contents) }
+        let key = try household.ledger.openGrant(of: plan.newKeyID, from: listing, as: victim.keyset)
         #expect(key.key.material.constantTimeEquals(household.vaultKey.key.material))
+        #expect(!key.key.material.constantTimeEquals(planted.key.material))
+        #expect(throws: SharingError.grantNotFound) {
+            _ = try household.ledger.openGrant(of: plan.newKeyID, from: elsewhere + inPlace, as: victim.keyset)
+        }
     }
 
     /// A4, an administrator who was demoted to an ordinary member (so no rotation happened, and the key is one they
@@ -584,8 +613,8 @@ struct AdversarialSharingTests {
         let theirKey = VaultKey.generate(vaultID: UUID(), using: &generator)
         var theirs = try MembershipLedger.create(vaultKey: theirKey, owner: attacker.keyset)
         let victimContact = VerifiedContact(bundle: victim.bundle, method: .comparedByEye, verifiedAt: nil)
-        _ = try theirs.ingest([
-            theirs.proposeAddition(of: victimContact, as: .readWrite, signedBy: attacker.keyset).encoded()
+        theirs.ingest([
+            try theirs.proposeAddition(of: victimContact, as: .readWrite, signedBy: attacker.keyset).encoded()
         ])
         let genuine = try theirs.makeGrant(of: theirKey, to: victim.accountID, from: attacker.keyset)
         #expect(
@@ -701,7 +730,7 @@ struct AdversarialSharingTests {
         try household.rotate(.removal(household.writer.accountID), by: household.owner)
         var ledger = household.ledger
         for offered in [earlier, [earlier[0]], Array(earlier.reversed()), []] {
-            let report = try ledger.ingest(offered)
+            let report = ledger.ingest(offered)
             #expect(!report.changedHead && report.rejected.isEmpty)
             #expect(ledger.state == household.state)
         }
@@ -751,7 +780,7 @@ struct AdversarialSharingTests {
         // the next ingest brings it forward again.
         var stale = try restore(earlier)
         #expect(stale.state.epoch == 3)
-        _ = try stale.ingest(household.ledger.chain.map(\.encoded))
+        stale.ingest(household.ledger.chain.map(\.encoded))
         #expect(stale.state == household.state)
     }
 
@@ -789,10 +818,19 @@ struct AdversarialSharingTests {
         try await owner.sync(vault)
         let adminReport = try await admin.sync(vault)
         try await bystander.sync(vault)
+        try await owner.sync(vault)
         #expect(adminReport.superseded == [adminsRecord])
+        // Everyone is on the owner's record. The administrator's change lost its place, so the administrator's
+        // device made it again on top (review finding S27); nothing either of them did is missing.
+        let state = try owner.ledger(vault).state
         for member in [owner, admin, bystander] {
-            #expect(try member.ledger(vault).state.hash == ownersRecord.hash, "\(member.name)")
+            #expect(try member.ledger(vault).contains(ownersRecord.hash), "\(member.name)")
+            #expect(try !member.ledger(vault).contains(adminsRecord.hash), "\(member.name)")
+            #expect(try member.ledger(vault).state == state, "\(member.name)")
         }
+        #expect(state.epoch == 5)
+        #expect(state.member(members[2].accountID)?.role == .readWrite)
+        #expect(state.member(members[1].accountID)?.role == .readOnly)
     }
 
     // MARK: - Role escalation
@@ -858,7 +896,7 @@ struct AdversarialSharingTests {
             (demotesOwnerOnTheSide, admin, .resultingMembersMismatch),
         ]
         for (forged, signer, expected) in attempts {
-            let report = try ledger.ingest([forged.signed(by: signer.keyset)])
+            let report = ledger.ingest([try forged.signed(by: signer.keyset)])
             #expect(report.rejected.map(\.reason) == [.invalid(expected)])
         }
         #expect(ledger.state == household.state)
@@ -905,7 +943,7 @@ struct AdversarialSharingTests {
         try await household.add(member, as: .readWrite, by: household.owner)
         #expect(household.state.member(member.accountID)?.since == 5)
 
-        #expect(household.ledger.pendingLeaveRequests(among: [request.encoded()]).isEmpty)
+        #expect(household.ledger.pendingLeaveRequests(among: [request]).isEmpty)
         #expect(throws: SharingError.leaveRequestInvalid) { try request.validate(against: household.state) }
         #expect(throws: SharingError.leaveRequestInvalid) {
             _ = try RotationPlanner.plan(
@@ -917,7 +955,7 @@ struct AdversarialSharingTests {
             .memberLeft(member.accountID, requestSignature: request.signature), signer: household.administrator,
             newKeyID: UUID())
         #expect(
-            try ledger.ingest([forged.signed(by: household.administrator.keyset)]).rejected.map(\.reason)
+            ledger.ingest([try forged.signed(by: household.administrator.keyset)]).rejected.map(\.reason)
                 == [.invalid(.leaveRequestInvalid)])
 
         // Another vault with the same owner, in which the same member was added at the same epoch.
@@ -931,19 +969,19 @@ struct AdversarialSharingTests {
         ] {
             let record = try third.proposeAddition(
                 of: Self.trusted(party), as: role, signedBy: household.owner.keyset)
-            _ = try third.ingest([record.encoded()])
+            third.ingest([record.encoded()])
         }
         #expect(third.state.member(household.reader.accountID)?.since == elsewhere.memberSince)
-        #expect(third.pendingLeaveRequests(among: [elsewhere.encoded()]).isEmpty)
+        #expect(third.pendingLeaveRequests(among: [elsewhere]).isEmpty)
         #expect(throws: SharingError.leaveRequestInvalid) {
             _ = try RotationPlanner.plan(.departure(elsewhere), ledger: third, signedBy: household.owner.keyset)
         }
         let relabelled = LeaveRequest(
             vaultID: third.vaultID, accountID: elsewhere.accountID, memberSince: elsewhere.memberSince,
             signature: elsewhere.signature)
-        #expect(third.pendingLeaveRequests(among: [relabelled.encoded()]).isEmpty)
+        #expect(third.pendingLeaveRequests(among: [relabelled]).isEmpty)
         #expect(throws: SharingError.leaveRequestInvalid) { try relabelled.validate(against: third.state) }
-        #expect(household.ledger.pendingLeaveRequests(among: [elsewhere.encoded()]) == [elsewhere], "valid at home")
+        #expect(household.ledger.pendingLeaveRequests(among: [elsewhere]) == [elsewhere], "valid at home")
 
         // A request signed by someone other than the member it names.
         let impersonated = LeaveRequest(
@@ -952,7 +990,7 @@ struct AdversarialSharingTests {
                 LeaveRequest.signedContent(
                     vaultID: household.vaultID, accountID: household.reader.accountID, memberSince: 3),
                 domain: .membership))
-        #expect(household.ledger.pendingLeaveRequests(among: [impersonated.encoded()]).isEmpty)
+        #expect(household.ledger.pendingLeaveRequests(among: [impersonated]).isEmpty)
     }
 
     // MARK: - Two administrators against each other
@@ -983,7 +1021,7 @@ struct AdversarialSharingTests {
         ]
         for order in [records, Array(records.reversed())] {
             var ledger = household.ledger
-            let report = try ledger.ingest(order)
+            let report = ledger.ingest(order)
             #expect(report.rejected.map(\.reason) == [.invalid(.ownerOnly), .invalid(.ownerOnly)])
             #expect(ledger.state == before)
         }
@@ -1018,14 +1056,14 @@ struct AdversarialSharingTests {
         for _ in 0..<TestEnvironment.iterations(standard: 12, long: 200) {
             var ledger = household.ledger
             for record in candidates.shuffled(using: &generatorForOrder) {
-                _ = try ledger.ingest([record])
+                ledger.ingest([record])
             }
             #expect(ledger.state.hash == removal.recordHash)
             #expect(ledger.state.member(admin.accountID) == nil)
             #expect(ledger.state.owner.accountID == household.owner.accountID)
             // Nobody is locked out: the owner signs the next record.
             let next = try RotationPlanner.plan(.routine, ledger: ledger, signedBy: household.owner.keyset)
-            #expect(try ledger.ingest([next.record.contents]).adopted.count == 1)
+            #expect(ledger.ingest([next.record.contents]).adopted.count == 1)
         }
     }
 
@@ -1073,6 +1111,676 @@ struct AdversarialSharingTests {
         #expect(try await contacts.trust(of: other.bundle) == .unverified)
     }
 
+    // MARK: - Round-two findings: forks across calls, late and stale records, names, pins, plans, floods
+
+    /// A well-formed membership object name for contents that are not a record: what anyone who can create objects
+    /// can put in the directory.
+    static func junkName(vault: UUID, epoch: UInt64, salt: Int, contents: [UInt8]) -> String {
+        SharingObjectLocation(
+            vaultID: vault,
+            kind: .membership(
+                epoch: epoch, hash: MembershipHash(unchecked: SharingBytes.sha256([UInt8(truncatingIfNeeded: salt)])),
+                digest: SharingBytes.sha256(contents))
+        ).name
+    }
+
+    /// A5, a former administrator with their key and store write access, helped by a store (A1) that serves the
+    /// membership directory a page at a time, or one object at a time, in an order of its choosing: publishes a
+    /// record at an epoch before their removal with a hash ground below the accepted one's, hoping a device that
+    /// adopts it on one page can no longer connect what the next page holds (review finding S17).
+    @Test("a former administrator's rewrite does not stick on a device fed the directory a page at a time")
+    func rewriteAcrossPages() async throws {
+        var household = try await SharingHousehold.make()
+        let former = household.administrator
+        let second = try SharingParty(seed: 42)
+        try await household.add(second, as: .administrator, by: household.owner)
+        let forkPoint = household.ledger
+        try household.adopt(
+            household.ledger.proposeRoleChange(
+                of: household.reader.accountID, to: .readWrite, signedBy: second.keyset
+            ).encoded())
+        let overwritten = household.state.hash
+        try household.rotate(.removal(former.accountID), by: household.owner)
+        try household.rotate(.routine, by: second)
+        let rewrite = try Self.groundRotation(below: overwritten, on: forkPoint, by: former, seed: 43)
+        let genuine = household.ledger.chain.map(\.encoded)
+
+        // First page: everything up to the fork, both records at it. The device cannot know better yet.
+        var device = try Self.freshDevice(household, Array(genuine[...5]) + [rewrite.record.contents])
+        #expect(device.state.hash == rewrite.recordHash)
+        #expect(device.holds(overwritten), "the record that lost is kept")
+        // Second page: the owner's removal and what followed. They connect, and the owner's record decides.
+        let report = device.ingest(Array(genuine[6...]))
+        #expect(report.rejected.isEmpty)
+        #expect(device.state == household.state)
+        #expect(device.state.member(former.accountID) == nil)
+        #expect(device.owedRemovals.isEmpty)
+
+        // One object per call, in orders of the store's choosing, re-offering what did not connect yet.
+        let listing = genuine + [rewrite.record.contents]
+        var generator = SeededGenerator(seed: TestEnvironment.seed(fallback: 44))
+        for _ in 0..<TestEnvironment.iterations(standard: 20, long: 400) {
+            var ledger = try Self.freshDevice(household, [genuine[0]])
+            var passes = 0
+            while ledger.chain.count + ledger.branches.count < listing.count {
+                for object in listing.shuffled(using: &generator) {
+                    ledger.ingest([object])
+                }
+                passes += 1
+                try #require(passes < 50)
+            }
+            #expect(ledger.state == household.state)
+            #expect(ledger.branches.map(\.state.hash) == [rewrite.recordHash])
+        }
+    }
+
+    /// A4, a read-only member about to be removed, with nothing but permission to create objects: fills the
+    /// membership directory with thousands of objects, some of them shaped like the next record under the owner's
+    /// name, so that no device gets through a listing and their removal is never adopted (review finding S17).
+    @Test("thousands of junk objects in the membership directory stop nobody from adopting the next record")
+    func membershipFlood() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite, .readOnly])
+        var bystander = members[0]
+        let flooder = members[1]
+        try await bystander.sync(vault)
+        let state = try owner.ledger(vault).state
+        for index in 0..<4_500 {
+            let contents = [UInt8(truncatingIfNeeded: index), UInt8(truncatingIfNeeded: index >> 8), 0x57]
+            try await world.store.create(
+                Self.junkName(vault: vault, epoch: UInt64(index % 5), salt: index, contents: contents),
+                contents: contents, by: flooder.accountID)
+        }
+        // Records that pass every check that costs nothing, and carry a signature nobody made.
+        var unsigned = 0
+        for index in 0..<600 {
+            var forged = ForgedRecord(
+                after: state, signer: owner.accountID, operation: .changeRole(flooder.accountID, to: .administrator))
+            forged.vaultKeyID = state.vaultKeyID
+            let contents = forged.withSignature(
+                [UInt8(truncatingIfNeeded: index), UInt8(truncatingIfNeeded: index >> 8)]
+                    + [UInt8](repeating: 0x57, count: 62))
+            try await world.store.create(
+                SharingObject(try MembershipRecord.parse(contents)).name, contents: contents, by: flooder.accountID)
+            unsigned += 1
+        }
+
+        #expect(try await owner.remove(flooder.accountID, from: vault) == .complete)
+        let report = try await bystander.sync(vault)
+        #expect(report.adopted.map(\.operation) == [.removeMember(flooder.accountID)])
+        #expect(report.rejected.count == 4_500 + unsigned)
+        #expect(report.signatureChecks == unsigned + 1, "one each for what looked like a record, none for the rest")
+        #expect(try bystander.ledger(vault).state == owner.ledger(vault).state)
+        #expect(try bystander.currentKey(vault).key.keyID == owner.currentKey(vault).key.keyID)
+
+        // The flood is paid for once: what can never be a record is not fetched again.
+        #expect(bystander.refusedNames.count == 4_500 + unsigned)
+        let again = try await bystander.sync(vault)
+        #expect(again.rejected.isEmpty && again.signatureChecks == 0)
+    }
+
+    /// A1, serving the store, with two honest administrators: hides the newest head from one administrator's
+    /// device, so that its next ordinary action is signed on the stale head, sees from the object names that this
+    /// record's hash is the lower one, and releases it after every device has accepted the other administrator's
+    /// removal of a member and built on it, to roll the chain back to a state in which that member is listed and
+    /// the key they hold is current (review finding S18).
+    @Test("a record signed on a stale head and released late displaces nothing that has been built on since")
+    func withheldSiblingReleasedLate() async throws {
+        var household = try await SharingHousehold.make()
+        let second = try SharingParty(seed: 42)
+        try await household.add(second, as: .administrator, by: household.owner)
+        let fork = household.ledger
+        let oldKey = household.state.vaultKeyID
+        let target = household.writer.accountID
+        let removal = try household.rotate(.removal(target), by: second)
+        let afterRemoval = household.ledger
+        try household.adopt(
+            household.ledger.proposeRoleChange(of: household.reader.accountID, to: .readWrite, signedBy: second.keyset)
+                .encoded())
+        let stale = try Self.groundRotation(below: removal.recordHash, on: fork, by: household.administrator, seed: 45)
+        #expect(stale.recordHash < removal.recordHash)
+
+        // Every device has two records on top of the fork; the stale one is one.
+        var device = household.ledger
+        var report = device.ingest([stale.record.contents])
+        #expect(report.superseded.isEmpty && !report.changedHead)
+        #expect(report.outranked == [stale.proposal])
+        #expect(device.state == household.state)
+        #expect(device.state.member(target) == nil && device.state.vaultKeyID != oldKey)
+        #expect(device.status(of: stale.proposal) == .superseded, "its author's device proposes it again")
+        #expect(
+            try Self.freshDevice(household, household.ledger.chain.map(\.encoded) + [stale.record.contents]).state
+                == household.state)
+
+        // The narrowest timing the store has: released when nothing has been built on the removal yet. The two
+        // records are then equals and the hash decides, so the removal is undone; but it is not forgotten.
+        device = afterRemoval
+        report = device.ingest([stale.record.contents])
+        #expect(report.superseded == [removal.proposal])
+        #expect(device.state.member(target) != nil, "listed again, for now")
+        #expect(device.owedRemovals.map(\.accountID) == [target])
+        #expect(device.owedRemovals.map(\.reason) == [.removal(target)])
+        #expect(device.writePermission(for: target) == .refused(.removalPending), "their writes are still refused")
+        #expect(device.writePermission(for: target, atEpoch: device.state.epoch) == .refused(.removalPending))
+        let underNewerKey = SealedRecordReference(
+            recordID: UUID(), kind: .item, keyID: removal.newKeyID, version: 2, author: second.accountID)
+        #expect(device.recordsToReseal(in: [underNewerKey]).isEmpty, "nothing is sealed back towards a key they hold")
+        #expect(
+            device.pendingRotation(
+                plan: nil, leaveRequests: [], inventory: [underNewerKey], heldKeyIDs: [device.state.vaultKeyID])
+                == [.removalOwed(target)])
+
+        // Any administrator's device plans it again; it need not be the one that signed the first.
+        let again = try RotationPlanner.plan(
+            try #require(device.owedRemovals.first).reason, ledger: device, signedBy: household.administrator.keyset)
+        device.ingest([again.record.contents])
+        #expect(device.state.member(target) == nil && device.owedRemovals.isEmpty)
+        #expect(![oldKey, removal.newKeyID, stale.newKeyID].contains(device.state.vaultKeyID))
+        #expect(device.writePermission(for: target) == .refused(.notAMember))
+        #expect(device.recordsToReseal(in: [underNewerKey]) == [underNewerKey])
+    }
+
+    /// A5, a former administrator with their key and store write access: signs removals of the remaining members on
+    /// a branch from before their own removal, so that devices which keep losing records and plan "owed" removals
+    /// again would empty the vault on the former administrator's say-so.
+    @Test("removals a former administrator signs on a dead branch are owed by nobody")
+    func deadBranchRemovalsOweNothing() async throws {
+        var household = try await SharingHousehold.make()
+        let former = household.administrator
+        let fork = household.ledger
+        try household.rotate(.removal(former.accountID), by: household.owner)
+
+        var branch = fork
+        var attack: [[UInt8]] = []
+        for victim in [household.writer, household.reader] {
+            let plan = try RotationPlanner.plan(.removal(victim.accountID), ledger: branch, signedBy: former.keyset)
+            branch.ingest([plan.record.contents])
+            attack.append(plan.record.contents)
+        }
+        var device = household.ledger
+        let report = device.ingest(attack)
+        #expect(report.outranked.count == 2 && !report.changedHead)
+        #expect(device.owedRemovals.isEmpty)
+        #expect(device.writePermission(for: household.writer.accountID) == .allowed)
+        #expect(device.state == household.state)
+    }
+
+    /// No adversary: an administrator removes a member and then invites them back, on a branch that later loses to a
+    /// longer one on which neither happened. Planning the removal again because it "lost" would do the opposite of
+    /// what that administrator last decided.
+    @Test("a removal its own branch took back by adding the member again is not owed")
+    func removalTakenBackIsNotOwed() async throws {
+        var household = try await SharingHousehold.make()
+        let second = try SharingParty(seed: 42)
+        try await household.add(second, as: .administrator, by: household.owner)
+        let fork = household.ledger
+        let target = household.writer
+
+        var branch = fork
+        let removal = try RotationPlanner.plan(.removal(target.accountID), ledger: branch, signedBy: second.keyset)
+        branch.ingest([removal.record.contents])
+        let readded = try branch.proposeAddition(of: Self.trusted(target), as: .readWrite, signedBy: second.keyset)
+
+        for _ in 0..<3 {
+            try household.rotate(.routine, by: household.administrator)
+        }
+        var device = household.ledger
+        device.ingest([removal.record.contents])
+        #expect(device.owedRemovals.map(\.accountID) == [target.accountID], "the removal alone is owed")
+        device.ingest([readded.encoded()])
+        #expect(device.owedRemovals.isEmpty, "with the record that took it back, it is not")
+        #expect(device.writePermission(for: target.accountID) == .allowed)
+        #expect(device.state == household.state)
+        #expect(device.status(of: readded) == .superseded)
+    }
+
+    /// No adversary beyond a store that is slow (A1 at its mildest): a second device of the owner's that last synced
+    /// several records ago signs an ordinary change on the head it knows, after the owner's other device removed a
+    /// member. A rule that favoured the owner's earliest record would silently reinstate that member and make the
+    /// key they hold current again (review finding S19).
+    @Test("a stale device of the owner's does not undo a removal, and a removal it does displace is carried out again")
+    func staleOwnerDevice() async throws {
+        var household = try await SharingHousehold.make()
+        let tablet = household.ledger
+        let target = household.writer.accountID
+        let guest = household.outsider
+        let oldKey = household.state.vaultKeyID
+        try household.adopt(
+            household.ledger.proposeRoleChange(
+                of: household.reader.accountID, to: .readWrite, signedBy: household.administrator.keyset
+            ).encoded())
+        let removal = try household.rotate(.removal(target), by: household.owner)
+
+        // One record signed on the old head: the owner has signed once on each path, and the longer path stays.
+        let invitation = try tablet.proposeAddition(
+            of: Self.trusted(guest), as: .readOnly, signedBy: household.owner.keyset)
+        var phone = household.ledger
+        var report = phone.ingest([invitation.encoded()])
+        #expect(report.superseded.isEmpty && phone.state == household.state)
+        #expect(phone.state.member(target) == nil && phone.state.vaultKeyID == removal.newKeyID)
+        #expect(phone.status(of: invitation) == .superseded, "the tablet invites the guest again on the new head")
+        let again = try phone.proposeAddition(of: Self.trusted(guest), as: .readOnly, signedBy: household.owner.keyset)
+        phone.ingest([again.encoded()])
+        #expect(phone.state.member(guest.accountID) != nil && phone.state.member(target) == nil)
+
+        // Two records signed on the old head: now the stale path carries more of the owner's signatures and wins.
+        var onTablet = tablet
+        onTablet.ingest([invitation.encoded()])
+        let second = try onTablet.proposeRoleChange(
+            of: household.reader.accountID, to: .readWrite, signedBy: household.owner.keyset)
+        var device = household.ledger
+        report = device.ingest([second.encoded(), invitation.encoded()])
+        #expect(report.superseded.map(\.epoch) == [4, 5])
+        #expect(device.state.member(target) != nil && device.state.vaultKeyID == oldKey)
+        // The removal is owed, on every device that has seen it; the member writes nothing meanwhile, and what was
+        // written under the newer key is not sealed again under the old one.
+        #expect(device.owedRemovals.map(\.record) == [removal.proposal])
+        #expect(device.writePermission(for: target) == .refused(.removalPending))
+        let fresh = SealedRecordReference(
+            recordID: UUID(), kind: .item, keyID: removal.newKeyID, version: 1, author: household.owner.accountID)
+        #expect(device.recordsToReseal(in: [fresh]).isEmpty)
+        #expect(
+            try Self.freshDevice(
+                household, household.ledger.chain.map(\.encoded) + [invitation.encoded(), second.encoded()]
+            ).owedRemovals == device.owedRemovals)
+        // An administrator may carry it out as well as the owner: the member is not an administrator.
+        let replanned = try RotationPlanner.plan(
+            .removal(target), ledger: device, signedBy: household.administrator.keyset)
+        device.ingest([replanned.record.contents])
+        #expect(device.state.member(target) == nil && device.owedRemovals.isEmpty)
+        #expect(device.state.vaultKeyID == replanned.newKeyID)
+        #expect(device.recordsToReseal(in: [fresh]) == [fresh])
+    }
+
+    /// A4, a read-write member who expects to be made read-only (or an administrator who expects to be demoted, or
+    /// anyone who expects the vault to be deleted): every signed byte of that record is predictable, so they create
+    /// the object it would be published as first, with a signature nobody made. If a record's name did not cover
+    /// its signature, a write-once store would then never take the genuine record (review finding S20).
+    @Test("a predictable record cannot be blocked by creating its object first with a signature that does not verify")
+    func squattedRecordName() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite, .readWrite])
+        var mallory = members[0]
+        var bystander = members[1]
+        try await bystander.sync(vault)
+        let state = try owner.ledger(vault).state
+
+        // What the owner's record must say, with 64 bytes in place of the signature Mallory cannot make.
+        var squats: [[UInt8]] = []
+        for operation in [MembershipRecord.Operation.changeRole(mallory.accountID, to: .readOnly), .deleteVault] {
+            let predicted = ForgedRecord(after: state, signer: owner.accountID, operation: operation)
+                .withSignature([UInt8](repeating: 0, count: 64))
+            try await world.store.create(
+                SharingObject(try MembershipRecord.parse(predicted)).name, contents: predicted,
+                by: mallory.accountID)
+            squats.append(predicted)
+        }
+        let genuine = try owner.ledger(vault).proposeRoleChange(
+            of: mallory.accountID, to: .readOnly, signedBy: owner.keyset)
+        let squatted = try MembershipRecord.parse(squats[0])
+        #expect(squatted.hash == genuine.hash, "the same record, as far as its hash can tell")
+        #expect(SharingObject(squatted).name != SharingObject(genuine).name, "and a different object")
+        let deletion = try owner.ledger(vault).proposeDeletion(signedBy: owner.keyset)
+        #expect(try MembershipRecord.parse(squats[1]).hash == deletion.hash)
+        #expect(SharingObject(try MembershipRecord.parse(squats[1])).name != SharingObject(deletion).name)
+
+        try await owner.changeRole(of: mallory.accountID, to: .readOnly, in: vault)
+        let report = try await bystander.sync(vault)
+        try await mallory.sync(vault)
+        #expect(report.adopted.map(\.hash) == [genuine.hash])
+        #expect(report.rejected.map(\.reason) == [.invalid(.signatureInvalid), .invalid(.signatureInvalid)])
+        for member in [owner, bystander, mallory] {
+            #expect(try member.ledger(vault).state.member(mallory.accountID)?.role == .readOnly, "\(member.name)")
+        }
+    }
+
+    /// A4, an administrator (hostile, or handed a substituted bundle by the key directory, A1, and careless with the
+    /// comparison): removes a member the owner verified in person and adds the same account ID back with other
+    /// keys. The chain's rules allow it. The owner's device must not go on to wrap the next vault key to keys its
+    /// person never verified (review finding S21).
+    @Test("a member whose keys were swapped in the chain is reported against the pin, and no key is wrapped to them")
+    func chainKeyAgainstPin() async throws {
+        var household = try await SharingHousehold.make()
+        let victim = household.reader
+        let impostor = try SharingParty(accountID: victim.accountID, seed: 62)
+        let before = try await household.ledger.checkMemberKeys(against: household.contacts)
+        #expect(before.substituted.isEmpty && before.unverified.isEmpty, "the owner verified everyone")
+
+        try household.rotate(.removal(victim.accountID), by: household.administrator)
+        try household.adopt(
+            household.ledger.proposeAddition(
+                of: VerifiedContact(bundle: impostor.bundle, method: .comparedByEye, verifiedAt: nil),
+                as: .readOnly, signedBy: household.administrator.keyset
+            ).encoded())
+        let ledger = household.ledger
+        #expect(ledger.state.member(victim.accountID)?.bundle.hasSameKeys(as: impostor.bundle) == true)
+
+        let check = try await ledger.checkMemberKeys(against: household.contacts)
+        #expect(check.substituted == [victim.accountID] && check.unverified.isEmpty)
+        var generator = SeededGenerator(seed: 63)
+        for reason in [RotationReason.routine, .removal(household.writer.accountID)] {
+            #expect(throws: SharingError.keySubstituted(accountID: victim.accountID)) {
+                _ = try RotationPlanner.plan(
+                    reason, ledger: ledger, memberKeys: check, signedBy: household.owner.keyset, using: &generator)
+            }
+        }
+        #expect(throws: SharingError.keySubstituted(accountID: victim.accountID)) {
+            _ = try ledger.makeGrant(
+                of: household.vaultKey, to: victim.accountID, memberKeys: check, from: household.administrator.keyset)
+        }
+        // A comparison made on an earlier head, or for another vault, does not stand in for one made now.
+        #expect(throws: SharingError.memberKeysNotChecked) {
+            _ = try RotationPlanner.plan(
+                .routine, ledger: ledger, memberKeys: before, signedBy: household.owner.keyset, using: &generator)
+        }
+        #expect(throws: SharingError.memberKeysNotChecked) {
+            _ = try ledger.makeGrant(
+                of: household.vaultKey, to: household.writer.accountID, memberKeys: before,
+                from: household.administrator.keyset)
+        }
+
+        // What the person can do about it: remove the member (no key goes to the swapped keys) ...
+        let removal = try RotationPlanner.plan(
+            .removal(victim.accountID), ledger: ledger, memberKeys: check, signedBy: household.owner.keyset,
+            using: &generator)
+        let listed = removal.grants.map { (name: $0.name, contents: $0.contents) }
+        var afterwards = ledger
+        afterwards.ingest([removal.record.contents])
+        #expect(throws: SharingError.self) {
+            _ = try afterwards.openGrant(of: removal.newKeyID, from: listed, as: impostor.keyset)
+        }
+        #expect(try await afterwards.checkMemberKeys(against: household.contacts).substituted.isEmpty)
+        // ... or verify the new keys with the member and replace the pin, explicitly.
+        _ = try await household.contacts.verify(
+            impostor.bundle, evidence: .comparedByEye, signedBy: household.owner.keyset, at: Self.now,
+            replacingPin: true)
+        let verified = try await ledger.checkMemberKeys(against: household.contacts)
+        #expect(verified.substituted.isEmpty)
+        _ = try RotationPlanner.plan(
+            .routine, ledger: ledger, memberKeys: verified, signedBy: household.owner.keyset, using: &generator)
+
+        // A device with no pins of its own trusts the chain, and says so; its own keys it always knows.
+        let writers = VerifiedContacts(store: InMemoryVerifiedContactStore(), account: household.writer.bundle)
+        let unpinned = try await ledger.checkMemberKeys(against: writers)
+        #expect(unpinned.substituted.isEmpty && unpinned.unverified.count == ledger.state.members.count - 1)
+        let impostors = VerifiedContacts(store: InMemoryVerifiedContactStore(), account: victim.bundle)
+        #expect(try await ledger.checkMemberKeys(against: impostors).substituted == [victim.accountID])
+    }
+
+    /// A5, a former administrator, who keeps a valid signing position at every epoch before their removal: builds
+    /// many branches that each introduce the same vault key ID, a deep branch beside them, and at its tip a flood
+    /// of copies of a record that names that key ID again, so that asking "has this branch used the key" costs the
+    /// number of branches times the depth for every copy, before any signature is looked at (review finding S22).
+    @Test("a comb of signed branches reusing one key ID costs a verifier no more than each record's own path")
+    func keyReuseComb() async throws {
+        let household = try await SharingHousehold.make()
+        let former = household.administrator
+        let teeth = 30
+        let depth = 30
+        let copies = 600
+        let reused = UUID()
+        var records: [[UInt8]] = []
+        func extend(_ ledger: inout MembershipLedger, key: UUID) throws {
+            let record = try ForgedRecord(
+                after: ledger.state, signer: former.accountID, operation: .rotateKey, newKeyID: key
+            ).signed(by: former.keyset)
+            // A ledger of one path, as in `forkedHistory`: the record is that path's next.
+            ledger = try Self.freshDevice(household, ledger.chain.map(\.encoded) + [record])
+            records.append(record)
+        }
+        for _ in 0..<teeth {
+            var tooth = household.ledger
+            try extend(&tooth, key: UUID())
+            try extend(&tooth, key: reused)
+        }
+        var deep = household.ledger
+        for _ in 0..<depth {
+            try extend(&deep, key: UUID())
+        }
+        let tip = ForgedRecord(after: deep.state, signer: former.accountID, operation: .rotateKey, newKeyID: reused)
+        let flood = (0..<copies).map { index in
+            tip.withSignature(
+                [UInt8(truncatingIfNeeded: index), UInt8(truncatingIfNeeded: index >> 8)]
+                    + [UInt8](repeating: 0x57, count: 62))
+        }
+        let genuineTip = try tip.signed(by: former.keyset)
+
+        var ledger = household.ledger
+        let report = ledger.ingest(flood + records + [genuineTip])
+        #expect(report.rejected.count == copies)
+        #expect(report.rejected.allSatisfy { $0.reason == .invalid(.signatureInvalid) })
+        #expect(report.signatureChecks == copies + records.count + 1, "one per candidate")
+        // Each signed rotation walks the rotations of its own path, and nothing else in the tree.
+        #expect(report.keyHistorySteps <= (records.count + 1) * (depth + 2))
+        #expect(report.keyHistorySteps < copies * teeth, "far below one walk per copy per branch")
+        #expect(ledger.state.epoch == UInt64(household.state.epoch) + UInt64(depth) + 1)
+        #expect(ledger.state.vaultKeyID == reused, "valid on that path: no record before it there used the ID")
+        // And on a path that did use it, it is refused.
+        var tooth = try Self.freshDevice(household, household.ledger.chain.map(\.encoded) + Array(records[0..<2]))
+        try extend(&tooth, key: UUID())
+        let twice = try ForgedRecord(
+            after: tooth.state, signer: former.accountID, operation: .rotateKey, newKeyID: reused
+        ).signed(by: former.keyset)
+        #expect(tooth.ingest([twice]).rejected.map(\.reason) == [.invalid(.keyReused(reused))])
+    }
+
+    /// A8, with write access to this device's files: alters the saved rotation plan so that its first step takes a
+    /// different member off the transport's share, or plants a whole plan that another administrator (A4) made, or
+    /// one made with keys of its own (review finding S23).
+    @Test("a rotation plan altered or planted on disk is refused, and cannot aim a revocation at another member")
+    func plantedPlan() async throws {
+        let household = try await SharingHousehold.make()
+        let me = household.owner
+        var generator = SeededGenerator(seed: 64)
+        let plan = try RotationPlanner.plan(
+            .removal(household.reader.accountID), ledger: household.ledger, signedBy: me.keyset, using: &generator)
+        let bytes = plan.encoded()
+        #expect(
+            try RotationPlan.parse(bytes, account: me.bundle).steps(in: household.ledger).first
+                == .revokeTransportAccess(household.reader.accountID))
+
+        // The account that leaves is nowhere but in the signed record; every occurrence of it, replaced.
+        let reader = ForgedRecord.bytes(household.reader.accountID)
+        let other = ForgedRecord.bytes(household.administrator.accountID)
+        var offset = 0
+        var found = 0
+        while offset + 16 <= bytes.count {
+            if Array(bytes[offset..<(offset + 16)]) == reader {
+                found += 1
+                var altered = bytes
+                altered.replaceSubrange(offset..<(offset + 16), with: other)
+                #expect(throws: (any Error).self, "at \(offset)") {
+                    _ = try RotationPlan.parse(altered, account: me.bundle)
+                }
+            }
+            offset += 1
+        }
+        #expect(found >= 1)
+        for position in bytes.indices {
+            var altered = bytes
+            altered[position] ^= 0x01
+            #expect(throws: (any Error).self, "byte \(position)") {
+                _ = try RotationPlan.parse(altered, account: me.bundle)
+            }
+        }
+
+        // Another administrator's genuine plan, and a stranger's, put in its place.
+        let theirs = try RotationPlanner.plan(
+            .removal(household.writer.accountID), ledger: household.ledger,
+            signedBy: household.administrator.keyset, using: &generator)
+        #expect(throws: SharingError.savedPlanInvalid) {
+            _ = try RotationPlan.parse(theirs.encoded(), account: me.bundle)
+        }
+        let strangersKey = VaultKey.generate(vaultID: household.vaultID, using: &generator)
+        let strangersVault = try MembershipLedger.create(vaultKey: strangersKey, owner: household.outsider.keyset)
+        let strangers = try RotationPlanner.plan(
+            .routine, ledger: strangersVault, signedBy: household.outsider.keyset, using: &generator)
+        #expect(throws: SharingError.savedPlanInvalid) {
+            _ = try RotationPlan.parse(strangers.encoded(), account: me.bundle)
+        }
+        // The same bytes under a signature of the attacker's own, claiming to be this account's.
+        let unsigned = Array(bytes.dropLast(64))
+        #expect(throws: SharingError.savedPlanInvalid) {
+            _ = try RotationPlan.parse(
+                unsigned + household.outsider.keyset.sign(unsigned, domain: .membership), account: me.bundle)
+        }
+    }
+
+    /// Anyone who can create objects in the store (A4, or A5 on a store that still takes their writes): fills the
+    /// leave directory with objects whose names sort before a member's genuine request, and the member's own
+    /// subdirectory with requests that say the right things under a signature nobody made, so that no
+    /// administrator's device ever rotates the key the departing member holds (review finding S24).
+    @Test("a flood in the leave directory does not hide a member's request to leave")
+    func leaveRequestFlood() async throws {
+        let household = try await SharingHousehold.make()
+        let leaver = household.writer
+        let request = try LeaveRequest.make(leaving: household.state, as: leaver.keyset)
+        var listing: [(name: String, contents: [UInt8])] = []
+        for index in 0..<5_000 {
+            var account = [UInt8](repeating: 0, count: 16)
+            account[14] = UInt8(truncatingIfNeeded: index >> 8)
+            account[15] = UInt8(truncatingIfNeeded: index)
+            let contents = [UInt8](repeating: UInt8(truncatingIfNeeded: index), count: LeaveRequest.encodedLength)
+            listing.append(
+                (
+                    SharingObjectLocation(
+                        vaultID: household.vaultID,
+                        kind: .leave(account: UUID(sharingBytes: account), digest: SharingBytes.sha256(contents))
+                    ).name, contents
+                ))
+        }
+        for index in 0..<300 {
+            let forged = LeaveRequest(
+                vaultID: household.vaultID, accountID: leaver.accountID, memberSince: request.memberSince,
+                signature: (0..<64).map { UInt8(truncatingIfNeeded: index &+ $0) })
+            listing.append((SharingObject(forged).name, forged.encoded()))
+        }
+        // The owner cannot leave, whatever is filed under their account; and a request misfiled is not one.
+        listing.append(
+            (
+                SharingObjectLocation(
+                    vaultID: household.vaultID,
+                    kind: .leave(
+                        account: household.owner.accountID, digest: SharingBytes.sha256(request.encoded()))
+                ).name, request.encoded()
+            ))
+        #expect(household.ledger.pendingLeaveRequests(among: listing).isEmpty)
+
+        listing.sort { $0.name < $1.name }
+        listing.append((SharingObject(request).name, request.encoded()))
+        #expect(household.ledger.pendingLeaveRequests(among: listing) == [request])
+        #expect(
+            household.ledger.pendingRotation(
+                plan: nil, leaveRequests: listing, inventory: [], heldKeyIDs: [household.state.vaultKeyID])
+                == [.departureRequested(leaver.accountID)])
+    }
+
+    /// A1, serving the store, together with a former member X (A5): a member M who was removed is invited back
+    /// after X was removed too. The store hides every membership object from M's own removal onwards. M's earlier
+    /// membership and the original grant of the old key are a valid prefix of the chain, so an invitation that
+    /// built a new ledger from what the store offers would put M's device back to a state older than one it had
+    /// itself verified, with X a member and the old key current, and M's next item readable by X (review finding
+    /// S26).
+    @Test("a member invited back does not rejoin an older state than their own device had accepted")
+    func reinvitationRollback() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite, .readWrite])
+        var returning = members[0]
+        var former = members[1]
+        try await returning.sync(vault)
+        try await former.sync(vault)
+        let oldKeyID = try owner.ledger(vault).state.vaultKeyID
+
+        try await owner.remove(returning.accountID, from: vault)
+        try await returning.sync(vault)
+        #expect(try returning.ledger(vault).state.member(returning.accountID) == nil)
+        let accepted = try returning.ledger(vault).state
+        try await owner.remove(former.accountID, from: vault)
+        let invitation = try await owner.invite(
+            returning.accountID, to: vault, as: .readWrite, safetyNumber: returning.safetyNumber)
+
+        // The store shows the returning member the directory as it was before their removal.
+        let hidden = await world.store.list(
+            prefix: SharingObjectLocation.membershipPrefix(vault), viewer: returning.accountID
+        ).map(\.name).filter { name in
+            guard case .membership(let epoch, _, _)? = SharingObjectLocation(name: name)?.kind else { return false }
+            return epoch >= accepted.epoch
+        }
+        await world.store.hide(hidden, from: returning.accountID)
+        await #expect(throws: SharingError.notAMember(returning.accountID)) {
+            try await returning.accept(invitation, ownerSafetyNumber: owner.safetyNumber)
+        }
+        #expect(try returning.ledger(vault).state == accepted, "still where its own device had got to")
+
+        // What accepting without the ledger it holds would have done, and why the ledger must be passed.
+        let offered = await world.store.list(
+            prefix: SharingObjectLocation.membershipPrefix(vault), viewer: returning.accountID)
+        let grants = await world.store.list(
+            prefix: SharingObjectLocation.vaultPrefix(vault) + "grant/", viewer: returning.accountID)
+        var forgetful = try await IncomingInvitation.begin(
+            invitation, knownOwner: owner.accountID, directory: world.directory, contacts: returning.contacts)
+        let rolledBack = try forgetful.accept(
+            membership: offered.map(\.contents), grants: grants, as: returning.keyset, continuing: nil)
+        #expect(rolledBack.ledger.state.epoch < accepted.epoch)
+        #expect(rolledBack.ledger.state.member(former.accountID) != nil && rolledBack.vaultKey.key.keyID == oldKeyID)
+        // A ledger held for the same vault ID under another owner is not this vault's.
+        let othersKey = VaultKey.generate(vaultID: vault, using: &returning.generator)
+        let others = try MembershipLedger.create(vaultKey: othersKey, owner: former.keyset)
+        var mistaken = try await IncomingInvitation.begin(
+            invitation, knownOwner: owner.accountID, directory: world.directory, contacts: returning.contacts)
+        #expect(throws: SharingError.vaultOwnerConflict(vaultID: vault)) {
+            _ = try mistaken.accept(
+                membership: offered.map(\.contents), grants: grants, as: returning.keyset, continuing: others)
+        }
+
+        // Shown everything, the invitation goes through, on the newest state and under the newest key.
+        await world.store.reveal(to: returning.accountID)
+        try await returning.accept(invitation, ownerSafetyNumber: owner.safetyNumber)
+        let state = try returning.ledger(vault).state
+        #expect(state == (try owner.ledger(vault).state))
+        #expect(state.member(former.accountID) == nil && state.vaultKeyID != oldKeyID)
+        #expect(state.member(returning.accountID)?.since == state.epoch)
+        let secret = UUID()
+        try await returning.write("new secret", to: vault, recordID: secret, version: 1)
+        try await owner.sync(vault)
+        #expect(try await owner.readable(in: vault)[secret] == "new secret")
+        #expect(try await former.items(in: vault).allSatisfy { $0.outcome != .read("new secret") })
+    }
+
+    /// A1, serving the store, with an honest administrator and the owner acting at once: shows the administrator's
+    /// device only its own record until it has adopted it, then the owner's, which wins. A device that looked only
+    /// at what a sync reports as superseded, or that forgot what it had proposed, would drop the administrator's
+    /// change without a word (review finding S27).
+    @Test("a change that loses a fork is proposed again by its author's device, not silently dropped")
+    func lostProposalIsProposedAgain() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.administrator, .readWrite, .readOnly])
+        var admin = members[0]
+        let writer = members[1].accountID
+        let reader = members[2].accountID
+        try await admin.sync(vault)
+
+        // The owner's record is on the store; the administrator's device is not shown it.
+        let owners = try owner.ledger(vault).proposeRoleChange(of: reader, to: .readWrite, signedBy: owner.keyset)
+        try await world.store.create(SharingObject(owners).name, contents: owners.encoded(), by: owner.accountID)
+        await world.store.hide([SharingObject(owners).name], from: admin.accountID)
+        try await admin.changeRole(of: writer, to: .readOnly, in: vault)
+        #expect(try admin.ledger(vault).state.member(writer)?.role == .readOnly)
+        #expect(admin.proposals[vault]?.isEmpty == true, "adopted, as far as this device could see")
+
+        // Shown both, it reorganises onto the owner's record, and its own change goes out again on the new head.
+        await world.store.reveal(to: admin.accountID)
+        let report = try await admin.sync(vault)
+        #expect(report.superseded.map(\.operation) == [.changeRole(writer, to: .readOnly)])
+        try await owner.sync(vault)
+        for member in [owner, admin] {
+            let state = try member.ledger(vault).state
+            #expect(state.epoch == 5, "\(member.name)")
+            #expect(state.member(reader)?.role == .readWrite && state.member(writer)?.role == .readOnly)
+        }
+        #expect(try owner.ledger(vault).state == admin.ledger(vault).state)
+    }
+
     // MARK: - Oversized and malformed input
 
     /// A1 (and, for a scanned code, anyone who can show the person a QR code): feeds every parser oversized input,
@@ -1117,7 +1825,9 @@ struct AdversarialSharingTests {
                 #expect(KeyBundleCodec.encode(parsed) == badBundle)
             }
             let badPlan = damaged(plan.encoded())
-            if let parsed = try? RotationPlan.parse(badPlan) { #expect(parsed.encoded() == badPlan) }
+            if let parsed = try? RotationPlan.parse(badPlan, account: household.owner.bundle) {
+                #expect(parsed.encoded() == badPlan)
+            }
         }
         for _ in 0..<TestEnvironment.iterations(standard: 60, long: 2_000) {
             let badSaved = damaged(saved)
@@ -1132,7 +1842,9 @@ struct AdversarialSharingTests {
         #expect(throws: SharingFormatError.tooLarge(huge.count)) { _ = try KeyGrantCodec.parse(huge) }
         #expect(throws: SharingFormatError.tooLarge(huge.count)) { _ = try LeaveRequest.parse(huge) }
         #expect(throws: SharingFormatError.tooLarge(huge.count)) { _ = try Invitation.parse(huge) }
-        #expect(throws: SharingFormatError.tooLarge(huge.count)) { _ = try RotationPlan.parse(huge) }
+        #expect(throws: SharingFormatError.tooLarge(huge.count)) {
+            _ = try RotationPlan.parse(huge, account: household.owner.bundle)
+        }
         #expect(throws: SharingFormatError.tooLarge(huge.count)) {
             _ = try KeyBundleCodec.parse(huge, expecting: household.owner.accountID)
         }
@@ -1150,22 +1862,21 @@ struct AdversarialSharingTests {
                 inflated, vaultID: household.vaultID, owner: owner, account: household.owner.bundle)
         }
 
-        // More candidates than one call examines.
+        // No number of candidates is one too many: each is examined, and the ledger is where it was.
         var ledger = household.ledger
-        #expect(throws: LedgerError.tooManyCandidates(MembershipLimits.maximumCandidates + 1)) {
-            _ = try ledger.ingest(Array(repeating: record, count: MembershipLimits.maximumCandidates + 1))
-        }
-        #expect(throws: LedgerError.tooManyCandidates(MembershipLimits.maximumJoinCandidates + 1)) {
+        let report = ledger.ingest(Array(repeating: [0x57], count: 70_000))
+        #expect(report.rejected.count == 70_000 && ledger.state == household.state)
+        #expect(throws: LedgerError.noGenesis) {
             _ = try MembershipLedger.join(
-                vaultID: household.vaultID, owner: owner,
-                candidates: Array(repeating: [], count: MembershipLimits.maximumJoinCandidates + 1))
+                vaultID: household.vaultID, owner: owner, candidates: Array(repeating: [], count: 70_000))
         }
     }
 
-    /// A1, with write access to the store: floods the membership directory with unsigned records that name a real
-    /// administrator and a vault key the chain has used before, each of which makes the verifier ask "was this key
-    /// used on this branch", to make every sync cost time in proportion to the flood times the chain's length.
-    @Test("a flood of unsigned records naming a reused key is refused without a signature check each")
+    /// A1, with write access to the store and no key: floods the membership directory with unsigned records that
+    /// name a real administrator and a vault key the chain has used before, each of which would make a verifier ask
+    /// "was this key used on this branch", to make every sync cost time in proportion to the flood times the chain's
+    /// length (review finding S9).
+    @Test("a flood of unsigned records naming a reused key costs one signature check each and no walk")
     func reusedKeyFlood() async throws {
         var household = try await SharingHousehold.make()
         let genesisKey = household.state.vaultKeyID
@@ -1173,14 +1884,24 @@ struct AdversarialSharingTests {
             try household.rotate(.routine, by: household.owner)
         }
         var ledger = household.ledger
-        let flood: [[UInt8]] = (0..<MembershipLimits.maximumCandidates).map { index in
+        let flood: [[UInt8]] = (0..<4_096).map { index in
             var forged = household.forgery(.rotateKey, signer: household.administrator, newKeyID: genesisKey)
             forged.entries[0].since = UInt64(index % 3)
             return forged.withSignature([UInt8](repeating: UInt8(truncatingIfNeeded: index), count: 64))
         }
-        let report = try ledger.ingest(flood)
+        var report = ledger.ingest(flood)
         #expect(ledger.state == household.state)
-        #expect(report.rejected.allSatisfy { $0.reason == .invalid(.keyReused(genesisKey)) })
-        #expect(report.rejected.count >= 3)
+        #expect(report.rejected.allSatisfy { $0.reason == .invalid(.signatureInvalid) })
+        #expect(report.rejected.count == 256 * 3, "one per distinct candidate; exact copies are not looked at twice")
+        #expect(report.signatureChecks == report.rejected.count && report.keyHistorySteps == 0)
+
+        // Signed by an administrator, the reuse is what it is refused for, at the cost of one walk over the
+        // chain's rotations.
+        report = ledger.ingest([
+            try household.forgery(.rotateKey, signer: household.administrator, newKeyID: genesisKey)
+                .signed(by: household.administrator.keyset)
+        ])
+        #expect(report.rejected.map(\.reason) == [.invalid(.keyReused(genesisKey))])
+        #expect(report.keyHistorySteps == 13)
     }
 }

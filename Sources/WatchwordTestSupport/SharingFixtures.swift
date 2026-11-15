@@ -185,7 +185,7 @@ public struct SharingHousehold: Sendable {
     /// Ingests one record and requires that it became the head.
     @discardableResult
     public mutating func adopt(_ record: [UInt8]) throws -> MembershipLedger.IngestReport {
-        let report = try ledger.ingest([record])
+        let report = ledger.ingest([record])
         if let rejection = report.rejected.first {
             switch rejection.reason {
             case .malformed(let error): throw error
@@ -221,5 +221,43 @@ public struct SharingHousehold: Sendable {
 
     public mutating func newKeyID() -> UUID {
         SimulatedMember.uuid(using: &generator)
+    }
+}
+
+extension MemberKeyCheck {
+    /// A comparison that found nothing, for tests that are not about pins: what a device with no pin that
+    /// contradicts the chain would get from `MembershipLedger.checkMemberKeys`.
+    public static func findingNothing(in ledger: MembershipLedger) -> MemberKeyCheck {
+        .unchecked(in: ledger)
+    }
+}
+
+extension RotationPlanner {
+    /// Plans with a member-key comparison that found nothing (`MemberKeyCheck.findingNothing`).
+    public static func plan<R: RandomNumberGenerator>(
+        _ reason: RotationReason, ledger: MembershipLedger, signedBy keyset: Keyset, using generator: inout R
+    ) throws -> RotationPlan {
+        try plan(
+            reason, ledger: ledger, memberKeys: .findingNothing(in: ledger), signedBy: keyset, using: &generator)
+    }
+
+    public static func plan(_ reason: RotationReason, ledger: MembershipLedger, signedBy keyset: Keyset) throws
+        -> RotationPlan
+    {
+        try plan(reason, ledger: ledger, memberKeys: .findingNothing(in: ledger), signedBy: keyset)
+    }
+}
+
+extension MembershipLedger {
+    /// Wraps a key to a member with a member-key comparison that found nothing.
+    public func makeGrant(of vaultKey: VaultKey, to recipient: UUID, from keyset: Keyset) throws
+        -> VaultKeyGrantRecord
+    {
+        try makeGrant(of: vaultKey, to: recipient, memberKeys: .findingNothing(in: self), from: keyset)
+    }
+
+    /// Leave requests as a store would list them, under their own names.
+    public func pendingLeaveRequests(among requests: [LeaveRequest]) -> [LeaveRequest] {
+        pendingLeaveRequests(among: requests.map { (name: SharingObject($0).name, contents: $0.encoded()) })
     }
 }

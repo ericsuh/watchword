@@ -99,14 +99,29 @@ public struct SimulatedItem: Sendable, Hashable {
     public let outcome: SimulatedItemOutcome
 }
 
+/// A record as a simulated member's device holds it once merged: the newest version it accepted, and from whom.
+public struct MergedItem: Sendable, Hashable {
+    public let version: UInt64
+    public let author: UUID
+    public let keyID: UUID
+    public let text: String
+}
+
 /// One account with real keys taking part in shared vaults: the code an integrator will write around
 /// `WatchwordSharing`, kept as small as it can be while still exercising every step (create, invite, verify, accept,
 /// write, read, change a role, remove with rotation, leave, re-seal) against a `HostileSharingStore`.
 ///
 /// Item writes stand in for sync's log segments: an item envelope sealed with `RecordCipher` under the vault key and
 /// signed by its author over `name ‖ 0x00 ‖ envelope`, as `SyncEngine`'s objects are. A reader applies the three checks
-/// the integration must make, in this order: may the author write (the ledger, at its current epoch), is the
-/// signature the author's (the key the chain lists), does it open under a key this member holds.
+/// the integration must make, in this order: may the author write (the ledger, now), is the signature the author's
+/// (the key the chain lists), does it open under a key this member holds. What passes is **merged** into the device's
+/// own record store (`merged`) and stays there whatever happens to its author's standing afterwards; what the device
+/// has merged and its author may no longer write, the device publishes again under its own name
+/// (`MembershipLedger.recordsToReseal`), which is how a demoted or removed member's data reaches members who had not
+/// merged it (docs/02-architecture.md §8.7).
+///
+/// The order of a sync pass is the one §8.8 prescribes: membership first, then keys, then this device's own
+/// proposals, then items.
 public struct SimulatedMember: Sendable {
     public let name: String
     public let keyset: Keyset
@@ -120,6 +135,14 @@ public struct SimulatedMember: Sendable {
     public var keys: [UUID: [UUID: VaultKey]] = [:]
     /// Unfinished rotation plans as they would be on disk, by vault.
     public var savedPlans: [UUID: [UInt8]] = [:]
+    /// Records this device proposed and has not yet seen adopted, as they would be on disk, by vault.
+    public var proposals: [UUID: [[UInt8]]] = [:]
+    /// The device's own record store: what it has merged, by vault and record.
+    public var merged: [UUID: [UUID: MergedItem]] = [:]
+    /// Membership objects found permanently unacceptable, so that a flood is paid for once.
+    public var refusedNames: Set<String> = []
+    /// What the last comparison of member keys with this device's pins found, by vault (for the UI).
+    public var keyChecks: [UUID: MemberKeyCheck] = [:]
     public var generator: SeededGenerator
     public var now = Date(timeIntervalSince1970: 1_800_000_000)
 
@@ -195,11 +218,11 @@ public struct SimulatedMember: Sendable {
         if invitation.fingerprintToConfirm != nil {
             try await invitation.confirm(.safetyNumber(safetyNumber), contacts: contacts, signedBy: keyset, at: now)
         }
-        let package = try invitation.issue(ledger: ledger(vault), vaultKey: currentKey(vault), signedBy: keyset)
-        for object in package.objects {
-            try await publish(object)
-        }
+        // Propose on the newest head this device can see, and publish only what could still be adopted.
         try await sync(vault)
+        let package = try invitation.issue(ledger: ledger(vault), vaultKey: currentKey(vault), signedBy: keyset)
+        try await publish(package.grant)
+        try await propose(package.proposal, in: vault)
         return package.invitation
     }
 
@@ -215,21 +238,28 @@ public struct SimulatedMember: Sendable {
         let vault = invitation.vaultID
         let records = await store.list(prefix: SharingObjectLocation.membershipPrefix(vault), viewer: accountID)
         let grants = await store.list(prefix: SharingObjectLocation.vaultPrefix(vault) + "grant/", viewer: accountID)
-        let joined = try incoming.accept(membership: records.map(\.contents), grants: grants, as: keyset)
+        // The ledger of an earlier membership, if there was one, is continued, never replaced.
+        let joined = try incoming.accept(
+            membership: records.map(\.contents), grants: grants, as: keyset, continuing: ledgers[vault])
         ledgers[vault] = joined.ledger
         keys[vault, default: [:]][joined.vaultKey.key.keyID] = joined.vaultKey
+        keyChecks[vault] = try await joined.ledger.checkMemberKeys(against: contacts)
+        merged[vault] = try await view(of: vault)
     }
 
     // MARK: - Syncing
 
-    /// Ingests the vault's membership objects and fetches the current key if this member is entitled to it and does
-    /// not hold it yet.
+    /// One sync pass over a vault's sharing objects: ingests the membership objects this device does not hold,
+    /// compares the members' keys with its pins, fetches the current key if it is entitled to it and does not hold
+    /// it, settles its own pending proposals, and merges the items it now accepts. Returns what the first ingest
+    /// did.
     @discardableResult
     public mutating func sync(_ vault: UUID) async throws -> MembershipLedger.IngestReport {
-        var ledger = try ledger(vault)
-        let records = await store.list(prefix: SharingObjectLocation.membershipPrefix(vault), viewer: accountID)
-        let report = try ledger.ingest(records.map(\.contents))
-        ledgers[vault] = ledger
+        let report = try await ingest(vault)
+        // A record of this device's that was in the chain and has been displaced is a proposal again.
+        proposals[vault, default: []] += report.superseded.filter { $0.signer == accountID }.map { $0.encoded() }
+        if try await settleProposals(in: vault) { _ = try await ingest(vault) }
+        let ledger = try ledger(vault)
         let state = ledger.state
         if state.member(accountID) != nil, keys[vault]?[state.vaultKeyID] == nil {
             let grants = await store.list(
@@ -240,7 +270,94 @@ public struct SimulatedMember: Sendable {
                 keys[vault, default: [:]][state.vaultKeyID] = key
             }
         }
+        merged[vault] = try await view(of: vault)
         return report
+    }
+
+    /// Lists the membership prefix and offers the ledger every object it does not hold. Names are looked at first:
+    /// one that is not a membership object's, that carries a hash the ledger holds, or whose contents were refused
+    /// for good before, is not fetched again; and contents that are not what their name commits to are not offered.
+    private mutating func ingest(_ vault: UUID) async throws -> MembershipLedger.IngestReport {
+        var ledger = try ledger(vault)
+        let listed = await store.list(prefix: SharingObjectLocation.membershipPrefix(vault), viewer: accountID)
+        let offered = listed.filter { object in
+            guard let location = SharingObjectLocation(name: object.name), !ledger.holds(location),
+                !refusedNames.contains(object.name)
+            else { return false }
+            return location.isName(of: object.contents)
+        }
+        let report = ledger.ingest(offered.map(\.contents))
+        for rejection in report.rejected {
+            switch rejection.reason {
+            case .malformed, .invalid: refusedNames.insert(offered[rejection.index].name)
+            case .unconnected: break
+            }
+        }
+        ledgers[vault] = ledger
+        keyChecks[vault] = try await ledger.checkMemberKeys(against: contacts)
+        return report
+    }
+
+    /// Publishes a record this device signed, if it can still be adopted, and remembers it until it is.
+    private mutating func propose(_ record: MembershipRecord, in vault: UUID) async throws {
+        guard try ledger(vault).status(of: record) == .awaitingPublication else { return }
+        proposals[vault, default: []].append(record.encoded())
+        try await publish(SharingObject(record))
+        try await sync(vault)
+    }
+
+    /// Looks at every record this device proposed and has not seen adopted: one that was adopted is forgotten, one
+    /// still waiting is published again, and one that lost its place is proposed again on the new head if what it
+    /// did is still wanted and still possible. Returns whether anything was published.
+    private mutating func settleProposals(in vault: UUID) async throws -> Bool {
+        var published = false
+        var remaining: [[UInt8]] = []
+        for bytes in proposals[vault] ?? [] {
+            let record = try MembershipRecord.parse(bytes)
+            let ledger = try ledger(vault)
+            switch ledger.status(of: record) {
+            case .adopted:
+                continue
+            case .awaitingPublication:
+                try await publish(SharingObject(record))
+                remaining.append(bytes)
+                published = true
+            case .superseded:
+                guard let again = try await proposeAgain(record.operation, in: vault) else { continue }
+                try await publish(SharingObject(again))
+                remaining.append(again.encoded())
+                published = true
+            }
+        }
+        proposals[vault] = remaining
+        return published
+    }
+
+    /// The record that does on the current head what a superseded record of this device's did; `nil` if it has
+    /// happened by other means, is no longer allowed, or is a rotation (which has a plan of its own).
+    private mutating func proposeAgain(_ operation: MembershipRecord.Operation, in vault: UUID) async throws
+        -> MembershipRecord?
+    {
+        let ledger = try ledger(vault)
+        switch operation {
+        case .changeRole(let account, let role):
+            return try? ledger.proposeRoleChange(of: account, to: role, signedBy: keyset)
+        case .addMember(let account, let role):
+            // The invitation over again, from the pin: the key may have changed on the winning branch, so the grant
+            // is made again too.
+            guard
+                var invitation = try? await OutgoingInvitation.begin(
+                    vaultID: vault, inviting: account, as: role, directory: directory, contacts: contacts),
+                let key = try? currentKey(vault),
+                let package = try? invitation.issue(ledger: ledger, vaultKey: key, signedBy: keyset)
+            else { return nil }
+            try await publish(package.grant)
+            return package.proposal
+        case .deleteVault:
+            return try? ledger.proposeDeletion(signedBy: keyset)
+        case .createVault, .removeMember, .memberLeft, .rotateKey:
+            return nil
+        }
     }
 
     // MARK: - Items
@@ -281,13 +398,14 @@ public struct SimulatedMember: Sendable {
     /// An honest write: refused locally unless the ledger allows it (the client's half of F4.5), under the current key.
     public mutating func write(_ text: String, to vault: UUID, recordID: UUID, version: UInt64) async throws {
         let ledger = try ledger(vault)
-        if case .refused = ledger.writePermission(for: accountID, atEpoch: ledger.state.epoch) {
-            throw SharingError.notPermitted
-        }
-        try await write(text, to: vault, recordID: recordID, version: version, under: currentKey(vault))
+        if case .refused = ledger.writePermission(for: accountID) { throw SharingError.notPermitted }
+        let key = try currentKey(vault)
+        try await write(text, to: vault, recordID: recordID, version: version, under: key)
+        merged[vault, default: [:]][recordID] = MergedItem(
+            version: version, author: accountID, keyID: key.key.keyID, text: text)
     }
 
-    /// Every item object on the store as this member judges it, in name order.
+    /// Every item object on the store as this member judges it now, in name order.
     public func items(in vault: UUID) async throws -> [SimulatedItem] {
         let ledger = try ledger(vault)
         var result: [SimulatedItem] = []
@@ -303,7 +421,7 @@ public struct SimulatedMember: Sendable {
             func item(_ outcome: SimulatedItemOutcome) -> SimulatedItem {
                 SimulatedItem(recordID: recordID, version: version, author: author, keyID: keyID, outcome: outcome)
             }
-            if case .refused(let refusal) = ledger.writePermission(for: author, atEpoch: ledger.state.epoch) {
+            if case .refused(let refusal) = ledger.writePermission(for: author) {
                 result.append(item(.refused(refusal)))
                 continue
             }
@@ -334,84 +452,135 @@ public struct SimulatedMember: Sendable {
         return result
     }
 
-    /// The newest readable text of each record.
-    public func readable(in vault: UUID) async throws -> [UUID: String] {
-        var newest: [UUID: (version: UInt64, text: String)] = [:]
+    /// The device's record store as it would be after merging now: what it has merged already, overlaid with the
+    /// newer versions it accepts at this moment. What was merged earlier is never taken out again.
+    public func view(of vault: UUID) async throws -> [UUID: MergedItem] {
+        var newest = merged[vault] ?? [:]
         for item in try await items(in: vault) {
-            guard case .read(let text) = item.outcome, (newest[item.recordID]?.version ?? 0) <= item.version else {
-                continue
-            }
-            newest[item.recordID] = (item.version, text)
+            guard case .read(let text) = item.outcome, let keyID = item.keyID,
+                (newest[item.recordID]?.version ?? 0) < item.version
+            else { continue }
+            newest[item.recordID] = MergedItem(version: item.version, author: item.author, keyID: keyID, text: text)
         }
-        return newest.mapValues(\.text)
+        return newest
     }
 
-    /// The vault's live records as rotation sees them: the newest accepted version of each.
+    /// Merges what this device accepts now into its record store, without a membership pass: a rotation's
+    /// `mergeOutstandingWrites` step.
+    public mutating func mergeItems(in vault: UUID) async throws {
+        merged[vault] = try await view(of: vault)
+    }
+
+    /// The newest text this device holds of each record.
+    public func readable(in vault: UUID) async throws -> [UUID: String] {
+        try await view(of: vault).mapValues(\.text)
+    }
+
+    /// The vault's live records as rotation sees them.
     public func inventory(of vault: UUID) async throws -> [SealedRecordReference] {
-        var newest: [UUID: SealedRecordReference] = [:]
-        for item in try await items(in: vault) {
-            guard case .read = item.outcome, let keyID = item.keyID,
-                (newest[item.recordID]?.version ?? 0) <= item.version
-            else { continue }
-            newest[item.recordID] = SealedRecordReference(
-                recordID: item.recordID, kind: .item, keyID: keyID, version: item.version)
+        try await view(of: vault).map { recordID, item in
+            SealedRecordReference(
+                recordID: recordID, kind: .item, keyID: item.keyID, version: item.version, author: item.author)
         }
-        return Array(newest.values)
+    }
+
+    /// The re-seal step: writes again, under the current key and this member's name, every record the ledger lists
+    /// (sealed under an earlier key, or last written by an account that may no longer write). Skipped by a member
+    /// who may not write or does not hold the current key. Returns how many were written.
+    @discardableResult
+    public mutating func reseal(_ vault: UUID) async throws -> Int {
+        let ledger = try ledger(vault)
+        guard ledger.writePermission(for: accountID).isAllowed, (try? currentKey(vault)) != nil else { return 0 }
+        try await mergeItems(in: vault)
+        let texts = merged[vault] ?? [:]
+        let stale = ledger.recordsToReseal(in: try await inventory(of: vault))
+        for reference in stale {
+            guard let item = texts[reference.recordID] else { continue }
+            try await write(item.text, to: vault, recordID: reference.recordID, version: reference.version + 1)
+        }
+        return stale.count
     }
 
     // MARK: - Role changes, removal, leaving, rotation
 
+    /// Changes a member's role: a sync pass first (so the record is built on the newest head, and what the member
+    /// wrote so far is merged while they may still write), then the record, then the re-seal step, which publishes
+    /// again whatever a member who is now read-only had written.
     public mutating func changeRole(of account: UUID, to role: MemberRole, in vault: UUID) async throws {
-        let record = try ledger(vault).proposeRoleChange(of: account, to: role, signedBy: keyset)
-        try await publish(SharingObject(record))
         try await sync(vault)
+        let record = try ledger(vault).proposeRoleChange(of: account, to: role, signedBy: keyset)
+        try await propose(record, in: vault)
+        try await reseal(vault)
     }
 
     /// Plans a rotation and saves the plan, as an interrupted device would have it. Nothing is published.
     @discardableResult
-    public mutating func planRotation(_ reason: RotationReason, in vault: UUID) throws -> RotationPlan {
-        let plan = try RotationPlanner.plan(reason, ledger: ledger(vault), signedBy: keyset, using: &generator)
+    public mutating func planRotation(_ reason: RotationReason, in vault: UUID) async throws -> RotationPlan {
+        let ledger = try ledger(vault)
+        let plan = try RotationPlanner.plan(
+            reason, ledger: ledger, memberKeys: try await ledger.checkMemberKeys(against: contacts),
+            signedBy: keyset, using: &generator)
         savedPlans[vault] = plan.encoded()
         return plan
     }
 
     /// Carries the saved plan forward from wherever it stands, performing at most `limit` steps (to interrupt it).
-    /// Returns the status afterwards.
+    /// Returns the status afterwards. A plan that was superseded is planned again, if its member is still to go.
     @discardableResult
     public mutating func resumeRotation(in vault: UUID, limit: Int = .max) async throws -> RotationStatus {
-        guard let saved = savedPlans[vault] else { return .complete }
-        let plan = try RotationPlan.parse(saved)
+        var status = RotationStatus.complete
+        for _ in 0..<3 {
+            guard let saved = savedPlans[vault] else { return status }
+            let plan = try RotationPlan.parse(saved, account: bundle)
+            status = try await carryOut(plan, in: vault, limit: limit)
+            switch status {
+            case .complete:
+                savedPlans[vault] = nil
+            case .superseded:
+                savedPlans[vault] = nil
+                // The intent outlives the plan: a removal or departure that lost a fork is planned again.
+                if plan.reason.departingAccount != nil, (try? await planRotation(plan.reason, in: vault)) != nil {
+                    continue
+                }
+            case .awaitingPublication, .resealing:
+                break
+            }
+            return status
+        }
+        return status
+    }
+
+    private mutating func carryOut(_ plan: RotationPlan, in vault: UUID, limit: Int) async throws -> RotationStatus {
         var performed = 0
-        for step in plan.steps where performed < limit {
+        steps: for step in plan.steps(in: try ledger(vault)) where performed < limit {
             performed += 1
             switch step {
             case .revokeTransportAccess(let account):
                 await store.revokeShare(account)
+            case .mergeOutstandingWrites:
+                try await mergeItems(in: vault)
             case .publish(let object):
-                // Publishing a record that has since lost a fork is harmless: it stays a valid, outranked candidate.
+                if object == plan.record {
+                    // Never publish a record that can no longer be adopted: look at the store once more first.
+                    try await sync(vault)
+                    guard try ledger(vault).status(of: plan.proposal) == .awaitingPublication else { break steps }
+                }
                 try await publish(object)
             case .resealRecords:
                 try await sync(vault)
-                guard try plan.status(in: ledger(vault), inventory: []) != .superseded else { break }
-                let live = try await inventory(of: vault)
-                let texts = try await readable(in: vault)
-                for reference in try ledger(vault).recordsToReseal(in: live) {
-                    guard let text = texts[reference.recordID] else { continue }
-                    try await write(text, to: vault, recordID: reference.recordID, version: reference.version + 1)
-                }
+                guard try ledger(vault).status(of: plan.proposal) == .adopted else { break steps }
+                try await reseal(vault)
             }
         }
         try await sync(vault)
-        let live = try await inventory(of: vault)
-        let status = try plan.status(in: ledger(vault), inventory: live)
-        if status == .complete || status == .superseded { savedPlans[vault] = nil }
-        return status
+        return try plan.status(in: ledger(vault), inventory: await inventory(of: vault))
     }
 
     /// Removes a member: plan, then carry it out.
     @discardableResult
     public mutating func remove(_ account: UUID, from vault: UUID) async throws -> RotationStatus {
-        try planRotation(.removal(account), in: vault)
+        try await sync(vault)
+        try await planRotation(.removal(account), in: vault)
         return try await resumeRotation(in: vault)
     }
 
@@ -425,10 +594,29 @@ public struct SimulatedMember: Sendable {
     public mutating func processLeaveRequests(in vault: UUID) async throws {
         try await sync(vault)
         let objects = await store.list(prefix: SharingObjectLocation.leavePrefix(vault), viewer: accountID)
-        for request in try ledger(vault).pendingLeaveRequests(among: objects.map(\.contents)) {
-            try planRotation(.departure(request), in: vault)
+        for request in try ledger(vault).pendingLeaveRequests(among: objects) {
+            guard (try? await planRotation(.departure(request), in: vault)) != nil else { continue }
             try await resumeRotation(in: vault)
         }
+    }
+
+    /// Plans again every removal that lost a fork and that this account may sign (`MembershipLedger.owedRemovals`).
+    public mutating func settleOwedRemovals(in vault: UUID) async throws {
+        try await sync(vault)
+        for owed in try ledger(vault).owedRemovals {
+            guard (try? await planRotation(owed.reason, in: vault)) != nil else { continue }
+            try await resumeRotation(in: vault)
+        }
+    }
+
+    /// Everything a device does for a shared vault when it syncs (docs/02-architecture.md §8.8): the sync pass, then
+    /// any plan of its own, removals that are owed, departures that were asked for, and the re-seal step.
+    public mutating func maintain(_ vault: UUID) async throws {
+        try await sync(vault)
+        try await resumeRotation(in: vault)
+        try await settleOwedRemovals(in: vault)
+        try await processLeaveRequests(in: vault)
+        try await reseal(vault)
     }
 }
 

@@ -497,8 +497,8 @@ most 10,040 bytes.
 | Published key bundle | `WWKB` | account ID, X25519 key, Ed25519 key | self-signature (`.publicKeyBundle`) |
 | Invitation | `WWIV` | vault ID, owner's account ID | nobody: it only says whose fingerprint to ask about |
 | Contact pin (local) | `WWCP` | pinning account, method, time, the contact's bundle | the pinning account |
-| Saved ledger (local) | `WWML` | account, vault, digest of the owner's keys, head epoch and hash; then the records | the account, over the checkpoint |
-| Rotation plan (local) | `WWRP` | reason, base head, new key ID, the membership record, the grants | (its contents are) |
+| Saved ledger (local) | `WWML` | account, vault, digest of the owner's keys, head epoch and hash; then the accepted records, then the records held from losing branches | the account, over the checkpoint |
+| Rotation plan (local) | `WWRP` | planner, vault, base head, new key ID, kind of rotation, the membership record, the grants | the planner's account, over all of it |
 
 Signatures of the membership protocol all use `SignatureDomain.membership`; the leading magic keeps one kind from
 verifying as another. A record's **hash** is `SHA-256("WW-membership-hash-v1" ‖ signed content)`: the signature is
@@ -518,67 +518,106 @@ Objects live on the transport under a prefix of their own, beside sync's `vault/
 written once like sync's:
 
 ```
-sharing/<vaultID>/membership/<epoch, 20 digits>-<record hash, hex>
+sharing/<vaultID>/membership/<epoch, 20 digits>-<record hash, hex>-<SHA-256 of the object, hex>
 sharing/<vaultID>/grant/<keyID>/<recipient account>/<SHA-256 of the object, hex>
 sharing/<vaultID>/leave/<account>/<SHA-256 of the object, hex>
 ```
 
-Names are content-addressed: two administrators writing the same epoch write two objects rather than fight over
-one, publishing twice is harmless, and nobody can occupy another writer's name. Names are parsed exactly
-(`SharingObjectLocation`), as sync's are.
+Every name ends in a digest of the whole object, so two administrators writing the same epoch write two objects
+rather than fight over one, publishing twice is harmless, and **nobody can occupy another writer's name**. That last
+property needs the digest and not just the record hash: the signed content of a role change, an invitation or a
+deletion is predictable to any member, so a name made of the hash alone could be created first, with a signature that
+does not verify, by someone who wants the genuine record never to be published (review finding S20). The record hash
+stays in the name because it is the same for every copy of a record, which lets a device skip objects it already
+holds (`MembershipLedger.holds`). Names are parsed exactly (`SharingObjectLocation`), as sync's are.
 
 ### 8.3 The ledger: verification, forks, rollback
 
-`MembershipLedger` is one device's verified copy of a chain and the only source of a `MembershipState`.
+`MembershipLedger` is one device's verified copy of a vault's membership records and the only source of a
+`MembershipState`.
 
 **Trust anchor.** Two things, both local: the owner's key bundle, pinned when the vault was created or when the
-person accepting an invitation confirmed the owner's fingerprint out of band (§8.4); and the chain the device has
-already accepted, which the ledger holds. Everything the store offers is a candidate.
+person accepting an invitation confirmed the owner's fingerprint out of band (§8.4); and every valid record the
+device has already seen, which the ledger holds. Everything the store offers is a candidate.
 
 **Verifying a record** against the state before it, cheapest first: the vault, the epoch (exactly the next), the
 previous hash; the signer is a member and an administrator of the previous state; the operation is one that signer
-may perform (§8.1); the key rule (a removal or departure names a key ID the chain has never used, `rotateKey` likewise,
-nothing else changes the key); the signature, under the key the *previous state* lists for the signer; and last what
-the record brought with it: a new member's key bundle is validated, a departure's embedded leave request is checked,
-and the member list must be exactly the previous list with the operation applied. Unsigned junk costs at most one
-signature check. Each failure is a typed `MembershipError`; a refused record changes nothing.
+may perform (§8.1); the shape of the key change (a removal, a departure and `rotateKey` name a new key, nothing else
+changes it); the signature, under the key the *previous state* lists for the signer; and only then what costs work or
+came with the record: the new key ID must not have been used on this record's own path, a new member's key bundle is
+validated, a departure's embedded leave request is checked, and the member list must be exactly the previous list
+with the operation applied. Unsigned junk costs exactly one signature check; the key-history check walks the
+rotations of the record's own path and nothing else in the tree (S22). Each failure is a typed `MembershipError`; a
+refused record changes nothing, and since a record names its predecessor by hash, a refusal is permanent.
 
-**What the store cannot do.** Candidates are only ever *added* to the tree the accepted chain is part of, so:
-it cannot forge (every record is signed back to the owner's pinned key); it cannot roll back (a shorter chain is a
-subset of what the ledger holds); and it cannot choose between forks (below). It can withhold, as everywhere in sync,
-and then the ledger stays where it is.
+**A grow-only set of records, and a function of it.** The ledger holds the *tree* of valid records it has seen: the
+accepted chain and the records on branches that lost a fork (`branches`). `ingest` only ever adds valid records to
+that set, and the accepted chain is a pure function of the set, the fork rule below. So devices that have seen the
+same records agree, whatever the order of arrival and however the records were split across calls; a record that
+lost is still there for a later record to connect to, and can then win (S17). This is the same shape as a
+state-based CRDT: a set that only grows, merged by union, with the state read off it by a deterministic function.
+`ingest` takes any number of candidates and never refuses for count; a flood costs time in proportion to itself (one
+parse each, one signature check for what looks like a record) and hides nothing.
 
-**Concurrent administrators.** Two administrators may each write the record for the same epoch without seeing the
-other's. Every device settles it the same way, whatever the order of arrival: `MembershipLedger.ingest` builds the
-tree of valid records and walks it from the genesis, choosing at each fork
+The records kept from losing branches are bounded (1,024; only an account that is or was an administrator can sign
+one). Past the bound the ledger keeps the best-ranked, removals that are still owed first, says how many it let go
+(`IngestReport.forgotten`), and the integrator then offers the whole listing in each call instead of only what is
+new, which is always right.
 
-1. the branch whose **first owner-signed record comes at the earliest epoch**; then
-2. the **lower hash** of the record at the fork.
+**The fork rule.** Among all paths from the genesis through the valid records held, the accepted chain is the one
+with
 
-A device that had accepted the losing record reorganises onto the winner (`IngestReport.superseded`), and the loser's
-author plans again on the new head (`RotationStatus.superseded`; planning a removal that has since happened throws
-`nothingToDo`). Why this rule is safe:
+1. the **most records signed by the owner**; then
+2. the **most records**; then
+3. at the first record where two such paths part, the **lower hash**.
 
-- Between branches *without* an owner-signed record, every signer is an administrator on both (the set changes only
-  in owner-signed records), so the choice is between equals and the hash is as good as any.
-- A **former administrator** can go back to an epoch at which they still were one and publish a competing record,
-  even with a hash ground down to win. But their removal or demotion was signed by the owner at or after that
-  epoch, and their branch holds no owner-signed record, so it loses on every device however it is timed. A device
-  the store showed *only* their branch follows it until the owner's record arrives, which is no worse than not
-  having heard of the removal.
-- The owner's own records dominate, so the owner can always settle a dispute, and any owner-signed record seals
-  everything before it against administrators.
+Why this rule:
 
-Two residual cases are deterministic but not prevented: the owner's own devices signing different records for one
-epoch (settled by the rule; the losing device plans again), and a store that isolates one of the owner's devices so
-that it signs on a stale branch (§8.8, "what is not solved").
+- A **former administrator** can go back to an epoch at which they still were one and publish a branch of any
+  length, with hashes ground as low as they like. But the accounts that may sign change only in owner-signed records,
+  so their removal or demotion is one, and their branch lacks it: it holds fewer owner-signed records and loses on
+  every device however it is timed (S1). A device the store showed *only* their branch follows it until the owner's
+  record arrives, which is no worse than not having heard of the removal.
+- Between paths that hold the same owner-signed records, every signer is an administrator on both, so the choice is
+  between equals, and the **longer** one is the one more devices have built on. A single record signed on a stale
+  head and released late therefore displaces nothing that has been built on since (S18). Only when two paths are
+  equally long does the hash decide.
+- A **stale device of the owner's** is not special: one record it signs on an old head ties on owner-signed records
+  with the path that holds the owner's later record, and loses on length (S19).
+- The owner can always sign the next record, so no outcome leaves a vault that nobody can administer.
+
+**What the store can and cannot do** (A1). It cannot forge (every record is signed back to the owner's pinned
+key). Serving an older or partial listing changes nothing, because that is a subset of what the ledger holds. It can
+withhold, as everywhere in sync, and the ledger then stays where it is. And by withholding the newest head from an
+honest administrator's device it can have that device sign on a stale one, which **creates a fork between two honest
+records**; it chooses *when* the fork becomes visible, never which record wins it. What a fork costs is bounded by
+the next two paragraphs.
+
+**Removal wins.** A reorganisation can still displace a record that removed a member: two paths of equal standing
+(the narrowest timing the store has), or a device of the owner's that signed twice while isolated. The displaced
+record is kept, and while its signer may still remove that member in the accepted state (for a departure: while the
+member is still in the same stint) the removal is **owed** (`MembershipLedger.owedRemovals`). Until it is carried out
+again: `writePermission` refuses the member's writes (`removalPending`); `recordsToReseal` is empty, so nothing
+written under the newer key is sealed again under one the member holds; `pendingRotation` reports it; and the next
+device whose account may sign the removal plans it again, whichever device signed the first. This is a function of
+the records held, like the chain itself. A former administrator's removals on a dead branch owe nothing: their signer
+has no standing in the accepted state. Nor does a removal that its own branch went on to take back by adding the
+member again.
+
+**Everything else that loses is proposed again by its author.** `MembershipLedger.status(of:)` says whether a record
+this device proposed is `awaitingPublication`, `adopted` or `superseded`. A device keeps what it proposed until it is
+adopted, asks after every ingest, and proposes a superseded change again on the new head (the proposing functions
+throw if it has meanwhile happened). A device's own record is merely `outranked` in the report of its first ingest,
+so the report alone does not say this (S27). And a device ingests before it proposes, and never publishes a record
+that is no longer `awaitingPublication`.
 
 **Persistence.** `persisted(signedBy:)` writes a checkpoint (this account, the vault, a digest of the owner's keys,
-the head) signed by the account's own key, then the records. `restore` trusts none of it: the checkpoint must carry
-this account's signature and name this vault and owner, every record is verified again from the genesis, and the
-result must reach the checkpoint's head (`LedgerError.rolledBack` otherwise). A saved ledger that was truncated,
-altered or planted fails closed. An older blob of the device's own, put back, restores as that older state; the next
-ingest moves it forward.
+the head) signed by the account's own key, then the accepted records, then the records held from losing branches.
+`restore` trusts none of it: the checkpoint must carry this account's signature and name this vault and owner, every
+record is verified again from the genesis and must be valid, and the fork rule applied to them must give exactly the
+checkpoint's head (`LedgerError.rolledBack`, `savedRecordInvalid`). A saved ledger that was truncated, altered,
+extended or planted fails closed. An older blob of the device's own, put back, restores as that older state; the
+next ingest moves it forward.
 
 ### 8.4 Fingerprints, verified contacts, invitations (F4.1, F4.2, SEC3)
 
@@ -594,8 +633,9 @@ both comparisons are constant-time.
 
 **Verified contacts** (`VerifiedContacts` over the `VerifiedContactStore` port). Confirming a fingerprint, by typed
 number, by scan, or by the person's own comparison, **pins** the bundle: a record signed by the pinning account's own
-key. From then on a different bundle for that account, from anywhere, is refused and reported
-(`SharingError.keySubstituted`), never silently adopted; replacing a pin is a separate, explicit act. A pin that does
+key. From then on a different bundle for that account is refused and reported (`SharingError.keySubstituted`),
+never silently adopted, in the three places the module meets one: the key directory's answer on either side of an
+invitation, and the member list of a chain (below). Replacing a pin is a separate, explicit act. A pin that does
 not verify is ignored, so an attacker with the file (A8) cannot plant trust, only delete it, which puts the contact
 back in front of the person. Bundles are compared by account and keys, not by self-signature, because Ed25519 signing
 may be randomised.
@@ -615,13 +655,27 @@ invitee:  begin ─► awaitingVerification ─confirm─► verified ─accept�
 - The invitee verifies the **owner**, whoever invited them: an administrator's key is in the chain under the owner's
   signature, and every other member's under an administrator's. Trust in member keys is therefore transitive through
   the chain, rooted in one out-of-band comparison per person; a member who wants more compares fingerprints with
-  another member directly, and the pin then guards that key too. (Review finding D17: the UI must show unverified
-  members as such.)
+  another member directly, and the pin then guards that key too (next paragraph). (Review finding D17: the UI must
+  show unverified members as such.)
 - `accept` builds the ledger from the store's candidates anchored to the verified owner, requires this account to be
   a member **with its own keys** (an administrator who was handed a substituted key for the invitee is caught here:
   `ownKeySubstituted`), and opens the grant of the current key (§8.5).
 - An invitation to a vault ID the device already holds under another owner is refused (`vaultOwnerConflict`): vault
   IDs are not secret, and accepting it would let the sender stand in as the owner of someone else's vault.
+- A member who was removed and is **invited back** continues the ledger their device already holds
+  (`accept(…, continuing:)`); it is not rebuilt from what the store offers. Their earlier membership and the old
+  key's grant are a valid prefix of the chain, so a store that hid everything from their removal onwards would
+  otherwise have them rejoin a state older than one their own device had verified (S26). A device therefore keeps the
+  ledger of a vault it was removed from.
+
+**Pins against the chain.** The chain's rules let an administrator remove a member and add the same account ID back
+with other keys, so a ledger accepts that. `MembershipLedger.checkMemberKeys(against:)` compares every member's
+listed keys with the device's pins and returns a `MemberKeyCheck` for that head: `substituted` (listed keys differ
+from the pinned ones: reported as `keySubstituted`) and `unverified` (no pin; trusted through the chain only).
+`RotationPlanner.plan` and `MembershipLedger.makeGrant` *require* that value, made on the current head, and refuse to
+wrap a key to a member in `substituted`, so the comparison cannot be left out of anything that wraps a key (S21). The
+person resolves it by removing the member (no key goes to the swapped keys) or by verifying the new keys and
+replacing the pin.
 
 ### 8.5 Key grants
 
@@ -635,7 +689,9 @@ or former administrator's, not an administrator of another vault's, not one from
 (a demotion does not rotate, so "an administrator when the key was introduced" alone would still let them plant a
 key on a member added later). Only then does `VaultKeyGrant.open` check signature, addressing and ciphertext. A
 member is entitled only to keys that were current while they were a member; a newcomer reads older records because
-rotation re-seals them (§8.6), not by being given old keys.
+rotation re-seals them (§8.6), not by being given old keys. Looking for a grant, every object listed is considered,
+names first; there is no bound on how many, because a bound is something junk filed in the right place can fill
+(S10, S24).
 
 ### 8.6 Removal, leaving and rotation (F4.3, F4.4)
 
@@ -643,65 +699,124 @@ Removing a member or carrying out a departure **always rotates** (the verifier r
 key). `RotationPlanner.plan` produces a `RotationPlan`, pure data the integrator executes, in this order:
 
 1. **Revoke transport access** for the departing account. First, because it takes effect at once on the server.
-2. **Publish the grants**: the new key wrapped to every remaining member, the planner's own account included.
-3. **Publish the membership record** that removes the member and names the new key.
-4. **Re-seal** every record not under the current key (`MembershipLedger.recordsToReseal(in:)`), as new versions
-   through the ordinary save path, repeating until the list is empty.
+2. **Merge the departing account's outstanding writes**, while this device's ledger still lets it write (§8.7).
+3. **Publish the grants**: the new key wrapped to every remaining member, the planner's own account included.
+4. **Publish the membership record** that removes the member and names the new key, after one more look at the
+   store: a record that can no longer be adopted is not published, the plan is superseded, and it is planned again.
+5. **Re-seal** every record `MembershipLedger.recordsToReseal(in:)` lists, as new versions through the ordinary
+   save path, repeating until the list is empty.
 
 The plan holds no key in the clear: the new key exists only inside the grants, and the planning device obtains it
 like everyone else, by opening its own grant once the record is in its chain. So the plan can be saved and resumed
-after any interruption; every step is safe to repeat; and its status is read from what the device sees
-(`awaitingPublication`, `resealing(remaining:)`, `complete`, `superseded`), not from a counter.
+after any interruption; every step is safe to repeat; its status is read from what the device sees
+(`awaitingPublication`, `resealing(remaining:)`, `complete`, `superseded`), not from a counter; and what is left to
+do is asked of the ledger (`steps(in:)`), so that once the record is in the chain nothing is published again and the
+share is revoked again only while the account is still not a member.
+
+A saved plan is local state and is **signed by the planner's account**, like a pin or the saved ledger: its first
+step takes an account off the transport's share, and a file altered or planted on the device must not be able to aim
+that at a member of its choosing (S23). The account that leaves is not stored; it is read from the signed record.
+
+The planner needs a `MemberKeyCheck` made on the current head (§8.4) and wraps the new key to nobody whose keys in
+the chain are not the ones this device's person verified.
 
 **Pending rotation** (F4.3) is observable on every device, `MembershipLedger.pendingRotation`: a departure
-requested and not yet carried out, a plan of this device's not yet in the chain, the current key not yet held, and
-records still sealed under an earlier key.
+requested and not yet carried out, a removal that is owed (§8.3), a plan of this device's not yet in the chain, the
+current key not yet held, and records still to be sealed again.
 
 **Leaving.** The member's device publishes a signed `LeaveRequest` and leaves the transport share; it cannot write
 the record itself, which names a key it must not hold. The next unlocked device of an administrator (the owner, if
 the leaver is an administrator) turns the request into a rotation whose record carries the request's signature, so
 "left" in the chain always means the member said so. A request is bound to the vault and to one stint of membership
 (the epoch the member was added), so replaying it after the member has been invited back, or into another vault,
-does nothing.
+does nothing. Requests are found by name (the vault, a current member's account, the object's own digest) and then
+by signature, with no bound on how many objects are looked at: junk filed in the leave directory cannot hide a
+request, and so cannot keep a departing member's key current unnoticed (S24).
 
 **Per-item keys** were considered and rejected (`adr/0007-rotation-reencrypts-records.md`): rotation re-encrypts.
 
 ### 8.7 Permissions (F4.5)
 
-One question, `MembershipState.writePermission(for:)` (and `MembershipLedger.writePermission(for:atEpoch:)`):
-may this account write to the vault? Allowed for the owner, administrators and read-write members of a vault that
-has not been deleted. The client asks it before its own writes and before merging anyone else's.
+One question, `MembershipLedger.writePermission(for:)` (over `MembershipState.writePermission(for:)`): may this
+account write to the vault now? Allowed for the owner, administrators and read-write members of a vault that has not
+been deleted, unless their removal is owed (§8.3). The client asks it before its own writes and before merging anyone
+else's. (`writePermission(for:atEpoch:)` answers for an earlier epoch of the accepted chain; that is for showing
+history, never for deciding whether to merge.)
 
 It is **not cryptographic**: a read-only member holds the vault key, and a former member holds every key of their
 time, so either can produce a ciphertext that decrypts. What stops it counting is every remaining member's client
-asking, and the transport's own permission where it has one (CloudKit's read-only participant). When judging someone
-else's write, ask about the ledger's *current* epoch: a former member can date a write as they please. The cost is
-that a removed member's last, not-yet-merged edits are refused with the rest.
+asking, and the transport's own permission where it has one (CloudKit's read-only participant).
+
+**Judged now, merged for good, sealed again.** A write is judged against the membership the device knows *when it
+merges it*, not against the time the write claims: a former member can date a write as they please, so only the
+newest membership a device knows can refuse them. Two rules keep that from stranding what a member wrote while they
+were entitled to (S25):
+
+- What a device has merged stays merged, whatever happens to its author's standing afterwards.
+- A record whose stored version was written by an account that may no longer write is **sealed again by a member who
+  may**, as a new version under their own name. `recordsToReseal` lists those records beside the ones under an
+  earlier key (`SealedRecordReference.author`), and `pendingRotation` counts them. So after a demotion to read-only,
+  which rotates nothing, every device that had merged the member's records and may write publishes them again; a
+  member invited later, or a device that was offline, refuses the original and reads the copy. After a removal the
+  same happens in the rotation's re-seal step, which is why the plan merges the departing account's outstanding
+  writes *before* publishing the record that ends them.
+
+What is still lost: a write by a member whose removal or demotion every device learned of before any device that may
+write had merged it. That is the price of F4.5 being a rule the clients keep (S12). The reverse also holds: a write
+made while read-only counts once its author has been made read-write.
 
 ### 8.8 What integration calls, and what is not solved
 
-For each shared vault a session keeps a `MembershipLedger` (saved after every change of head), the vault's keys, and
-at most one `RotationPlan`. On sync: list `sharing/<vaultID>/membership/` and `ingest`; if the head changed, persist,
-fetch the grant of the current key if it is not held (`openGrant(of:from:as:)`) and store the key wrapped under Ksym;
-if a record of this device's was superseded, plan again; list `leave/` and, as an administrator, plan a rotation for
-each `pendingLeaveRequests`; continue any saved plan. `SyncKeyring.verify` is where `writePermission` plugs in, with
-the author's signing key taken from the ledger's state.
+For each shared vault a session keeps a `MembershipLedger` (saved after every ingest that adopted, outranked or
+forgot a record, and kept after the account is removed from the vault), the vault's keys, at most one `RotationPlan`,
+and the records it has proposed and not yet seen adopted. `SimulatedMember` in `WatchwordTestSupport` is this loop,
+written out against a hostile store. One sync pass, in this order:
+
+1. **Membership.** List `sharing/<vaultID>/membership/`; skip names that are not a membership object's, that carry a
+   hash the ledger `holds`, or whose contents were refused as `malformed` or `invalid` before (both are permanent);
+   fetch the rest, drop any whose contents are not what the name commits to (`SharingObjectLocation.isName(of:)`),
+   and `ingest` what remains. Offer `unconnected` objects again next time. Persist.
+2. **Member keys.** `checkMemberKeys` against the verified contacts; report `substituted` members to the person.
+3. **Proposals.** For each record this device proposed: `status(of:)`. Adopted: forget it. Awaiting publication:
+   publish it again. Superseded: propose the change again on the new head, if it is still wanted and still possible.
+   A record of this account's in `IngestReport.superseded` is a proposal again.
+4. **Key.** Fetch the grant of the current key if it is not held (`openGrant(of:from:as:)`) and store the key
+   wrapped under Ksym.
+5. **Items.** Merge other members' writes, judging each author with `writePermission(for:)` (§8.7).
+   `SyncKeyring.verify` is where that plugs in, with the author's signing key taken from the ledger's state.
+6. **Rotation.** Continue any saved plan (`RotationPlan.parse(_:account:)`, `steps(in:)`); a superseded removal or
+   departure is planned again. Plan each of `owedRemovals` this account may sign. As an administrator, plan a
+   rotation for each of `pendingLeaveRequests`. Then, as a member who may write, seal again whatever
+   `recordsToReseal` lists; a re-seal is the same item state at a higher version (`ItemMerge.written`), not an edit,
+   so two devices doing it at once converge.
+
+Accepting an invitation passes the ledger the device already holds for that vault ID, if it ever held one
+(`continuing:`), and the owner it knows for it (`knownOwner:`).
 
 Not solved here, and to be decided with integration:
 
 - **One signing key per account** (review finding D9). A lost device of an administrator can sign membership records
   until the account key is replaced. The device registry belongs in front of this module's signature checks.
 - **An isolated owner device.** A store that shows one of the owner's devices only a former administrator's branch
-  can obtain an owner-signed record on it. The rule then picks between two branches the owner signed; the other
-  device's removal is superseded and must be planned again. Until it is, members who follow the stale branch seal to
-  a key the former administrator holds. Closing this needs the owner's devices to refuse to sign while they disagree,
-  which is device-registry work.
+  can obtain an owner-signed record on it; the two paths then tie on owner-signed records and the former
+  administrator, who can lengthen theirs, wins the tie. The owner's removal of them is then *owed* and is planned
+  again by the first device of the owner's that sees both paths, after which their path can never win again; until
+  then members who follow it seal to a key the former administrator holds. Closing the window needs the owner's
+  devices to refuse to sign while they disagree, which is device-registry work. A displaced *demotion* is not owed;
+  the owner's device proposes it again (step 3).
+- **Forks cost work.** Whatever lost a fork is done again: removals by any device that may, everything else by its
+  author's device when it next syncs. Until then an invitee waits, a role change is not in effect, and a removed
+  member is listed (with their writes refused).
+- **A former administrator who can still write to the store** can publish valid records on dead branches without
+  limit. They change nothing and owe nothing, but a device keeps only 1,024 of them, and each one beyond that costs
+  it a signature check on every sync. Taking them off the transport's share (step 1 of a removal) is what stops it.
 - **Account key replacement.** A member with new account keys is removed and invited again; there is no record that
   replaces a member's bundle in place.
 - **A deleted or exhausted chain.** After `deleteVault`, or at epoch 65,535, membership is frozen; items move to a new
   vault (F4.6's "move to a shared vault" is that mechanism).
 - **Keys from a superseded record.** A device that followed a losing branch may have sealed records under its key;
-  it keeps that key until nothing it holds is sealed under it (`recordsToReseal` lists them).
+  it keeps that key until nothing it holds is sealed under it (`recordsToReseal` lists them). A device that never
+  held that key cannot read those records until one that did has sealed them again.
 
 ## 9. AutoFill and service matching (`WatchwordMatching`)
 
