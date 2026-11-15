@@ -8,8 +8,9 @@ Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
-`WatchwordPlatform`), and milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
-its CloudKit and iCloud Drive transports. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+`WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
+its CloudKit and iCloud Drive transports, and milestone 6's portable hygiene core (`WatchwordHygiene`) short of its
+network adapter, session wiring and UI. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -111,7 +112,9 @@ property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` an
 imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
 policies and ports are portable too, and so are `WatchwordCrypto` and `VaultSession` through swift-crypto (ADR 0006);
 `SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and all of
-`WatchwordPlatform` are not.
+`WatchwordPlatform` are not. `WatchwordHygiene` is wholly portable: it imports `Foundation`, `Crypto`, `SecureMemory`
+and `WatchwordModel`, and its only way to the network is the `HTTPClient` port, so the day it imports `URLSession`
+its tests stop being able to say what leaves the device.
 
 ## Architecture
 
@@ -119,7 +122,7 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Ten shipped modules, dependency-ordered, plus test support:
+Eleven shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
@@ -140,6 +143,11 @@ Ten shipped modules, dependency-ordered, plus test support:
   line-level `NoteText`, `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `SyncEngine`,
   `DeletionRecordingStore`, and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
+- **`WatchwordHygiene`** — milestone 6's portable core: `PwnedPasswordsClient` (the k-anonymity range API) and
+  `BreachedAccountClient` over the `HTTPClient` port, the `PwnedRangeCache` port, `ScanSchedule`/`ScanLedger` (when to
+  check, as a value), `StrengthEstimator` (zxcvbn-class, with embedded word lists), `ReuseIndex`, `ItemAnalyzer`,
+  the `SiteDirectory` seam, `HygieneReport`, and `HygieneEngine`, the actor the session will drive between unlock and
+  lock. Depends on `WatchwordModel`, `SecureMemory` and `Crypto`; knows nothing of the session or the store.
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
   history, trash, password change, deletion, `sync()`, conflict resolution), `UnlockPolicy`, `AutoLockPolicy`,
   `ItemCodec`, `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`), and `VaultSyncAdapter`, the
@@ -148,13 +156,36 @@ Ten shipped modules, dependency-ordered, plus test support:
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
-  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`). Test targets only; not a product, and no
-  production target may depend on it.
+  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for hygiene
+  `FakeHTTPClient`, which records every request, `RecordingPwnedRangeCache`, `SimulatedPwnedPasswords`). Test targets
+  only; not a product, and no production target may depend on it.
 
-`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`, `WatchwordHygiene`,
+`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`,
 `WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
 §7.6 the vault side (keyring, saves, state, conflict UI); `docs/03-implementation-plan.md` milestone 3 lists what is
-still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds).
+still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds). §13 describes hygiene as
+built, and milestone 6 what is still open (the `URLSession` adapter, session wiring, background glue, the report UI).
+
+### `WatchwordHygiene` invariants
+
+- Only five hexadecimal characters of a password's SHA-1 ever leave the device, in
+  `GET https://api.pwnedpasswords.com/range/XXXXX` with `Add-Padding: true` and the `User-Agent`. The hosts are the two
+  constants of `HygieneHost`; `HTTPSURL` has no public initialiser. Never add a configurable host, follow a
+  redirect, or put anything else in a request.
+- A response that could not be read is an error, never "not breached": the parser's bounds (bytes, lines) fail closed
+  and counts saturate. Suffix comparison (`PwnedRange.result`) scans every entry without branching on a match.
+- **Only while keys are resident (ADR 0005 and its amendment).** `HygieneEngine` keeps everything derived from a
+  password in one optional that `lock()` clears; every hashing entry point checks it, and a scan re-checks the lock
+  epoch after each suspension, so a lock during a request wins and nothing is cached or recorded. `PasswordDigest`,
+  `ReuseToken`, `ReuseIndex`, `ItemAnalysis` and the report are not `Codable`: keep them that way.
+- The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts). They are persisted only
+  sealed, per device, unsynced. Nothing here writes to disk.
+- The breached-account lookup sends an identifier, so it takes an `IdentifierDisclosure` and nothing schedules it.
+- Time is a parameter and jitter an injected generator: no timers, no `Date()`, no sleeping, in the module or its
+  tests. Every request is paid for in `ScanSchedule`'s token bucket, including the several an item with several
+  passwords makes.
+- The estimator analyses 64 scalars and keeps one match per stretch; anything that makes its cost depend on the
+  password's full length is a denial-of-service on a shared vault. Explanations never quote the password.
 
 ### `SyncEngine` invariants
 
@@ -315,7 +346,7 @@ directions are tested; keep both when adjusting constants.
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`), so **renaming a suite breaks CI deliberately** — update
+  `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`, `"hygiene and breach checks"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication

@@ -26,7 +26,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
 | 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
-| 6 — hygiene | HIBP client, scheduling, strength estimator, reuse/age/2FA checks | the Watchtower-style report UI and its snapshot tests |
+| 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done | open: the `URLSession` adapter, the wiring into `VaultSession`, background-task glue, the Watchtower-style report UI and its snapshot tests |
 | 7 — interchange | Parsers, adversarial parser tests, and the fuzz targets — a better host for them | Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive |
 | 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
 
@@ -213,7 +213,7 @@ half delivered** on a Mac; the transports are open.
   request type is an AuthenticationServices entry point, the targets are app extensions, and the exit
   criteria name simulator and on-device QA. This is the milestone the Xcode MCP server exists for.
 
-## Milestone 6 — Hygiene
+## Milestone 6 — Hygiene (portable core done)
 
 - `WatchwordHygiene`: HIBP range client with padding, caching and lenient parsing; scheduling;
   zxcvbn-class estimator (vendored); reuse/age/2FA checks; Watchtower-style report UI.
@@ -224,6 +224,34 @@ half delivered** on a Mac; the transports are open.
   and the reuse/age/2FA checks are all portable; add `import FoundationNetworking` under
   `#if canImport` where URLSession needs it on Linux. Only the report UI and its snapshot tests need
   a Mac.
+
+**Done** (`02-architecture.md` §13; all of it built and tested on Linux, none of it Apple-bound):
+
+- `PwnedPasswordsClient` (five-character prefix, `Add-Padding`, `User-Agent`, bounded lenient parser,
+  constant-time suffix comparison, typed retryable outcomes with bounded `Retry-After`), the `PwnedRangeCache`
+  port with a 7-day expiry and `InMemoryPwnedRangeCache`, and `BreachedAccountClient` (F9.4, opt-in per call).
+- `ScanSchedule` and `ScanLedger`: on create and edit, changed since the last scan, a weekly pass that
+  resumes after a lock, nothing while keys are absent; token-bucket rate limit, jitter and backoff.
+- `StrengthEstimator`, written here, with embedded word lists (`07-supply-chain.md` §2.2).
+- `ReuseIndex` over HMAC tokens, password age, plain-`http` addresses, and the `SiteDirectory` seam with the
+  opt-in `EmbeddedSiteDirectory` for two-step verification and passkeys (F11.8).
+- `HygieneReport` and `HygieneEngine`, the actor the session will drive.
+- The `HTTPClient` port, with `FakeHTTPClient` and `SimulatedPwnedPasswords` in `WatchwordTestSupport`.
+- Tests: `WatchwordHygieneTests` and the adversarial suite "hygiene and breach checks" (`04-test-plan.md` §6.6).
+  The fixtures are written to the API's documented format; the live service is not reachable from a cloud
+  session and is never called by a test.
+
+**Open:**
+
+- `URLSessionHTTPClient` in `WatchwordPlatform` (ephemeral, no redirects, size and time limits), and a
+  capture of real range responses on a Mac to check the fixtures against.
+- Wiring into `VaultSession`: the reuse key from `Ksym`, the ledger and the prefix cache as sealed local
+  records, `update`/`scan` on save, `unlock`/`lock`.
+- `BGProcessingTask` / `NSBackgroundActivityScheduler` glue that wakes the loop.
+- The report UI, per-item badges in the item list, settings for the site directory and the HIBP API key, and
+  the UI snapshot tests.
+- The embedded EFF list came from a mirror (eff.org was unreachable); compare it with EFF's file before the
+  generator draws passphrases from it, and keep one copy when the generator gains its own.
 
 ## Milestone 7 — Interchange
 

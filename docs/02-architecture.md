@@ -225,8 +225,9 @@ milestone 2 stores full item records only.
   database beside it, `sync.sqlite` (`SQLiteSyncStateStore`, milestone 3), opened and schema-checked the
   same way; a separate file keeps `WatchwordStore` ignorant of sync, and nothing needs both in one
   transaction (tombstones are recorded after the deletion commits, and the engine's state can be rebuilt by a
-  reconciling sync, so a state row that does not decode is read as no state). Still to come: `hibp_cache`
-  (milestone 6). The schema version is `PRAGMA user_version`; a newer one is refused, not
+  reconciling sync, so a state row that does not decode is read as no state). Still to come: the breach-check
+  prefix cache and scan ledger, as sealed local records rather than a plaintext `hibp_cache` table (§13.2,
+  §13.3; milestone 6). The schema version is `PRAGMA user_version`; a newer one is refused, not
   misread. A commit may name the version it read of each record (`StoreChange.expectations`), so a writer
   that awaited something in between — the sync engine waiting on its merger while the person saves the same
   item — fails with `versionConflict` instead of overwriting the newer save.
@@ -626,17 +627,197 @@ future flow needs a generated password to outlive a single UI interaction.
 
 ## 13. Hygiene (`WatchwordHygiene`)
 
-- HIBP: `SHA1(password)` → prefix 5 hex → `GET https://api.pwnedpasswords.com/range/<prefix>` with
-  `Add-Padding: true` and `User-Agent: Watchword/<version>`; the response is parsed leniently,
-  zero-count lines are discarded, the suffix set is cached by prefix for 7 days in the ciphertext
-  store (it is public data, but caching also hides re-check timing). Plaintext passwords never
-  leave `SecureMemory` except as the SHA-1 digest held transiently.
-- Scheduling: on item save; on unlock for items modified since `lastScanAt`; weekly full scan via
-  `BGProcessingTask` (iOS) / `NSBackgroundActivityScheduler` (macOS) **only while keys are
-  resident**; if the vault locks mid-scan the task resumes on next unlock. No hashes are persisted
-  to allow scanning while locked (`adr/0005-hibp-while-locked.md`).
-- Strength: vendored zxcvbn-class estimator; reuse detection via a per-unlock in-memory map of
-  `HMAC(Ksym-derived key, password)` → item IDs (never persisted); age and 2FA-availability checks.
+The portable core is built (milestone 6); the `URLSession` adapter, the wiring into `VaultSession`, the
+background-task glue and the report UI are not (§13.8). The module depends on `WatchwordModel`,
+`SecureMemory` and `Crypto` (SHA-1 for the range API, HMAC-SHA-256 for reuse) and on nothing else: it does
+not know the session, the store or any Apple framework, takes the time as a parameter and randomness as a
+generator, and reaches the network only through the `HTTPClient` port. Everything below runs under
+`swift test` on Linux.
+
+### 13.1 Who hygiene defends against
+
+Hygiene is the one feature that talks to a third party, so it adds two positions to §2:
+
+- **The service and the network path** (the Have I Been Pwned operator, its CDN, a TLS-intercepting proxy
+  the device trusts). Sees every request and chooses every response. It learns five hexadecimal characters
+  of a password's SHA-1 per check and the times of the checks, and nothing else; it cannot move a request
+  to another host, exhaust the device with a response, or switch the scanner off. It can always lie by
+  omission (leave a breached suffix out of a range), which nothing on the device can detect.
+- **Whoever reads the device at rest** (A2, A3, A8). Finds nothing derived from a password in the clear:
+  no hash, no prefix, no reuse token, no breach result (ADR 0005).
+- **A malicious household member** (A4) chooses the items a victim's device analyses, so the cost of one
+  item, and the request rate whatever the items, are bounded.
+
+### 13.2 Pwned Passwords (F9.1)
+
+`PasswordDigest` is SHA-1 of the password's UTF-8 bytes as typed, split into `PwnedRangePrefix` (twenty
+bits, held as a number, so the type cannot carry more of the hash) and the other 35 hexadecimal characters,
+packed into 18 bytes of `SecureBytes`. It is not `Codable`, `Hashable` or printable. Item fields are Swift
+`String`s (PRD SEC4), so `init(utf8Of:)` takes one; the copy fed to the hash is in `SecureBytes` and wiped,
+and `init(password:)` takes `SecureBytes` for callers that have it.
+
+`PwnedPasswordsClient.check` sends at most one request per check:
+`GET https://api.pwnedpasswords.com/range/<PREFIX>` with `Add-Padding: true` and
+`User-Agent: Watchword/<version>`, and no other header. The host and scheme are constants (`HygieneHost` has
+no public initialiser; `HTTPSURL` is built only by two factories from typed values), so no parameter, setting
+or response can redirect a request, and a 3xx is an error (`unexpectedStatus`), never followed.
+
+`PwnedRangeParser` is lenient about what a well-meaning server or proxy might do (either line ending, either
+case, stray white space, blank lines, a byte-order mark; lines that are not `SUFFIX:COUNT` are skipped and
+counted) and bounded about the rest: 2 MiB, 50,000 lines, counts saturating at `UInt32.max`. Zero-count
+lines are padding and are dropped. Exceeding a bound, or a body with no range line at all (an error page, a
+proxy's block page), is an error, not an empty range: a response that could not be read is never "not
+breached". `PwnedRange.result(for:)` compares the digest with every entry, in full, and selects the count
+without a branch, so neither the result nor the time taken says which other suffixes the range holds or
+where a match was.
+
+Outcomes are typed (`PwnedPasswordsError`): 429 and 5xx are retryable and carry `Retry-After` clamped to
+1 s…1 h (so a server can neither make the scanner spin nor switch it off), a thrown transport error is
+retryable, and everything else (other statuses, oversized or malformed bodies) is not.
+
+**Prefix cache.** `PwnedRangeCache` is a port; the client applies the 7-day expiry against the `now` it is
+given, ignores an entry dated in the future or filed under the wrong prefix, and stores only parsed 200
+responses. `InMemoryPwnedRangeCache` (512 prefixes, 32 MiB, oldest out) is the default. The ranges are
+public data, but *which prefixes a device holds* is not: each is twenty bits of the SHA-1 of one of the
+person's passwords, enough to discard all but one in a million guesses offline. A persisting implementation
+must therefore seal what it writes under a key that is gone when the vault locks, read and write nothing
+while locked, and keep it on the device; `CachedPwnedRange.encoded()` is the plaintext to seal (ADR 0005,
+amendment). This replaces the earlier plan of a plaintext `hibp_cache` table.
+
+### 13.3 Scheduling (F9.2, ADR 0005)
+
+`ScanSchedule` is a value: given the candidates (items with a password, not trashed), the `ScanLedger` and
+the time, `decide` returns `.locked`, `.scan(item, reason)`, `.wait(until, why)` or `.idle(nextFullScanAt)`.
+It owns no timer, thread or clock.
+
+- An item with no ledger entry (`created`) or an entry for another version (`changed`) is due at once and
+  first. That one rule covers creation, edit, and "changed since the last scan" after an unlock.
+- A weekly pass begins when the previous one *began* at least seven days ago. An item is due in a pass until
+  it has been scanned since the pass began; the pass's checks pass `freshAfter` to the client, so the pass
+  really asks again, once per prefix. A pass a lock interrupts is still in progress in the ledger
+  (`fullScanCompletedAt == nil`), so the next unlock resumes it.
+- With `keysResident` false the answer is `.locked` and the ledger is untouched.
+- Rate: a token bucket (five requests at once, then one per two seconds; every request is paid for, so an
+  item with several passwords buys a proportionate wait), plus up to three seconds of injected jitter in the
+  weekly pass. Any failure backs every request off, doubling from one minute to one hour and never less than
+  `Retry-After`; an item whose range cannot be used is also set aside (ten minutes, doubling to a day) so it
+  does not block the rest. Checks answered from the cache cost nothing. Times that are ahead of the clock
+  (a clock put back) are treated as wrong, not waited for.
+
+`ScanLedger` records, per item, the version scanned, when, and the result per password field, plus the pass
+times. It is `Codable` with explicit, bounded shapes, and it is **derived from passwords** (a breach count
+all but names one): the session persists it only sealed, as a local record that is not synced. It holds no
+hash, prefix or token.
+
+### 13.4 Strength (F9.3)
+
+`StrengthEstimator` is a zxcvbn-class estimator written here (Wheeler, USENIX Security 2016 is the
+description it follows; no code is shared with any implementation). `StrengthMatcher` finds every stretch
+explained by a ranked word list (plain, reversed, and with look-alike substitutions and capitalisation
+variations), a keyboard walk (US QWERTY and a keypad, built from the printed rows), a repeat (its unit
+analysed recursively, two levels), a sequence, a recent year or a date; `cheapestCover` is the
+minimum-guesses search over those matches, with brute force between them. The result is a `StrengthScore`
+(0–4 at 10^3, 10^6, 10^8 and 10^10 guesses), `guessesLog10`, and a `StrengthWeakness` with one plain
+sentence that never quotes the password. The item's own title, usernames and hosts are passed as personal
+inputs and rank ahead of every list.
+
+Bounded: only the first 64 scalars are analysed (`truncated` says so). What follows can only add guesses, so
+the estimate for a longer password is a lower bound, and an assessment costs the same for 64 characters or
+ten thousand (milliseconds). One match is kept per stretch, so the search sees at most `n(n+1)/2`.
+
+The word lists are Swift source (one multi-line literal each; about 300 kB in all), each file carrying its
+source, commit and licence (`07-supply-chain.md` §2.2):
+
+| List | Entries | Source |
+| --- | --- | --- |
+| Common passwords | 10,000 | zxcvbn `data/passwords.txt` (MIT), most common first |
+| English words | 5,000 | zxcvbn `data/english_wikipedia.txt` (MIT) |
+| Surnames, female and male given names | 500 + 300 + 300 | zxcvbn (MIT; 1990 US census) |
+| EFF large wordlist | 7,776 | EFF (CC BY 3.0 US), via a mirror, cross-checked against a second |
+
+A word's cost is its rank in its list. The EFF list is not a frequency list, so every word in it costs
+7,776: a generated passphrase of `n` words is estimated at about `7776^n`, the figure §12 reports.
+
+### 13.5 Reuse and the other checks (F9.3, F11.8)
+
+- **Reuse.** `ReuseKey` (32 bytes or more, derived by the session from `Ksym` for this purpose, zeroised on
+  lock) gives `ReuseToken = HMAC-SHA-256(key, password)`; `ReuseIndex` maps tokens to item IDs. Tokens and
+  the index are not `Codable`, print as redacted, and live only between unlock and lock.
+- **Age.** A password has been current since the latest time the item's history shows a different value of
+  that field being replaced, or since creation. Asking for the latest differing entry is independent of the
+  order a merge left the history in. Older than three years (configurable, or off) is reported as
+  information only; an item with no timestamps has no age.
+- **Insecure addresses.** `url` fields that start `http://`, loopback excepted. (Scopes are hostnames and
+  carry no scheme, so "insecure scopes" in F9.3 can only mean these.)
+- **Two-step verification and passkeys.** `SiteDirectory` is the seam. The default, `NoSiteDirectory`, knows
+  nothing, and then a password-only item is merely noted (`passwordOnly`, information; F11.8).
+  `EmbeddedSiteDirectory` is an opt-in selection of about 240 domains of well-known services from the
+  2factorauth directories, retrieved 2026-11-15; with it, an item with no one-time code on a site listed as
+  supporting TOTP gets `twoFactorAvailable`, and one with no passkey on a site listed as supporting
+  passkey sign-in gets `passkeyAvailable`. It is off by default because such a list ages; its answers are
+  advice in the report and feed no decision about a secret.
+- Security answers and PINs are not checked.
+
+### 13.6 Breached-account lookup (F9.4)
+
+`BreachedAccountClient.breaches(disclosing:apiKey:)` sends
+`GET https://haveibeenpwned.com/api/v3/breachedaccount/<address>?truncateResponse=false` with the person's
+key in `hibp-api-key`. Unlike the range API this sends an identifier, so it is opt-in per call: the only
+argument that names the address is an `IdentifierDisclosure`, made by
+`.confirmedByPerson(sending:)` at the UI action in which the person asks, and nothing in the module makes
+one or looks an address up on a schedule. `EmailAddress` and `HIBPAPIKey` refuse anything that could add a
+header or change the path (the address is one percent-encoded segment); the key prints as redacted and an
+`HTTPRequest` prints its host and header names only. The response is bounded (2 MiB, 2,000 breaches) and
+reduced to plain text: control and bidirectional-formatting characters are removed, and the service's HTML
+description and logo URL are not carried. Nothing is cached or stored.
+
+### 13.7 The report and the engine
+
+`HygieneReport.make(analyses:ledger:now:policy:)` is pure. Per item it gives findings (kind, severity, field,
+a summary, a plain-language explanation, and the facts behind it for a UI that words things itself), badges
+(one per kind at `low` or above), and a breach status (`notApplicable`, `notChecked`, `clear`, `breached`,
+with the check time); and vault-wide totals, including how many items await a check and the oldest check,
+so stale results are visible (ADR 0005). Order is fixed: items worst first, then by lower-cased title bytes,
+then ID; findings by severity, kind, field. A breach result counts only for the item version it was made
+for. The report holds titles, so it is as private as the vault; it holds no password, hash or token.
+
+| Finding | Severity |
+| --- | --- |
+| Password found in a data breach | critical |
+| Password reused on another item | high |
+| Weak password (score 0–1) / could be stronger (score 2) | high / medium |
+| Two-step verification available, none set up (directory) | medium |
+| Unencrypted web address | low |
+| Passkey available, none set up (directory) | low |
+| Password only | info |
+| Old password | info |
+
+`HygieneEngine` is the actor the session drives between unlock and lock: `unlock(reuseKey:ledger:items:now:)`,
+`update`/`remove` as items change, `next(now:)` and `scan(_:now:)` in a loop, `report(now:)`, `ledger()` to
+persist, `lock()`. It keeps an `ItemAnalysis` per item (strength, token, flags; never the password) and
+reads passwords only from the item handed to `scan`. Its invariants:
+
+- Everything derived from a password lives in one optional that `lock()` clears after zeroising the reuse
+  key. Every entry point that hashes checks it first; while locked `scan` returns `.locked`, and `update`,
+  `report`, `ledger` and `items(using:)` throw.
+- A scan re-checks the lock epoch after every suspension, and the client asks again before storing: a lock
+  that lands while a request is in flight wins. The response is dropped, nothing is cached, the ledger is
+  untouched, and a scan from before a lock cannot write into the session after it.
+- One scan at a time; a check requested by a save obeys the same rate limit and backoff as the loop.
+- At most 16 passwords per item are analysed and checked.
+
+### 13.8 Still to come, and how it plugs in
+
+- **`URLSessionHTTPClient`** in `WatchwordPlatform`: an ephemeral session, no cookies or cache, redirects
+  refused, the response cut off at `maximumResponseBytes` of decoded body, a timeout, nothing logged (the
+  port's documentation is the contract).
+- **Session wiring** in `VaultSession`: derive the reuse key from `Ksym` with its own HKDF label; on unlock,
+  unseal the ledger record and call `unlock` with the decrypted items; on save, `update` then `scan`; on
+  lock, `lock()` (before the keyset is zeroised); seal and store `ledger()` after scans; back
+  `PwnedRangeCache` with sealed local records.
+- **Background glue**: `BGProcessingTask` (iOS) and `NSBackgroundActivityScheduler` (macOS) only wake the
+  loop; whether anything runs is `next(now:)`'s decision, so a wake while locked does nothing.
+- **The report UI** and its snapshot tests, and the settings for the site directory and the API key.
 
 ## 14. Import and export (`WatchwordInterchange`)
 
@@ -670,7 +851,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordSync         change log, merge, SyncTransport protocol,
                                 SQLite sync state                                  [milestone 3; transports open]
   Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
-  Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 6]
+  Sources/WatchwordHygiene      HIBP clients, scan schedule, strength estimator,
+                                reuse, report, HygieneEngine                       [milestone 6; adapter, wiring, UI open]
   Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
   Sources/WatchwordKit          VaultSession façade, UnlockPolicy, AutoLockPolicy,
                                 ports (KeychainStore, BiometricGate, WallClock)     [milestone 2, done]
@@ -693,6 +875,11 @@ store `SQLiteSyncStateStore`. Production adapters live in the package (`Watchwor
 `SQLiteRecordStore`) rather than `Apps/`, so the strict-memory-safety job, the unsafe tripwire,
 lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live in
 `WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`).
+
+Milestone 6 adds `HTTPClient`, `PwnedRangeCache` (with `InMemoryPwnedRangeCache` in the module) and `SiteDirectory`
+(§13); their fakes are `FakeHTTPClient`, which records every request, `RecordingPwnedRangeCache` and
+`SimulatedPwnedPasswords`. Hygiene takes the time as a parameter and randomness as a generator, so it needs no clock
+port of its own.
 
 ## 16. Open questions tracked as ADR candidates
 
