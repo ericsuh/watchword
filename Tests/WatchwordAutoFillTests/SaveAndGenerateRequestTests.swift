@@ -27,8 +27,8 @@ struct SaveAndGenerateRequestTests {
             plan
                 == .createItem(
                     NewItemProposal(
-                        title: "shop.example.net", scopeHost: "shop.example.net", userName: "pat@example.com",
-                        warning: nil)))
+                        title: "shop.example.net", scopeHost: "shop.example.net", includesSubdomains: false,
+                        userName: "pat@example.com", warning: nil, hiddenAccounts: 0, besideExisting: nil)))
         #expect(await harness.vault.saves.isEmpty)
 
         let saved = try await harness.model.savePassword(request, to: .newItem).value
@@ -40,7 +40,8 @@ struct SaveAndGenerateRequestTests {
         #expect(item.fields.map(\.value) == ["pat@example.com", "new-password"])
         #expect(item.vaultID == Fixtures.vaultID)
 
-        // It fills on that host and not on a sibling or a subdomain, and its identity is published.
+        // It fills on that host and not on a sibling or a subdomain. It is for one host and not a whole site, so
+        // it has no QuickType identity: the system could offer one anywhere under example.net.
         let credential = try await harness.model.password(
             for: PasswordChoice(itemID: item.id, userName: "pat@example.com"),
             identifiers: [Fixtures.domain("shop.example.net")]
@@ -51,13 +52,8 @@ struct SaveAndGenerateRequestTests {
                 for: PasswordChoice(itemID: item.id, userName: "pat@example.com"),
                 identifiers: [Fixtures.domain("evil.shop.example.net")]
             ).refusal?.isGateRefusal == true)
-        #expect(
-            await harness.publisher.published.contains(
-                .password(
-                    PasswordIdentity(
-                        host: "shop.example.net", user: "pat@example.com",
-                        recordIdentifier: RecordIdentifier(itemID: item.id),
-                        rank: 7))))
+        #expect(!(await harness.publisher.published.contains { $0.recordIdentifier.itemID == item.id }))
+        #expect(try await harness.publishedIdentities() == CredentialIdentityPlanner.identities(for: Fixtures.all))
     }
 
     @Test("a changed password is offered as an update of the matching account, and the old one stays in history")
@@ -112,14 +108,89 @@ struct SaveAndGenerateRequestTests {
             return
         }
         #expect(proposal.scopeHost == "www.amazon.com")
+        #expect(!proposal.includesSubdomains)
         #expect(proposal.warning == nil)
-        // Not unasked: a second account would tie with the first and stop it filling without UI.
+        // Scoped to this one host it would outrank the account already offered here, and the sheet says so.
+        #expect(proposal.hiddenAccounts == 1)
+        #expect(
+            proposal.besideExisting
+                == SharedScopeProposal(scopeHost: "amazon.com", includesSubdomains: true, accounts: 1))
+        // Not unasked: where an account is already offered, a second one is the person's to place.
         #expect(await harness.model.savePasswordWithoutInteraction(request) == .requiresInteraction(.confirmation))
         // Forcing the update onto the other account is refused.
         #expect(
             await harness.model.savePassword(request, to: .existingItem(Fixtures.amazonRetail.id))
                 == .refused(.unknownRecord))
         #expect(await harness.vault.saves.isEmpty)
+    }
+
+    /// The review finding: saved as its own exact-host item, the second account outranked the first, which the
+    /// gate then refused on that host even when chosen, and nothing had said so.
+    @Test("a second account saved beside the first leaves both offered; saved for the one host, it hides the first")
+    func secondAccountBesideTheFirst() async throws {
+        let shop = Fixtures.url("https://www.amazon.com/ap/signin")
+        let request = Self.request("https://www.amazon.com/ap/signin", user: "work@example.com")
+        let first = PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email)
+
+        let beside = AutoFillHarness(items: [Fixtures.amazonRetail])
+        let saved = try await beside.model.savePassword(request, to: .newItemBesideExisting).value
+        let item = try #require(await beside.vault.item(saved.itemID))
+        #expect(item.scopes == Fixtures.amazonRetail.scopes)
+        #expect(item.title == "www.amazon.com")
+        #expect(try await beside.model.password(for: first, identifiers: [shop]).value.password == "retail-password")
+        #expect(
+            try await beside.model.password(
+                for: PasswordChoice(itemID: item.id, userName: "work@example.com"), identifiers: [shop]
+            ).value.password == "new-password")
+        guard case .list(let list) = await beside.model.credentialList(for: [shop]) else {
+            Issue.record("no list")
+            return
+        }
+        #expect(Set(list.passwords.map(\.userName)) == [Fixtures.email, "work@example.com"])
+        #expect(list.otherAccounts.isEmpty)
+        #expect(list.suggested == nil)
+        // The first account's one-time code is still its own to give.
+        #expect(
+            try await beside.model.oneTimeCode(
+                for: FieldChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(103)), identifiers: [shop]
+            ).value.code.count == 6)
+        // Both are whole-site accounts with different names, so both keep a QuickType identity.
+        #expect(try await beside.publishedPasswords().map(\.user) == [Fixtures.email, "work@example.com"])
+
+        // The other choice, which the plan described as hiding one account: scenario S1's, on purpose.
+        let apart = AutoFillHarness(items: [Fixtures.amazonRetail])
+        let narrow = try await apart.model.savePassword(request, to: .newItem).value
+        #expect(
+            await apart.vault.item(narrow.itemID)?.scopes
+                == [ServiceScope(host: "www.amazon.com", includeSubdomains: false)])
+        #expect(await apart.model.password(for: first, identifiers: [shop]).refusal?.isGateRefusal == true)
+        #expect(
+            try await apart.model.password(for: first, identifiers: [Fixtures.domain("amazon.com")]).value.password
+                == "retail-password")
+        // And the retail identity leaves the keyboard: the system might offer it on www.amazon.com.
+        #expect(await apart.publisher.published.isEmpty)
+    }
+
+    @Test("where the accounts on a host already match it exactly, a new item ties with them and hides nothing")
+    func secondAccountOnAnExactHost() async throws {
+        let harness = AutoFillHarness(items: [Fixtures.awsRoot])
+        let request = Self.request("https://signin.aws.amazon.com/signin", user: "ops@example.com")
+        guard case .createItem(let proposal) = try await harness.model.savePasswordPlan(for: request).value else {
+            Issue.record("expected a new item")
+            return
+        }
+        #expect(proposal.hiddenAccounts == 0)
+        #expect(proposal.besideExisting == nil)
+        // With nothing to be beside, the two destinations are the same.
+        let saved = try await harness.model.savePassword(request, to: .newItemBesideExisting).value
+        #expect(
+            await harness.vault.item(saved.itemID)?.scopes
+                == [ServiceScope(host: "signin.aws.amazon.com", includeSubdomains: false)])
+        #expect(
+            try await harness.model.password(
+                for: PasswordChoice(itemID: Fixtures.awsRoot.id, userName: Fixtures.email),
+                identifiers: [Fixtures.url("https://signin.aws.amazon.com/signin")]
+            ).value.password == "aws-password")
     }
 
     @Test("an item with no user name can take the one from the login it is updated with")

@@ -429,8 +429,14 @@ struct PasskeyRequestTests {
             extensions: PasskeyRegistrationExtensions(prf: .checkForSupport, largeBlobRequested: true))
         let options = try await harness.model.passkeyRegistrationOptions(for: request).value
         #expect(options.existingItems.isEmpty)
+        #expect(options.relatedLogins.isEmpty)
         #expect(options.suggested == .newItem)
         #expect(options.relyingPartyID == "shop.example")
+        #expect(
+            options.newItem
+                == NewItemProposal(
+                    title: "shop.example", scopeHost: "shop.example", includesSubdomains: true,
+                    userName: "pat@example.com", warning: nil, hiddenAccounts: 0, besideExisting: nil))
 
         let result = try await harness.model.registerPasskey(request, destination: .newItem, presence: .verified).value
         let item = try #require(await harness.vault.item(result.itemID))
@@ -496,6 +502,160 @@ struct PasskeyRequestTests {
         #expect(item.fields.dropLast() == Fixtures.amazonRetail.fields[...])
         #expect(item.fields.last?.kind == .passkey)
         #expect(await harness.vault.allItems.count == Fixtures.all.count)
+    }
+
+    /// The review finding: the second account's new item was scoped to the relying party exactly, outranked the
+    /// item holding the first account's passkey, and the gate then refused that passkey for good.
+    @Test("a second account's passkey, registered beside the first, leaves the first assertable")
+    func secondAccountBesideTheFirst() async throws {
+        var example = Fixtures.library
+        example.title = "Example"
+        example.scopes = [ServiceScope(host: "example.com")]
+        example.fields[1].value = "alice"
+        let harness = AutoFillHarness(items: [example])
+        let alice = try await harness.model.registerPasskey(
+            Self.registrationRequest("login.example.com", userName: "alice", handle: "alice-handle"),
+            destination: .existingItem(example.id), presence: .verified
+        ).value
+        let aliceChoice = FieldChoice(itemID: example.id, fieldID: alice.fieldID)
+        let assertion = Self.assertionRequest("login.example.com")
+        #expect(
+            try await harness.model.passkeyAssertion(for: aliceChoice, request: assertion, presence: .verified).value
+                .assertion.userHandle == Data("alice-handle".utf8))
+
+        // Bob registers. No item holds his name, so the suggestion is a new item, and one that hides nobody.
+        let bobRequest = Self.registrationRequest("login.example.com", userName: "bob", handle: "bob-handle")
+        let options = try await harness.model.passkeyRegistrationOptions(for: bobRequest).value
+        #expect(options.existingItems.map(\.itemID) == [example.id])
+        #expect(options.newItem.scopeHost == "login.example.com")
+        #expect(options.newItem.hiddenAccounts == 1)
+        #expect(
+            options.newItem.besideExisting
+                == SharedScopeProposal(scopeHost: "example.com", includesSubdomains: true, accounts: 1))
+        #expect(options.suggested == .newItemBesideExisting)
+        let bob = try await harness.model.registerPasskey(
+            bobRequest, destination: options.suggested, presence: .verified
+        )
+        .value
+        #expect(bob.createdItem)
+        #expect(await harness.vault.item(bob.itemID)?.scopes == [ServiceScope(host: "example.com")])
+        #expect(await harness.vault.item(example.id)?.scopes == [ServiceScope(host: "example.com")])
+
+        // Both passkeys are offered, published and assertable, by choice and from the system's sheet.
+        guard
+            case .list(let list) = await harness.model.credentialList(
+                for: [Fixtures.domain("login.example.com")], passkey: assertion)
+        else {
+            Issue.record("no list")
+            return
+        }
+        #expect(Set(list.passkeys.map(\.userName)) == ["alice", "bob"])
+        #expect(list.otherAccounts.isEmpty)
+        let published = await harness.publisher.published.compactMap { identity -> PasskeyIdentity? in
+            if case .passkey(let passkey) = identity { return passkey }
+            return nil
+        }
+        #expect(Set(published.map(\.userName)) == ["alice", "bob"])
+        for identity in published {
+            #expect(
+                try await harness.model.passkeyAssertionWithoutInteraction(
+                    request: assertion, identity: identity.handedBack, presence: .verified
+                ).value.assertion.userHandle == identity.userHandle)
+        }
+        #expect(
+            try await harness.model.passkeyAssertion(for: aliceChoice, request: assertion, presence: .verified).value
+                .assertion.userHandle == Data("alice-handle".utf8))
+
+        // The other destination, which the sheet said would hide one account: it does, and the hidden passkey's
+        // identity leaves the system's sheet instead of being offered and then refused.
+        let apart = AutoFillHarness(items: [try #require(await harness.vault.item(example.id))], seed: 43)
+        _ = try await apart.publishedIdentities()
+        _ = try await apart.model.registerPasskey(bobRequest, destination: .newItem, presence: .verified).value
+        #expect(
+            await apart.model.passkeyAssertion(for: aliceChoice, request: assertion, presence: .verified)
+                .refusal?.isGateRefusal == true)
+        let left = await apart.publisher.published.compactMap { identity -> String? in
+            if case .passkey(let passkey) = identity { return passkey.userName }
+            return nil
+        }
+        #expect(left == ["bob"])
+    }
+
+    /// The review finding: a login the save flow scoped to `www.shop.example` is not for the relying party
+    /// `shop.example`, so the passkey cannot join it. That stays so, because joining it would mean adding a scope
+    /// from the extension (PRD F11.7); what changed is that the sheet now names the login.
+    @Test("a login scoped under the relying party is named, never re-scoped, and the passkey goes to its own item")
+    func loginScopedBelowTheRelyingParty() async throws {
+        let harness = AutoFillHarness(items: [])
+        let saved = try await harness.model.savePasswordWithoutInteraction(
+            SavePasswordRequest(
+                serviceIdentifier: Fixtures.url("https://www.shop.example/login"), userName: "pat@example.com",
+                password: "pw")
+        ).value
+        let login = try #require(await harness.vault.item(saved.itemID))
+        #expect(login.scopes == [ServiceScope(host: "www.shop.example", includeSubdomains: false)])
+
+        let request = Self.registrationRequest("shop.example")
+        #expect(await harness.model.registerPasskeyWithoutInteraction(request) == .refused(.noItemToUpgrade))
+        let options = try await harness.model.passkeyRegistrationOptions(for: request).value
+        #expect(options.existingItems.isEmpty)
+        #expect(options.relatedLogins.map(\.itemID) == [login.id])
+        #expect(options.relatedLogins.first?.title == "www.shop.example")
+        #expect(options.suggested == .newItem)
+        #expect(options.newItem.hiddenAccounts == 0)
+        // Naming it as the destination anyway is refused by the gate, and nothing is written.
+        #expect(
+            await harness.model.registerPasskey(request, destination: .existingItem(login.id), presence: .verified)
+                .refusal?.isGateRefusal == true)
+        #expect(await harness.vault.item(login.id) == login)
+
+        let registered = try await harness.model.registerPasskey(request, destination: .newItem, presence: .verified)
+            .value
+        #expect(registered.createdItem)
+        #expect(await harness.vault.item(login.id) == login)
+        // Each half works where it belongs: the password on www, the passkey for the relying party.
+        #expect(
+            try await harness.model.password(
+                for: PasswordChoice(itemID: login.id, userName: "pat@example.com"),
+                identifiers: [Fixtures.url("https://www.shop.example/login")]
+            ).value.password == "pw")
+        #expect(
+            try await harness.model.passkeyAssertion(
+                for: FieldChoice(itemID: registered.itemID, fieldID: registered.fieldID),
+                request: Self.assertionRequest("shop.example"), presence: .verified
+            ).value.assertion.userHandle == Data("handle-1".utf8))
+
+        // A login for another account, or one scoped elsewhere, is not "related".
+        var other = login
+        other.id = Fixtures.id(60)
+        other.scopes = [ServiceScope(host: "www.shop.example.net")]
+        var otherUser = login
+        otherUser.id = Fixtures.id(61)
+        otherUser.fields[0].value = "someone@else.example"
+        let unrelated = AutoFillHarness(items: [other, otherUser])
+        #expect(try await unrelated.model.passkeyRegistrationOptions(for: request).value.relatedLogins.isEmpty)
+    }
+
+    @Test("one item holds a bounded number of passkeys")
+    func passkeysPerItemAreBounded() async throws {
+        let harness = AutoFillHarness(items: [Fixtures.amazonRetail])
+        for round in 0..<CredentialProviderModel.maximumPasskeysPerItem {
+            _ = try await harness.model.registerPasskey(
+                Self.registrationRequest("amazon.com", userName: Fixtures.email, handle: "handle-\(round)"),
+                destination: .existingItem(Fixtures.amazonRetail.id), presence: .verified
+            ).value
+        }
+        let full = Self.registrationRequest("amazon.com", userName: Fixtures.email, handle: "one-too-many")
+        #expect(
+            await harness.model.registerPasskey(
+                full, destination: .existingItem(Fixtures.amazonRetail.id), presence: .verified)
+                == .refused(.passkey(.tooManyCredentials)))
+        let options = try await harness.model.passkeyRegistrationOptions(for: full).value
+        #expect(options.existingItems.isEmpty)
+        #expect(options.suggested == .newItemBesideExisting || options.suggested == .newItem)
+        #expect(
+            await harness.vault.item(Fixtures.amazonRetail.id)?.fields.filter { $0.kind == .passkey }.count
+                == CredentialProviderModel.maximumPasskeysPerItem)
     }
 
     @Test("a passkey cannot be added to an item that is not for the relying party")
@@ -644,8 +804,16 @@ struct PasskeyRequestTests {
         #expect(item.scopes == Fixtures.amazonRetail.scopes)
         #expect(await harness.vault.allItems.count == Fixtures.all.count)
 
-        // Asking again does not add a second passkey for the same account.
+        // Asking again adds nothing: not for the same account, not under another user handle, and not as another
+        // relying party the same page could name. An upgrade happens once.
         #expect(await harness.model.registerPasskeyWithoutInteraction(request) == .refused(.noItemToUpgrade))
+        for again in [
+            Self.registrationRequest("amazon.com", userName: Fixtures.email, handle: "another-handle"),
+            Self.registrationRequest("www.amazon.com", userName: Fixtures.email, handle: "third-handle"),
+        ] {
+            #expect(await harness.model.registerPasskeyWithoutInteraction(again) == .refused(.noItemToUpgrade))
+        }
+        #expect(await harness.vault.saves.count == 1)
     }
 
     @Test("a conditional request never creates an item or guesses between accounts")
@@ -656,12 +824,18 @@ struct PasskeyRequestTests {
         passwordless.fields.removeAll { $0.kind == .password }
         var archived = Fixtures.bank
         archived.archived = true
-        let harness = AutoFillHarness(items: [Fixtures.amazonRetail, second, passwordless, archived, Fixtures.google])
+        var excluded = Fixtures.library
+        excluded.id = Fixtures.id(97)
+        excluded.scopes = [ServiceScope(host: "private.example")]
+        excluded.excludedFromSuggestions = true
+        let harness = AutoFillHarness(
+            items: [Fixtures.amazonRetail, second, passwordless, archived, excluded, Fixtures.google])
         for request in [
             Self.registrationRequest("new-site.example"),  // nothing saved for the site
             Self.registrationRequest("amazon.com", userName: Fixtures.email),  // two accounts tie
             Self.registrationRequest("library.example.org", userName: "pat"),  // no password to upgrade
             Self.registrationRequest("firstbank.co.uk", userName: "40012345"),  // archived
+            Self.registrationRequest("private.example", userName: "pat"),  // excluded from AutoFill
             Self.registrationRequest("google.com", userName: "someone@else.example"),  // another account's name
             Self.registrationRequest("google.com", userName: ""),
         ] {

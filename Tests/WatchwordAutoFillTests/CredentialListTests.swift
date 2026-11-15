@@ -248,53 +248,137 @@ struct CredentialListTests {
 
     // MARK: Password without interaction
 
-    static func identity(
-        _ item: Item, on identifier: ServiceIdentifier, user: String = Fixtures.email
-    ) -> PasswordIdentityRequest {
-        PasswordIdentityRequest(
-            serviceIdentifier: identifier, user: user, recordIdentifier: RecordIdentifier(itemID: item.id).text)
+    // The system hands back the identity Watchword published and never the page, so every request below is built
+    // from a published identity (`handedBack`), or says in what way it differs from one.
+
+    static func identity(_ item: Item, host: String, user: String = Fixtures.email) -> PasswordIdentityRequest {
+        PasswordIdentity(host: host, user: user, recordIdentifier: RecordIdentifier(itemID: item.id), rank: 0)
+            .handedBack
     }
 
-    @Test("a QuickType suggestion fills without UI when its item is the only fill for the host")
+    @Test("a published identity, handed back as stored, fills without UI")
     func silentFill() async throws {
-        let harness = AutoFillHarness(items: Fixtures.all)
-        let aws = try await harness.model.passwordWithoutInteraction(
-            for: Self.identity(Fixtures.awsRoot, on: Self.console)
-        ).value
-        #expect(aws.password == "aws-password")
-        let retail = try await harness.model.passwordWithoutInteraction(
-            for: Self.identity(Fixtures.amazonRetail, on: Fixtures.domain("amazon.com"))
-        ).value
-        #expect(retail.password == "retail-password")
+        let harness = AutoFillHarness(items: [Fixtures.amazonRetail, Fixtures.bank])
+        let published = try await harness.publishedPasswords()
+        #expect(Set(published.map(\.host)) == ["amazon.com", "firstbank.co.uk"])
+        for identity in published {
+            let credential = try await harness.model.passwordWithoutInteraction(for: identity.handedBack).value
+            #expect(credential.user == identity.user)
+            #expect(
+                credential.password
+                    == (identity.recordIdentifier.itemID == Fixtures.bank.id ? "bank-password" : "retail-password"))
+        }
     }
 
-    @Test("a tie, a locked vault and a stale user name each need the person")
-    func silentNeedsInteraction() async {
-        var second = Fixtures.amazonRetail
-        second.id = Fixtures.id(90)
-        let harness = AutoFillHarness(items: [Fixtures.amazonRetail, second, Fixtures.library])
+    /// The review finding this replaced a wrong test for: the retail identity is stored for `amazon.com`, the
+    /// system may offer it on the AWS console, and nothing in the request says which page it is.
+    @Test("S1: with an AWS item in the vault, neither Amazon account is published or answered without UI")
+    func silentS1() async throws {
+        var retail = Fixtures.amazonRetail
+        retail.scopes = [ServiceScope(host: "amazon.com", excludedHosts: ["aws.amazon.com"])]
+        for items in [[Fixtures.amazonRetail, Fixtures.awsRoot], [retail, Fixtures.awsRoot]] {
+            let harness = AutoFillHarness(items: items)
+            #expect(try await harness.publishedPasswords().isEmpty)
+            #expect(try await harness.publishedCodes().isEmpty)
+            // A stale store may still hold what was published before the AWS item existed.
+            #expect(
+                await harness.model.passwordWithoutInteraction(
+                    for: Self.identity(items[0], host: "amazon.com"))
+                    == .requiresInteraction(
+                        items[0] == retail ? .staleIdentity : .ambiguousMatch))
+            for host in ["signin.aws.amazon.com", "console.aws.amazon.com", "aws.amazon.com"] {
+                #expect(
+                    await harness.model.passwordWithoutInteraction(for: Self.identity(Fixtures.awsRoot, host: host))
+                        == .requiresInteraction(.staleIdentity), "\(host)")
+            }
+        }
+    }
+
+    @Test("an item that is not for every page of its site is not answered without UI")
+    func silentNeedsWholeSite() async throws {
+        var excluding = Fixtures.amazonRetail
+        excluding.scopes = [ServiceScope(host: "amazon.com", excludedHosts: ["pay.amazon.com"])]
+        var exact = Fixtures.amazonRetail
+        exact.scopes = [ServiceScope(host: "amazon.com", includeSubdomains: false)]
+        var subdomain = Fixtures.amazonRetail
+        subdomain.scopes = [ServiceScope(host: "www.amazon.com")]
+        var tenant = Fixtures.amazonRetail
+        tenant.scopes = [ServiceScope(host: "acme.zendesk.com")]
+        for (item, host) in [
+            (excluding, "amazon.com"), (exact, "amazon.com"), (subdomain, "www.amazon.com"),
+            (tenant, "acme.zendesk.com"), (Fixtures.library, "library.example.org"),
+        ] {
+            let harness = AutoFillHarness(items: [item])
+            #expect(try await harness.publishedPasswords().isEmpty, "\(host)")
+            let user = item.loginNames[0]
+            #expect(
+                await harness.model.passwordWithoutInteraction(for: Self.identity(item, host: host, user: user))
+                    == .requiresInteraction(.staleIdentity), "\(host)")
+            // The list, which is told the page, still offers it.
+            let list = try Self.list(await harness.model.credentialList(for: [Fixtures.domain(host)]))
+            #expect(list.passwords.map(\.itemID) == [item.id], "\(host)")
+        }
+    }
+
+    @Test("accounts that tie are told apart by the user name tapped, and need the person when they share it")
+    func silentTie() async throws {
+        var work = Fixtures.amazonRetail
+        work.id = Fixtures.id(90)
+        work.fields[0].value = "work@example.com"
+        work.fields[1].value = "work-password"
+        let harness = AutoFillHarness(items: [Fixtures.amazonRetail, work])
+        let published = try await harness.publishedPasswords()
+        #expect(published.map(\.user) == [Fixtures.email, "work@example.com"])
         #expect(
-            await harness.model.passwordWithoutInteraction(for: Self.identity(Fixtures.amazonRetail, on: Self.shop))
-                == .requiresInteraction(.ambiguousMatch))
+            try await harness.model.passwordWithoutInteraction(for: published[1].handedBack).value.password
+                == "work-password")
+        #expect(
+            try await harness.model.passwordWithoutInteraction(for: published[0].handedBack).value.password
+                == "retail-password")
+
+        var twin = Fixtures.amazonRetail
+        twin.id = Fixtures.id(91)
+        let tied = AutoFillHarness(items: [Fixtures.amazonRetail, twin])
+        #expect(try await tied.publishedPasswords().isEmpty)
+        for item in [Fixtures.amazonRetail, twin] {
+            #expect(
+                await tied.model.passwordWithoutInteraction(for: Self.identity(item, host: "amazon.com"))
+                    == .requiresInteraction(.ambiguousMatch))
+        }
+    }
+
+    @Test("a stale user name and a locked vault each need the person")
+    func silentNeedsInteraction() async {
+        let harness = AutoFillHarness(items: [Fixtures.amazonRetail])
         #expect(
             await harness.model.passwordWithoutInteraction(
-                for: Self.identity(Fixtures.library, on: Fixtures.domain("library.example.org"), user: "old-name"))
+                for: Self.identity(Fixtures.amazonRetail, host: "amazon.com", user: "old-name"))
                 == .requiresInteraction(.staleIdentity))
         await harness.vault.lock()
         #expect(
-            await harness.model.passwordWithoutInteraction(for: Self.identity(Fixtures.amazonRetail, on: Self.shop))
+            await harness.model.passwordWithoutInteraction(
+                for: Self.identity(Fixtures.amazonRetail, host: "amazon.com"))
                 == .requiresInteraction(.vaultLocked))
     }
 
-    @Test("a published identity is only a lookup key: the gate still decides")
-    func silentRefusals() async {
-        let harness = AutoFillHarness(items: Fixtures.all)
-        // The retail identity replayed for the console, and for a look-alike.
-        for identifier in [Self.console, Fixtures.domain("amazon.com.evil.example")] {
+    @Test("an identity's identifier is a lookup key: a page's URL in its place, or a look-alike, releases nothing")
+    func silentIdentifierIsNotThePage() async {
+        let harness = AutoFillHarness(items: [Fixtures.amazonRetail])
+        for identifier in [
+            Self.shop, Self.console, Fixtures.domain("www.amazon.com"), Fixtures.domain("amazon.com.evil.example"),
+            Fixtures.domain("arnazon.com"),
+        ] {
             let outcome = await harness.model.passwordWithoutInteraction(
-                for: Self.identity(Fixtures.amazonRetail, on: identifier))
-            #expect(outcome.refusal?.isGateRefusal == true, "\(identifier.identifier): \(outcome)")
+                for: PasswordIdentityRequest(
+                    serviceIdentifier: identifier, user: Fixtures.email,
+                    recordIdentifier: RecordIdentifier(itemID: Fixtures.amazonRetail.id).text))
+            #expect(outcome == .requiresInteraction(.staleIdentity), "\(identifier.identifier): \(outcome)")
         }
+        let unusable = await harness.model.passwordWithoutInteraction(
+            for: PasswordIdentityRequest(
+                serviceIdentifier: Fixtures.url("https://amazon.com@evil.example/"), user: Fixtures.email,
+                recordIdentifier: RecordIdentifier(itemID: Fixtures.amazonRetail.id).text))
+        #expect(unusable.refusal?.isGateRefusal == true)
         for record in [
             "", "garbage", RecordIdentifier(itemID: Fixtures.id(999)).text,
             RecordIdentifier(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(102)).text,
@@ -302,9 +386,60 @@ struct CredentialListTests {
         ] {
             let outcome = await harness.model.passwordWithoutInteraction(
                 for: PasswordIdentityRequest(
-                    serviceIdentifier: Self.shop, user: Fixtures.email, recordIdentifier: record))
+                    serviceIdentifier: Fixtures.domain("amazon.com"), user: Fixtures.email, recordIdentifier: record))
             #expect(outcome == .refused(.unknownRecord), "\(record): \(outcome)")
         }
+    }
+
+    // MARK: Excluded from AutoFill (F6.8)
+
+    @Test("an item excluded from AutoFill is not listed or released by the extension, and still ranks")
+    func excludedItem() async throws {
+        var excluded = Fixtures.awsRoot
+        excluded.excludedFromSuggestions = true
+        var sensitive = Fixtures.bank
+        sensitive.excludedFromSuggestions = true
+        let harness = AutoFillHarness(items: [Fixtures.amazonRetail, excluded, sensitive])
+        let bankSite = Fixtures.url("https://www.firstbank.co.uk/login")
+
+        #expect(try Self.list(await harness.model.credentialList(for: [bankSite])).isEmpty)
+        #expect(await harness.model.oneTimeCodeList(for: [bankSite]) == .list([]))
+        #expect(
+            await harness.model.password(
+                for: PasswordChoice(itemID: sensitive.id, userName: "40012345"), identifiers: [bankSite])
+                == .refused(.itemNotInUse))
+        #expect(
+            await harness.model.oneTimeCode(
+                for: FieldChoice(itemID: sensitive.id, fieldID: Fixtures.id(404)), identifiers: [bankSite])
+                == .refused(.itemNotInUse))
+        #expect(
+            await harness.model.textToInsert(
+                for: TextChoice(itemID: sensitive.id, fieldID: Fixtures.id(405)), identifiers: [bankSite])
+                == .refused(.itemNotInUse))
+        // An identity the store still holds from before the exclusion (made on another device, say).
+        #expect(
+            await harness.model.passwordWithoutInteraction(
+                for: Self.identity(sensitive, host: "firstbank.co.uk", user: "40012345")) == .refused(.itemNotInUse))
+        #expect(
+            await harness.model.oneTimeCodeWithoutInteraction(
+                for: OneTimeCodeIdentity(
+                    host: "firstbank.co.uk", label: "40012345",
+                    recordIdentifier: RecordIdentifier(itemID: sensitive.id, fieldID: Fixtures.id(404))
+                ).handedBack) == .refused(.itemNotInUse))
+        #expect(
+            await harness.model.markRecoveryCode(FieldChoice(itemID: sensitive.id, fieldID: Fixtures.id(405)), index: 0)
+                == .refused(.itemNotInUse))
+        #expect(try await harness.publishedIdentities().isEmpty)
+
+        // The excluded AWS item still keeps the retail login off the console.
+        let console = try Self.list(await harness.model.credentialList(for: [Self.console]))
+        #expect(console.passwords.isEmpty)
+        #expect(console.otherAccounts.map(\.itemID) == [Fixtures.amazonRetail.id])
+        #expect(
+            await harness.model.password(
+                for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email),
+                identifiers: [Self.console]
+            ).refusal?.isGateRefusal == true)
     }
 
     // MARK: Vault failures
@@ -314,6 +449,7 @@ struct CredentialListTests {
         struct Broken: CredentialVault {
             func credentialItems() async throws -> [Item] { throw CredentialVaultError.noAccount }
             func defaultVaultID() async throws -> UUID { throw CredentialVaultError.noAccount }
+            func confirmUnlocked() async throws { throw CredentialVaultError.noAccount }
             func isBackedUp() async throws -> Bool { throw CredentialVaultError.noAccount }
             func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
                 throw CredentialVaultError.noAccount
@@ -322,8 +458,21 @@ struct CredentialListTests {
         let broken = CredentialProviderModel(vault: Broken())
         #expect(await broken.credentialList(for: [Self.shop]) == .refused(.vault(.noAccount)))
         #expect(
-            await broken.passwordWithoutInteraction(for: Self.identity(Fixtures.amazonRetail, on: Self.shop))
+            await broken.passwordWithoutInteraction(for: Self.identity(Fixtures.amazonRetail, host: "amazon.com"))
                 == .refused(.vault(.noAccount)))
+
+        // A lock that lands after the items were read, before the answer: the password read goes nowhere.
+        let harness = AutoFillHarness(items: Fixtures.all)
+        await harness.vault.lockAfterReads(1)
+        #expect(
+            await harness.model.password(
+                for: PasswordChoice(itemID: Fixtures.awsRoot.id, userName: Fixtures.email), identifiers: [Self.console])
+                == .vaultLocked)
+        let alone = AutoFillHarness(items: [Fixtures.amazonRetail])
+        await alone.vault.lockAfterReads(1)
+        #expect(
+            await alone.model.passwordWithoutInteraction(for: Self.identity(Fixtures.amazonRetail, host: "amazon.com"))
+                == .requiresInteraction(.vaultLocked))
     }
 
     @Test("identities are republished from the unlocked items on request")

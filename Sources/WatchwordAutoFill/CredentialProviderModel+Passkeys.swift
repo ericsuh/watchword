@@ -7,11 +7,17 @@ import WatchwordModel
 ///
 /// A passkey is bound twice. The credential stores its relying party ID and `PasskeyAuthenticator` signs for no
 /// other; and the item holding it must pass `AutoFillGate` for that relying party as a host, like any release
-/// (F11.1). A passkey created here always passes: it goes into an item the gate already authorises for the relying
-/// party, or into a new item scoped to it.
+/// (F11.1). A passkey created here passes when it is created: it goes into an item the gate already authorises for
+/// the relying party, or into a new item scoped to it. It can stop passing later, when the person gives another
+/// item a more specific scope: in the app, or here by choosing a new item for a relying party that items with a
+/// broader scope already serve, which the registration sheet says would hide them (`newItemProposal`) and offers
+/// their scope as the alternative. A passkey whose item the gate does not authorise is not published.
 extension CredentialProviderModel {
     /// Most relying parties list a handful of credentials; this bounds what a page can make the model walk.
     static let maximumCredentialListCount = 256
+    /// How many passkeys one item may hold. A person keeps one or two per account; every registration is a version
+    /// in a history that is never pruned (PRD F1.4), and an item past its payload limit refuses every later edit.
+    public static let maximumPasskeysPerItem = 8
     static let maximumNameLength = PasskeyCredential.maximumNameLength
 
     // MARK: Assertion
@@ -130,7 +136,7 @@ extension CredentialProviderModel {
         case nil:
             break
         }
-        return PasskeyAssertionResult(assertion: assertion, prf: prf, largeBlob: largeBlob)
+        return try await releasing(PasskeyAssertionResult(assertion: assertion, prf: prf, largeBlob: largeBlob))
     }
 
     private func storeLargeBlob(_ credential: PasskeyCredential, fieldID: UUID, in item: Item) async throws -> Bool {
@@ -160,9 +166,18 @@ extension CredentialProviderModel {
             try Self.checkNotExcluded(request, relyingParty: relyingParty, in: snapshot)
             let candidates = Self.registrationCandidates(for: relyingParty, userName: request.user.name, in: snapshot)
             let named = candidates.filter(\.matchesUserName)
+            let newItem = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot).proposal
+            let suggested: PasskeyDestination
+            if named.count == 1 {
+                suggested = .existingItem(named[0].itemID)
+            } else {
+                suggested = newItem.besideExisting == nil ? .newItem : .newItemBesideExisting
+            }
             return PasskeyRegistrationOptions(
                 relyingPartyID: relyingParty.value, userName: request.user.name, existingItems: candidates,
-                suggested: named.count == 1 ? .existingItem(named[0].itemID) : .newItem)
+                relatedLogins: Self.relatedLogins(
+                    for: relyingParty, userName: request.user.name, excluding: candidates, in: snapshot),
+                newItem: newItem, suggested: suggested)
         }
         do {
             return .success(try await run())
@@ -173,8 +188,12 @@ extension CredentialProviderModel {
 
     /// Creates a passkey and stores it where the person chose.
     ///
-    /// An existing item must be one the gate authorises for the relying party; its scopes are never changed. A new
-    /// item is titled by the relying party ID and scoped to it, an ID that has already passed the scope policy.
+    /// An existing item must be one the gate authorises for the relying party and hold fewer than
+    /// `maximumPasskeysPerItem`; its scopes are never changed, so a login that is not scoped to the relying party
+    /// cannot take the passkey from here (PRD F11.7: a scope is added in the app). A new item is titled by the
+    /// relying party ID and scoped to it, an ID that has already passed the scope policy; `newItemBesideExisting`
+    /// scopes it as the items already offered for the relying party are, so that it ties with them instead of
+    /// outranking them.
     public func registerPasskey(
         _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence
     ) async -> Outcome<PasskeyRegistrationResult> {
@@ -192,10 +211,13 @@ extension CredentialProviderModel {
     /// Conditional registration: a site that has just signed the person in with a saved password asks for a passkey
     /// to be added quietly (PRD F6.2, F11.8).
     ///
-    /// Nobody is asked, so this only ever upgrades: there must be exactly one item the gate would fill for the
-    /// relying party, it must hold a password and the user name the site gives, and it must not already hold a
-    /// passkey for that account. A page can therefore not use this request to plant items in the vault, only to
-    /// add a passkey to the login the person already keeps for that very site. Anything else is
+    /// Nobody is asked, so this only ever upgrades, and only once: there must be exactly one item the gate would
+    /// fill for the relying party, it must hold a password and the user name the site gives, and it must hold no
+    /// passkey at all yet. A page can therefore not use this request to plant items in the vault, nor to grow one
+    /// (every field of the request, the user handle included, is the page's to vary, and each passkey added is a
+    /// version in a history that is never pruned): it can turn the password login the person already keeps for
+    /// that very site into a login with one passkey. Nor does it ever add a scope, so a login saved for
+    /// `www.shop.example` is not upgraded by a relying party `shop.example`. Anything else is
     /// `refused(.noItemToUpgrade)`, and the site is free to ask again with UI.
     public func registerPasskeyWithoutInteraction(
         _ request: PasskeyRegistrationRequest, presence: PersonPresence = .absent
@@ -209,12 +231,10 @@ extension CredentialProviderModel {
             guard !request.user.name.isEmpty,
                 case .fill(let match) = AutoFillGate.decide(
                     for: relyingParty.serviceIdentifier, among: snapshot.rankable),
-                !match.item.archived, match.item.field(.password) != nil,
+                snapshot.isInUse(match.item), match.item.field(.password) != nil,
                 match.item.loginNames.contains(request.user.name),
-                !Self.credentials(in: match.item).contains(where: {
-                    $0.credential.relyingPartyID == relyingParty.value
-                        && $0.credential.userHandle == request.user.handle
-                })
+                // Any passkey field counts, whatever it decodes to and whoever it is for.
+                !match.item.fields.contains(where: { $0.kind == .passkey })
             else { throw Blocked.refused(.noItemToUpgrade) }
             return .success(
                 try await self.register(request, destination: .existingItem(match.item.id), presence: presence))
@@ -239,10 +259,19 @@ extension CredentialProviderModel {
         // Authorise the destination before any key exists.
         var existing: Item?
         if case .existingItem(let itemID) = destination {
-            existing =
-                try Self.unwrap(
-                    ReleaseGate.authorize(itemID: itemID, for: [relyingParty.serviceIdentifier], in: snapshot)
-                ).item
+            let item = try Self.unwrap(
+                ReleaseGate.authorize(itemID: itemID, for: [relyingParty.serviceIdentifier], in: snapshot)
+            ).item
+            guard item.fields.filter({ $0.kind == .passkey }).count < Self.maximumPasskeysPerItem else {
+                throw Blocked.refused(.passkey(.tooManyCredentials))
+            }
+            existing = item
+        }
+        var newItemScope = relyingParty.scope
+        if destination == .newItemBesideExisting,
+            let shared = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot).sharedScope
+        {
+            newItemScope = shared
         }
         let backedUp = try await backedUp()
         let now = await clock.now()
@@ -311,8 +340,7 @@ extension CredentialProviderModel {
             }
             stored = try await save(
                 Item(
-                    id: itemID, vaultID: vaultID, title: relyingParty.value, scopes: [relyingParty.scope],
-                    fields: fields),
+                    id: itemID, vaultID: vaultID, title: relyingParty.value, scopes: [newItemScope], fields: fields),
                 replacing: nil)
         }
         return PasskeyRegistrationResult(
@@ -444,11 +472,47 @@ extension CredentialProviderModel {
         return entries
     }
 
-    /// Items in use the gate authorises for the relying party: where a new passkey may be added.
+    /// The new item a registration for `relyingParty` would create, and the scope that would put it beside the
+    /// items already offered for the relying party, if it would otherwise outrank them.
+    static func newItem(
+        for relyingParty: RelyingPartyID, userName: String, in snapshot: VaultSnapshot
+    ) throws -> (proposal: NewItemProposal, sharedScope: ServiceScope?) {
+        guard let host = try? HostNormalizer.normalize(relyingParty.serviceIdentifier) else {
+            throw Blocked.refused(.passkey(.relyingPartyRejected(.notCanonical(relyingParty.value))))
+        }
+        return newItemProposal(
+            title: relyingParty.value, narrow: relyingParty.scope, on: host, userName: userName, warning: nil,
+            in: snapshot)
+    }
+
+    /// Logins in use with `userName` that are scoped at or under the relying party and are not candidates: the
+    /// gate does not authorise them for it, and a registration never adds a scope to make it so.
+    static func relatedLogins(
+        for relyingParty: RelyingPartyID, userName: String, excluding candidates: [PasskeyRegistrationCandidate],
+        in snapshot: VaultSnapshot
+    ) -> [PasskeyRegistrationCandidate] {
+        guard !userName.isEmpty else { return [] }
+        let below = "." + relyingParty.value
+        return snapshot.inUse.filter { item in
+            item.loginNames.contains(userName) && !candidates.contains { $0.itemID == item.id }
+                && item.scopes.contains {
+                    ScopePolicy.isAcceptable($0) && ($0.host == relyingParty.value || $0.host.hasSuffix(below))
+                }
+        }
+        .prefix(maximumCredentialListCount)
+        .map {
+            PasskeyRegistrationCandidate(itemID: $0.id, title: $0.title, userName: userName, matchesUserName: true)
+        }
+    }
+
+    /// Items in use the gate authorises for the relying party and that have room: where a new passkey may be added.
     static func registrationCandidates(
         for relyingParty: RelyingPartyID, userName: String, in snapshot: VaultSnapshot
     ) -> [PasskeyRegistrationCandidate] {
-        let candidates = ReleaseGate.authorizedItems(for: relyingParty.serviceIdentifier, in: snapshot).map {
+        let authorized = ReleaseGate.authorizedItems(for: relyingParty.serviceIdentifier, in: snapshot).filter {
+            $0.item.fields.filter { $0.kind == .passkey }.count < maximumPasskeysPerItem
+        }
+        let candidates = authorized.map {
             PasskeyRegistrationCandidate(
                 itemID: $0.item.id, title: $0.item.title, userName: $0.item.loginNames.first { !$0.isEmpty } ?? "",
                 matchesUserName: !userName.isEmpty && $0.item.loginNames.contains(userName))

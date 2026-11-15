@@ -526,19 +526,58 @@ Full design in `05-anti-phishing.md`. Three additions beyond matching:
 3. **Ambiguity is surfaced, not resolved.** `ItemRanking.isAmbiguous` forces a choice when items
    tie, so the extension never fills the first of a tied set.
 
-Published identities: for QuickType we publish one `ASPasswordCredentialIdentity` per
-(item, scope host, username) with `rank` set from specificity, one `ASPasskeyCredentialIdentity`
-per passkey, and (iOS 18+) one `ASOneTimeCodeCredentialIdentity` per TOTP field. Whether the OS
-itself prefers the more specific subdomain identity is not documented and will be verified on
-device in the first integration milestone; our in-extension ranking is authoritative regardless.
-`CredentialIdentityPlanner` (§9.2) is the pure function from items to identities: the rank is the
-specificity an exact match on the host scores (`2 × labels + 1`); nothing is published for an item
-that is excluded from suggestions (F6.8), archived or in the trash, for a scope the scope policy
-refuses, for a login with no user name, for a passkey its own item is not scoped to, or for a
-passkey its relying party reported unknown; and one item publishes at most 64 identities. An
-identity carries a host, a user name, the passkey's credential ID and user handle, and a record
-identifier made of the item's and field's random UUIDs. Nothing else of the item leaves: no title,
-note, tag, field label or secret.
+Published identities: for QuickType we publish `ASPasswordCredentialIdentity` values (item, scope
+host, username, with `rank` set from specificity), one `ASPasskeyCredentialIdentity` per passkey,
+and (iOS 18+) `ASOneTimeCodeCredentialIdentity` values for TOTP fields. Two facts about the system
+decide *which* identities:
+
+- A tap on a password or code suggestion hands the stored identity back
+  (`provideCredentialWithoutUserInteraction(for:)`, then `prepareInterfaceToProvideCredential(for:)`).
+  The extension is **not told the page**. Only `prepareCredentialList(for:)` carries the page's
+  service identifiers.
+- Which pages a stored identity is suggested on is the system's own matching. It is undocumented,
+  and as far as other providers have observed it is by registrable domain: an `amazon.com`
+  identity can be suggested on `signin.aws.amazon.com`, and an identity for one subdomain on a
+  sibling.
+
+So on the QuickType path `AutoFillGate` cannot be asked about the page, and our in-extension
+ranking is **not** authoritative there: nothing of F6.6's shadowing, a scope's `excludedHosts` or
+`includeSubdomains == false` would be applied to a tap. The rule that follows is that an identity
+is published, and answered, only if the item is the right answer on *every* page the system might
+offer it on. `CredentialIdentityPlanner` (§9.2) is the pure function from the vault's items to the
+identities, and it gives an item a password or code identity for a scope host only when
+
+1. the scope covers the whole site: its host is the site's root, subdomains are included and no
+   host is excluded. The root is `PublicSuffix.broadestSite(of:)`, which errs wide on purpose: the
+   last two labels, three under a country-code second-level domain, and a shared-hosting suffix is
+   *not* honoured, because whether the system treats `zendesk.com` as a suffix is not ours to
+   know. A tenant's login (`acme.zendesk.com`) is therefore never suggested by the keyboard;
+2. no other item outside the trash holds a scope below that host, so there is no page of the site
+   where another account is more specific (S1: once the AWS item exists, the retail login has no
+   identity, and the AWS login never had one); and
+3. no other item scoped to that same host shares the name the suggestion shows, so accounts that
+   tie are told apart by what the person tapped (F11.5), and two accounts under one email are not
+   suggested at all.
+
+Everything else is reached through the keyboard's key icon, which opens the extension's list:
+that request names the page and goes through the gate. The cost is real and deliberate: a login
+saved from the extension is scoped to one exact host and has no QuickType identity until the
+person widens its scope in the app. A passkey identity is published exactly when the gate would
+release the passkey for its relying party, which every passkey request names. Because of rules 2
+and 3 one item's identities depend on the others, so a change to one item is published as the
+difference between the whole sets before and after.
+
+Nothing is published for an item that is excluded from AutoFill (F6.8), archived or in the trash,
+for an item whose ID another item shares, for a scope the scope policy refuses, for a login with
+no user name, for a second code field of one item, or for a passkey its relying party reported
+unknown; and one item publishes at most 64 identities. The rank is the specificity an exact match
+on the host scores (`2 × labels + 1`). An identity carries a host, a user name, the passkey's
+credential ID and user handle, and a record identifier made of the item's and field's random
+UUIDs. Nothing else of the item leaves: no title, note, tag, field label or secret.
+
+The first on-device question for milestone 5 is therefore what the system hands back and where it
+offers an identity; if it turns out to match exact hosts only, rule 1 can be relaxed, and nothing
+else in the model changes.
 
 Passkeys: the extension signs `authenticatorData || clientDataHash` with the item's P-256 key,
 increments no counter (Apple's guidance for synced passkeys), supports `prf` (HMAC-secret derived
@@ -568,13 +607,17 @@ mirrors `ASCredentialServiceIdentifier`. It reaches the vault through one port:
 ```
 protocol CredentialVault            (VaultSession conforms; FakeCredentialVault in tests)
   credentialItems()                 every readable item, archived and trashed included
+  confirmUnlocked()                 throws `locked` unless unlocked now; the last call before a release
   defaultVaultID()                  where a new item goes
   isBackedUp()                      whether items reach the sync store (the BS flag)
   saveCredentialItem(_:replacingVersion:)   create, or compare-and-swap on the version read
 ```
 
 Every method throws `CredentialVaultError`, and `locked` whenever there are no keys. The vault
-keeps owning versions, timestamps, history, sync metadata and the scope policy check.
+keeps owning versions, timestamps, history, sync metadata and the scope policy check. Item IDs
+should be unique in what `credentialItems()` returns, and the model does not rely on it: an ID two
+items share (a member of a shared vault choosing a record ID, an item mid-move between vaults)
+names neither, so both keep ranking and neither is listed, released, written or published.
 
 `CredentialProviderModel` is the actor behind the extension. One method per request:
 
@@ -582,13 +625,14 @@ keeps owning versions, timestamps, history, sync metadata and the scope policy c
 | --- | --- | --- |
 | Credential list (`prepareCredentialList`) | `credentialList(for:passkey:)` | passwords of the most specific matches, passkeys of the relying party, "other accounts on this site", a suggestion only for a sole match; or `LookAlikeWarning` |
 | Password, chosen in the list | `password(for:identifiers:)` | `PasswordCredential` |
-| Password, QuickType (`provideCredentialWithoutUserInteraction`) | `passwordWithoutInteraction(for:)` | the credential, `requiresInteraction`, or a refusal |
+| Password, QuickType (`provideCredentialWithoutUserInteraction`) | `passwordWithoutInteraction(for:)` | the credential for an identity the planner would publish now; otherwise `requiresInteraction` or a refusal |
 | One-time codes (iOS 18) | `oneTimeCodeList`, `oneTimeCode`, `oneTimeCodeWithoutInteraction` | `OneTimeCode` with the seconds remaining |
-| Text to insert (iOS 18) | `textInsertionList(for:)`, `textToInsert(for:identifiers:)` | the field's text, one recovery code, or a code field's current code |
+| Text to insert, host named | `textInsertionList(for:)`, `textToInsert(for:identifiers:)` | the field's text, one recovery code, or a code field's current code |
+| Text to insert, no host (iOS 18's `prepareInterfaceForUserChoosingTextToInsert()`) | `textInsertionListWithoutHost()`, `textToInsertWithoutHost(for:)` | a hand-picked field that is not a secret |
 | Passkey assertion | `passkeyAssertion`, `passkeyAssertionWithoutInteraction` | `PasskeyAssertionResult` with `prf` and `largeBlob` output |
 | Passkey registration | `passkeyRegistrationOptions`, `registerPasskey` | attestation object, and where the credential was stored |
 | Conditional registration (iOS 18) | `registerPasskeyWithoutInteraction` | as above, or `noItemToUpgrade` |
-| Save password | `savePasswordPlan`, `savePassword`, `savePasswordWithoutInteraction` | create, offer an update, or already saved |
+| Save password | `savePasswordPlan`, `savePassword`, `savePasswordWithoutInteraction` | create (alone, or beside the accounts already there), offer an update, or already saved |
 | Generate password | `generatePassword(for:)` | a password obeying the site's `passwordrules`, with its entropy |
 | Credential-update reports | `handle(_:)` | which fields were flagged or renamed |
 | Identity publishing | `publishAllIdentities()`, and after every write | through `CredentialIdentityPublisher` |
@@ -608,36 +652,64 @@ What holds across all of them:
 - **Shadowed accounts are shown, not released.** `otherAccounts` lists items that match the host
   less specifically (F6.6). The gate refuses them even when chosen, as it always has; to use one
   on that host the person adds the host to the item, in the app.
-- **Archived items rank but are not released; trashed items do neither.** An archived AWS item
-  still keeps the retail login off the console.
+- **Archived and excluded items rank but are not released; trashed items do neither.** An archived
+  AWS item still keeps the retail login off the console. An item marked "exclude from AutoFill
+  suggestions" is reachable only by opening the app (F6.8): the extension does not list it, does
+  not release it by choice or for an identity the store still holds, and does not write to it.
 - **Stored scopes are checked again.** The gate ranks among items with only the scopes
   `ScopePolicy` accepts, so a `com` scope written by another vault member or an import matches
   nothing (F11.2). The stored item is not rewritten.
-- **Without interaction, only a sole fill.** A QuickType tap releases a password or code only if
-  `AutoFillGate.decide` says that item is *the* fill for the host and the identity's user name is
-  still one of the item's. A tie needs the extension's UI: two suggestions with the same email
-  are indistinguishable in the keyboard (S1, F11.5). A passkey chosen in the system's sheet is a
-  choice of one credential and needs only the gate.
-- **No host, no credential.** With no service identifier a password, a one-time code and a passkey
-  assertion are refused. Text insertion is the one request the system makes without naming a site
-  (`prepareInterfaceForUserChoosingTextToInsert()` has no parameters): then the person picks an
-  item by hand, as in the app, and can insert any field *except* a password, a one-time code or a
-  passkey, which keep their own host-checked requests. When identifiers are supplied, text is
-  gated like everything else.
-- **A page cannot plant or widen.** A new login is scoped to the exact host it was made on,
+- **The page, or nothing.** The gate is asked about a host only when the system named it for
+  *this* request: the identifiers of a list request, the relying party of a passkey request, the
+  identifier of a save. A QuickType tap names no page (§9.1, "Published identities"), so
+  `passwordWithoutInteraction` and `oneTimeCodeWithoutInteraction` treat the identity's identifier
+  as a lookup key and answer only an identity `CredentialIdentityPlanner` would publish for the
+  vault as it is now: host, user name (or code label) and record all as planned. Anything else is
+  `requiresInteraction(.ambiguousMatch)` when other items are the reason and `.staleIdentity`
+  when the item itself changed, and the person chooses from the list, which is told the page. The
+  gate is still asked, about the identity's own host. A passkey chosen in the system's sheet is a
+  choice of one credential for a relying party the request names, and needs only the gate.
+- **No host, no secret.** With no service identifier a password, a one-time code, a passkey
+  assertion and host-checked text are refused. Text insertion is the one request the system makes
+  without naming a site, and it is a separate pair of methods, not the gated ones with an empty
+  list, so an adapter that lost the identifiers gets a refusal. Without a host the person picks an
+  item by hand, as in the app, and can insert only fields that are **not secrets**: user names,
+  emails, phone, account and card numbers, dates. A recovery code is a one-time code that needs no
+  device and an API key is a bearer credential; a security answer and a PIN each sign someone in
+  or recover an account somewhere. Typed into a look-alike they are replayed at once, and with no
+  host there is no mismatch to detect, so F11.4's rule for codes holds for all of them. This
+  narrows PRD F6.4 as written (S2's recovery codes, S3's answers and S4's PIN insert as text only
+  where the system names the host, which iOS 18's request does not; otherwise they are copied
+  from the app, where the item's scopes are in view). Which of those kinds, if any, may leave
+  without a host is the owner's decision; the predicate is `ManualChoice.isInsertable`.
+- **A page cannot plant, widen or hide.** A new login is scoped to the exact host it was made on,
   without subdomains, titled by that host (never by the page), and goes through `ScopePolicy`. An
   update touches the password of an item the gate would fill on that host and never its scopes.
-  Without UI a login is saved only for a host nothing is saved for; anything that would change or
-  tie with an existing account waits for the person.
-  A conditional passkey registration only ever adds a passkey to the one saved password login for
-  that relying party and user; it creates nothing.
+  Without UI a login is saved only for a host nothing is saved for. Where accounts are already
+  offered on the host, an item scoped to the exact host (or, for a passkey, to the relying party)
+  would outrank them, and the gate would then refuse them there even when chosen: right for a
+  different service under the same domain (S1), wrong for a second account on the same one, and
+  the request cannot say which. So `NewItemProposal` reports `hiddenAccounts` and offers
+  `besideExisting`, the scope of the accounts already there (one the person gave an item), and the
+  person picks `newItem` or `newItemBesideExisting`. The passkey sheet's suggestion never hides
+  an account.
+- **A registration never adds a scope.** A passkey joins an existing item only if the gate
+  already authorises that item for the relying party, and an item holds at most eight. A login
+  saved for `www.shop.example` is not for the relying party `shop.example`; the sheet names it
+  under `relatedLogins`, the passkey goes to an item of its own, and joining the two means adding
+  `shop.example` to the login in the app (F11.7). A conditional registration only ever adds a
+  passkey to the one saved password login for that relying party and user, and only to an item
+  that holds no passkey yet: every field of that request, the user handle included, is the
+  page's, so "one per account" would be no bound at all.
 - **A remote party never deletes.** A report sets or clears a flag in `Field.meta`
   (`reportedUnusedAt`, `reportedUnknownAt`) or changes a passkey's account name, only on items the
   gate would release to the reporter, and at most once per field per day, because every change is
   a version in a history that is never pruned (F1.4).
 - **Locked is a state.** `vaultLocked`, or `requiresInteraction(.vaultLocked)` for a request made
   without UI. Each request reads the items once; each step of an interactive flow reads them
-  again; writes are compare-and-swap, and a lock that lands mid-request wins.
+  again; writes are compare-and-swap. A lock that lands mid-request wins: a write fails in the
+  vault, and every request that hands a secret back calls `confirmUnlocked()` as its last
+  suspension, so plaintext read before the lock is not released after it.
 - **The page is not trusted.** Identifiers, relying party IDs, user names, allow and exclude
   lists, `prf` inputs, blobs, password rules and reports are bounded and validated here, whatever
   the system checked first.
@@ -648,9 +720,9 @@ is checked against the parsed rules before it is returned), and `CredentialIdent
 
 Still open for milestone 5, all on a Mac: the extension targets' adapter over this model,
 `VaultSession`'s conformance to `CredentialVault`, the encrypted index record that lets the
-extension list without decrypting every item, and on-device QA (the QuickType ranking question
-above, what the system passes as `prf` salts, and how it treats UP = 0 on a conditional
-registration).
+extension list without decrypting every item, and on-device QA (first, what the system hands back
+for a QuickType tap and on which hosts it offers an identity, §9.1; then what it passes as `prf`
+salts, and how it treats UP = 0 on a conditional registration).
 
 ## 10. Unlock state machine
 
@@ -827,4 +899,6 @@ and `FakeCredentialIdentityPublisher` beside them.
   the author named in the location may write to the vault.
 - OS QuickType behaviour with overlapping domain identities. Planned for milestone 2 but not yet
   verified: it needs a physical device with the AutoFill extension publishing identities, which
-  arrives with milestone 5. Carried to milestone 5's on-device QA.
+  arrives with milestone 5. Carried to milestone 5's on-device QA. Until then the portable core
+  assumes the widest matching (the registrable domain) and publishes only whole-site identities
+  (§9.1).

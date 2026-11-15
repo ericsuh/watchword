@@ -19,12 +19,15 @@ public enum ProviderRefusal: Error, Equatable, Sendable {
     case gate(FillRefusal)
     /// The identity or choice names no item or field the vault holds: a stale identity store, or a made-up one.
     case unknownRecord
-    /// The item is archived or in the trash.
+    /// Two readable items carry this ID, so it names neither (see `CredentialVault.credentialItems()`).
+    case duplicateRecord
+    /// The item is archived, in the trash, or marked "exclude from AutoFill suggestions": such an item is reachable
+    /// only by opening the app (PRD F6.8).
     case itemNotInUse
     /// The item or field holds nothing of the kind asked for.
     case nothingToRelease
-    /// A field kind that is never text to insert (a passkey), or one that is withheld when the system names no host
-    /// (a password, a one-time code): those have their own host-checked requests.
+    /// A field kind that is never text to insert (a passkey), or a secret asked for when the system named no host:
+    /// a secret leaves only for a host its item is scoped to.
     case fieldWithheld(FieldKind)
     case oneTimeCode(OTPAuthError)
     case clock(OneTimeCodeError)
@@ -50,9 +53,12 @@ public enum Outcome<Value: Equatable & Sendable>: Equatable, Sendable {
 /// Why a request made without the person cannot be answered without them.
 public enum InteractionReason: Hashable, Sendable {
     case vaultLocked
-    /// Several items tie for this host, or the published identity no longer matches the item: the person must look
-    /// and choose (PRD F11.5).
+    /// The identity is the item's, but other items now make it one Watchword would not publish: somewhere on its
+    /// site another account is more specific, or shares its user name. The system cannot say which page the person
+    /// is on, so they choose from the extension's list, which is told (PRD F6.6, F11.5).
     case ambiguousMatch
+    /// The identity is not one the item would publish as it is now: its user name, its field or its scope changed.
+    /// The same remedy, and the identity store is due a refresh.
     case staleIdentity
     case userPresence
     case userVerification
@@ -152,7 +158,12 @@ public struct PasswordChoice: Hashable, Sendable {
 }
 
 /// `ASPasswordCredentialIdentity` as the system hands it back for a QuickType suggestion.
+///
+/// Everything in it is what Watchword published: the system returns the stored identity and does not say which
+/// page or app the person is on. `serviceIdentifier` is therefore the identity's own, a lookup key like the record
+/// identifier, and never evidence about the page (docs/02-architecture.md §9.2, "Published identities").
 public struct PasswordIdentityRequest: Hashable, Sendable {
+    /// The identifier of the published identity (`PasswordIdentity.host`, as a domain). Not the page.
     public var serviceIdentifier: ServiceIdentifier
     public var user: String
     public var recordIdentifier: String
@@ -205,13 +216,18 @@ public struct FieldChoice: Hashable, Sendable {
     }
 }
 
-/// `ASOneTimeCodeCredentialIdentity` as the system hands it back.
+/// `ASOneTimeCodeCredentialIdentity` as the system hands it back. As for `PasswordIdentityRequest`, it says what
+/// Watchword published and nothing about the page.
 public struct OneTimeCodeIdentityRequest: Hashable, Sendable {
+    /// The identifier of the published identity (`OneTimeCodeIdentity.host`, as a domain). Not the page.
     public var serviceIdentifier: ServiceIdentifier
+    /// The name the suggestion showed (`OneTimeCodeIdentity.label`): what the person saw when they tapped.
+    public var label: String
     public var recordIdentifier: String
 
-    public init(serviceIdentifier: ServiceIdentifier, recordIdentifier: String) {
+    public init(serviceIdentifier: ServiceIdentifier, label: String, recordIdentifier: String) {
         self.serviceIdentifier = serviceIdentifier
+        self.label = label
         self.recordIdentifier = recordIdentifier
     }
 }
@@ -276,8 +292,8 @@ public struct InsertableItem: Hashable, Sendable {
 
 public struct TextInsertionList: Hashable, Sendable {
     public let items: [InsertableItem]
-    /// `false` when the system named no site or app. Passwords, one-time codes and passkeys are then left out:
-    /// they are only released for a host an item is scoped to.
+    /// `false` when the system named no site or app. Every secret field is then left out: a secret is only
+    /// released for a host its item is scoped to.
     public let hostVerified: Bool
 }
 
@@ -424,8 +440,12 @@ public struct PasskeyRegistrationRequest: Hashable, Sendable {
 
 /// Where a new passkey goes.
 public enum PasskeyDestination: Hashable, Sendable {
-    /// A new item, titled and scoped by the relying party ID.
+    /// A new item, titled by the relying party ID and scoped to it and the hosts below it.
     case newItem
+    /// A new item with the scope of the items already offered for the relying party
+    /// (`PasskeyRegistrationOptions.newItem.besideExisting`), so that it ties with them instead of outranking them.
+    /// Where there are none to be beside, the same as `newItem`.
+    case newItemBesideExisting
     /// An item the gate authorises for the relying party. Its scopes are not touched.
     case existingItem(UUID)
 }
@@ -442,8 +462,18 @@ public struct PasskeyRegistrationCandidate: Hashable, Sendable {
 public struct PasskeyRegistrationOptions: Hashable, Sendable {
     public let relyingPartyID: String
     public let userName: String
-    /// Items the passkey may be added to.
+    /// Items the passkey may be added to: those the gate authorises for the relying party.
     public let existingItems: [PasskeyRegistrationCandidate]
+    /// Logins with this user name that are scoped at or under the relying party and yet cannot take the passkey,
+    /// because the gate would not release it from them for the relying party (a login saved for
+    /// `www.shop.example` when the relying party is `shop.example`). The sheet names them so the person knows the
+    /// account will be in two items, and that the remedy is to add the relying party to the login, in the app
+    /// (PRD F11.7): this request never changes an item's scopes.
+    public let relatedLogins: [PasskeyRegistrationCandidate]
+    /// The item `PasskeyDestination.newItem` would create, and what that would do to the items already offered.
+    public let newItem: NewItemProposal
+    /// The one existing item with the user name, if there is exactly one; otherwise a new item, beside the items
+    /// already offered for the relying party where there are any: the suggestion never hides an account.
     public let suggested: PasskeyDestination
 }
 
@@ -477,19 +507,51 @@ public struct SavePasswordRequest: Hashable, Sendable {
     }
 }
 
+/// The scope that puts a new item beside the accounts already offered on the request's host.
+public struct SharedScopeProposal: Hashable, Sendable {
+    /// The scope host of those accounts, which the new item would take.
+    public let scopeHost: String
+    public let includesSubdomains: Bool
+    /// How many accounts the new one would tie with. The person then chooses among them each time (PRD F11.5).
+    public let accounts: Int
+
+    public init(scopeHost: String, includesSubdomains: Bool, accounts: Int) {
+        self.scopeHost = scopeHost
+        self.includesSubdomains = includesSubdomains
+        self.accounts = accounts
+    }
+}
+
+/// The item a `newItem` destination would create, for the sheet to show before the person confirms.
 public struct NewItemProposal: Hashable, Sendable {
     public let title: String
-    /// The exact host the login was made on; subdomains are not included.
+    /// The host the new item is scoped to: the exact host the login was made on, or a passkey's relying party.
     public let scopeHost: String
+    /// Whether the scope covers the hosts below `scopeHost`: never for a saved login, always for a passkey (that is
+    /// what a relying party ID means).
+    public let includesSubdomains: Bool
     public let userName: String
     /// Set when the host resembles a saved site: the sheet shows it before anything is saved.
     public let warning: LookAlikeWarning?
+    /// How many accounts now offered on the request's host this item would outrank there. They would move to
+    /// "other accounts on this site" and no longer be released on that host from the extension (PRD F6.6). Right
+    /// for a different service under the same domain (scenario S1), wrong for a second account on the same one;
+    /// the sheet says so, and offers `besideExisting` as the alternative.
+    public let hiddenAccounts: Int
+    /// Set when `hiddenAccounts` is not zero: what the `newItemBesideExisting` destination would do instead.
+    public let besideExisting: SharedScopeProposal?
 
-    public init(title: String, scopeHost: String, userName: String, warning: LookAlikeWarning?) {
+    public init(
+        title: String, scopeHost: String, includesSubdomains: Bool, userName: String, warning: LookAlikeWarning?,
+        hiddenAccounts: Int, besideExisting: SharedScopeProposal?
+    ) {
         self.title = title
         self.scopeHost = scopeHost
+        self.includesSubdomains = includesSubdomains
         self.userName = userName
         self.warning = warning
+        self.hiddenAccounts = hiddenAccounts
+        self.besideExisting = besideExisting
     }
 }
 
@@ -510,7 +572,11 @@ public enum SavePasswordPlan: Hashable, Sendable {
 }
 
 public enum SaveDestination: Hashable, Sendable {
+    /// A new item scoped to the exact host of the request (`NewItemProposal.scopeHost`).
     case newItem
+    /// A new item with the scope of the accounts already offered on the host (`NewItemProposal.besideExisting`).
+    /// Where there are none to be beside, the same as `newItem`.
+    case newItemBesideExisting
     case existingItem(UUID)
 }
 

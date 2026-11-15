@@ -31,6 +31,11 @@ struct AdversarialAutoFillRequestTests {
 
     /// Asks for everything `item` holds, through every request type that releases a secret, as a page behind
     /// `identifiers` could cause it to be asked. Returns a description of each release that succeeded.
+    ///
+    /// The requests made without the person carry an identity the system hands back, not the page. The sweep puts
+    /// the page's identifier in the identity's place all the same: that is what an adapter that confused the two
+    /// would send, and it must release nothing a look-alike or another site could use. What the system really hands
+    /// back is covered by `quickTypeIdentityIsRightEverywhere`.
     static func releases(
         of item: Item, to identifiers: [ServiceIdentifier], model: CredentialProviderModel
     ) async -> [String] {
@@ -64,10 +69,13 @@ struct AdversarialAutoFillRequestTests {
                 }
             }
             for identifier in identifiers {
-                if case .success = await model.oneTimeCodeWithoutInteraction(
-                    for: OneTimeCodeIdentityRequest(serviceIdentifier: identifier, recordIdentifier: record))
-                {
-                    released.append("one-time code without interaction (\(item.title))")
+                for label in Set(item.loginNames + ["", "Watchword"]) {
+                    if case .success = await model.oneTimeCodeWithoutInteraction(
+                        for: OneTimeCodeIdentityRequest(
+                            serviceIdentifier: identifier, label: label, recordIdentifier: record))
+                    {
+                        released.append("one-time code without interaction (\(item.title))")
+                    }
                 }
                 guard field.kind == .passkey, let credential = try? field.passkeyCredential() else { continue }
                 for relyingParty in relyingParties(for: identifier) {
@@ -208,17 +216,236 @@ struct AdversarialAutoFillRequestTests {
                 == .refused(.noServiceIdentifier))
         // The text-insertion request, which the system makes with no host, is not a way round either.
         #expect(
-            await harness.model.textToInsert(
-                for: TextChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(102)), identifiers: [])
+            await harness.model.textToInsertWithoutHost(
+                for: TextChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(102)))
                 == .refused(.fieldWithheld(.password)))
         #expect(
-            await harness.model.textToInsert(
-                for: TextChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(103)), identifiers: [])
+            await harness.model.textToInsertWithoutHost(
+                for: TextChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(103)))
                 == .refused(.fieldWithheld(.totp)))
         #expect(
-            await harness.model.textToInsert(
-                for: TextChoice(itemID: Fixtures.google.id, fieldID: Fixtures.id(302)), identifiers: [])
+            await harness.model.textToInsertWithoutHost(
+                for: TextChoice(itemID: Fixtures.google.id, fieldID: Fixtures.id(302)))
                 == .refused(.fieldWithheld(.passkey)))
+    }
+
+    /// A6 on a look-alike host that has already phished the password by hand entry and now asks for "a backup
+    /// code", "your security answer" or "your PIN". The person invokes the system's text insertion, which names no
+    /// site, so there is no host to check and no warning to show. Nothing that signs anyone in may leave that way
+    /// (F11.4's reasoning, for every replayable secret), and an adapter that dropped the identifiers of a
+    /// host-checked request must get a refusal, not the hand-picked answer.
+    @Test("with no host named, no secret of any kind can be inserted as text")
+    func hostlessTextReleasesNoSecret() async throws {
+        var everything = Fixtures.library
+        everything.id = Fixtures.id(70)
+        everything.fields = FieldKind.allCases.enumerated().map { index, kind in
+            switch kind {
+            case .totp: return Fixtures.totp("everything-secret-00", id: Fixtures.id(700 + index))
+            case .passkey:
+                return Fixtures.passkey(relyingParty: "library.example.org", seed: 70, id: Fixtures.id(700 + index))
+            case .recoveryCodes:
+                return Field(
+                    id: Fixtures.id(700 + index), kind: kind, label: kind.rawValue, value: "aaaa-1111\nbbbb-2222")
+            default:
+                return Field(
+                    id: Fixtures.id(700 + index), kind: kind, label: kind.rawValue, value: "value-\(kind.rawValue)")
+            }
+        }
+        let harness = AutoFillHarness(items: Fixtures.all + [everything])
+        guard case .list(let list) = await harness.model.textInsertionListWithoutHost() else {
+            Issue.record("no list")
+            return
+        }
+        #expect(!list.hostVerified)
+        #expect(list.items.flatMap(\.fields).allSatisfy { !$0.kind.isSecret })
+        for item in Fixtures.all + [everything] {
+            for field in item.fields {
+                for part in [TextPart.whole, .recoveryCode(index: 0)] {
+                    let choice = TextChoice(itemID: item.id, fieldID: field.id, part: part)
+                    let outcome = await harness.model.textToInsertWithoutHost(for: choice)
+                    if field.kind.isSecret {
+                        #expect(outcome == .refused(.fieldWithheld(field.kind)), "\(item.title) \(field.kind)")
+                    }
+                    // The host-checked request with its identifiers lost is refused outright, secret or not.
+                    #expect(
+                        await harness.model.textToInsert(for: choice, identifiers: [])
+                            == .refused(.noServiceIdentifier))
+                }
+            }
+        }
+        #expect(await harness.model.textInsertionList(for: []) == .refused(.noServiceIdentifier))
+        // The same code, asked for where the page is known to be a look-alike, is refused by the gate with the
+        // assessment; asked for on Google itself, it is released.
+        let code = TextChoice(itemID: Fixtures.google.id, fieldID: Fixtures.id(303), part: .recoveryCode(index: 0))
+        #expect(
+            await harness.model.textToInsert(for: code, identifiers: [Fixtures.domain("g00gle.com")])
+                .refusal?.isGateRefusal == true)
+        #expect(
+            await harness.model.textToInsert(for: code, identifiers: [Fixtures.domain("google.com")])
+                == .success("1111-2222"))
+    }
+
+    // MARK: - QuickType: the request that names no page
+
+    /// The hosts the property test builds scopes from and probes with: three sites, a country-code one, and two
+    /// tenants of a shared host.
+    static let quickTypeHosts = [
+        "shop.example", "www.shop.example", "pay.shop.example", "admin.pay.shop.example", "other.example",
+        "firstbank.co.uk", "www.firstbank.co.uk", "acme.zendesk.com", "evil.zendesk.com", "zendesk.com",
+    ]
+
+    /// A6, as any page that shares a site with an account of the person's: another service of the same company
+    /// (scenario S1), a tenant of the same shared host, a forgotten subdomain taken over. It is helped by the
+    /// operating system, not by a bug: which pages a stored identity is suggested on is the system's own matching,
+    /// as wide as the registrable domain, and a tap hands the identity back without saying which page it came from.
+    /// So an identity must be answered only if its item is the right answer on *every* page of its site. The oracle
+    /// is the gate itself, asked page by page: for each identity the model publishes or answers, on each probe host
+    /// of the identity's site, the item must be released by choice there and be the only account offered under
+    /// that name. And publishing must agree with answering: nothing unpublished is answered when handed back.
+    @Test("a QuickType identity is answered only if its item is the right answer on every page of its site")
+    func quickTypeIdentityIsRightEverywhere() async throws {
+        var generator = SeededGenerator(seed: TestEnvironment.seed(fallback: 2026))
+        let users = ["pat@example.com", "work@example.com"]
+        var answered = 0
+        for round in 0..<TestEnvironment.iterations(standard: 120, long: 4_000) {
+            var items: [Item] = []
+            for index in 0..<Int.random(in: 1...5, using: &generator) {
+                var scopes: [ServiceScope] = []
+                for _ in 0..<Int.random(in: 1...2, using: &generator) {
+                    var excluded: Set<String> = []
+                    if Int.random(in: 0..<5, using: &generator) == 0 {
+                        excluded.insert(Self.quickTypeHosts.randomElement(using: &generator)!)
+                    }
+                    scopes.append(
+                        ServiceScope(
+                            host: Self.quickTypeHosts.randomElement(using: &generator)!,
+                            includeSubdomains: Int.random(in: 0..<4, using: &generator) != 0, excludedHosts: excluded))
+                }
+                var item = Item(
+                    id: Fixtures.id(1_000 + index), vaultID: Fixtures.vaultID, title: "Item \(index)", scopes: scopes,
+                    fields: [
+                        Field(kind: .email, label: "Email", value: users.randomElement(using: &generator)!),
+                        Field(kind: .password, label: "Password", value: "password-\(round)-\(index)"),
+                        Fixtures.totp("totp-secret-item-\(index)-0", id: Fixtures.id(2_000 + index)),
+                    ], version: 1)
+                switch Int.random(in: 0..<12, using: &generator) {
+                case 0: item.archived = true
+                case 1: item.excludedFromSuggestions = true
+                case 2: item.trashedAt = Fixtures.now
+                default: break
+                }
+                items.append(item)
+            }
+            let harness = AutoFillHarness(items: [])
+            for item in items { await harness.vault.plant(item) }
+            let published = try await harness.publishedIdentities()
+
+            // Every candidate identity an old store could hold: each item, each of its scope hosts, each user.
+            for item in items {
+                for host in Set(item.scopes.map(\.host)) {
+                    let user = item.loginNames[0]
+                    let password = PasswordIdentity(
+                        host: host, user: user, recordIdentifier: RecordIdentifier(itemID: item.id), rank: 0)
+                    let code = OneTimeCodeIdentity(
+                        host: host, label: user,
+                        recordIdentifier: RecordIdentifier(itemID: item.id, fieldID: item.fields[2].id))
+                    let passwordOutcome = await harness.model.passwordWithoutInteraction(for: password.handedBack)
+                    let codeOutcome = await harness.model.oneTimeCodeWithoutInteraction(for: code.handedBack)
+                    let isPublished = published.contains {
+                        if case .password(let identity) = $0 {
+                            return identity.host == host && identity.user == user
+                                && identity.recordIdentifier == password.recordIdentifier
+                        }
+                        return false
+                    }
+                    let codeIsPublished = published.contains { $0 == .oneTimeCode(code) }
+                    var passwordAnswered = false
+                    if case .success = passwordOutcome { passwordAnswered = true }
+                    var codeAnswered = false
+                    if case .success = codeOutcome { codeAnswered = true }
+                    #expect(passwordAnswered == isPublished, "round \(round): \(item.title) at \(host)")
+                    #expect(codeAnswered == codeIsPublished, "round \(round): \(item.title) code at \(host)")
+                    guard passwordAnswered || codeAnswered else { continue }
+                    answered += 1
+
+                    // The pages the system could have offered it on: every host of the identity's site, taken
+                    // as widely as the system might (the last two labels, three under `co.uk`), parents and
+                    // siblings of the identity's own host included.
+                    let labels = host.split(separator: ".")
+                    let site = labels.suffix(host.hasSuffix(".co.uk") ? 3 : 2).joined(separator: ".")
+                    let probes = (Self.quickTypeHosts + Self.quickTypeHosts.map { "zz." + $0 } + ["zz.\(host)"])
+                        .filter { $0 == site || $0.hasSuffix("." + site) }
+                    for probe in probes {
+                        let page = [Fixtures.domain(probe)]
+                        let byChoice = await harness.model.password(
+                            for: PasswordChoice(itemID: item.id, userName: user), identifiers: page)
+                        guard case .success = byChoice else {
+                            Issue.record("round \(round): \(item.title) answered for \(host), refused on \(probe)")
+                            continue
+                        }
+                        guard case .list(let list) = await harness.model.credentialList(for: page) else {
+                            Issue.record("round \(round): no list on \(probe)")
+                            continue
+                        }
+                        #expect(
+                            list.passwords.filter { $0.userName == user }.map(\.itemID) == [item.id],
+                            "round \(round): \(user) is not one account on \(probe)")
+                        #expect(!list.otherAccounts.contains { $0.itemID == item.id })
+                    }
+                }
+            }
+        }
+        // The generator does produce vaults in which something is answered; the test is not vacuous.
+        #expect(answered > 0)
+    }
+
+    /// A6 on the AWS console sign-in page (scenario S1), with a credential identity store that is out of date: the
+    /// retail identity was published for `amazon.com` before the AWS item reached this device by sync, or before
+    /// the person excluded a host or narrowed the scope on another device. The system offers the stale suggestion
+    /// under the same email as the AWS account; the person taps it. The request is exactly what was stored, and it
+    /// must release neither the retail password nor the retail one-time code.
+    @Test("S1 with a stale identity store: the retail identity, handed back as it was stored, releases nothing")
+    func staleQuickTypeIdentity() async throws {
+        var excluding = Fixtures.amazonRetail
+        excluding.scopes = [ServiceScope(host: "amazon.com", excludedHosts: ["aws.amazon.com"])]
+        var exact = Fixtures.amazonRetail
+        exact.scopes = [ServiceScope(host: "amazon.com", includeSubdomains: false)]
+        var excluded = Fixtures.amazonRetail
+        excluded.excludedFromSuggestions = true
+        var archived = Fixtures.amazonRetail
+        archived.archived = true
+        var renamed = Fixtures.amazonRetail
+        renamed.fields[0].value = "pat@new.example"
+
+        let changes: [(String, [Item])] = [
+            ("the AWS item arrives", [Fixtures.amazonRetail, Fixtures.awsRoot]),
+            ("a host is excluded", [excluding]), ("the scope loses its subdomains", [exact]),
+            ("the item is excluded from AutoFill", [excluded]), ("the item is archived", [archived]),
+            ("the user name changes", [renamed]),
+        ]
+        for (what, after) in changes {
+            let harness = AutoFillHarness(items: [Fixtures.amazonRetail])
+            let stored = try await harness.publishedIdentities()
+            #expect(stored.count == 2)
+            // The vault changes underneath the store (sync, or the app on another device); nothing republishes.
+            for item in after { await harness.vault.plant(item) }
+            for identity in stored {
+                switch identity {
+                case .password(let password):
+                    if case .success = await harness.model.passwordWithoutInteraction(for: password.handedBack) {
+                        Issue.record("the retail password was released after \(what)")
+                    }
+                case .oneTimeCode(let code):
+                    if case .success = await harness.model.oneTimeCodeWithoutInteraction(for: code.handedBack) {
+                        Issue.record("the retail code was released after \(what)")
+                    }
+                case .passkey:
+                    Issue.record("unexpected passkey identity")
+                }
+            }
+            // And the next publication takes them out of the store.
+            #expect(Set(stored).isDisjoint(with: try await harness.publishedIdentities()), "\(what)")
+        }
     }
 
     // MARK: - Passkeys
@@ -284,7 +511,239 @@ struct AdversarialAutoFillRequestTests {
         #expect(await harness.vault.allItems == Fixtures.all)
     }
 
+    /// A6, against availability: a page under the item's relying party (the site after an XSS, or any same-site
+    /// subdomain) issues conditional-create requests in a loop. Every field of the request is the page's: a fresh
+    /// user handle each time, any relying party ID its origin may claim. Each accepted request would add a passkey
+    /// field and a history entry holding all the fields before it, in a history that is never pruned (F1.4), until
+    /// the item passes its payload limit and refuses every later edit, on every device. Nobody is asked, so the
+    /// bound has to be in the model: one upgrade per item, ever.
+    @Test("a loop of silent registrations adds one passkey to an item, whatever each request claims")
+    func conditionalRegistrationCannotGrowAnItem() async throws {
+        var shop = Fixtures.library
+        shop.scopes = [ServiceScope(host: "shop.example")]
+        let harness = AutoFillHarness(items: [shop])
+        var accepted = 0
+        for round in 0..<300 {
+            let relyingParty = ["shop.example", "www.shop.example", "t\(round).shop.example"][round % 3]
+            let request = PasskeyRegistrationRequest(
+                relyingPartyID: relyingParty, user: PasskeyUser(handle: Data("handle-\(round)".utf8), name: "pat"),
+                clientDataHash: Fixtures.clientDataHash(UInt8(truncatingIfNeeded: round)))
+            switch await harness.model.registerPasskeyWithoutInteraction(request) {
+            case .success: accepted += 1
+            case .refused(.noItemToUpgrade): break
+            case let other: Issue.record("round \(round): \(other)")
+            }
+        }
+        #expect(accepted == 1)
+        let item = try #require(await harness.vault.item(shop.id))
+        #expect(item.fields.filter { $0.kind == .passkey }.count == 1)
+        #expect(item.history.count == 1)
+        #expect(await harness.vault.saves.count == 1)
+        #expect(await harness.vault.allItems.count == 1)
+        // A passkey field that does not even decode counts: the item has had its upgrade.
+        var planted = Fixtures.bank
+        planted.fields.append(Field(kind: .passkey, label: "Broken", value: "{}"))
+        let other = AutoFillHarness(items: [planted])
+        #expect(
+            await other.model.registerPasskeyWithoutInteraction(
+                PasskeyRegistrationRequest(
+                    relyingPartyID: "firstbank.co.uk", user: PasskeyUser(handle: Data("h".utf8), name: "40012345"),
+                    clientDataHash: Fixtures.clientDataHash())) == .refused(.noItemToUpgrade))
+    }
+
+    /// A6, with the person's help: a page that may claim the registrable domain as its relying party asks for a
+    /// passkey and proposes the person's existing login as the place to keep it. That login is scoped to one exact
+    /// host; adding the passkey so that it worked would mean giving the item the relying party as a scope, from the
+    /// extension, on a page's request, after which its *password* would be offered wherever that scope reaches. A
+    /// scope is added in the app and nowhere else (F11.7): no registration, silent or confirmed, changes one.
+    @Test("no passkey registration, silent or confirmed, changes the scopes of an existing item")
+    func registrationNeverAddsAScope() async throws {
+        var login = Fixtures.library
+        login.id = Fixtures.id(62)
+        login.scopes = [ServiceScope(host: "www.shop.example", includeSubdomains: false)]
+        let harness = AutoFillHarness(items: Fixtures.all + [login])
+        let before = await harness.vault.allItems
+        let relyingParties = ["shop.example", "www.shop.example", "amazon.com", "aws.amazon.com", "google.com"]
+        for relyingParty in relyingParties {
+            for name in ["pat", Fixtures.email] {
+                let request = PasskeyRegistrationRequest(
+                    relyingPartyID: relyingParty, user: PasskeyUser(handle: Data("h-\(relyingParty)".utf8), name: name),
+                    clientDataHash: Fixtures.clientDataHash())
+                _ = await harness.model.registerPasskeyWithoutInteraction(request)
+                for item in before {
+                    _ = await harness.model.registerPasskey(
+                        request, destination: .existingItem(item.id), presence: .verified)
+                }
+                _ = await harness.model.registerPasskey(
+                    request, destination: .newItemBesideExisting, presence: .verified)
+                _ = await harness.model.registerPasskey(request, destination: .newItem, presence: .verified)
+            }
+        }
+        for original in before {
+            #expect(await harness.vault.item(original.id)?.scopes == original.scopes, "\(original.title)")
+        }
+        // The exact-host login took a passkey only as its own relying party.
+        let stored = try #require(await harness.vault.item(login.id))
+        for field in stored.fields where field.kind == .passkey {
+            #expect(try field.passkeyCredential().relyingPartyID == "www.shop.example")
+        }
+        // And every item created is scoped to a relying party that asked, or exactly as an item the person scoped.
+        let allowed = Set(before.flatMap(\.scopes)).union(relyingParties.map { ServiceScope(host: $0) })
+        let created = await harness.vault.allItems.filter { item in !before.contains { $0.id == item.id } }
+        #expect(!created.isEmpty)
+        for item in created {
+            #expect(item.scopes.count == 1)
+            #expect(allowed.contains(item.scopes[0]), "\(item.scopes)")
+        }
+    }
+
     // MARK: - Records no honest client wrote
+
+    /// A vault that returns what it is given, duplicates included: `FakeCredentialVault` keys its items by ID, as
+    /// the stores do today, and so cannot hold the state this adversary creates.
+    struct LooseVault: CredentialVault {
+        let items: [Item]
+        func credentialItems() async throws -> [Item] { items }
+        func confirmUnlocked() async throws {}
+        func defaultVaultID() async throws -> UUID { AutoFillFixtures.vaultID }
+        func isBackedUp() async throws -> Bool { true }
+        func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
+            throw CredentialVaultError.failed("read-only")
+        }
+    }
+
+    /// A4, a malicious member of a shared vault, who chooses the record ID of an item they write: they plant an
+    /// item whose ID equals the victim's bank item and whose scope is their own site. Every request names an item
+    /// by its ID alone, so the gate could be satisfied by the planted twin ("an item with this ID matches
+    /// `evil.example`") while the secret is read from the victim's item. An ID two readable items share must name
+    /// neither: nothing is listed, released, written or published for it, on the attacker's site or the bank's.
+    /// And a twin must not unseat the item it copies from the ranking, or planting one for the AWS item would put
+    /// the retail login back on the console.
+    @Test("an item ID that two readable items share releases nothing, and still ranks")
+    func duplicatedItemID() async throws {
+        var twin = Fixtures.library
+        twin.id = Fixtures.bank.id
+        twin.title = "Planted"
+        twin.scopes = [ServiceScope(host: "evil.example")]
+        var awsTwin = Fixtures.library
+        awsTwin.id = Fixtures.awsRoot.id
+        awsTwin.scopes = [ServiceScope(host: "evil.example")]
+        let evil = Fixtures.url("https://evil.example/login")
+        let bankSite = Fixtures.url("https://www.firstbank.co.uk/login")
+        let console = Fixtures.url("https://signin.aws.amazon.com/signin")
+
+        for order in [[Fixtures.bank, twin], [twin, Fixtures.bank]] {
+            let items = order + [Fixtures.amazonRetail, Fixtures.awsRoot, awsTwin]
+            let model = CredentialProviderModel(
+                vault: LooseVault(items: items), clock: FakeClock(Fixtures.now),
+                random: SeededGenerator(seed: 5))
+            for site in [evil, bankSite, console] {
+                for item in [Fixtures.bank, twin, Fixtures.awsRoot] {
+                    let released = await Self.releases(of: item, to: [site], model: model)
+                    #expect(released.isEmpty, "\(item.title) on \(site.identifier): \(released)")
+                }
+                if case .list(let list) = await model.credentialList(for: [site]) {
+                    #expect(list.passwords.isEmpty, "\(site.identifier)")
+                }
+                #expect(await model.oneTimeCodeList(for: [site]) == .list([]))
+            }
+            #expect(
+                await model.password(
+                    for: PasswordChoice(itemID: Fixtures.bank.id, userName: "40012345"), identifiers: [evil])
+                    == .refused(.duplicateRecord))
+            #expect(
+                await model.passwordWithoutInteraction(
+                    for: PasswordIdentity(
+                        host: "firstbank.co.uk", user: "40012345",
+                        recordIdentifier: RecordIdentifier(itemID: Fixtures.bank.id), rank: 7
+                    ).handedBack) == .refused(.duplicateRecord))
+            #expect(
+                await model.textToInsertWithoutHost(
+                    for: TextChoice(itemID: Fixtures.bank.id, fieldID: Fixtures.id(402)))
+                    == .refused(.duplicateRecord))
+            #expect(
+                await model.markRecoveryCode(FieldChoice(itemID: Fixtures.bank.id, fieldID: Fixtures.id(405)), index: 0)
+                    == .refused(.duplicateRecord))
+            #expect(
+                await model.savePassword(
+                    SavePasswordRequest(serviceIdentifier: evil, userName: "40012345", password: "x"),
+                    to: .existingItem(Fixtures.bank.id)) == .refused(.duplicateRecord))
+            #expect(
+                try await model.handle(.unusedPassword(domain: "firstbank.co.uk", userName: "40012345")).value.changes
+                    .isEmpty)
+            // The twinned AWS item still keeps the retail login off the console.
+            #expect(
+                await model.password(
+                    for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email),
+                    identifiers: [console]
+                ).refusal?.isGateRefusal == true)
+            let published = CredentialIdentityPlanner.identities(for: items)
+            #expect(
+                !published.contains { [Fixtures.bank.id, Fixtures.awsRoot.id].contains($0.recordIdentifier.itemID) })
+            // The item that shares no ID is untouched by all this.
+            #expect(
+                try await model.password(
+                    for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email),
+                    identifiers: [Fixtures.url("https://www.amazon.com/")]
+                ).value.password == "retail-password")
+        }
+    }
+
+    /// A2 or A3 at the keyboard of a device whose identity store is out of date: the person marked the bank item
+    /// "exclude from AutoFill suggestions" on another device (PRD F6.8: reachable only by opening the app), the
+    /// item has synced, the store has not been rewritten. The suggestion is still in the QuickType bar, and the
+    /// extension's own list is one tap away. Neither may give the item up.
+    @Test("an item excluded from AutoFill is not released for a stale identity, nor listed, nor chosen")
+    func excludedItemIsUnreachable() async throws {
+        let harness = AutoFillHarness(items: [Fixtures.bank, Fixtures.google])
+        let stored = try await harness.publishedIdentities()
+        #expect(stored.count == 3)
+        var bank = Fixtures.bank
+        bank.excludedFromSuggestions = true
+        var google = Fixtures.google
+        google.excludedFromSuggestions = true
+        await harness.vault.plant(bank)
+        await harness.vault.plant(google)
+
+        for identity in stored {
+            switch identity {
+            case .password(let password):
+                #expect(
+                    await harness.model.passwordWithoutInteraction(for: password.handedBack)
+                        == .refused(.itemNotInUse))
+            case .oneTimeCode(let code):
+                #expect(
+                    await harness.model.oneTimeCodeWithoutInteraction(for: code.handedBack) == .refused(.itemNotInUse))
+            case .passkey(let passkey):
+                #expect(
+                    await harness.model.passkeyAssertionWithoutInteraction(
+                        request: PasskeyAssertionRequest(
+                            relyingPartyID: passkey.relyingPartyID, clientDataHash: Fixtures.clientDataHash()),
+                        identity: passkey.handedBack, presence: .verified) == .refused(.itemNotInUse))
+            }
+        }
+        for (item, site) in [
+            (bank, Fixtures.url("https://www.firstbank.co.uk/login")), (google, Fixtures.domain("google.com")),
+        ] {
+            #expect(await Self.releases(of: item, to: [site], model: harness.model).isEmpty)
+            if case .list(let list) = await harness.model.credentialList(
+                for: [site],
+                passkey: PasskeyAssertionRequest(
+                    relyingPartyID: "google.com", clientDataHash: Fixtures.clientDataHash()))
+            {
+                #expect(list.isEmpty)
+            }
+            if case .list(let text) = await harness.model.textInsertionList(for: [site]) {
+                #expect(text.items.isEmpty)
+            }
+        }
+        guard case .list(let handPicked) = await harness.model.textInsertionListWithoutHost() else {
+            Issue.record("no list")
+            return
+        }
+        #expect(handPicked.items.isEmpty)
+        #expect(try await harness.publishedIdentities().isEmpty)
+    }
 
     /// A4, a malicious member of a shared vault (or A7, a crafted import): they can write any item into a vault the
     /// victim can read. An item with a scope spanning unrelated owners must not make its credential appear on
@@ -322,7 +781,7 @@ struct AdversarialAutoFillRequestTests {
                 identifiers: [Fixtures.domain("half.example.org")]
             ).value.password == "library-password")
         #expect(await harness.vault.item(half.id) == half)
-        #expect(CredentialIdentityPlanner.identities(for: planted).isEmpty)
+        #expect(CredentialIdentityPlanner.identities(for: [planted, half]).isEmpty)
     }
 
     /// A4 or A7: a passkey for one relying party stored in an item scoped to another. Whichever party asks, the
@@ -414,8 +873,9 @@ struct AdversarialAutoFillRequestTests {
             passkey: PasskeyAssertionRequest(relyingPartyID: "evil.example", clientDataHash: Fixtures.clientDataHash()))
         _ = await harness.model.oneTimeCodeList(for: site)
         _ = await harness.model.textInsertionList(for: site)
-        _ = await harness.model.textInsertionList(for: [])
-        _ = CredentialIdentityPlanner.identities(for: item)
+        _ = await harness.model.textInsertionListWithoutHost()
+        _ = await harness.model.textToInsertWithoutHost(for: TextChoice(itemID: item.id, fieldID: field.id))
+        _ = CredentialIdentityPlanner.identities(for: [item])
         // The PIN beside it is unaffected.
         #expect(
             await harness.model.textToInsert(
@@ -608,6 +1068,10 @@ struct AdversarialAutoFillRequestTests {
             #expect(await harness.model.oneTimeCodeList(for: [site.identifier]) == .vaultLocked)
             #expect(await harness.model.textInsertionList(for: [site.identifier]) == .vaultLocked)
         }
+        #expect(await harness.model.textInsertionListWithoutHost() == .vaultLocked)
+        #expect(
+            await harness.model.textToInsertWithoutHost(
+                for: TextChoice(itemID: Fixtures.library.id, fieldID: Fixtures.id(501))) == .vaultLocked)
         let registration = PasskeyRegistrationRequest(
             relyingPartyID: "amazon.com", user: PasskeyUser(handle: Data("h".utf8), name: Fixtures.email),
             clientDataHash: Fixtures.clientDataHash())
@@ -666,6 +1130,103 @@ struct AdversarialAutoFillRequestTests {
         #expect(await harness.vault.saves.isEmpty)
     }
 
+    /// A3 once more: the lock lands after a request has read the items and before it answers, while it waits on
+    /// the clock or for its turn on the actor. The plaintext is already in the request's hands; the lock must still
+    /// win. Every request type that hands a secret back is run with the vault locking as its one read returns, on
+    /// the site the item belongs to, where nothing else would refuse it.
+    @Test("a lock that lands after the items were read stops every kind of release")
+    func lockBeforeRelease() async throws {
+        let bankSite = [Fixtures.url("https://www.firstbank.co.uk/login")]
+        let google = [Fixtures.domain("google.com")]
+        let assertion = PasskeyAssertionRequest(relyingPartyID: "google.com", clientDataHash: Fixtures.clientDataHash())
+        let passkey = RecordIdentifier(itemID: Fixtures.google.id, fieldID: Fixtures.id(302))
+        let credentialID = try Fixtures.google.fields[1].passkeyCredential().credentialID
+        let bankPassword = PasswordIdentity(
+            host: "firstbank.co.uk", user: "40012345", recordIdentifier: RecordIdentifier(itemID: Fixtures.bank.id),
+            rank: 7)
+        let bankCode = OneTimeCodeIdentity(
+            host: "firstbank.co.uk", label: "40012345",
+            recordIdentifier: RecordIdentifier(itemID: Fixtures.bank.id, fieldID: Fixtures.id(404)))
+
+        /// Runs `request` twice on a fresh vault: unlocked throughout, where it must release (so the locked run
+        /// proves something), and locking as the items are read.
+        func check(_ name: String, _ request: (CredentialProviderModel) async -> (released: Bool, locked: Bool)) async {
+            let open = AutoFillHarness(items: Fixtures.all)
+            #expect(await request(open.model).released, "\(name) does not release when unlocked")
+            let locking = AutoFillHarness(items: Fixtures.all)
+            await locking.vault.lockAfterReads(1)
+            let outcome = await request(locking.model)
+            #expect(!outcome.released, "\(name) released after the lock")
+            #expect(outcome.locked, "\(name) did not report the lock")
+            #expect(await locking.vault.readCount == 1)
+        }
+        func result<Value>(_ outcome: Outcome<Value>) -> (released: Bool, locked: Bool) {
+            switch outcome {
+            case .success: return (true, false)
+            case .vaultLocked: return (false, true)
+            case .refused: return (false, false)
+            }
+        }
+        func result<Value>(_ outcome: SilentOutcome<Value>) -> (released: Bool, locked: Bool) {
+            switch outcome {
+            case .success: return (true, false)
+            case .requiresInteraction(.vaultLocked): return (false, true)
+            case .requiresInteraction, .refused: return (false, false)
+            }
+        }
+
+        await check("password by choice") {
+            result(
+                await $0.password(
+                    for: PasswordChoice(itemID: Fixtures.bank.id, userName: "40012345"), identifiers: bankSite))
+        }
+        await check("password without interaction") {
+            result(await $0.passwordWithoutInteraction(for: bankPassword.handedBack))
+        }
+        await check("one-time code by choice") {
+            result(
+                await $0.oneTimeCode(
+                    for: FieldChoice(itemID: Fixtures.bank.id, fieldID: Fixtures.id(404)), identifiers: bankSite))
+        }
+        await check("one-time code without interaction") {
+            result(await $0.oneTimeCodeWithoutInteraction(for: bankCode.handedBack))
+        }
+        await check("security answer as text") {
+            result(
+                await $0.textToInsert(
+                    for: TextChoice(itemID: Fixtures.bank.id, fieldID: Fixtures.id(405)), identifiers: bankSite))
+        }
+        await check("one-time code as text") {
+            result(
+                await $0.textToInsert(
+                    for: TextChoice(itemID: Fixtures.bank.id, fieldID: Fixtures.id(404)), identifiers: bankSite))
+        }
+        await check("recovery code as text") {
+            result(
+                await $0.textToInsert(
+                    for: TextChoice(
+                        itemID: Fixtures.google.id, fieldID: Fixtures.id(303), part: .recoveryCode(index: 0)),
+                    identifiers: google))
+        }
+        await check("hand-picked text") {
+            result(
+                await $0.textToInsertWithoutHost(for: TextChoice(itemID: Fixtures.bank.id, fieldID: Fixtures.id(402))))
+        }
+        await check("passkey assertion by choice") {
+            result(
+                await $0.passkeyAssertion(
+                    for: FieldChoice(itemID: Fixtures.google.id, fieldID: Fixtures.id(302)), request: assertion,
+                    presence: .verified))
+        }
+        await check("passkey assertion without interaction") {
+            result(
+                await $0.passkeyAssertionWithoutInteraction(
+                    request: assertion,
+                    identity: PasskeyIdentityRequest(recordIdentifier: passkey.text, credentialID: credentialID),
+                    presence: .verified))
+        }
+    }
+
     // MARK: - What the system stores
 
     /// A2 or A3, reading the operating system's credential identity store, which is plaintext outside the app
@@ -677,14 +1238,15 @@ struct AdversarialAutoFillRequestTests {
         var excluded = Fixtures.bank
         excluded.excludedFromSuggestions = true
         var archived = Fixtures.library
+        archived.scopes = [ServiceScope(host: "library.example")]
         archived.archived = true
         var noted = Fixtures.amazonRetail
         noted.notes = "NOTE-SECRET"
         noted.tags = ["TAG-SECRET"]
-        let harness = AutoFillHarness(items: [noted, Fixtures.awsRoot, Fixtures.google, excluded, archived])
+        let harness = AutoFillHarness(items: [noted, Fixtures.google, excluded, archived])
         _ = try await harness.model.publishAllIdentities().value
         let published = await harness.publisher.published
-        #expect(!published.isEmpty)
+        #expect(published.count == 3)
         var text = ""
         for identity in published {
             switch identity {

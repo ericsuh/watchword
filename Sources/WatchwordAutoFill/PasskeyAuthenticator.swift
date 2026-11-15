@@ -25,6 +25,8 @@ public enum PasskeyError: Error, Equatable, Sendable {
     case credentialIDCollision
     /// The vault already holds a credential the relying party listed in `excludeCredentials`.
     case credentialExcluded
+    /// The item already holds as many passkeys as one item may.
+    case tooManyCredentials
     /// More entries in an allow or exclude list, or more bytes in one, than the authenticator will look at.
     case listTooLong
     case prfInputTooLong

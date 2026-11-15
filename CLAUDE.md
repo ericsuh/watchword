@@ -226,26 +226,43 @@ still open (CloudKit and iCloud Drive transports, enrolment, sync in production 
   `Item` it looked up itself, and an explicit choice by the person is authorised like any other (SEC6, F11.1).
 - **No override.** Nothing releases after a refusal: no flag, no presence level, no second call (F11.4, F11.7). A
   look-alike host gets `LookAlikeWarning` in place of a list. Do not add a "fill anyway".
-- Shadowed items are listed (`otherAccounts`) and never released; archived items rank but are not released; trashed
+- Shadowed items are listed (`otherAccounts`) and never released; archived items and items marked
+  `excludedFromSuggestions` rank but are not listed, released or written (F6.8: reachable only in the app); trashed
   items do neither. The gate ranks among items with only the scopes `ScopePolicy` accepts, so a stored `com` scope
-  matches nothing; the stored item is not rewritten.
-- Without interaction a password or code is released only when `AutoFillGate.decide` says that item is the sole
-  fill and the identity's user is still the item's; a tie is `requiresInteraction`. A passkey needs only the gate.
-- With no service identifier, passwords, one-time codes and passkeys are refused. Text insertion with no identifier
-  (the system supplies none) goes through `ManualChoice`, which withholds exactly those three kinds.
+  matches nothing; the stored item is not rewritten. An item ID two readable items share names neither
+  (`VaultSnapshot.duplicatedIDs`): both rank, neither is released. Use `snapshot.itemInUse(_:)`, not `all.first`.
+- **The page, or nothing.** The gate is asked about a host only when the system named it for this request (list
+  identifiers, a passkey's relying party, a save's identifier). A QuickType tap hands back the identity Watchword
+  published and *not the page*, and the system chooses where to offer an identity (assume: anywhere under the
+  registrable domain). So `passwordWithoutInteraction` and `oneTimeCodeWithoutInteraction` treat the request's
+  identifier as a lookup key and answer only an identity `CredentialIdentityPlanner` would publish for the vault now;
+  never pass a page URL there, and build test inputs with `handedBack`. A passkey needs only the gate.
+- `CredentialIdentityPlanner` is a whole-vault function: a password or code identity exists only for a scope that
+  covers its whole site (host equal to `PublicSuffix.broadestSite`, subdomains on, nothing excluded), with no other
+  item scoped below that host and none at that host sharing the suggested name; a passkey identity only when the
+  gate would release it. One item's change is published as the difference between the whole sets before and after.
+- No host, no secret. With no service identifier every gated request is refused (`noServiceIdentifier`), text
+  included. The system's host-less text insertion is `textInsertionListWithoutHost()` /
+  `textToInsertWithoutHost(for:)`, through `ManualChoice`, which gives only fields whose kind is not a secret. Do not
+  fold the two back into "empty identifiers".
 - A passkey is bound twice: the stored relying party ID must equal the request's, and the item must pass the gate
   for that relying party as a host. A relying party ID is a `RelyingPartyID` (normalised, canonical, scope policy)
   before anything is hashed, stored or signed. Flags are truthful: UP/UV from the `PersonPresence` the adapter
   reports, BE always, BS from `CredentialVault.isBackedUp()`; the counter is zero; no extension data in
   authenticator data. `prf` is evaluated only when the person was verified (one secret per credential).
-- A page cannot plant or widen: a saved login is scoped to the exact host, without subdomains, titled by the host,
-  through `ScopePolicy`; an update changes a password and never a scope, and is never made without UI, nor is a
-  second account added where one already fills; a conditional registration only adds a
-  passkey to the one saved password login for that relying party and user.
+- A page cannot plant, widen or hide: a saved login is scoped to the exact host, without subdomains, titled by the
+  host, through `ScopePolicy`; an update changes a password and never a scope, and is never made without UI. A new
+  item that would outrank accounts already offered on the host says so (`NewItemProposal.hiddenAccounts`) and
+  offers their scope instead (`newItemBesideExisting`); the model never picks between the two unasked. No
+  registration adds a scope to an item (F11.7); a login scoped under the relying party is only named
+  (`relatedLogins`). A conditional registration adds a passkey to the one saved password login for that relying
+  party and user, and only if the item holds no passkey yet; an item holds at most `maximumPasskeysPerItem`.
 - A remote party never deletes: reports set or clear `Field.meta` flags or rename a passkey's account, only on items
   the gate would release to the reporter, at most once per field per `reportInterval` (history is never pruned).
 - Locked is a state the model reports (`vaultLocked`, `requiresInteraction(.vaultLocked)`). Each request reads the
-  items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:)`).
+  items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:)`); and every
+  request that hands a secret back does so through `releasing(_:)`, which calls `CredentialVault.confirmUnlocked()`
+  as the last suspension, so a lock that lands after the read wins.
 - Published identities are plaintext outside the app: `CredentialIdentityPlanner` emits hosts, user names, credential
   IDs, user handles and UUID record identifiers, never a title, label, note or secret, and nothing for excluded,
   archived or trashed items.

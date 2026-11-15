@@ -9,12 +9,17 @@ struct VaultSnapshot: Sendable {
     let all: [Item]
     /// What the gate ranks among: every item outside the trash, each with only the scopes the scope policy accepts.
     ///
-    /// Archived items stay in, so an archived account still marks its host as its own and a less specific item is
-    /// not offered there in its place; they are never released themselves (`Authorization` is only made for items in
-    /// use). A scope the policy refuses (`com`, `co.uk`) cannot be created through the vault, but an item can arrive
-    /// from another vault member or an import, and such a scope would match every site under it; here it matches
-    /// nothing (PRD F11.2). The stored item is not rewritten.
+    /// Archived items and items excluded from AutoFill stay in, so such an account still marks its host as its own
+    /// and a less specific item is not offered there in its place; they are never released themselves
+    /// (`Authorization` is only made for items in use). A scope the policy refuses (`com`, `co.uk`) cannot be
+    /// created through the vault, but an item can arrive from another vault member or an import, and such a scope
+    /// would match every site under it; here it matches nothing (PRD F11.2). The stored item is not rewritten.
     let rankable: [Item]
+    /// IDs more than one readable item carries. No honest client writes two items with one ID, and everything here
+    /// names an item by its ID alone (a choice, a record identifier, the ranker's "is this the match"), so with two
+    /// candidates the gate could say yes about one and the secret be read from the other. Such items keep ranking,
+    /// which can only narrow what is offered, and are never listed, released, written or published.
+    let duplicatedIDs: Set<UUID>
 
     init(_ items: [Item]) {
         all = items
@@ -23,11 +28,36 @@ struct VaultSnapshot: Sendable {
             view.scopes = item.scopes.filter(ScopePolicy.isAcceptable)
             return view
         }
+        var seen = Set<UUID>()
+        var duplicated = Set<UUID>()
+        for item in items where !seen.insert(item.id).inserted {
+            duplicated.insert(item.id)
+        }
+        duplicatedIDs = duplicated
+    }
+
+    /// Whether a credential may be released from `item`, or the item written to, by the extension: not in the
+    /// trash, not archived, not marked "exclude from AutoFill suggestions" (PRD F6.8: reachable only by opening the
+    /// app), and the only item with its ID.
+    func isInUse(_ item: Item) -> Bool {
+        !item.isTrashed && !item.archived && !item.excludedFromSuggestions && !duplicatedIDs.contains(item.id)
     }
 
     /// Items a credential may be released from, as stored.
     var inUse: [Item] {
-        all.filter { !$0.isTrashed && !$0.archived }
+        all.filter(isInUse)
+    }
+
+    /// The one stored item with this ID.
+    func item(_ id: UUID) -> Result<Item, ProviderRefusal> {
+        guard !duplicatedIDs.contains(id) else { return .failure(.duplicateRecord) }
+        guard let item = all.first(where: { $0.id == id }) else { return .failure(.unknownRecord) }
+        return .success(item)
+    }
+
+    /// The one stored item with this ID, if a credential may be released from it or it may be written to.
+    func itemInUse(_ id: UUID) -> Result<Item, ProviderRefusal> {
+        item(id).flatMap { isInUse($0) ? .success($0) : .failure(.itemNotInUse) }
     }
 }
 
@@ -48,9 +78,9 @@ struct Authorization: Sendable {
     }
 }
 
-/// An item the person picked by hand when the system named no site or app (text insertion only). There is no host,
-/// so the gate has nothing to check, and this type can read only what has no host-checked request of its own:
-/// never a password, a one-time code or a passkey.
+/// An item the person picked by hand when the system named no site or app (the system's text-insertion request).
+/// There is no host, so the gate has nothing to check, and this type can read only fields that are not secrets:
+/// never a password, a one-time code, a passkey, a recovery code, an API key, a security answer or a PIN.
 struct ManualChoice: Sendable {
     let item: Item
 
@@ -69,16 +99,21 @@ enum ReleaseGate {
         case oneTimeCode
     }
 
-    /// The single place a release is authorised. `itemID` must name an item in use, and `AutoFillGate` must
-    /// authorise it for at least one of the identifiers the system supplied, among everything outside the trash.
+    /// The single place a release is authorised. `itemID` must name the one item in use with that ID, and
+    /// `AutoFillGate` must authorise it for at least one of the identifiers the system supplied, among everything
+    /// outside the trash.
     static func authorize(
         itemID: UUID, for identifiers: [ServiceIdentifier], in snapshot: VaultSnapshot, purpose: Purpose = .credential
     ) -> Result<Authorization, ProviderRefusal> {
         guard !identifiers.isEmpty else { return .failure(.noServiceIdentifier) }
-        guard let item = snapshot.all.first(where: { $0.id == itemID }) else { return .failure(.unknownRecord) }
-        guard !item.isTrashed, !item.archived, let ranked = snapshot.rankable.first(where: { $0.id == itemID }) else {
-            return .failure(.itemNotInUse)
+        let item: Item
+        switch snapshot.itemInUse(itemID) {
+        case .success(let found): item = found
+        case .failure(let refusal): return .failure(refusal)
         }
+        // The gate is asked about the very item the secret will be read from, in the form it ranks: its ID is
+        // unique in the snapshot, so "the match with this ID" can only be this item.
+        guard let ranked = snapshot.rankable.first(where: { $0.id == itemID }) else { return .failure(.itemNotInUse) }
 
         var refusals: [FillRefusal] = []
         for identifier in identifiers.prefix(maximumIdentifiers) {
@@ -108,9 +143,7 @@ enum ReleaseGate {
 
     /// The item for a hand-picked text insertion with no host. In use, and nothing else can be asked.
     static func manualChoice(itemID: UUID, in snapshot: VaultSnapshot) -> Result<ManualChoice, ProviderRefusal> {
-        guard let item = snapshot.all.first(where: { $0.id == itemID }) else { return .failure(.unknownRecord) }
-        guard !item.isTrashed, !item.archived else { return .failure(.itemNotInUse) }
-        return .success(ManualChoice(item: item))
+        snapshot.itemInUse(itemID).map(ManualChoice.init(item:))
     }
 
     /// Of several refusals, the one that warns: a look-alike assessment beats "nothing matches", which beats an
@@ -194,12 +227,21 @@ extension Authorization {
 }
 
 extension ManualChoice {
-    /// Kinds that are only ever released for a host their item is scoped to.
-    static let withheldKinds: Set<FieldKind> = [.password, .totp, .passkey]
+    /// Whether a field of this kind may be inserted when the system named no site: only what is not a secret.
+    ///
+    /// A password, a one-time code and a passkey have host-checked requests of their own. A recovery code is a
+    /// one-time code that needs no device, and an API key is a bearer credential: typed into a look-alike page they
+    /// are replayed at once, which is why PRD F11.4 withholds codes on a mismatch instead of warning, and with no
+    /// host there is no way to tell a mismatch. Security answers, PINs and custom secret fields are held to the same
+    /// rule: each signs someone in, or recovers an account, somewhere. What remains is what a person reads off a
+    /// card or a letter: user names, emails, phone, account and card numbers, dates, addresses.
+    static func isInsertable(_ kind: FieldKind) -> Bool {
+        !kind.isSecret
+    }
 
     func text(fieldID: UUID, part: TextPart) -> Result<TextToInsert, ProviderRefusal> {
         guard let field = item.fields.first(where: { $0.id == fieldID }) else { return .failure(.unknownRecord) }
-        guard !ManualChoice.withheldKinds.contains(field.kind) else { return .failure(.fieldWithheld(field.kind)) }
+        guard ManualChoice.isInsertable(field.kind) else { return .failure(.fieldWithheld(field.kind)) }
         return plainText(of: field, part: part)
     }
 }

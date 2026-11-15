@@ -32,9 +32,14 @@ struct InjectedGenerator: RandomNumberGenerator, Sendable {
 ///   like any other (SEC6, F11.1).
 /// - **No override.** No request, parameter or configuration releases anything for a host the gate refused (F11.4,
 ///   F11.7). A look-alike host gets a `LookAlikeWarning` in place of a list (F11.3), not a list with a caveat.
+/// - **The page, or nothing.** The gate is asked about a host only when the system named it for *this* request: the
+///   identifiers of a list request, the relying party of a passkey request, the identifier of a save. A QuickType
+///   tap names no page (the system hands back the identity Watchword published), so it is answered only for an
+///   identity `CredentialIdentityPlanner` would publish now, which is one that is right on every page of its site.
 /// - **Locked is a state.** With no keys the answer is `vaultLocked` (or `requiresInteraction(.vaultLocked)`); the
 ///   extension unlocks and asks again. The items of each request are read once, at its start, and every step of an
-///   interactive flow reads them afresh.
+///   interactive flow reads them afresh. A request that hands back a secret confirms the vault is still unlocked
+///   as its last suspension, so a lock that lands while it runs wins.
 /// - **The page is not trusted.** Service identifiers, relying party IDs, user names, password rules and reports
 ///   all originate with a web page or an app (adversary A6). Each is bounded and validated here, whatever the
 ///   operating system has already checked.
@@ -139,7 +144,7 @@ public actor CredentialProviderModel {
             let snapshot = try await self.load()
             let authorization = try Self.unwrap(
                 ReleaseGate.authorize(itemID: choice.itemID, for: identifiers, in: snapshot))
-            return try Self.unwrap(authorization.password(userName: choice.userName))
+            return try await self.releasing(try Self.unwrap(authorization.password(userName: choice.userName)))
         }
         do {
             return .success(try await run())
@@ -148,11 +153,15 @@ public actor CredentialProviderModel {
         }
     }
 
-    /// The password for a QuickType suggestion, with no UI (`provideCredentialWithoutUserInteraction`).
+    /// The password for a QuickType suggestion, with no UI (`provideCredentialWithoutUserInteraction(for:)`, and
+    /// again from `prepareInterfaceToProvideCredential(for:)` once the extension has unlocked the vault).
     ///
-    /// Released only when the gate both authorises the item for the identity's host and decides that it alone is
-    /// the fill there. A tie between accounts, or an identity whose user the item no longer has, needs the person:
-    /// two suggestions with the same email are indistinguishable in the keyboard (PRD F11.5, scenario S1).
+    /// The system hands back the identity Watchword published and does not name the page, so the request's
+    /// identifier is a lookup key and the gate cannot be asked about where the person is. The password is released
+    /// only if the identity is one `CredentialIdentityPlanner` would publish for the vault as it is now: the item
+    /// is for every page of that site, no other account is more specific anywhere on it, and none shares the user
+    /// name tapped. The gate is then asked about the identity's own host, like any release. An identity that no
+    /// longer qualifies needs the person, in the extension's list, which is told the page (PRD F6.6, F11.5, S1).
     public func passwordWithoutInteraction(
         for request: PasswordIdentityRequest
     ) async -> SilentOutcome<PasswordCredential> {
@@ -161,16 +170,18 @@ public actor CredentialProviderModel {
                 throw Blocked.refused(.unknownRecord)
             }
             let snapshot = try await self.load()
+            let item = try Self.unwrap(snapshot.itemInUse(record.itemID))
+            let host = try Self.publishedHost(request.serviceIdentifier)
+            let standing = Self.standing(of: item, in: snapshot) {
+                guard case .password(let identity) = $0 else { return false }
+                return identity.host == host.value && identity.user == request.user
+            }
+            if let reason = standing { return .requiresInteraction(reason) }
             let authorization = try Self.unwrap(
-                ReleaseGate.authorize(itemID: record.itemID, for: [request.serviceIdentifier], in: snapshot))
-            guard Self.isSoleFill(authorization.item, for: request.serviceIdentifier, in: snapshot) else {
-                return .requiresInteraction(.ambiguousMatch)
-            }
-            switch authorization.password(userName: request.user) {
-            case .success(let credential): return .success(credential)
-            case .failure(.unknownRecord): return .requiresInteraction(.staleIdentity)
-            case .failure(let refusal): return .refused(refusal)
-            }
+                ReleaseGate.authorize(
+                    itemID: item.id, for: [ServiceIdentifier(host.value, kind: .domain)], in: snapshot)
+            )
+            return .success(try await self.releasing(try Self.unwrap(authorization.password(userName: request.user))))
         }
         do {
             return try await run()
@@ -218,7 +229,9 @@ public actor CredentialProviderModel {
             let authorization = try Self.unwrap(
                 ReleaseGate.authorize(
                     itemID: choice.itemID, for: identifiers, in: snapshot, purpose: .oneTimeCode))
-            return try Self.unwrap(authorization.oneTimeCode(fieldID: choice.fieldID, at: await self.clock.now()))
+            let now = await self.clock.now()
+            return try await self.releasing(
+                try Self.unwrap(authorization.oneTimeCode(fieldID: choice.fieldID, at: now)))
         }
         do {
             return .success(try await run())
@@ -227,7 +240,9 @@ public actor CredentialProviderModel {
         }
     }
 
-    /// The current code for a published one-time code identity, with no UI. Same rule as a password.
+    /// The current code for a published one-time code identity, with no UI. The rule of
+    /// `passwordWithoutInteraction(for:)`: the identity names no page, so it must be one the planner would publish
+    /// now, and a code is withheld otherwise (F11.4).
     public func oneTimeCodeWithoutInteraction(
         for request: OneTimeCodeIdentityRequest
     ) async -> SilentOutcome<OneTimeCode> {
@@ -236,17 +251,21 @@ public actor CredentialProviderModel {
                 throw Blocked.refused(.unknownRecord)
             }
             let snapshot = try await self.load()
+            let item = try Self.unwrap(snapshot.itemInUse(record.itemID))
+            let host = try Self.publishedHost(request.serviceIdentifier)
+            let standing = Self.standing(of: item, in: snapshot) {
+                $0
+                    == .oneTimeCode(
+                        OneTimeCodeIdentity(host: host.value, label: request.label, recordIdentifier: record))
+            }
+            if let reason = standing { return .requiresInteraction(reason) }
             let authorization = try Self.unwrap(
                 ReleaseGate.authorize(
-                    itemID: record.itemID, for: [request.serviceIdentifier], in: snapshot, purpose: .oneTimeCode))
-            guard Self.isSoleFill(authorization.item, for: request.serviceIdentifier, in: snapshot) else {
-                return .requiresInteraction(.ambiguousMatch)
-            }
-            switch authorization.oneTimeCode(fieldID: fieldID, at: await self.clock.now()) {
-            case .success(let code): return .success(code)
-            case .failure(.unknownRecord): return .requiresInteraction(.staleIdentity)
-            case .failure(let refusal): return .refused(refusal)
-            }
+                    itemID: item.id, for: [ServiceIdentifier(host.value, kind: .domain)], in: snapshot,
+                    purpose: .oneTimeCode))
+            let now = await self.clock.now()
+            return .success(
+                try await self.releasing(try Self.unwrap(authorization.oneTimeCode(fieldID: fieldID, at: now))))
         }
         do {
             return try await run()
@@ -257,14 +276,12 @@ public actor CredentialProviderModel {
 
     // MARK: - Text to insert (PRD F6.4)
 
-    /// The items and fields the person may insert as text.
+    /// The items and fields the person may insert as text on a site or in an app the system named.
     ///
-    /// With identifiers, the request is gated like any other: only items the gate would release for the host are
-    /// listed, with every field but the passkey, and a look-alike host gets the warning. The operating system's own
-    /// text-insertion request names no site, though (`prepareInterfaceForUserChoosingTextToInsert()` has no
-    /// parameters). Then there is no host to check and no mismatch to detect, and the list is every item in use,
-    /// picked by hand as it would be in the app, minus the three kinds that have a host-checked request of their
-    /// own: passwords, one-time codes and passkeys are never released without a host.
+    /// Gated like any other request: only items the gate would release for the host are listed, with every field
+    /// but the passkey, and a look-alike host gets the warning. With no identifier there is no host to authorise
+    /// anything for and the request is refused; the request the system makes without naming a site is
+    /// `textInsertionListWithoutHost()`, a different question with a much smaller answer.
     public func textInsertionList(for identifiers: [ServiceIdentifier]) async -> TextInsertionListOutcome {
         let snapshot: VaultSnapshot
         switch await loadResult() {
@@ -272,12 +289,7 @@ public actor CredentialProviderModel {
         case .failure(.locked): return .vaultLocked
         case .failure(.refused(let refusal)): return .refused(refusal)
         }
-        guard !identifiers.isEmpty else {
-            let items = snapshot.inUse.sorted { $0.title < $1.title }.compactMap {
-                Self.insertableItem($0, withholding: ManualChoice.withheldKinds)
-            }
-            return .list(TextInsertionList(items: items, hostVerified: false))
-        }
+        guard !identifiers.isEmpty else { return .refused(.noServiceIdentifier) }
         let matching = Matching(identifiers: identifiers, snapshot: snapshot)
         if matching.primary.isEmpty {
             if let warning = Self.warning(for: matching.hosts, in: snapshot) { return .warning(warning) }
@@ -285,29 +297,63 @@ public actor CredentialProviderModel {
                 return .refused(.gate(.unusableIdentifier(error)))
             }
         }
-        let items = matching.primary.compactMap { Self.insertableItem($0.item, withholding: [.passkey]) }
+        let items = matching.primary.compactMap { Self.insertableItem($0.item, including: { $0 != .passkey }) }
         return .list(TextInsertionList(items: items, hostVerified: true))
     }
 
-    /// The text of the field the person chose. Authorised by the gate when the system named a host; restricted to
-    /// fields without a host-checked request when it did not.
+    /// The text of the field the person chose, for a host the system named. Authorised by the gate; refused with no
+    /// identifier.
     public func textToInsert(for choice: TextChoice, identifiers: [ServiceIdentifier]) async -> Outcome<TextToInsert> {
         func run() async throws -> TextToInsert {
             let snapshot = try await self.load()
-            guard !identifiers.isEmpty else {
-                let manual = try Self.unwrap(ReleaseGate.manualChoice(itemID: choice.itemID, in: snapshot))
-                return try Self.unwrap(manual.text(fieldID: choice.fieldID, part: choice.part))
-            }
+            guard !identifiers.isEmpty else { throw Blocked.refused(.noServiceIdentifier) }
             // A one-time code is held to the one-time code rule whichever request asks for it.
             let isCode =
-                snapshot.all.first { $0.id == choice.itemID }?.fields
-                .first { $0.id == choice.fieldID }?.kind == .totp
+                (try? snapshot.item(choice.itemID).get())?.fields.first { $0.id == choice.fieldID }?.kind == .totp
             let authorization = try Self.unwrap(
                 ReleaseGate.authorize(
                     itemID: choice.itemID, for: identifiers, in: snapshot, purpose: isCode ? .oneTimeCode : .credential)
             )
-            return try Self.unwrap(
-                authorization.text(fieldID: choice.fieldID, part: choice.part, at: await self.clock.now()))
+            let now = await self.clock.now()
+            return try await self.releasing(
+                try Self.unwrap(authorization.text(fieldID: choice.fieldID, part: choice.part, at: now)))
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
+        }
+    }
+
+    /// The list for the system's own text-insertion request, which names no site or app
+    /// (`prepareInterfaceForUserChoosingTextToInsert()` has no parameters).
+    ///
+    /// With no host there is nothing for the gate to check and no mismatch to detect, so nothing that is a secret
+    /// can leave this way: the list is every item in use, picked by hand as it would be in the app, with only the
+    /// fields that are not secrets (user names, emails, phone, account and card numbers, dates, addresses). It is a
+    /// separate request, not the gated one with an empty list of identifiers, so that an adapter that lost the
+    /// identifiers gets a refusal instead of this.
+    public func textInsertionListWithoutHost() async -> TextInsertionListOutcome {
+        switch await loadResult() {
+        case .success(let snapshot):
+            let items = snapshot.inUse.sorted { $0.title < $1.title }.compactMap {
+                Self.insertableItem($0, including: ManualChoice.isInsertable)
+            }
+            return .list(TextInsertionList(items: items, hostVerified: false))
+        case .failure(.locked):
+            return .vaultLocked
+        case .failure(.refused(let refusal)):
+            return .refused(refusal)
+        }
+    }
+
+    /// The text of a field the person picked from `textInsertionListWithoutHost()`. Any secret is
+    /// `refused(.fieldWithheld)`, whatever the list showed.
+    public func textToInsertWithoutHost(for choice: TextChoice) async -> Outcome<TextToInsert> {
+        func run() async throws -> TextToInsert {
+            let snapshot = try await self.load()
+            let manual = try Self.unwrap(ReleaseGate.manualChoice(itemID: choice.itemID, in: snapshot))
+            return try await self.releasing(try Self.unwrap(manual.text(fieldID: choice.fieldID, part: choice.part)))
         }
         do {
             return .success(try await run())
@@ -320,10 +366,7 @@ public actor CredentialProviderModel {
     public func markRecoveryCode(_ choice: FieldChoice, index: Int, used: Bool = true) async -> Outcome<Bool> {
         func run() async throws -> Bool {
             let snapshot = try await self.load()
-            guard let item = snapshot.all.first(where: { $0.id == choice.itemID }) else {
-                throw Blocked.refused(.unknownRecord)
-            }
-            guard !item.isTrashed, !item.archived else { throw Blocked.refused(.itemNotInUse) }
+            let item = try Self.unwrap(snapshot.itemInUse(choice.itemID))
             guard
                 let position = item.fields.firstIndex(where: { $0.id == choice.fieldID && $0.kind == .recoveryCodes }),
                 item.fields[position].recoveryCodes.indices.contains(index)
@@ -362,6 +405,17 @@ public actor CredentialProviderModel {
     }
 
     // MARK: - Shared machinery
+
+    /// Hands `value` back only if the vault is still unlocked: the last suspension of every request that releases
+    /// a secret. The items were read at the start of the request, and a lock since then must win.
+    func releasing<Value>(_ value: Value) async throws -> Value {
+        do {
+            try await vault.confirmUnlocked()
+        } catch {
+            throw Self.blocked(error)
+        }
+        return value
+    }
 
     /// The items of this request. Every vault error but `locked` is a refusal.
     func load() async throws -> VaultSnapshot {
@@ -433,12 +487,74 @@ public actor CredentialProviderModel {
         }
     }
 
-    /// Whether the gate's decision for `identifier` is to fill `item` and nothing else.
-    static func isSoleFill(_ item: Item, for identifier: ServiceIdentifier, in snapshot: VaultSnapshot) -> Bool {
-        if case .fill(let match) = AutoFillGate.decide(for: identifier, among: snapshot.rankable) {
-            return match.item.id == item.id
+    /// The host of an identity the system handed back: the identifier Watchword published, normalised.
+    static func publishedHost(_ identifier: ServiceIdentifier) throws -> NormalizedHost {
+        do {
+            return try HostNormalizer.normalize(identifier)
+        } catch {
+            throw Blocked.refused(
+                .gate(.unusableIdentifier((error as? HostNormalizationError) ?? .invalidHost(identifier.identifier))))
         }
-        return false
+    }
+
+    /// Whether an identity the system handed back is one Watchword would publish for `item` now: `nil` if it is,
+    /// and otherwise why the person is needed. `matches` picks the identity out of the planner's list.
+    static func standing(
+        of item: Item, in snapshot: VaultSnapshot, _ matches: (CredentialIdentity) -> Bool
+    ) -> InteractionReason? {
+        if CredentialIdentityPlanner.identities(for: item, in: snapshot).contains(where: matches) { return nil }
+        // Published for the item on its own, so it is the other items that stand in the way.
+        if CredentialIdentityPlanner.identities(for: item, in: VaultSnapshot([item])).contains(where: matches) {
+            return .ambiguousMatch
+        }
+        return .staleIdentity
+    }
+
+    /// What creating an item scoped `narrow` would do to the accounts already offered on `host`, and the scope that
+    /// would put it beside them instead.
+    ///
+    /// `narrow` is the scope a request asks for on its own terms: the exact host of a saved login, the relying party
+    /// of a passkey. Where the accounts already offered on the host match it less specifically (a login for
+    /// `amazon.com` and its subdomains, on `www.amazon.com`), an item scoped `narrow` outranks them, and the gate
+    /// refuses an outranked item even when the person chooses it: the first account would drop out of AutoFill on
+    /// that host. That is right when the new login is a different service under the same domain (scenario S1) and
+    /// wrong when it is a second account on the same one, and nothing in the request says which. So the model does
+    /// neither on its own: the proposal says how many accounts would be hidden, and offers the scope of the most
+    /// specific matches as the alternative, which makes the accounts tie, and a tie is the person's to choose from
+    /// (PRD F6.6, F11.5). That scope is one the person gave an item and the scope policy accepts; the most specific
+    /// matches share its host by construction, and where they differ on subdomains or exclusions the narrower holds.
+    static func newItemProposal(
+        title: String, narrow: ServiceScope, on host: NormalizedHost, userName: String, warning: LookAlikeWarning?,
+        in snapshot: VaultSnapshot
+    ) -> (proposal: NewItemProposal, sharedScope: ServiceScope?) {
+        func proposal(hidden: Int, beside: SharedScopeProposal?) -> NewItemProposal {
+            NewItemProposal(
+                title: title, scopeHost: narrow.host, includesSubdomains: narrow.includeSubdomains, userName: userName,
+                warning: warning, hiddenAccounts: hidden, besideExisting: beside)
+        }
+        let primary = ItemRanker.rank(items: snapshot.rankable, host: host).primary
+        guard let first = primary.first, let own = ScopeMatcher.match(narrow, host: host),
+            own.specificity > first.match.specificity
+        else { return (proposal(hidden: 0, beside: nil), nil) }
+
+        // Only accounts in use can be hidden from the person, or stood beside: an archived or excluded item that
+        // is outranked loses nothing, and its scope is not offered for copying.
+        let accounts = primary.filter { snapshot.isInUse($0.item) }.count
+        guard accounts > 0 else { return (proposal(hidden: 0, beside: nil), nil) }
+        let scopes = primary.map(\.match.scope)
+        let shared = ServiceScope(
+            host: first.match.scope.host, includeSubdomains: scopes.allSatisfy(\.includeSubdomains),
+            excludedHosts: scopes.reduce(into: Set<String>()) { $0.formUnion($1.excludedHosts) })
+        guard scopes.allSatisfy({ $0.host == shared.host }), ScopePolicy.isAcceptable(shared),
+            ScopeMatcher.match(shared, host: host)?.specificity == first.match.specificity
+        else { return (proposal(hidden: accounts, beside: nil), nil) }
+        return (
+            proposal(
+                hidden: accounts,
+                beside: SharedScopeProposal(
+                    scopeHost: shared.host, includesSubdomains: shared.includeSubdomains, accounts: accounts)),
+            shared
+        )
     }
 
     /// The warning to show in place of an empty result, if any of the hosts resembles a saved site (PRD F11.3).
@@ -463,8 +579,8 @@ public actor CredentialProviderModel {
             reportedUnused: match.item.field(.password)?.reportedUnusedAt != nil)
     }
 
-    static func insertableItem(_ item: Item, withholding withheld: Set<FieldKind>) -> InsertableItem? {
-        let fields = item.fields.filter { !withheld.contains($0.kind) && !$0.value.isEmpty }.map { field in
+    static func insertableItem(_ item: Item, including isIncluded: (FieldKind) -> Bool) -> InsertableItem? {
+        let fields = item.fields.filter { isIncluded($0.kind) && !$0.value.isEmpty }.map { field in
             InsertableField(
                 fieldID: field.id, kind: field.kind, label: field.label,
                 question: field.kind == .securityQuestion ? field.meta["question"] : nil,
@@ -483,7 +599,8 @@ struct Matching {
     /// The identifiers that normalised, in order, each once.
     var hosts: [NormalizedHost] = []
     var firstError: HostNormalizationError?
-    /// Items in use that are a most specific match for at least one host.
+    /// Items in use that are a most specific match for at least one host. Archived and excluded items, and items
+    /// that share an ID, take part in the ranking and are in neither list.
     var primary: [RankedMatch] = []
     /// Items in use that match only less specifically: "other accounts on this site".
     var shadowed: [RankedMatch] = []
@@ -506,12 +623,12 @@ struct Matching {
             hosts.append(host)
             let ranking = ItemRanker.rank(items: snapshot.rankable, host: host)
             for match in ranking.primary
-            where !match.item.archived && !primary.contains(where: { $0.item.id == match.item.id }) {
+            where snapshot.isInUse(match.item) && !primary.contains(where: { $0.item.id == match.item.id }) {
                 primary.append(match)
             }
-            shadowedCandidates.append(contentsOf: ranking.shadowed.filter { !$0.item.archived })
+            shadowedCandidates.append(contentsOf: ranking.shadowed.filter { snapshot.isInUse($0.item) })
             switch AutoFillGate.decide(for: identifier, among: snapshot.rankable) {
-            case .fill(let match) where !match.item.archived: fills.insert(match.item.id)
+            case .fill(let match) where snapshot.isInUse(match.item): fills.insert(match.item.id)
             case .fill, .chooseAmong: undecided = true
             case .refuse: break
             }

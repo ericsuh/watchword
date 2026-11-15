@@ -26,7 +26,18 @@ public enum CredentialVaultError: Error, Equatable, Sendable {
 public protocol CredentialVault: Sendable {
     /// Every readable item of every unlocked vault, the archived and the trashed included: the model filters, and
     /// needs archived items to rank against.
+    ///
+    /// Each item's `id` should occur once. The model does not rely on it: an ID that two returned items share
+    /// (a hostile member of a shared vault choosing a record ID, an item mid-move between vaults) is treated as
+    /// naming neither, so both keep ranking and neither is listed, released, written or published.
     func credentialItems() async throws -> [Item]
+
+    /// Throws `locked` unless the vault is unlocked at this moment, and does nothing else.
+    ///
+    /// The model reads the items once, at the start of a request, and may suspend before it answers (on the clock,
+    /// on this actor). It calls this as its last suspension before handing a secret back, so a lock that lands in
+    /// between wins: the request reports the lock and the plaintext it read goes nowhere.
+    func confirmUnlocked() async throws
 
     /// The vault a new item is created in (the Personal vault).
     func defaultVaultID() async throws -> UUID

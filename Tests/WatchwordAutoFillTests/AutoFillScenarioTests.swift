@@ -57,18 +57,12 @@ struct AutoFillScenarioTests {
                 ).code))
         #expect(retailCode.code != awsCode.code)
 
-        // Neither is ever handed to the other's site: by choice, by QuickType identity, as a code, or as text.
+        // Neither is ever handed to the other's site: by choice, as a code, or as text.
         let retailChoice = PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email)
         let awsChoice = PasswordChoice(itemID: Fixtures.awsRoot.id, userName: Fixtures.email)
         #expect(
             await harness.model.password(for: retailChoice, identifiers: [Self.console]).refusal?.isGateRefusal == true)
         #expect(await harness.model.password(for: awsChoice, identifiers: [Self.shop]).refusal?.isGateRefusal == true)
-        #expect(
-            await harness.model.passwordWithoutInteraction(
-                for: PasswordIdentityRequest(
-                    serviceIdentifier: Self.console, user: Fixtures.email,
-                    recordIdentifier: RecordIdentifier(itemID: Fixtures.amazonRetail.id).text)
-            ).refusal?.isGateRefusal == true)
         #expect(
             await harness.model.oneTimeCode(
                 for: FieldChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(103)),
@@ -81,26 +75,38 @@ struct AutoFillScenarioTests {
             )
             .refusal?.isGateRefusal == true)
 
-        // QuickType: both accounts fill silently on their own site, and their identities carry distinct ranks.
-        #expect(
-            try await harness.model.passwordWithoutInteraction(
-                for: PasswordIdentityRequest(
-                    serviceIdentifier: Self.console, user: Fixtures.email,
-                    recordIdentifier: RecordIdentifier(itemID: Fixtures.awsRoot.id).text)
-            ).value.password == "aws-password")
-        #expect(
-            try await harness.model.passwordWithoutInteraction(
-                for: PasswordIdentityRequest(
-                    serviceIdentifier: Self.shop, user: Fixtures.email,
-                    recordIdentifier: RecordIdentifier(itemID: Fixtures.amazonRetail.id).text)
-            ).value.password == "retail-password")
-        _ = try await harness.model.publishAllIdentities().value
-        var ranks: [UUID: Set<Int>] = [:]
-        for case .password(let identity) in await harness.publisher.published {
-            ranks[identity.recordIdentifier.itemID, default: []].insert(identity.rank)
+        // QuickType. A tap hands back the stored identity and not the page, and the system decides where an
+        // `amazon.com` identity is offered: quite possibly on the console too. So with both accounts in the vault
+        // neither has a password or code identity, and what an out-of-date store still holds is not answered. The
+        // keyboard's own list (above), which is told the page, is where these two accounts are chosen.
+        #expect(try await harness.publishedIdentities().isEmpty)
+        let before = AutoFillHarness(items: [Fixtures.amazonRetail])
+        for identity in try await before.publishedPasswords() {
+            #expect(identity.host == "amazon.com")
+            #expect(
+                try await before.model.passwordWithoutInteraction(for: identity.handedBack).value
+                    == .init(
+                        user: Fixtures.email, password: "retail-password"))
+            #expect(
+                await harness.model.passwordWithoutInteraction(for: identity.handedBack)
+                    == .requiresInteraction(.ambiguousMatch))
         }
-        #expect(ranks[Fixtures.amazonRetail.id] == [5])
-        #expect(ranks[Fixtures.awsRoot.id] == [9])
+        for identity in try await before.publishedCodes() {
+            #expect(
+                await harness.model.oneTimeCodeWithoutInteraction(for: identity.handedBack)
+                    == .requiresInteraction(.ambiguousMatch))
+        }
+        #expect(try await before.publishedPasswords().count == 1)
+        #expect(try await before.publishedCodes().count == 1)
+
+        // And saving the AWS item takes the retail identities out of the store.
+        let growing = AutoFillHarness(items: [Fixtures.amazonRetail])
+        #expect(try await growing.publishedIdentities().count == 2)
+        _ = try await growing.model.savePassword(
+            SavePasswordRequest(serviceIdentifier: Self.console, userName: Fixtures.email, password: "aws-password"),
+            to: .newItem
+        ).value
+        #expect(await growing.publisher.published.isEmpty)
     }
 
     @Test("S2: a passkey registered for Google signs in, its prf output is stable, and a used backup code is marked")

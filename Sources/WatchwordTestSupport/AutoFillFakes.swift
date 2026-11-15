@@ -50,6 +50,10 @@ public actor FakeCredentialVault: CredentialVault {
         return items
     }
 
+    public func confirmUnlocked() throws {
+        try requireUnlocked()
+    }
+
     public func defaultVaultID() throws -> UUID {
         try requireUnlocked()
         return vaultID

@@ -14,13 +14,20 @@ import WatchwordTestSupport
 /// encryption, versioning and history today, and to show the port asks nothing of the session it does not already
 /// do. The one thing it cannot do from outside the actor is make `saveCredentialItem` atomic: it reads the stored
 /// version and then saves, which is enough for a single-threaded test and is exactly what the real conformance must
-/// do inside the session's `write`.
+/// do inside the session's `write`. `confirmUnlocked()` asks the session for its state, which is the lock check the
+/// real conformance makes on the actor.
 struct SessionCredentialVault: CredentialVault {
     let session: VaultSession
     var backedUp = false
 
     func credentialItems() async throws -> [Item] {
         try await translating { try await session.items().items }
+    }
+
+    func confirmUnlocked() async throws {
+        try await translating {
+            guard try await session.state() == .unlocked else { throw VaultError.locked }
+        }
     }
 
     func defaultVaultID() async throws -> UUID {
@@ -110,15 +117,28 @@ struct VaultSessionBridgeTests {
                 for: PasswordChoice(itemID: Fixtures.awsRoot.id, userName: Fixtures.email), identifiers: [console]
             ).value.password == "aws-password")
         #expect(
-            try await model.passwordWithoutInteraction(
-                for: PasswordIdentityRequest(
-                    serviceIdentifier: shop, user: Fixtures.email,
-                    recordIdentifier: RecordIdentifier(itemID: Fixtures.amazonRetail.id).text)
+            try await model.password(
+                for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email), identifiers: [shop]
             ).value.password == "retail-password")
         #expect(
             await model.password(
                 for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email), identifiers: [console]
             ).refusal?.isGateRefusal == true)
+        // QuickType: with both accounts in the vault the retail identity is not answered (the system does not say
+        // which Amazon page the tap came from); the bank's, alone on its site, is.
+        let retailIdentity = PasswordIdentity(
+            host: "amazon.com", user: Fixtures.email,
+            recordIdentifier: RecordIdentifier(itemID: Fixtures.amazonRetail.id),
+            rank: 5)
+        #expect(
+            await model.passwordWithoutInteraction(for: retailIdentity.handedBack)
+                == .requiresInteraction(.ambiguousMatch))
+        try await vault.session.save(Self.fresh(Fixtures.bank, in: vaultID))
+        let bankIdentity = PasswordIdentity(
+            host: "firstbank.co.uk", user: "40012345", recordIdentifier: RecordIdentifier(itemID: Fixtures.bank.id),
+            rank: 7)
+        #expect(
+            try await model.passwordWithoutInteraction(for: bankIdentity.handedBack).value.password == "bank-password")
         let code = try await model.oneTimeCode(
             for: FieldChoice(itemID: Fixtures.awsRoot.id, fieldID: Fixtures.id(203)), identifiers: [console]
         ).value
@@ -142,11 +162,7 @@ struct VaultSessionBridgeTests {
                 for: PasswordChoice(itemID: Fixtures.awsRoot.id, userName: Fixtures.email), identifiers: [console])
                 == .vaultLocked)
         #expect(
-            await model.passwordWithoutInteraction(
-                for: PasswordIdentityRequest(
-                    serviceIdentifier: shop, user: Fixtures.email,
-                    recordIdentifier: RecordIdentifier(itemID: Fixtures.amazonRetail.id).text))
-                == .requiresInteraction(.vaultLocked))
+            await model.passwordWithoutInteraction(for: bankIdentity.handedBack) == .requiresInteraction(.vaultLocked))
     }
 
     @Test(

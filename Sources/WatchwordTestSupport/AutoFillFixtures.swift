@@ -23,6 +23,54 @@ public struct AutoFillHarness: Sendable {
     }
 }
 
+extension AutoFillHarness {
+    /// Publishes the vault's identities and returns what the system's store now holds.
+    public func publishedIdentities() async throws -> [CredentialIdentity] {
+        _ = try await model.publishAllIdentities().value
+        return await publisher.published
+    }
+
+    public func publishedPasswords() async throws -> [PasswordIdentity] {
+        try await publishedIdentities().compactMap {
+            if case .password(let identity) = $0 { return identity }
+            return nil
+        }
+    }
+
+    public func publishedCodes() async throws -> [OneTimeCodeIdentity] {
+        try await publishedIdentities().compactMap {
+            if case .oneTimeCode(let identity) = $0 { return identity }
+            return nil
+        }
+    }
+}
+
+// What the system does when the person taps a suggestion: it hands the stored identity back, verbatim, and says
+// nothing about the page. Tests of the requests made without the person build their input this way and no other,
+// because a request carrying the page's URL is one the system never makes.
+
+extension PasswordIdentity {
+    public var handedBack: PasswordIdentityRequest {
+        PasswordIdentityRequest(
+            serviceIdentifier: ServiceIdentifier(host, kind: .domain), user: user,
+            recordIdentifier: recordIdentifier.text)
+    }
+}
+
+extension OneTimeCodeIdentity {
+    public var handedBack: OneTimeCodeIdentityRequest {
+        OneTimeCodeIdentityRequest(
+            serviceIdentifier: ServiceIdentifier(host, kind: .domain), label: label,
+            recordIdentifier: recordIdentifier.text)
+    }
+}
+
+extension PasskeyIdentity {
+    public var handedBack: PasskeyIdentityRequest {
+        PasskeyIdentityRequest(recordIdentifier: recordIdentifier.text, credentialID: credentialID)
+    }
+}
+
 /// The items of PRD scenarios S1 to S4, with fixed IDs so a failure names the same item every run.
 public enum AutoFillFixtures {
     public static let vaultID = UUID(uuidString: "00000000-0000-4000-8000-0000000000AA")!
