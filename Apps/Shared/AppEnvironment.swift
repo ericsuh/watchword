@@ -32,11 +32,23 @@ enum AppEnvironment {
     }
 
     #if DEBUG
-        /// A UI-test launch with `--uitest-dark` draws the app in the dark appearance whatever the system's is, so the
-        /// screenshot tour can capture a dark set without changing a setting on the machine (docs/04-test-plan.md §5).
-        /// Like `--uitest` itself, the switch does not exist in Release builds, and it changes nothing but colours.
-        static func uiTestForcesDarkAppearance(arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
-            arguments.contains("--uitest") && arguments.contains("--uitest-dark")
+        /// The appearance a UI-test launch asks to be drawn in whatever the system's is: `--uitest-appearance=light`
+        /// or `--uitest-appearance=dark`, beside `--uitest`. The screenshot tour passes one for every set it captures
+        /// (docs/04-test-plan.md §5.1), so a set named light is light on a machine in Dark Mode, and a dark set needs
+        /// no setting changed. Without the argument, or with any other value, the app follows the system, as every
+        /// other UI test does. Like `--uitest` itself, the switch does not exist in Release builds, and it changes
+        /// nothing but colours.
+        enum UITestAppearance: String {
+            case light
+            case dark
+        }
+
+        static func uiTestAppearance(arguments: [String] = ProcessInfo.processInfo.arguments) -> UITestAppearance? {
+            let prefix = "--uitest-appearance="
+            guard arguments.contains("--uitest"), let argument = arguments.last(where: { $0.hasPrefix(prefix) }) else {
+                return nil
+            }
+            return UITestAppearance(rawValue: String(argument.dropFirst(prefix.count)))
         }
     #endif
 

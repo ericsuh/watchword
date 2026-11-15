@@ -148,6 +148,11 @@ jobs:
       - name: mise run lint
         run: mise run lint
 
+      # The scripts CI is made of (screenshots.yml's inline steps, app:screenshots and its helper), run against
+      # stand-ins for the tools they call. Here because it is as quick as the lint and needs no build.
+      - name: mise run test:scripts
+        run: mise run test:scripts
+
   app-tests:
     # The Xcode app, unit and UI test suites (milestone 2 in docs/03-implementation-plan.md): AppKit and UIKit, the
     # AutoFill extension shells, and XCUITest, which needs the logged-in GUI session, automation mode and simulators

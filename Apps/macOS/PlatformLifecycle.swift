@@ -25,11 +25,11 @@ extension PlatformLifecycle {
 @MainActor
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
     #if DEBUG
-        /// The screenshot tour's dark pass (`AppEnvironment.uiTestForcesDarkAppearance`). The application's appearance,
-        /// rather than one window's, so sheets and dialogs are dark too.
+        /// The appearance the screenshot tour asked for (`AppEnvironment.uiTestAppearance`). The application's
+        /// appearance, rather than one window's, so sheets and dialogs follow it too.
         func applicationWillFinishLaunching(_ notification: Notification) {
-            if AppEnvironment.uiTestForcesDarkAppearance() {
-                NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+            if let appearance = AppEnvironment.uiTestAppearance() {
+                NSApplication.shared.appearance = NSAppearance(named: appearance == .dark ? .darkAqua : .aqua)
             }
         }
     #endif

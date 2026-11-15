@@ -13,7 +13,7 @@ struct WatchwordApp: App {
                 .environment(model)
                 .task { await model.start() }
                 #if DEBUG
-                    .preferredColorScheme(AppEnvironment.uiTestForcesDarkAppearance() ? .dark : nil)
+                    .preferredColorScheme(AppEnvironment.uiTestAppearance().map { $0 == .dark ? .dark : .light })
                 #endif
         }
         #if os(macOS)

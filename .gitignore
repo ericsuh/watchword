@@ -84,6 +84,9 @@ Apps/Watchword.xcodeproj/
 Apps/**/Info*.plist
 Apps/**/*.entitlements
 
+# Python bytecode, if the script tests (Tests/ScriptTests) or a task's helper are run by hand.
+__pycache__/
+
 # Task output (`mise run test --coverage`, `mise run app:test --results TestResults`, `mise run app:screenshots`,
 # `mise run fuzz`).
 # Anchored to the root, so a committed Fuzz/corpus/ seed set or a nested artifacts/ directory is never hidden.

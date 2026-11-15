@@ -132,11 +132,22 @@ job, runs it with the other UI tests, and a flow that breaks fails it there.
   `conflict-resolution` are the same picture, because the conflicted item is already selected.
 - **`mise run app:screenshots [ios|macos|all]`** runs the tour alone, exports the result bundle's attachments with
   the selected Xcode's `xcresulttool export attachments`, and writes `Screenshots/<set>/<NN-name>.png`, `index.md`,
-  `index.html` (a contact sheet over the files beside it) and `Screenshots/watchword-screens-<set>.html` (the same
-  sheet with the images embedded). It fails if the tour failed, if the index is absent (the tour stopped part way),
-  if a listed screen has no picture, or if a picture is not a PNG or is one flat colour. `--appearance dark` tours
-  with `--uitest-dark` (Debug only) for the sets `ios-dark` and `macos-dark`; `--device ipad` tours on an iPad
-  simulator in landscape for `ios-ipad`. Neither runs by default.
+  `index.html` (a contact sheet over the files beside it) and `Screenshots/watchword-screens-<set>.png` (every
+  screen in one picture, each under its name, drawn by the task's own helper from `sips` thumbnails). It fails if
+  the tour failed, if the index is absent (the tour stopped part way), if a listed screen has no picture, if a
+  picture is not a PNG or is one flat colour, or if the pictures are not in the appearance the set was asked for.
+- **Only a complete set is a set.** A capture that fails in any of those ways writes nothing to
+  `Screenshots/<set>/`, no contact sheet, and announces no screen names to the workflow. What there is goes to
+  `Screenshots/<set>-incomplete/`: the pictures, an `index.md` and `index.html` that begin by saying the set is
+  incomplete and why and that keep the tour's own numbering (a missing screen is a row that says so, not a gap
+  closed up), and, when the tour stopped part way, XCUITest's own screenshots of the failure as `failure-<n>.png`.
+  The job summary gets the same statement instead of an index.
+- **Appearance and device.** The task tells the tour which appearance its set is in, and the tour launches the app
+  with `--uitest-appearance=light` or `=dark` (Debug only, beside `--uitest`), which fixes the appearance whatever
+  the machine's is: the default sets `ios` and `macos` are light on a Mac in Dark Mode, and `--appearance dark`
+  gives `ios-dark` and `macos-dark` without a setting changed. Run through `app:test`, with no set asked for, the
+  tour follows the system like every other UI test. `--device ipad` tours on an iPad simulator in landscape for
+  `ios-ipad`. Neither the dark nor the iPad set runs by default.
 - **In CI.** `screenshots.yml` (§7) captures both platforms for a pull request and comments with links;
   `mac-run.yml`'s `app:screenshots` gate does the same capture on a branch for a session without a Mac
   (`09-cloud-sessions.md` §5).
@@ -418,7 +429,13 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
 - `strict-memory-safety`: builds with `-Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors`
   on Xcode 27 (anything from Swift 6.2 on), then runs the unsafe-confinement tripwire, proving no unsafe constructs
   outside `SecureMemory` [`build:strict --require`, `audit:unsafe`].
-- `lint`: `swift format lint --strict` with the repository `.swift-format` [`lint`].
+- `lint`: `swift format lint --strict` with the repository `.swift-format`, then the script tests
+  (`Tests/ScriptTests`, Python `unittest`): `screenshots-index.py` over made-up exports (a complete set; a missing,
+  blank or non-PNG picture; a tour that stopped; the wrong appearance; names, captions and paths a test run should
+  not be able to smuggle through; the BMP reader), the `app:screenshots` task with stand-ins for `mise`, `xcrun`
+  and `sips` (what it writes, announces and summarises when a capture fails), and the two inline scripts of
+  `screenshots.yml`, read out of the file and run against a stand-in `gh` and `curl` (who can start a capture, what
+  the comment job will and will not post or link, and which comment it will overwrite) [`lint`, `test:scripts`].
 - `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator, one matrix leg each on
   `xcode-27`, with the AutoFill Settings attempt marked `continue-on-error`. The iOS leg boots its
   simulator and waits for the boot to finish (`simctl bootstatus -b`) before testing, because a UI-test runner
@@ -435,9 +452,10 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   merge, including both app-test legs, and a runner bump that renames a matrix leg needs no
   protection change.
 
-- `screenshots.yml`: not a gate. On the `screenshots` label (and each push while a pull request carries it), a head
-  commit message containing `[screenshots]`, or a dispatch, it runs the screenshot tour (§5.1) on the iOS simulator
-  and macOS, uploads each set and its one-file contact sheet as artifacts, writes the index to the job summary, and
-  creates or updates one comment on the pull request linking to them [`app:screenshots ios`, `app:screenshots
-  macos`]. Its controls are in `07-supply-chain.md` §3.2. It is not part of `required` and must not be added to
-  branch protection.
+- `screenshots.yml`: not a gate. On the `screenshots` label (and each push while a pull request carries it), a
+  same-repository head commit whose message has a line that is exactly `[screenshots]`, or a dispatch, it runs the
+  screenshot tour (§5.1) on the iOS simulator and macOS, uploads each set and its one-PNG contact sheet as
+  artifacts, writes the index to the job summary, and creates or updates one comment on the pull request linking
+  to them [`app:screenshots ios`, `app:screenshots macos`]. Its controls are in `07-supply-chain.md` §3.2, and its
+  two inline scripts are tested by `test:scripts` in the `lint` job. It is not part of `required` and must not be
+  added to branch protection.

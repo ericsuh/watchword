@@ -82,7 +82,7 @@ fi
 #                     filter, only `test --filter=<pattern> --log test-output.log`: no coverage, audit or build step
 #   test:adversarial  adversarial-tests
 #   build:strict      strict-memory-safety: `build:strict --require --verbose`, then audit:unsafe
-#   lint              lint
+#   lint              lint: `lint`, then `test:scripts`
 #   app:test          app-tests: `app:test <platform> --results TestResults`, without the iOS leg's best-effort AutoFill
 #                     step. `all` runs both schemes in one job, where ci.yml runs one job per platform
 #   app:screenshots   screenshots.yml's capture job: `app:screenshots <platform>`, with text previews of each screen in
@@ -113,7 +113,10 @@ case "$gate" in
     step build:strict --require --verbose
     step audit:unsafe
     ;;
-  lint) step lint ;;
+  lint)
+    step lint
+    step test:scripts
+    ;;
   app:test)
     if [ -n "$filter" ]; then
       step app:test "$platform" --results TestResults "--only-testing=$filter"

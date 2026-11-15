@@ -22,7 +22,7 @@ gh = "2.92.0"
 description = "Every package gate in ci.yml: lint, supply-chain and memory-safety audits, the tests"
 # `test` runs the adversarial suite too and checks every area's suite ran, so `test:adversarial` (its own CI job) is
 # not repeated here.
-depends = ["lint", "audit", "test"]
+depends = ["lint", "audit", "test", "test:scripts"]
 
 [tasks."check:all"]
 description = "`check` plus the iOS and macOS app test suites (macOS with Xcode only)"

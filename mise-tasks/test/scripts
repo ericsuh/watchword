@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#MISE description="Test the repository's own scripts: the screenshot index helper, app:screenshots and screenshots.yml's inline steps"
+#USAGE flag "-v --verbose" help="Name each test as it runs"
+#
+# The Swift tests cannot reach the scripts CI itself is made of, and two of them decide things that matter: the
+# comment job of screenshots.yml holds the one write token that runs after a pull request's code, and
+# app:screenshots decides what counts as a set of screens. Tests/ScriptTests runs them as they are (the workflow's
+# `run:` blocks are read out of the file) against stand-ins for `gh`, `mise`, `xcrun` and `sips`, so it needs only
+# python3 (3.9 or later, which is what Xcode's command line tools bring), bash and jq, on Linux or macOS.
+set -euo pipefail
+
+for tool in python3 jq; do
+  if ! command -v "$tool" > /dev/null 2>&1; then
+    echo "::error::test:scripts needs $tool on PATH"
+    exit 1
+  fi
+done
+
+arguments=()
+if [ "${usage_verbose:-false}" = true ]; then arguments+=(--verbose); fi
+# No bytecode beside the sources: nothing here is run often enough to want it, and it would be one more thing to ignore.
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover --start-directory Tests/ScriptTests --pattern 'test_*.py' \
+  ${arguments[@]+"${arguments[@]}"}

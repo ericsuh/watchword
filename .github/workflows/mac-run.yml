@@ -118,8 +118,9 @@ jobs:
           mise run ci:gate "$GATE" "--platform=$PLATFORM" "--appearance=$APPEARANCE" "--device=$DEVICE"
           "--xcode=$XCODE_VERSION" "--filter=$FILTER"
 
-      # app:screenshots writes Screenshots/<set>/ (the PNGs and their index) and one self-contained contact sheet per
-      # set beside them; they come down in the same zip as the logs.
+      # app:screenshots writes Screenshots/<set>/ (the PNGs and their index) and, beside them, every screen of the set
+      # in one PNG; a capture that failed leaves what it has in Screenshots/<set>-incomplete/ instead. They come down in
+      # the same zip as the logs.
       - name: Upload logs, result bundles and screenshots
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

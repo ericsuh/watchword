@@ -24,7 +24,8 @@ enum Screens {
     /// how `app:screenshots` knows what to expect in the result bundle.
     static let indexName = "screens-index"
 
-    /// What the task sets (through xcodebuild's `TEST_RUNNER_` prefix) to ask for the dark set.
+    /// What `app:screenshots` sets (through xcodebuild's `TEST_RUNNER_` prefix) to the appearance of the set it is
+    /// capturing: `light` or `dark`.
     static let appearanceVariable = "WATCHWORD_SCREENSHOT_APPEARANCE"
 
     /// Every screen captured so far in this test process, in order.
@@ -35,10 +36,15 @@ enum Screens {
         (position < 10 ? "0" : "") + "\(position)-\(name)"
     }
 
-    /// The arguments every tour launch needs: `--uitest`, and `--uitest-dark` when the dark set was asked for.
+    /// The arguments every tour launch needs: `--uitest`, and the appearance of the set being captured, light as
+    /// much as dark, so that a set is what its name says whatever the machine is set to. Run as an ordinary test
+    /// (`app:test`), with no set asked for, the tour follows the system like every other UI test.
     static var launchArguments: [String] {
-        let dark = ProcessInfo.processInfo.environment[appearanceVariable] == "dark"
-        return dark ? ["--uitest", "--uitest-dark"] : ["--uitest"]
+        switch ProcessInfo.processInfo.environment[appearanceVariable] {
+        case "light": return ["--uitest", "--uitest-appearance=light"]
+        case "dark": return ["--uitest", "--uitest-appearance=dark"]
+        default: return ["--uitest"]
+        }
     }
 
     /// An iPad is toured in landscape, where the list and the detail are side by side as they are on the Mac. An
