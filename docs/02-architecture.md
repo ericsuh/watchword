@@ -531,10 +531,124 @@ Published identities: for QuickType we publish one `ASPasswordCredentialIdentity
 per passkey, and (iOS 18+) one `ASOneTimeCodeCredentialIdentity` per TOTP field. Whether the OS
 itself prefers the more specific subdomain identity is not documented and will be verified on
 device in the first integration milestone; our in-extension ranking is authoritative regardless.
+`CredentialIdentityPlanner` (§9.2) is the pure function from items to identities: the rank is the
+specificity an exact match on the host scores (`2 × labels + 1`); nothing is published for an item
+that is excluded from suggestions (F6.8), archived or in the trash, for a scope the scope policy
+refuses, for a login with no user name, for a passkey its own item is not scoped to, or for a
+passkey its relying party reported unknown; and one item publishes at most 64 identities. An
+identity carries a host, a user name, the passkey's credential ID and user handle, and a record
+identifier made of the item's and field's random UUIDs. Nothing else of the item leaves: no title,
+note, tag, field label or secret.
 
 Passkeys: the extension signs `authenticatorData || clientDataHash` with the item's P-256 key,
 increments no counter (Apple's guidance for synced passkeys), supports `prf` (HMAC-secret derived
 from a per-passkey 32-byte secret stored in the field) and `largeBlob` storage in the item.
+`PasskeyAuthenticator` (§9.2) is that authenticator, in software: ES256 only, attestation format
+`none`, credential IDs of 32 random bytes, the signature DER-encoded. The flags say what happened
+rather than what a relying party would like to hear: UP and UV come from what the extension
+reports about the person in *this* request, BE is always set, and BS is set only when the vault
+syncs. `prf` is evaluated as CTAP's `hmac-secret`:
+`HMAC-SHA-256(prfSecret, SHA-256("WebAuthn PRF" ‖ 0x00 ‖ input))`; every credential gets a secret
+at creation whether or not the registration asked for the extension, and since there is one secret
+where CTAP keeps a second for unverified requests, `prf` is evaluated only for a verified person.
+A passkey is bound twice:
+the credential stores its relying party ID and signs for no other, and the item holding it must
+pass `AutoFillGate` for that relying party as a host, like any release. A relying party ID is a
+`RelyingPartyID` value, which exists only after `HostNormalizer` and `ScopePolicy` have accepted
+the string in its one canonical spelling, so `com`, `Google.com` and `google.com.` are never
+hashed, stored or signed for.
+
+### 9.2 As built in milestone 5 (`WatchwordAutoFill`, the portable core)
+
+The credential provider extension is an adapter. Every decision it makes and every byte it
+returns comes from `WatchwordAutoFill`, which imports no Apple framework and mirrors the
+AuthenticationServices request and result types with its own values, as `WatchwordMatching`
+mirrors `ASCredentialServiceIdentifier`. It reaches the vault through one port:
+
+```
+protocol CredentialVault            (VaultSession conforms; FakeCredentialVault in tests)
+  credentialItems()                 every readable item, archived and trashed included
+  defaultVaultID()                  where a new item goes
+  isBackedUp()                      whether items reach the sync store (the BS flag)
+  saveCredentialItem(_:replacingVersion:)   create, or compare-and-swap on the version read
+```
+
+Every method throws `CredentialVaultError`, and `locked` whenever there are no keys. The vault
+keeps owning versions, timestamps, history, sync metadata and the scope policy check.
+
+`CredentialProviderModel` is the actor behind the extension. One method per request:
+
+| Request (AuthenticationServices entry point) | Method | Answer |
+| --- | --- | --- |
+| Credential list (`prepareCredentialList`) | `credentialList(for:passkey:)` | passwords of the most specific matches, passkeys of the relying party, "other accounts on this site", a suggestion only for a sole match; or `LookAlikeWarning` |
+| Password, chosen in the list | `password(for:identifiers:)` | `PasswordCredential` |
+| Password, QuickType (`provideCredentialWithoutUserInteraction`) | `passwordWithoutInteraction(for:)` | the credential, `requiresInteraction`, or a refusal |
+| One-time codes (iOS 18) | `oneTimeCodeList`, `oneTimeCode`, `oneTimeCodeWithoutInteraction` | `OneTimeCode` with the seconds remaining |
+| Text to insert (iOS 18) | `textInsertionList(for:)`, `textToInsert(for:identifiers:)` | the field's text, one recovery code, or a code field's current code |
+| Passkey assertion | `passkeyAssertion`, `passkeyAssertionWithoutInteraction` | `PasskeyAssertionResult` with `prf` and `largeBlob` output |
+| Passkey registration | `passkeyRegistrationOptions`, `registerPasskey` | attestation object, and where the credential was stored |
+| Conditional registration (iOS 18) | `registerPasskeyWithoutInteraction` | as above, or `noItemToUpgrade` |
+| Save password | `savePasswordPlan`, `savePassword`, `savePasswordWithoutInteraction` | create, offer an update, or already saved |
+| Generate password | `generatePassword(for:)` | a password obeying the site's `passwordrules`, with its entropy |
+| Credential-update reports | `handle(_:)` | which fields were flagged or renamed |
+| Identity publishing | `publishAllIdentities()`, and after every write | through `CredentialIdentityPublisher` |
+
+Which system version first makes each request is the adapter's concern; the model answers any of
+them whenever it is asked.
+
+What holds across all of them:
+
+- **One gate, by construction.** A secret is read out of an item only through an `Authorization`,
+  whose initialiser is private to `ReleaseGate.swift` and is called in one place, after
+  `AutoFillGate.authorize` (or `authorizeOneTimeCode`) accepted that item for a host the system
+  named. A choice the person made in a list is authorised again; what a list showed is not
+  evidence (SEC6, F11.1).
+- **No override.** There is no parameter, mode or second call that releases after a refusal
+  (F11.4, F11.7). A look-alike host gets a `LookAlikeWarning` *instead of* a list (F11.3).
+- **Shadowed accounts are shown, not released.** `otherAccounts` lists items that match the host
+  less specifically (F6.6). The gate refuses them even when chosen, as it always has; to use one
+  on that host the person adds the host to the item, in the app.
+- **Archived items rank but are not released; trashed items do neither.** An archived AWS item
+  still keeps the retail login off the console.
+- **Stored scopes are checked again.** The gate ranks among items with only the scopes
+  `ScopePolicy` accepts, so a `com` scope written by another vault member or an import matches
+  nothing (F11.2). The stored item is not rewritten.
+- **Without interaction, only a sole fill.** A QuickType tap releases a password or code only if
+  `AutoFillGate.decide` says that item is *the* fill for the host and the identity's user name is
+  still one of the item's. A tie needs the extension's UI: two suggestions with the same email
+  are indistinguishable in the keyboard (S1, F11.5). A passkey chosen in the system's sheet is a
+  choice of one credential and needs only the gate.
+- **No host, no credential.** With no service identifier a password, a one-time code and a passkey
+  assertion are refused. Text insertion is the one request the system makes without naming a site
+  (`prepareInterfaceForUserChoosingTextToInsert()` has no parameters): then the person picks an
+  item by hand, as in the app, and can insert any field *except* a password, a one-time code or a
+  passkey, which keep their own host-checked requests. When identifiers are supplied, text is
+  gated like everything else.
+- **A page cannot plant or widen.** A new login is scoped to the exact host it was made on,
+  without subdomains, titled by that host (never by the page), and goes through `ScopePolicy`. An
+  update touches the password of an item the gate would fill on that host and never its scopes.
+  A conditional passkey registration only ever adds a passkey to the one saved password login for
+  that relying party and user; it creates nothing.
+- **A remote party never deletes.** A report sets or clears a flag in `Field.meta`
+  (`reportedUnusedAt`, `reportedUnknownAt`) or changes a passkey's account name, only on items the
+  gate would release to the reporter, and at most once per field per day, because every change is
+  a version in a history that is never pruned (F1.4).
+- **Locked is a state.** `vaultLocked`, or `requiresInteraction(.vaultLocked)` for a request made
+  without UI. Each request reads the items once; each step of an interactive flow reads them
+  again; writes are compare-and-swap, and a lock that lands mid-request wins.
+- **The page is not trusted.** Identifiers, relying party IDs, user names, allow and exclude
+  lists, `prf` inputs, blobs, password rules and reports are bounded and validated here, whatever
+  the system checked first.
+
+Also in the module: `TOTP` (RFC 6238 over an injected instant), `PasswordRules` (a strict parser
+for the page's `passwordrules` and its mapping to `RandomPasswordPolicy`; the generated password
+is checked against the parsed rules before it is returned), and `CredentialIdentityPublishing`.
+
+Still open for milestone 5, all on a Mac: the extension targets' adapter over this model,
+`VaultSession`'s conformance to `CredentialVault`, the encrypted index record that lets the
+extension list without decrypting every item, and on-device QA (the QuickType ranking question
+above, what the system passes as `prf` salts, and how it treats UP = 0 on a conditional
+registration).
 
 ## 10. Unlock state machine
 
@@ -669,6 +783,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordStore        record-store port, in-memory and SQLite stores     [milestone 2, done]
   Sources/WatchwordSync         change log, merge, SyncTransport protocol,
                                 SQLite sync state                                  [milestone 3; transports open]
+  Sources/WatchwordAutoFill     credential provider request model, TOTP, passkey
+                                authenticator, identity planner (§9.2)             [milestone 5; extension adapter open]
   Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
   Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 6]
   Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
@@ -692,7 +808,9 @@ production keyring is `VaultSession` (an `ItemSealer` for the shared `ItemRecord
 store `SQLiteSyncStateStore`. Production adapters live in the package (`WatchwordPlatform`,
 `SQLiteRecordStore`) rather than `Apps/`, so the strict-memory-safety job, the unsafe tripwire,
 lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live in
-`WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`).
+`WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`). Milestone 5 adds
+`CredentialVault`, `CredentialIdentityPublisher` and `AutoFillClock` in `WatchwordAutoFill`, with `FakeCredentialVault`
+and `FakeCredentialIdentityPublisher` beside them.
 
 ## 16. Open questions tracked as ADR candidates
 

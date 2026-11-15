@@ -8,8 +8,9 @@ Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
-`WatchwordPlatform`), and milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
-its CloudKit and iCloud Drive transports. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+`WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
+its CloudKit and iCloud Drive transports, and milestone 5's portable AutoFill core (`WatchwordAutoFill`) short of the
+extension adapter. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -109,7 +110,8 @@ simulator and the Xcode MCP server.
 `Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
 property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` and `RecordMerger` ports, and the day it
 imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
-policies and ports are portable too, and so are `WatchwordCrypto` and `VaultSession` through swift-crypto (ADR 0006);
+policies and ports are portable too, and so are `WatchwordCrypto`, `VaultSession` and `WatchwordAutoFill` through
+swift-crypto (ADR 0006);
 `SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and all of
 `WatchwordPlatform` are not.
 
@@ -119,7 +121,7 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Ten shipped modules, dependency-ordered, plus test support:
+Eleven shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
@@ -144,11 +146,20 @@ Ten shipped modules, dependency-ordered, plus test support:
   history, trash, password change, deletion, `sync()`, conflict resolution), `UnlockPolicy`, `AutoLockPolicy`,
   `ItemCodec`, `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`), and `VaultSyncAdapter`, the
   production `SyncKeyring` and `ItemSealer` (`VaultSession+Sync.swift`).
+- **`WatchwordAutoFill`** — the credential provider extension's portable core (milestone 5): `CredentialProviderModel`
+  (one method per request the OS makes: credential list, passwords, one-time codes, text to insert, passkey
+  registration and assertion, save and generate password, credential-update reports), `ReleaseGate`, `TOTP`,
+  `PasskeyAuthenticator` and `PasskeyPRF`, `RelyingPartyID`, `PasswordRules`, `CredentialIdentityPlanner`, and the
+  ports `CredentialVault`, `CredentialIdentityPublisher` and `AutoFillClock`. Depends on `WatchwordModel`,
+  `WatchwordMatching`, `WatchwordGenerator`, `SecureMemory` and `Crypto`; not on `WatchwordKit` (`VaultSession`
+  conforms to its port) and never on AuthenticationServices.
 - **`WatchwordPlatform`** — Apple adapters: `SystemKeychainStore`, `LocalAuthenticationGate`, the Emergency Kit
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
-  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`). Test targets only; not a product, and no
+  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for AutoFill
+  `FakeCredentialVault`, `FakeCredentialIdentityPublisher`, `AutoFillHarness` and the S1 to S4 items in
+  `AutoFillFixtures`). Test targets only; not a product, and no
   production target may depend on it.
 
 `docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`, `WatchwordHygiene`,
@@ -204,6 +215,41 @@ still open (CloudKit and iCloud Drive transports, enrolment, sync in production 
   through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.
 - The sync adapter holds the session, never a key; every key operation re-enters the actor and throws
   `SyncKeyringError.locked` after `lock()`.
+
+### `CredentialProviderModel` invariants
+
+`docs/02-architecture.md` §9.2 is the description; these are the rules to keep when editing `WatchwordAutoFill`.
+
+- **One gate, by construction.** A secret leaves an item only through an `Authorization`, whose initialiser is
+  private to `ReleaseGate.swift`; `ReleaseGate.authorize` is its one caller and runs `AutoFillGate.authorize` (or
+  `authorizeOneTimeCode`) first. A new request type reads secrets through `Authorization`'s methods, never from an
+  `Item` it looked up itself, and an explicit choice by the person is authorised like any other (SEC6, F11.1).
+- **No override.** Nothing releases after a refusal: no flag, no presence level, no second call (F11.4, F11.7). A
+  look-alike host gets `LookAlikeWarning` in place of a list. Do not add a "fill anyway".
+- Shadowed items are listed (`otherAccounts`) and never released; archived items rank but are not released; trashed
+  items do neither. The gate ranks among items with only the scopes `ScopePolicy` accepts, so a stored `com` scope
+  matches nothing; the stored item is not rewritten.
+- Without interaction a password or code is released only when `AutoFillGate.decide` says that item is the sole
+  fill and the identity's user is still the item's; a tie is `requiresInteraction`. A passkey needs only the gate.
+- With no service identifier, passwords, one-time codes and passkeys are refused. Text insertion with no identifier
+  (the system supplies none) goes through `ManualChoice`, which withholds exactly those three kinds.
+- A passkey is bound twice: the stored relying party ID must equal the request's, and the item must pass the gate
+  for that relying party as a host. A relying party ID is a `RelyingPartyID` (normalised, canonical, scope policy)
+  before anything is hashed, stored or signed. Flags are truthful: UP/UV from the `PersonPresence` the adapter
+  reports, BE always, BS from `CredentialVault.isBackedUp()`; the counter is zero; no extension data in
+  authenticator data. `prf` is evaluated only when the person was verified (one secret per credential).
+- A page cannot plant or widen: a saved login is scoped to the exact host, without subdomains, titled by the host,
+  through `ScopePolicy`; an update changes a password and never a scope; a conditional registration only adds a
+  passkey to the one saved password login for that relying party and user.
+- A remote party never deletes: reports set or clear `Field.meta` flags or rename a passkey's account, only on items
+  the gate would release to the reporter, at most once per field per `reportInterval` (history is never pruned).
+- Locked is a state the model reports (`vaultLocked`, `requiresInteraction(.vaultLocked)`). Each request reads the
+  items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:)`).
+- Published identities are plaintext outside the app: `CredentialIdentityPlanner` emits hosts, user names, credential
+  IDs, user handles and UUID record identifiers, never a title, label, note or secret, and nothing for excluded,
+  archived or trashed items.
+- Everything a page can influence is bounded here (identifier count, allow-list length, `prf` input, blob, password
+  rules, names), and `PasswordRules` cannot take a generated password outside the generator's 4 to 128 characters.
 
 ### The matching pipeline is the whole point of `WatchwordMatching`
 
@@ -314,8 +360,8 @@ directions are tested; keep both when adjusting constants.
 - **Adversarial suites** live in `Tests/WatchwordAdversarialTests`, are named `Adversarial…`, and
   carry `.tags(.adversarial)`. CI asserts each area's `@Suite` display name is present
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
-  `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`, `"local vault store"`,
-  `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`), so **renaming a suite breaks CI deliberately** — update
+  `"AutoFill request model"`, `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`,
+  `"local vault store"`, `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication

@@ -48,7 +48,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
-| F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
+| F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "Scenarios S1 and S2 through the request model", and "Request model over a real vault session" — S1 and S2 again over a `VaultSession` with a stand-in for its `CredentialVault` conformance; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
@@ -214,6 +214,33 @@ specification, plus vectors from independent Python implementations for HPKE wit
   service identifier the chosen item does not match (defence in depth against UI bugs).
 - Passkey assertion for a relying party different from the stored `rpID` is refused.
 
+Milestone 5 status: the last two obligations, and the rest of this list as seen from the request handler, are
+`Tests/WatchwordAdversarialTests/AdversarialAutoFillRequestTests.swift` ("Adversarial: AutoFill request model"),
+against `CredentialProviderModel` with `FakeCredentialVault`:
+
+- *Every request type, one sweep.* A helper asks for everything an item holds through every request that
+  releases a secret (password by choice and by QuickType identity, one-time code by choice and by identity, text
+  for every field, passkey assertion by choice and by identity, with and without an allow-list). For thirty
+  hostile identifiers (look-alikes, user-info, percent-escapes, non-web schemes, public suffixes) nothing is
+  released for any item; on each real site nothing of any *other* item is released, and the site's own item is,
+  which keeps the sweep honest; stuffing a request with extra identifiers widens nothing.
+- *No override.* A look-alike gets the warning in place of a list; repeating the request, raising the presence
+  level or omitting the identifier releases nothing, and the host-less text-insertion request withholds
+  passwords, one-time codes and passkeys (F11.4, F11.7).
+- *Passkeys.* A relying party ID in any spelling but the canonical one is refused before the vault is read; a
+  conditional registration cannot plant an item; a passkey planted in another site's item is asserted for
+  neither party.
+- *Records no honest client wrote* (a malicious vault member, a crafted import): an over-broad stored scope
+  matches nothing; malformed passkey, `otpauth` and recovery-code fields are refused field by field without a
+  crash and without taking the item's other fields down.
+- *Remote parties.* A randomised run of reports, silent saves and silent registrations, from any party, leaves
+  every item, field, secret value and scope in place (the nightly widens it); a report flood adds one version;
+  a save cannot widen a scope, pick a title or reach another site's item; hostile `passwordrules` end in a
+  refusal or a bounded, conforming password.
+- *Locked.* Every request type reports the lock and releases nothing, and a lock that lands mid-request wins.
+- *The identity store* learns hosts, user names and opaque IDs only, and nothing of excluded, archived or
+  trashed items.
+
 ### 6.4 Sync and sharing (milestones 3–4)
 - Malicious server mode: substitutes a member's public key → fingerprint mismatch blocks the
   invitation; reorders/duplicates/drops segments → convergence still holds or sync fails closed;
@@ -295,6 +322,10 @@ if the matcher changes.
 escapes accepted, zero-width/bidi/soft-hyphen rejected, over-long hosts and labels rejected,
 user-info rejected, and the IDNA compatibility mapping asserted as honoured so a future
 "hardening" change cannot silently break legitimate matching.
+
+*At the request model (milestone 5):* "no override" is a property of `CredentialProviderModel`'s API, not of a
+view: there is no call that releases after a refusal, which `AdversarialAutoFillRequestTests` checks request by
+request (§6.3).
 
 *Still to come:* a UI test that the AutoFill extension presents no override affordance on a
 suspicious host, and that adding a mismatched host as a scope requires the confirmation in F11.7

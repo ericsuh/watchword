@@ -181,3 +181,9 @@ matched scope. Nothing pre-selected.
   malicious host match. Membership and record signing (`02-architecture.md` §8) is what defends
   that, not this document.
 - Scope matching depends on the OS reporting the true host. A compromised OS is out of scope.
+- Text insertion (PRD F6.4) is requested by the system without naming a site, so there is no host to
+  check and no mismatch to detect. `CredentialProviderModel` then lets the person pick an item by hand,
+  as they would in the app, but withholds the three kinds that have a host-checked request of their own:
+  passwords, one-time codes and passkeys cannot leave that way (`02-architecture.md` §9.2). A security
+  answer, a PIN or a recovery code inserted by hand into a look-alike page is not prevented, for the same
+  reason a manual copy is not.
