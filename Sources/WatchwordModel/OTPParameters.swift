@@ -56,8 +56,9 @@ public struct OTPParameters: Hashable, Sendable {
         self.algorithm = algorithm
         self.digits = digits
         self.period = period
-        self.issuer = issuer
-        self.account = account
+        // An empty name is no name: the URI has no way to say otherwise.
+        self.issuer = issuer.flatMap { $0.isEmpty ? nil : $0 }
+        self.account = account.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Parses `otpauth://totp/Issuer:account?secret=BASE32&issuer=…&algorithm=…&digits=…&period=…`. Unknown
@@ -120,11 +121,13 @@ public struct OTPParameters: Hashable, Sendable {
         var components = URLComponents()
         components.scheme = "otpauth"
         components.host = "totp"
-        switch (issuer, account) {
-        case (let issuer?, let account?): components.path = "/\(issuer):\(account)"
-        case (nil, let account?): components.path = "/\(account)"
-        case (let issuer?, nil): components.path = "/\(issuer):"
-        case (nil, nil): components.path = "/"
+        // The parser splits the label at its first colon, so an issuer that contains one is carried by the `issuer`
+        // parameter alone, and an account that contains one is always given a (possibly empty) prefix.
+        let prefix = issuer.flatMap { $0.contains(":") ? nil : $0 }
+        if issuer != nil || (account ?? "").contains(":") {
+            components.path = "/\(prefix ?? ""):\(account ?? "")"
+        } else {
+            components.path = "/\(account ?? "")"
         }
         var query = [URLQueryItem(name: "secret", value: Base32.encode(secret))]
         if let issuer {

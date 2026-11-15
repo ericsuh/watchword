@@ -88,6 +88,22 @@ struct OTPParametersTests {
         #expect(try OTPParameters(uri: original.uri) == original)
     }
 
+    /// The label is split at its first colon, so names that contain one need care to survive formatting.
+    @Test(
+        "names with colons, and missing names, round-trip",
+        arguments: [
+            ("A:B", "x"), ("A:B", nil), (nil, "a:b"), ("Example", "a:b:c"), ("Example", nil), (nil, nil),
+            (nil, "plain"), ("", ""),
+        ] as [(String?, String?)])
+    func namesRoundTrip(_ issuer: String?, _ account: String?) throws {
+        let original = try OTPParameters(
+            secret: Data("12345678901234567890".utf8), issuer: issuer, account: account)
+        let parsed = try OTPParameters(uri: original.uri)
+        #expect(parsed == original)
+        #expect(parsed.issuer == (issuer?.isEmpty == false ? issuer : nil))
+        #expect(parsed.account == (account?.isEmpty == false ? account : nil))
+    }
+
     @Test(
         "hostile or unusable URIs are refused with a reason",
         arguments: zip(
