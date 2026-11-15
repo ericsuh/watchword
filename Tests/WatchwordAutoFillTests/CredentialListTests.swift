@@ -313,7 +313,6 @@ struct CredentialListTests {
     func vaultFailures() async {
         struct Broken: CredentialVault {
             func credentialItems() async throws -> [Item] { throw CredentialVaultError.noAccount }
-            func credentialItem(id: UUID) async throws -> Item { throw CredentialVaultError.noAccount }
             func defaultVaultID() async throws -> UUID { throw CredentialVaultError.noAccount }
             func isBackedUp() async throws -> Bool { throw CredentialVaultError.noAccount }
             func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {

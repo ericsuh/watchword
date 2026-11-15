@@ -28,9 +28,6 @@ public protocol CredentialVault: Sendable {
     /// needs archived items to rank against.
     func credentialItems() async throws -> [Item]
 
-    /// One item by ID, as stored now.
-    func credentialItem(id: UUID) async throws -> Item
-
     /// The vault a new item is created in (the Personal vault).
     func defaultVaultID() async throws -> UUID
 

@@ -50,12 +50,6 @@ public actor FakeCredentialVault: CredentialVault {
         return items
     }
 
-    public func credentialItem(id: UUID) throws -> Item {
-        try requireUnlocked()
-        guard let item = stored[id] else { throw CredentialVaultError.itemNotFound(id) }
-        return item
-    }
-
     public func defaultVaultID() throws -> UUID {
         try requireUnlocked()
         return vaultID

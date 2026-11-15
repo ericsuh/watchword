@@ -18,8 +18,13 @@ extension CredentialProviderModel {
     /// only if the gate would fill it on this host and it could be this account (same user name, or none recorded);
     /// a less specific "other account" is never a candidate, because updating it would not make it fill here.
     public func savePasswordPlan(for request: SavePasswordRequest) async -> Outcome<SavePasswordPlan> {
-        await outcome {
+        func run() async throws -> SavePasswordPlan {
             try Self.plan(for: request, in: try await self.load()).plan
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 
@@ -31,7 +36,7 @@ extension CredentialProviderModel {
     public func savePassword(
         _ request: SavePasswordRequest, to destination: SaveDestination
     ) async -> Outcome<SavedPassword> {
-        await outcome {
+        func run() async throws -> SavedPassword {
             let snapshot = try await self.load()
             let planned = try Self.plan(for: request, in: snapshot)
             switch destination {
@@ -43,13 +48,18 @@ extension CredentialProviderModel {
                 return try await self.updateLogin(authorization.item, with: request)
             }
         }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
+        }
     }
 
     /// A save the system asks for with no UI. Only what cannot damage anything is done unasked: nothing at all when
     /// the login is already saved, or a new item for a host that resembles no saved site. Changing a saved
     /// password, choosing between accounts, and saving on a look-alike host all need the person.
     public func savePasswordWithoutInteraction(_ request: SavePasswordRequest) async -> SilentOutcome<SavedPassword> {
-        await silentOutcome {
+        func run() async throws -> SilentOutcome<SavedPassword> {
             let planned = try Self.plan(for: request, in: try await self.load())
             switch planned.plan {
             case .alreadySaved(let itemID):
@@ -59,6 +69,11 @@ extension CredentialProviderModel {
             case .createItem, .offerUpdate:
                 return .requiresInteraction(.confirmation)
             }
+        }
+        do {
+            return try await run()
+        } catch {
+            return Self.silentFailure(error)
         }
     }
 
@@ -184,9 +199,9 @@ extension CredentialProviderModel {
     /// are parsed strictly, cannot take the password outside the generator's own bounds, and the result is checked
     /// against them before it is returned. Its entropy is reported so the sheet can warn when a site's rules force a
     /// weak password (F3.4).
-    public func generatePassword(for request: GeneratePasswordRequest = GeneratePasswordRequest()) -> Outcome<
-        GeneratedPassword
-    > {
+    public func generatePassword(
+        for request: GeneratePasswordRequest = GeneratePasswordRequest()
+    ) -> Outcome<GeneratedPassword> {
         do {
             let rules = try request.passwordRules.map { try PasswordRules(parsing: $0) } ?? PasswordRules()
             let policy = try rules.policy()

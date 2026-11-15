@@ -279,6 +279,43 @@ struct PasskeyRequestTests {
             ).value.prf == nil)
     }
 
+    @Test("prf is not evaluated for a person who was present but not verified")
+    func prfNeedsVerification() async throws {
+        let harness = AutoFillHarness(items: Fixtures.all)
+        let inputs = PRFInputValues(first: Data("first".utf8))
+        let request = Self.assertionRequest(
+            extensions: PasskeyAssertionExtensions(prf: PRFAssertionInput(inputValues: inputs)))
+        let present = try await harness.model.passkeyAssertion(
+            for: Self.googleChoice, request: request, presence: .present
+        ).value
+        #expect(present.prf == nil)
+        #expect(present.assertion.authenticatorData[32] == 0x19)
+        #expect(
+            try await harness.model.passkeyAssertion(for: Self.googleChoice, request: request, presence: .verified)
+                .value.prf != nil)
+
+        let registered = try await harness.model.registerPasskey(
+            Self.registrationRequest(extensions: PasskeyRegistrationExtensions(prf: .evaluate(inputs))),
+            destination: .newItem, presence: .present
+        ).value
+        #expect(registered.prf == PRFRegistrationOutput(isSupported: true, values: nil))
+    }
+
+    @Test("a credential whose key cannot sign writes no largeBlob either")
+    func unusableKeyWritesNothing() async throws {
+        var credential = try Self.storedCredential(Fixtures.google)
+        credential.privateKeyPKCS8 = Data("not a key".utf8)
+        var broken = Fixtures.google
+        broken.fields[1] = try Field.passkey(credential, id: Fixtures.id(302))
+        let harness = AutoFillHarness(items: [broken])
+        let request = Self.assertionRequest(
+            extensions: PasskeyAssertionExtensions(largeBlob: .write(Data("blob".utf8))))
+        #expect(
+            await harness.model.passkeyAssertion(for: Self.googleChoice, request: request, presence: .verified)
+                == .refused(.passkey(.unusablePrivateKey)))
+        #expect(await harness.vault.saves.isEmpty)
+    }
+
     @Test("a largeBlob is written into the item, read back, and survives in history when replaced")
     func largeBlob() async throws {
         let harness = AutoFillHarness(items: Fixtures.all)

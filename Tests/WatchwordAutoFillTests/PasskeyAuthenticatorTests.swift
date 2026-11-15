@@ -136,6 +136,18 @@ struct PasskeyAuthenticatorTests {
         #expect(registration.attestationObject == PasskeyVectors.data(PasskeyVectors.attestationObject))
     }
 
+    /// The stored form is PKCS#8 (`PasskeyCredential.privateKeyPKCS8`), which is what the Credential Exchange Format
+    /// carries. The prefix is that of the key `cryptography` serialised as PKCS#8: version 0, then the algorithm
+    /// identifier `id-ecPublicKey` with the curve `prime256v1`.
+    @Test("a new credential's private key is stored as PKCS#8")
+    func privateKeyEncoding() throws {
+        let key = [UInt8](try Self.register().credential.privateKeyPKCS8)
+        let prefix = [UInt8](hex: "308187020100301306072a8648ce3d020106082a8648ce3d030107")
+        #expect(Array(key.prefix(prefix.count)) == prefix)
+        #expect(Array([UInt8](hex: PasskeyVectors.ownPKCS8).prefix(prefix.count)) == prefix)
+        #expect(key.count == 138)
+    }
+
     @Test("the COSE key is the canonical ES256 encoding of the public point")
     func coseKey() {
         let encoded = WebAuthnEncoding.coseES256Key(x963: PasskeyVectors.data(PasskeyVectors.publicKeyX963))

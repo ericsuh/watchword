@@ -16,7 +16,7 @@ extension CredentialProviderModel {
     public static let reportInterval: TimeInterval = 24 * 60 * 60
 
     public func handle(_ report: CredentialUpdateReport) async -> Outcome<ReportResult> {
-        await outcome {
+        func run() async throws -> ReportResult {
             switch report {
             case .unusedPassword(let domain, let userName):
                 guard !userName.isEmpty, Self.isDisplayable(userName) else {
@@ -89,6 +89,11 @@ extension CredentialProviderModel {
                     }
                 }
             }
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 

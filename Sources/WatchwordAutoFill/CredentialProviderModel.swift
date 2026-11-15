@@ -132,14 +132,19 @@ public actor CredentialProviderModel {
 
     /// The password for a login the person chose in the extension's list. The choice is authorised again here: what
     /// the list showed is not evidence (SEC6).
-    public func password(for choice: PasswordChoice, identifiers: [ServiceIdentifier]) async -> Outcome<
-        PasswordCredential
-    > {
-        await outcome {
+    public func password(
+        for choice: PasswordChoice, identifiers: [ServiceIdentifier]
+    ) async -> Outcome<PasswordCredential> {
+        func run() async throws -> PasswordCredential {
             let snapshot = try await self.load()
             let authorization = try Self.unwrap(
                 ReleaseGate.authorize(itemID: choice.itemID, for: identifiers, in: snapshot))
             return try Self.unwrap(authorization.password(userName: choice.userName))
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 
@@ -148,10 +153,10 @@ public actor CredentialProviderModel {
     /// Released only when the gate both authorises the item for the identity's host and decides that it alone is
     /// the fill there. A tie between accounts, or an identity whose user the item no longer has, needs the person:
     /// two suggestions with the same email are indistinguishable in the keyboard (PRD F11.5, scenario S1).
-    public func passwordWithoutInteraction(for request: PasswordIdentityRequest) async -> SilentOutcome<
-        PasswordCredential
-    > {
-        await silentOutcome {
+    public func passwordWithoutInteraction(
+        for request: PasswordIdentityRequest
+    ) async -> SilentOutcome<PasswordCredential> {
+        func run() async throws -> SilentOutcome<PasswordCredential> {
             guard let record = RecordIdentifier(request.recordIdentifier), record.fieldID == nil else {
                 throw Blocked.refused(.unknownRecord)
             }
@@ -166,6 +171,11 @@ public actor CredentialProviderModel {
             case .failure(.unknownRecord): return .requiresInteraction(.staleIdentity)
             case .failure(let refusal): return .refused(refusal)
             }
+        }
+        do {
+            return try await run()
+        } catch {
+            return Self.silentFailure(error)
         }
     }
 
@@ -203,12 +213,17 @@ public actor CredentialProviderModel {
 
     /// The current code of a field the person chose.
     public func oneTimeCode(for choice: FieldChoice, identifiers: [ServiceIdentifier]) async -> Outcome<OneTimeCode> {
-        await outcome {
+        func run() async throws -> OneTimeCode {
             let snapshot = try await self.load()
             let authorization = try Self.unwrap(
                 ReleaseGate.authorize(
                     itemID: choice.itemID, for: identifiers, in: snapshot, purpose: .oneTimeCode))
             return try Self.unwrap(authorization.oneTimeCode(fieldID: choice.fieldID, at: await self.clock.now()))
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 
@@ -216,7 +231,7 @@ public actor CredentialProviderModel {
     public func oneTimeCodeWithoutInteraction(
         for request: OneTimeCodeIdentityRequest
     ) async -> SilentOutcome<OneTimeCode> {
-        await silentOutcome {
+        func run() async throws -> SilentOutcome<OneTimeCode> {
             guard let record = RecordIdentifier(request.recordIdentifier), let fieldID = record.fieldID else {
                 throw Blocked.refused(.unknownRecord)
             }
@@ -232,6 +247,11 @@ public actor CredentialProviderModel {
             case .failure(.unknownRecord): return .requiresInteraction(.staleIdentity)
             case .failure(let refusal): return .refused(refusal)
             }
+        }
+        do {
+            return try await run()
+        } catch {
+            return Self.silentFailure(error)
         }
     }
 
@@ -272,7 +292,7 @@ public actor CredentialProviderModel {
     /// The text of the field the person chose. Authorised by the gate when the system named a host; restricted to
     /// fields without a host-checked request when it did not.
     public func textToInsert(for choice: TextChoice, identifiers: [ServiceIdentifier]) async -> Outcome<TextToInsert> {
-        await outcome {
+        func run() async throws -> TextToInsert {
             let snapshot = try await self.load()
             guard !identifiers.isEmpty else {
                 let manual = try Self.unwrap(ReleaseGate.manualChoice(itemID: choice.itemID, in: snapshot))
@@ -289,11 +309,16 @@ public actor CredentialProviderModel {
             return try Self.unwrap(
                 authorization.text(fieldID: choice.fieldID, part: choice.part, at: await self.clock.now()))
         }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
+        }
     }
 
     /// Marks one recovery code spent (or unspent) after the person used it (scenario S2). Releases nothing.
     public func markRecoveryCode(_ choice: FieldChoice, index: Int, used: Bool = true) async -> Outcome<Bool> {
-        await outcome {
+        func run() async throws -> Bool {
             let snapshot = try await self.load()
             guard let item = snapshot.all.first(where: { $0.id == choice.itemID }) else {
                 throw Blocked.refused(.unknownRecord)
@@ -309,13 +334,18 @@ public actor CredentialProviderModel {
             _ = try await self.save(updated, replacing: item)
             return true
         }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
+        }
     }
 
     // MARK: - Identities (PRD F6.1, F6.8)
 
     /// Replaces the published identities with those of the unlocked items. The number published.
     public func publishAllIdentities() async -> Outcome<Int> {
-        await outcome {
+        func run() async throws -> Int {
             guard let publisher = self.publisher else { return 0 }
             let snapshot = try await self.load()
             do {
@@ -323,6 +353,11 @@ public actor CredentialProviderModel {
             } catch {
                 throw Blocked.refused(.vault(.failed("identity store")))
             }
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 
@@ -382,29 +417,19 @@ public actor CredentialProviderModel {
         }
     }
 
-    func outcome<Value: Equatable & Sendable>(
-        _ body: () async throws -> Value
-    ) async -> Outcome<Value> {
-        do {
-            return .success(try await body())
-        } catch {
-            switch Self.blocked(error) {
-            case .locked: return .vaultLocked
-            case .refused(let refusal): return .refused(refusal)
-            }
+    /// The outcome for a request the person takes part in that stopped with `error`.
+    static func failure<Value>(_ error: any Error) -> Outcome<Value> {
+        switch blocked(error) {
+        case .locked: return .vaultLocked
+        case .refused(let refusal): return .refused(refusal)
         }
     }
 
-    func silentOutcome<Value: Equatable & Sendable>(
-        _ body: () async throws -> SilentOutcome<Value>
-    ) async -> SilentOutcome<Value> {
-        do {
-            return try await body()
-        } catch {
-            switch Self.blocked(error) {
-            case .locked: return .requiresInteraction(.vaultLocked)
-            case .refused(let refusal): return .refused(refusal)
-            }
+    /// The outcome for a request made without the person that stopped with `error`.
+    static func silentFailure<Value>(_ error: any Error) -> SilentOutcome<Value> {
+        switch blocked(error) {
+        case .locked: return .requiresInteraction(.vaultLocked)
+        case .refused(let refusal): return .refused(refusal)
         }
     }
 

@@ -20,9 +20,14 @@ extension CredentialProviderModel {
     public func passkeyAssertion(
         for choice: FieldChoice, request: PasskeyAssertionRequest, presence: PersonPresence
     ) async -> Outcome<PasskeyAssertionResult> {
-        await outcome {
+        func run() async throws -> PasskeyAssertionResult {
             try await self.makeAssertion(
                 itemID: choice.itemID, fieldID: choice.fieldID, request: request, presence: presence)
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 
@@ -35,7 +40,7 @@ extension CredentialProviderModel {
     public func passkeyAssertionWithoutInteraction(
         request: PasskeyAssertionRequest, identity: PasskeyIdentityRequest, presence: PersonPresence
     ) async -> SilentOutcome<PasskeyAssertionResult> {
-        await silentOutcome {
+        func run() async throws -> SilentOutcome<PasskeyAssertionResult> {
             guard let record = RecordIdentifier(identity.recordIdentifier), let fieldID = record.fieldID else {
                 throw Blocked.refused(.unknownRecord)
             }
@@ -51,6 +56,11 @@ extension CredentialProviderModel {
                 case let blocked: throw blocked
                 }
             }
+        }
+        do {
+            return try await run()
+        } catch {
+            return Self.silentFailure(error)
         }
     }
 
@@ -84,12 +94,23 @@ extension CredentialProviderModel {
             throw Blocked.refused(.passkey(.userVerificationRequired))
         }
 
+        // CTAP's hmac-secret keeps a separate secret for requests without verification. A Watchword credential has
+        // one, so `prf` is evaluated only for a verified person; otherwise there is no output, rather than the
+        // verified one.
         var prf: PRFOutputValues?
-        if let input = request.extensions.prf,
+        if presence == .verified, let input = request.extensions.prf,
             let values = input.perCredential[credential.credentialID] ?? input.inputValues,
             let secret = credential.prfSecret
         {
             prf = try Self.passkey { try PasskeyPRF.evaluate(secret: secret, inputs: values) }
+        }
+
+        // Signed with the credential as stored, before any write: a key that cannot sign changes nothing.
+        let backedUp = try await backedUp()
+        let assertion = try Self.passkey {
+            try PasskeyAuthenticator.assertion(
+                with: credential, for: relyingParty, clientDataHash: request.clientDataHash, presence: presence,
+                backedUp: backedUp)
         }
 
         var largeBlob: LargeBlobAssertionOutput?
@@ -97,8 +118,8 @@ extension CredentialProviderModel {
         case .read:
             largeBlob = .read(credential.largeBlob)
         case .write(let blob):
-            // Written before signing, so a vault that locks here yields no assertion at all. A write that loses a
-            // race is reported as not written; the assertion is still good.
+            // A write that loses a race is reported as not written and the assertion is still good. A vault that
+            // locks during the write yields no assertion at all: `storeLargeBlob` rethrows the lock.
             if credential.largeBlob == blob {
                 largeBlob = .write(didWrite: true)
             } else {
@@ -108,13 +129,6 @@ extension CredentialProviderModel {
             }
         case nil:
             break
-        }
-
-        let backedUp = try await backedUp()
-        let assertion = try Self.passkey {
-            try PasskeyAuthenticator.assertion(
-                with: credential, for: relyingParty, clientDataHash: request.clientDataHash, presence: presence,
-                backedUp: backedUp)
         }
         return PasskeyAssertionResult(assertion: assertion, prf: prf, largeBlob: largeBlob)
     }
@@ -140,7 +154,7 @@ extension CredentialProviderModel {
     public func passkeyRegistrationOptions(
         for request: PasskeyRegistrationRequest
     ) async -> Outcome<PasskeyRegistrationOptions> {
-        await outcome {
+        func run() async throws -> PasskeyRegistrationOptions {
             let relyingParty = try Self.validate(request)
             let snapshot = try await self.load()
             try Self.checkNotExcluded(request, relyingParty: relyingParty, in: snapshot)
@@ -149,6 +163,11 @@ extension CredentialProviderModel {
             return PasskeyRegistrationOptions(
                 relyingPartyID: relyingParty.value, userName: request.user.name, existingItems: candidates,
                 suggested: named.count == 1 ? .existingItem(named[0].itemID) : .newItem)
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 
@@ -159,9 +178,14 @@ extension CredentialProviderModel {
     public func registerPasskey(
         _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence
     ) async -> Outcome<PasskeyRegistrationResult> {
-        await outcome {
+        func run() async throws -> PasskeyRegistrationResult {
             guard presence != .absent else { throw Blocked.refused(.passkey(.userPresenceRequired)) }
             return try await self.register(request, destination: destination, presence: presence)
+        }
+        do {
+            return .success(try await run())
+        } catch {
+            return Self.failure(error)
         }
     }
 
@@ -176,7 +200,7 @@ extension CredentialProviderModel {
     public func registerPasskeyWithoutInteraction(
         _ request: PasskeyRegistrationRequest, presence: PersonPresence = .absent
     ) async -> SilentOutcome<PasskeyRegistrationResult> {
-        await silentOutcome {
+        func run() async throws -> SilentOutcome<PasskeyRegistrationResult> {
             let relyingParty = try Self.validate(request)
             guard request.userVerification != .required || presence == .verified else {
                 return .requiresInteraction(.userVerification)
@@ -194,6 +218,11 @@ extension CredentialProviderModel {
             else { throw Blocked.refused(.noItemToUpgrade) }
             return .success(
                 try await self.register(request, destination: .existingItem(match.item.id), presence: presence))
+        }
+        do {
+            return try await run()
+        } catch {
+            return Self.silentFailure(error)
         }
     }
 
@@ -245,9 +274,12 @@ extension CredentialProviderModel {
         case .checkForSupport:
             prf = PRFRegistrationOutput(isSupported: true, values: nil)
         case .evaluate(let inputs):
-            let secret = credential.prfSecret ?? Data()
-            prf = PRFRegistrationOutput(
-                isSupported: true, values: try Self.passkey { try PasskeyPRF.evaluate(secret: secret, inputs: inputs) })
+            // As for an assertion: supported, but evaluated only for a verified person.
+            var values: PRFOutputValues?
+            if presence == .verified, let secret = credential.prfSecret {
+                values = try Self.passkey { try PasskeyPRF.evaluate(secret: secret, inputs: inputs) }
+            }
+            prf = PRFRegistrationOutput(isSupported: true, values: values)
         case nil:
             break
         }
