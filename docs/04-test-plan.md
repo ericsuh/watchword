@@ -48,7 +48,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
-| F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
+| F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "Scenarios S1 and S2 through the request model", and "Request model over a real vault session" — S1 and S2 again over a `VaultSession` with a stand-in for its `CredentialVault` conformance; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
@@ -62,7 +62,9 @@ Each test is written once against `VaultSession` and once as an XCUITest where U
 - **E2E-S1 Amazon vs AWS.** Seed both items. Request credential list for
   `https://signin.aws.amazon.com/signin` → primary list contains only the AWS item, retail is in
   the shadowed list; request for `https://www.amazon.com/ap/signin` → only retail. Assert the
-  TOTP returned for each matches the right item. Assert QuickType identities carry distinct ranks.
+  TOTP returned for each matches the right item. Assert that with both items in the vault neither
+  has a QuickType password or code identity, and that the retail identity a stale store still holds,
+  handed back as stored, releases nothing (`02-architecture.md` §9.1: a tap does not name the page).
 - **E2E-S2 Google passkey + recovery codes.** Register a passkey for `google.com` via the request
   handler; assert on assertion the signature verifies with the stored public key and the `prf`
   output is stable; mark a recovery code used and verify the item version and history.
@@ -258,6 +260,50 @@ specification, plus vectors from independent Python implementations for HPKE wit
   service identifier the chosen item does not match (defence in depth against UI bugs).
 - Passkey assertion for a relying party different from the stored `rpID` is refused.
 
+Milestone 5 status: the last two obligations, and the rest of this list as seen from the request handler, are
+`Tests/WatchwordAdversarialTests/AdversarialAutoFillRequestTests.swift` ("Adversarial: AutoFill request model"),
+against `CredentialProviderModel` with `FakeCredentialVault`:
+
+- *Every request type, one sweep.* A helper asks for everything an item holds through every request that
+  releases a secret (password by choice, one-time code by choice, text for every field, passkey assertion by
+  choice and by identity, with and without an allow-list; and the two QuickType requests with the page's
+  identifier put where the identity's own belongs, which is what a confused adapter would send). For thirty
+  hostile identifiers (look-alikes, user-info, percent-escapes, non-web schemes, public suffixes) nothing is
+  released for any item; on each real site nothing of any *other* item is released, and the site's own item is,
+  which keeps the sweep honest; stuffing a request with extra identifiers widens nothing.
+- *QuickType, the request that names no page.* A randomised property test (the nightly widens it) builds vaults
+  of items scoped across three sites, a country-code site and two tenants of a shared host, and checks every
+  identity the model publishes or answers against the gate itself, page by page: on every host of the
+  identity's site, parents and siblings included, the item must be released by choice and be the one account
+  offered under that name; and nothing unpublished is answered when handed back. A second test replays the
+  retail identity of S1 from a stale store after each change that should retire it (the AWS item arriving, an
+  exclusion, a narrowed scope, an exclusion from AutoFill, archiving, a renamed user). Inputs to these requests
+  are built only from published identities (`handedBack` in `AutoFillFixtures`).
+- *No override.* A look-alike gets the warning in place of a list; repeating the request, raising the presence
+  level or omitting the identifier releases nothing (F11.4, F11.7). With no host named, no secret of any kind
+  inserts as text, for an item holding a field of every kind, and the host-checked text request without its
+  identifiers is refused rather than answered as the hand-picked one.
+- *Passkeys.* A relying party ID in any spelling but the canonical one is refused before the vault is read; a
+  conditional registration cannot plant an item, and a loop of three hundred of them, each with a fresh user
+  handle and any relying party the page could claim, adds one passkey to an item; no registration, silent or
+  confirmed, changes an existing item's scopes; a passkey planted in another site's item is asserted for
+  neither party.
+- *Records no honest client wrote* (a malicious vault member, a crafted import): an over-broad stored scope
+  matches nothing; malformed passkey, `otpauth` and recovery-code fields are refused field by field without a
+  crash and without taking the item's other fields down; an item ID that two readable items share releases
+  nothing on either item's site, through any request, and the twin still ranks.
+- *Remote parties.* A randomised run of reports, silent saves and silent registrations, from any party, leaves
+  every item, field, secret value and scope in place (the nightly widens it); a report flood adds one version;
+  a save cannot widen a scope, pick a title or reach another site's item; hostile `passwordrules` end in a
+  refusal or a bounded, conforming password.
+- *Locked.* Every request type reports the lock and releases nothing; a lock that lands mid-request wins for a
+  write, and for every kind of release when it lands after the items were read (each request type is run
+  unlocked, where it must release, and again with the vault locking as its one read returns).
+- *Excluded from AutoFill (F6.8).* An item excluded on another device is not released for the identities a
+  stale store still holds, is not listed, and is not released when chosen.
+- *The identity store* learns hosts, user names and opaque IDs only, and nothing of excluded, archived or
+  trashed items.
+
 ### 6.4 Sync and sharing (milestones 3–4)
 - Malicious server mode: substitutes a member's public key → fingerprint mismatch blocks the
   invitation; reorders/duplicates/drops segments → convergence still holds or sync fails closed;
@@ -339,6 +385,10 @@ if the matcher changes.
 escapes accepted, zero-width/bidi/soft-hyphen rejected, over-long hosts and labels rejected,
 user-info rejected, and the IDNA compatibility mapping asserted as honoured so a future
 "hardening" change cannot silently break legitimate matching.
+
+*At the request model (milestone 5):* "no override" is a property of `CredentialProviderModel`'s API, not of a
+view: there is no call that releases after a refusal, which `AdversarialAutoFillRequestTests` checks request by
+request (§6.3).
 
 *Still to come:* a UI test that the AutoFill extension presents no override affordance on a
 suspicious host, and that adding a mismatched host as a scope requires the confirmation in F11.7

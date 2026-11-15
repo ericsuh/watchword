@@ -3,6 +3,7 @@
 # CI on purpose: update this list alongside it. (Data, not a task: mise runs only executable files.)
 envelope and KDF
 AutoFill service matching
+AutoFill request model
 password generator
 phishing resistance
 crypto core

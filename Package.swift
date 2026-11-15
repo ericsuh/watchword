@@ -26,6 +26,7 @@ let package = Package(
         .library(name: "WatchwordSync", targets: ["WatchwordSync"]),
         .library(name: "WatchwordKit", targets: ["WatchwordKit"]),
         .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
+        .library(name: "WatchwordAutoFill", targets: ["WatchwordAutoFill"]),
     ],
     dependencies: [
         // Exact version, and Package.resolved pins the commit (ADR 0006).
@@ -78,13 +79,22 @@ let package = Package(
         // tripwire, lint and `swift test` all cover them.
         .target(name: "WatchwordPlatform", dependencies: ["WatchwordKit", "WatchwordStore", "SecureMemory"]),
 
+        // The portable core of the credential provider extension: every decision and every byte it returns, behind a
+        // vault port, so the extension itself is an adapter (§9.1; milestone 5). No AuthenticationServices, and not
+        // WatchwordKit: `VaultSession` conforms to its `CredentialVault` port, not the other way round. `Crypto` for the
+        // passkey's P-256 key, HMAC (TOTP, `prf`) and SHA-256; SecureMemory for drawing key bytes.
+        .target(
+            name: "WatchwordAutoFill",
+            dependencies: ["WatchwordModel", "WatchwordMatching", "WatchwordGenerator", "SecureMemory", crypto]
+        ),
+
         // Seeded and deliberately broken generators and vector helpers, for test targets only (§15). Not a product,
         // and no production target may depend on it.
         .target(
             name: "WatchwordTestSupport",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordStore", "WatchwordSync", "WatchwordEnvelope",
-                "SecureMemory",
+                "WatchwordAutoFill", "WatchwordMatching", "SecureMemory",
             ]
         ),
 
@@ -122,6 +132,13 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "WatchwordAutoFillTests",
+            dependencies: [
+                "WatchwordAutoFill", "WatchwordModel", "WatchwordMatching", "WatchwordGenerator", "WatchwordKit",
+                "WatchwordTestSupport", crypto,
+            ]
+        ),
+        .testTarget(
             name: "WatchwordPlatformTests",
             dependencies: ["WatchwordPlatform", "WatchwordKit", "SecureMemory", "WatchwordTestSupport"]
         ),
@@ -132,7 +149,7 @@ let package = Package(
             dependencies: [
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
                 "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordKit", "WatchwordPlatform",
-                "WatchwordTestSupport", crypto,
+                "WatchwordAutoFill", "WatchwordTestSupport", crypto,
             ]
         ),
     ],

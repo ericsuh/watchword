@@ -25,7 +25,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
 | 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
-| 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
+| 5 — AutoFill (portable core done) | The request model, TOTP, the passkey authenticator and identity planning — done, behind a vault port with fakes | AuthenticationServices, app-extension targets, `VaultSession`'s conformance, simulator and device QA |
 | 6 — hygiene | HIBP client, scheduling, strength estimator, reuse/age/2FA checks | the Watchtower-style report UI and its snapshot tests |
 | 7 — interchange | Parsers, adversarial parser tests, and the fuzz targets — a better host for them | Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive |
 | 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
@@ -212,6 +212,37 @@ half delivered** on a Mac; the transports are open.
 - Environment: **Mac with Xcode, plus a physical device.** The strongest Mac case of the nine: every
   request type is an AuthenticationServices entry point, the targets are app extensions, and the exit
   criteria name simulator and on-device QA. This is the milestone the Xcode MCP server exists for.
+- Status: **the portable core is delivered** (`WatchwordAutoFill`, `02-architecture.md` §9.2), which moved
+  everything but the adapter off the Mac (rule 3 above): `CredentialProviderModel` answers every request type
+  through the `CredentialVault` port, with `TOTP`, `PasskeyAuthenticator` (registration, assertion, `prf`,
+  `largeBlob`), `PasswordRules`, and `CredentialIdentityPlanner` with the `CredentialIdentityPublisher` port.
+  The first exit criterion is met on Linux: `WatchwordAutoFillTests` covers every request type with
+  `FakeCredentialVault`, S1 and S2 run through the model, and the adversarial area "AutoFill request model"
+  attacks every request type. That is against swift-crypto's P-256 and HMAC; the macOS matrix runs the same
+  suites against CryptoKit, and until a run there passes the module is verified on Linux only.
+- Still open, all needing a Mac:
+  - the `AutoFillExtension` targets: an `ASCredentialProviderViewController` that converts each request to
+    the model's value types, shows what the outcome describes, and returns what it carries, plus the
+    `ASCredentialIdentityStore` adapter for `CredentialIdentityPublisher`. No security decision belongs in
+    it;
+  - `VaultSession`'s conformance to `CredentialVault` (`saveCredentialItem` as a compare-and-swap inside the
+    actor's `write`, `isBackedUp` from whether sync is configured, `confirmUnlocked` as the actor's own lock
+    check), and unlocking from the extension. When shared vaults arrive, an item ID present in two vaults is
+    treated by the model as naming neither item, so a move between vaults must not leave both copies readable.
+    `SessionCredentialVault` in `WatchwordAutoFillTests` is a stand-in over the session's public API that the
+    S1 and S2 tests already run through; it shows the shape and is not atomic;
+  - the encrypted index record, so the extension lists without decrypting every item;
+  - on-device QA for S1 and S2, including three things only a device can answer. First, what the system
+    hands back for a QuickType tap and on which hosts it offers a stored identity: the core assumes the
+    stored identity with no page, offered anywhere under the registrable domain, and so publishes password
+    and code identities only for whole-site scopes that nothing else shares or undercuts (`02-architecture.md`
+    §9.1). If the system matches exact hosts, that rule can be relaxed; if it hands back the page, the gate
+    can be asked. Then whether the system passes `prf` salts unhashed (the model applies WebAuthn's prefix
+    hash), and how it treats a conditional registration with UP = 0;
+  - an owner decision the review left open: with no host named, text insertion gives only fields that are not
+    secrets, which narrows F6.4 (recovery codes, security answers and PINs insert only where the system names
+    the host). `ManualChoice.isInsertable` is the one place to change it;
+  - the UI tests in `04-test-plan.md` §6.7 ("no override affordance", the F11.7 confirmation in the app).
 
 ## Milestone 6 — Hygiene
 

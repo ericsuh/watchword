@@ -181,3 +181,17 @@ matched scope. Nothing pre-selected.
   malicious host match. Membership and record signing (`02-architecture.md` §8) is what defends
   that, not this document.
 - Scope matching depends on the OS reporting the true host. A compromised OS is out of scope.
+- Text insertion (PRD F6.4) is requested by the system without naming a site, so there is no host to
+  check and no mismatch to detect. `CredentialProviderModel` then lets the person pick an item by hand,
+  as they would in the app, and inserts only fields that are not secrets (user names, emails, phone,
+  account and card numbers, dates). Passwords, one-time codes, passkeys, recovery codes, API keys,
+  security answers and PINs cannot leave that way (`02-architecture.md` §9.2): each is replayable by a
+  look-alike page, which is F11.4's reason for withholding a code instead of warning about it. They are
+  inserted as text where the system does name the host, through the gate, and otherwise copied from the
+  app, where the item's scopes are in view. This narrows F6.4 as written and is the owner's to revisit.
+- QuickType suggestions are offered by the operating system's own domain matching, and a tap does not
+  tell the extension which page it came from. Watchword therefore publishes a password or code identity
+  only for an item that is the right answer on every page of its site (`02-architecture.md` §9.1); the
+  two Amazon accounts of S1, a login saved for one exact host, and a tenant of a shared host are reached
+  through the extension's list instead. What the system really matches on is unverified until
+  milestone 5's on-device QA; the rule assumes the widest case.
