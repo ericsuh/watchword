@@ -95,6 +95,45 @@ with password re-entry, import of 1PUX/CSV fixtures.
   in yet.
 - Accessibility audit (`XCUIApplication.performAccessibilityAudit()`) runs on every screen.
 
+### 5.1 The screenshot tour
+
+`ScreenshotTourTests` (`Apps/UITests/Shared`, iOS simulator and macOS) is one pass through every flow the app has
+that attaches a picture of each major screen, so the screens can be audited by eye and a pull request that changes
+the UI can carry fresh ones. It is an end-to-end test in its own right: `app:test`, and so `ci.yml`'s `app-tests`
+job, runs it with the other UI tests, and a flow that breaks fails it there.
+
+- **What is on screen.** The app is launched with `--uitest`: in-memory ports, an account the test creates, and
+  `UITestPeer` as the other device. `Screens.capture` refuses any other launch. The Secret Key and the generated
+  password in the pictures belong to that throwaway account and differ on every run; no real vault, Keychain item
+  or secret can appear. The Settings picture includes the Debug-only "UI test: another device" section, which no
+  release build has.
+- **The screens today**, in flow order: `onboarding`, `emergency-kit`, `item-list-empty`, `item-edit` (a new item,
+  its password filled in by the generator), `item-list`, `item-detail` (password hidden), `item-detail-revealed`,
+  `trash-confirmation`, `locked`, `unlock-failed`, `settings`, `item-list-conflict` (the badge after a concurrent
+  rename) and `conflict-resolution`. Files are numbered in that order (`01-onboarding.png`).
+- **Adding a screen** is one line where the tour reaches it: `Screens.capture("vault-list", in: app, showing:
+  "…")`. Names are lower-case words joined by hyphens and unique; the number comes from the order of capture, so a
+  screen added in the middle renumbers the later ones. Every milestone that adds a screen adds it to the tour
+  (vault list, sharing, AutoFill settings, the hygiene report, import and export are still to come).
+- **No sleeping.** A capture follows a tap or keystroke (XCUITest waits for the app to be idle around those, which
+  covers a sheet or a push animating in) or a wait for the element that proves the screen is complete (the editor's
+  title field gone after Save, the error text after a wrong password). Where only the keyboard is moving, the tour
+  taps something inert first.
+- **The picture.** On macOS it is the app's window, not the screen, so nothing else on the machine is in it; on
+  iOS it is the whole screen, so the keyboard and system dialogs are. Attachments are kept whether or not the test
+  passes (`XCTAttachment.lifetime = .keepAlways`), and the tour ends by attaching `screens-index`, the list of what
+  it captured.
+- **`mise run app:screenshots [ios|macos|all]`** runs the tour alone, exports the result bundle's attachments with
+  the selected Xcode's `xcresulttool export attachments`, and writes `Screenshots/<set>/<NN-name>.png`, `index.md`,
+  `index.html` (a contact sheet over the files beside it) and `Screenshots/watchword-screens-<set>.html` (the same
+  sheet with the images embedded). It fails if the tour failed, if the index is absent (the tour stopped part way),
+  if a listed screen has no picture, or if a picture is not a PNG or is one flat colour. `--appearance dark` tours
+  with `--uitest-dark` (Debug only) for the sets `ios-dark` and `macos-dark`; `--device ipad` tours on an iPad
+  simulator in landscape for `ios-ipad`. Neither runs by default.
+- **In CI.** `screenshots.yml` (§7) captures both platforms for a pull request and comments with links;
+  `mac-run.yml`'s `app:screenshots` gate does the same capture on a branch for a session without a Mac
+  (`09-cloud-sessions.md` §5).
+
 ## 6. Adversarial security tests (explicit requirements)
 
 These are mandatory, live in `Tests/WatchwordAdversarialTests` (and later per-module
@@ -340,3 +379,10 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   protection requires this one check (`08-repository-hardening.md` §5), so every job above blocks a
   merge, including both app-test legs, and a runner bump that renames a matrix leg needs no
   protection change.
+
+- `screenshots.yml`: not a gate. On the `screenshots` label (and each push while a pull request carries it), a head
+  commit message containing `[screenshots]`, or a dispatch, it runs the screenshot tour (§5.1) on the iOS simulator
+  and macOS, uploads each set and its one-file contact sheet as artifacts, writes the index to the job summary, and
+  creates or updates one comment on the pull request linking to them [`app:screenshots ios`, `app:screenshots
+  macos`]. Its controls are in `07-supply-chain.md` §3.2. It is not part of `required` and must not be added to
+  branch protection.

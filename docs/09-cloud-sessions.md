@@ -229,9 +229,11 @@ gates a merge; `ci.yml` does.
 
 | Input | Values | Meaning |
 | --- | --- | --- |
-| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `check` | The steps of the matching `ci.yml` job (below) |
+| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `app:screenshots`, `check` | The steps of the matching `ci.yml` job (below); `app:screenshots` is `screenshots.yml`'s capture |
 | `filter` | empty, or one line not starting with `-` | `test`: a `swift test --filter` regex. `app:test` with `ios` or `macos`: an `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Must match at least one test |
-| `platform` | `macos`, `ios`, `all` | `app:test` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
+| `platform` | `macos`, `ios`, `all` | `app:test` and `app:screenshots` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
+| `appearance` | `light`, `dark` | `app:screenshots` only: `dark` captures the dark set |
+| `device` | `iphone`, `ipad` | `app:screenshots` with `ios` or `all` only: `ipad` captures on an iPad simulator |
 | `xcode` | `27.0`, `16.4` | `xcode-27` (macOS 27), every gate; or `macos-15`, `ci.yml`'s oldest leg, `build` and `test` only |
 
 Each gate runs what its `ci.yml` job runs: `test` is the package-tests job (`audit:dependencies`, `build -v`,
@@ -240,7 +242,8 @@ and `build`, `test:adversarial`, `lint` and `app:test` are their own job's step.
 runs only the matching tests, without coverage or the audit and build steps; `app:test` omits the iOS leg's
 best-effort AutoFill step; and `check` has no `ci.yml` job, being `mise.toml`'s local aggregate. A request that
 cannot mean what it says is refused before anything builds: a filter that starts with `-` or is given to a gate
-other than `test` and `app:test`, `app:test all` with a filter, and on Xcode 16.4 any gate but `build` and `test`
+other than `test` and `app:test`, `app:test all` with a filter, `appearance` or `device` on any gate but
+`app:screenshots` (and `ipad` with `macos`), and on Xcode 16.4 any gate but `build` and `test`
 (16.4 cannot build `-strict-memory-safety` at all, and `ci.yml` runs everything else on 27.0). A filtered run that
 executed no test fails too, where `swift test` and `xcodebuild` would report it as passing.
 
@@ -248,7 +251,8 @@ The step is `mise run ci:gate <gate> --platform=<platform> --xcode=<xcode> --fil
 locally on a Mac. Each value is written `--flag=value`, because mise reads a separate argument that starts with `-` as
 an option: `--filter --help` would print the task's help and pass. A failed run ends its log with a failure summary
 (the compiler errors, failing tests and xcodebuild's "Failing tests" list), because a tool reading the log may only
-fetch its tail; the full logs, `coverage.txt` and any `.xcresult` bundles are the run's `mac-run-<run id>` artifact.
+fetch its tail; the full logs, `coverage.txt`, any `.xcresult` bundles and `Screenshots/` are the run's
+`mac-run-<run id>` artifact.
 Runs are named after their gate, platform (for `app:test`), filter, branch and Xcode, and repeats of one request share
 a concurrency group: one runs, at most one waits, and a newer dispatch replaces the waiting one. Different requests
 never cancel one another.
@@ -259,6 +263,36 @@ Starting a run:
   then fetch the run's job log once it completes.
 - From a terminal: `gh workflow run mac-run.yml --ref <branch> -f gate=app:test -f platform=macos -f
   filter=WatchwordMacUITests/OnboardingAndUnlockTests`, then `gh run watch` and `gh run view --log-failed`.
+
+### 5.1 Screenshots from a cloud session
+
+The `app:screenshots` gate runs the screenshot tour (`04-test-plan.md` §5.1) on the branch and uploads what it
+wrote. It is how a session without a Mac checks a screen it added to the tour, and the same capture
+`screenshots.yml` runs for a pull request.
+
+1. Add the screen to the tour: drive the app to it in `ScreenshotTourTests` and add one
+   `Screens.capture("name", in: app, showing: "…")` line. Push the branch.
+2. Dispatch `mac-run.yml` on the branch with `gate=app:screenshots` and `platform=macos` or `ios`, one run each
+   (two runs in parallel finish sooner than `all`, which tours one after the other in one job). From a terminal:
+   `gh workflow run mac-run.yml --ref <branch> -f gate=app:screenshots -f platform=ios`.
+3. Read the end of the job log. A passing run lists every screen with its pixel size, file size and average
+   brightness (`07-item-detail  1206x2622  412 KB, brightness 0.93`), then a coarse text rendering of each picture
+   (the gate passes `--previews`): enough to see that a sheet, a dialog or the keyboard is where it should be, and
+   that a dark set is dark, without the image. A failing run ends with the failure summary; the tour's own failure
+   is an `XCTAssert` line naming the element that never appeared, and `app:diagnose` output precedes it.
+4. Fetch the pictures. They are in the run's `mac-run-<run id>` artifact, under `Screenshots/<set>/` with
+   `index.html`, beside `Screenshots/watchword-screens-<set>.html`, the one-file contact sheet:
+   `gh run download <run id> --name mac-run-<run id>`, or the artifact's download URL from the GitHub tools
+   (`actions_list` with `list_workflow_run_artifacts`, then `actions_get` with `download_workflow_run_artifact`),
+   then unzip and open the sheet, or read the PNGs with an image-capable tool.
+
+   The download URL points at GitHub's artifact storage (`*.blob.core.windows.net`), which a cloud environment's
+   network policy has to allow; the default allowlists do not, and the session's proxy then answers `403`. Without
+   it, a cloud session can verify a capture only from the log (step 3), and should say so: the pictures themselves
+   are then checked by whoever opens the artifact or the pull request's screenshot comment in a browser.
+
+A capture takes about as long as the matching `app:test` run, since most of it is the build: a few minutes on
+macOS, ten to fifteen on the iOS simulator, whose first boot on a fresh runner dominates.
 
 What it is not:
 

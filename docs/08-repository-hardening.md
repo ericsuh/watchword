@@ -69,6 +69,22 @@ SHA** (`owner/repo@<40-hex>`), which also keeps the nightly `action-pinning-audi
 `claude-code-action` means updating both entries: its own SHA, and the `setup-bun` SHA in that
 release's `action.yml`.
 
+### 1.1 The `screenshots` label
+
+`screenshots.yml` (`07-supply-chain.md` §3.2) captures a pull request's screens when the pull request carries the
+`screenshots` label. It uses GitHub-owned actions only, so the allowed-actions list above needs no entry for it, and
+the read-only default token is right for it: its one comment job asks for `pull-requests: write` in the file.
+The label has to exist before it can be applied:
+
+```sh
+gh label create screenshots --repo ericsuh/watchword --color 5319E7 \
+  --description "Capture the app's screens for this pull request and attach them (screenshots.yml)"
+```
+
+Applying a label needs triage access, which is who may start a capture this way. Do not add any `Screenshots` job
+to the required checks in step 5: the workflow skips most pull requests, and a required check that is skipped counts
+as passing while one that never reports blocks the merge.
+
 ## 2. Set up commit signing locally (prerequisite for step 8)
 
 SSH signing is the least friction on macOS if you already have an SSH key.

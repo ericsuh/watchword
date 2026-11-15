@@ -109,7 +109,8 @@ at run time, so that download is trusted the way the runner image is (§3.3).
 ### 3.2 Token and secret exposure (T5)
 
 - **[done]** `permissions: contents: read` at workflow level and repeated per job. No job needs
-  write access, except the Claude job in `claude-pr.yml` (below).
+  write access, except the Claude job in `claude-pr.yml` and the comment job in `screenshots.yml`
+  (both below), each `pull-requests: write` and nothing more.
 - **[done]** `persist-credentials: false` on every checkout, so the `GITHUB_TOKEN` is not left in
   `.git/config` for later steps (including any future step that runs third-party code) to read.
 - **[done]** the trigger is `pull_request`, never `pull_request_target`, so a fork's code never
@@ -153,11 +154,67 @@ at run time, so that download is trusted the way the runner image is (§3.3).
   The residual risk is prompt injection: an admin can ask Claude about a pull request written by
   someone else, whose text can try to steer what Claude posts. The tool allowlist bounds what it
   can do to commenting on that one pull request.
+- **[done]** `screenshots.yml` captures the screenshot tour's pictures (`04-test-plan.md` §5.1) for a pull request
+  and attaches them to it. It holds no secret. It runs on the `screenshots` label, on each push while the pull
+  request carries the label, on a push whose head commit message contains `[screenshots]`, and on dispatch. Its
+  controls:
+  - **Three jobs, split by what they may touch.** `decide` reads the event and, for the commit marker, one commit
+    message through the API: `contents: read`, no checkout. `capture` checks out and runs the pull request's code,
+    so it gets exactly what `ci.yml`'s `app-tests` job gets: `contents: read`, no secrets,
+    `persist-credentials: false`. `comment` is the only job with `pull-requests: write`, and has no other
+    permission, not even `contents: read`.
+  - **The job that can write runs nothing from the pull request.** `comment` has no checkout step and downloads no
+    artifact. All it receives from `capture` is, per platform, a list of screen names and two artifact ids, as job
+    outputs. It checks each against a pattern (`NN-lower-case-words`, digits) before using it, and writes every
+    other word of the comment itself. A build script, a test, or a tool the build fetched can therefore do nothing
+    with the write token, and cannot put text of its choosing into a comment posted in the repository's name: a
+    value that fails its pattern becomes "the capture failed or is incomplete".
+  - **One comment, and only its own.** The comment starts with a hidden marker and is updated in place. The one it
+    updates must start with the marker *and* have been written by `github-actions[bot]`, so a comment in which
+    someone else typed the marker is never edited. Comment jobs for one pull request run one at a time, so two
+    runs cannot each create one.
+  - **Who can start it.** Adding a label needs triage access; a dispatch needs write access. The commit marker can
+    be written by anyone who can push to the pull request, a fork's author included, and gets them what every push
+    already gets from `ci.yml`: the pull request's own code on a macOS runner with a read-only token. On a fork's
+    pull request GitHub makes the token read-only whatever the file says, so the capture and its artifacts are
+    produced and `comment` is skipped. A dispatch may name a pull request to attach to only if that pull request is
+    open, in this repository, and its head is the dispatched commit.
+  - **Event text reaches the shell only through `env:`**, and the commit message is fetched as data and searched
+    with a fixed-string `grep`, never interpolated.
+  - **Inline shell, in two jobs only.** `decide` and `comment` check nothing out, so they cannot run a mise task;
+    their `gh api` calls are in the workflow file, as in `claude-pr.yml`'s `authorize` job. Everything that touches
+    the code is `mise run app:screenshots`.
+  - **Pictures are linked, not embedded.** GitHub does not serve artifact files inside a comment. The ways round
+    that (committing images to a branch, or an image host) need `contents: write` or a third party, and neither
+    is acceptable here. The contact sheet is uploaded as one unzipped HTML file (`actions/upload-artifact`'s
+    `archive: false`, read from the action's `action.yml` at the pinned commit), so its link opens the sheet; it has
+    no script, no remote reference and a restrictive Content-Security-Policy, and every string in it that came from
+    the run is escaped.
+  - **Not a gate.** It is not in `ci.yml`'s `required` job and must not be named in branch protection
+    (`08-repository-hardening.md` §5): a workflow that most pull requests skip would otherwise report as passing
+    without having run, or block the ones it never ran on.
+
+  **No comment command, deliberately.** A `/screenshots` line in a pull-request comment arrives as `issue_comment`,
+  which always runs the default branch's copy of the workflow in the base repository's context. Building the pull
+  request's head there is the `pull_request_target` pattern this repository rules out: nothing but this file would
+  stand between that code and the repository's token, caches and environment, where on `pull_request` GitHub itself
+  withholds them from a fork. The safe variant is a relay, in which the comment job runs no pull-request code and
+  only dispatches this workflow on the pull request's branch; that needs a second write-scoped job (`actions:
+  write`), works for same-repository branches only, and cannot be exercised before it is on the default branch.
+  The label does the same for anyone with triage access, and a dispatch for anyone with write access, so the
+  relay was not worth a second token. Having the comment job add the label would not work either: events caused by
+  the workflow token start no workflows.
+
+  The residual risks: the artifacts and the job summary are whatever the pull request's code produced (they are
+  labelled with the commit, and a reviewer reads them as that code's output, as with a test log); and a
+  same-repository pull request can edit this file, as it can any workflow, so the split protects the write token
+  from the build, not from someone who already has write access.
 - **[convention]** the CloudKit integration tests (milestone 3) need an iCloud container and
   therefore secrets. They must stay `workflow_dispatch`-only, in a GitHub Environment with required
   reviewers, and must never be reachable from a `pull_request` trigger.
-- **[convention]** no secret is ever `echo`ed; artifact uploads are limited to test logs and
-  `.xcresult` bundles, which contain only synthetic fixture data.
+- **[convention]** no secret is ever `echo`ed; artifact uploads are limited to test logs,
+  `.xcresult` bundles and the screenshot tour's pictures, which contain only synthetic fixture data
+  (the tour refuses to capture anything but a `--uitest` launch).
 
 ### 3.3 Remaining CI exposure, stated honestly
 

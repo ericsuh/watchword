@@ -43,14 +43,22 @@ mise run app:generate                                  # xcodegen; refuses an Xc
 mise run app:build [ios|macos]                         # both by default; --configuration Release
 mise run app:test [ios|macos]                          # both by default; --only-testing <id> (needs a platform), --results, --simulator
 mise run app:diagnose [TestResults]                    # print a failed run's summary, runner logs and crash reports
+mise run app:screenshots [ios|macos]                   # the screenshot tour: Screenshots/<set>/*.png, index and contact sheet; --appearance dark, --device ipad
 mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
-mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs
+mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs (app:screenshots too)
 ```
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and
 syncs over an in-memory transport with `UITestPeer`, a second session of the same account the test drives from a
 Debug-only Settings section (it unlocks with `WATCHWORD_UITEST_PASSWORD` from the launch environment).
+`ScreenshotTourTests` is the screenshot tour: one pass through every flow that attaches a picture of each major
+screen (`Screens.capture("name", in: app)`, numbered in capture order, the app's window on macOS and the screen on
+iOS). A new screen is one `Screens.capture` line where the tour reaches it; capture after a tap or keystroke, or after
+waiting for the element that proves the screen is complete, never after a sleep. `app:test` runs the tour as an
+ordinary end-to-end test; `app:screenshots` runs it alone and writes `Screenshots/<set>/<NN-name>.png`, `index.md`,
+`index.html` and a self-contained `Screenshots/watchword-screens-<set>.html`, failing on a missing or blank picture.
+`--uitest-dark` (Debug only, with `--uitest`) draws the app dark for the `--appearance dark` set.
 macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
 have it. Real Keychain round trips need a signed, entitled process, so `swift test` and CI skip them.
 `app:test-keychain` runs `SystemKeychainStoreTests` in the `WatchwordKeychainTests` bundle, hosted by a do-nothing
@@ -354,6 +362,14 @@ the `staging` environment, which holds that secret. Its controls are in
 `docs/07-supply-chain.md` §3.2. `issue_comment` runs the default branch's copy of the file; the other triggers run the
 PR's. Its action is the one third-party action, so it needs its own entry in the repository's allowed-actions list
 (`docs/08-repository-hardening.md` §1).
+`screenshots.yml` — captures the tour's screens for a PR and attaches them: on the `screenshots` label (and each push
+while it is on), on a head commit whose message contains `[screenshots]`, or on dispatch. `decide` (read-only, no
+checkout) chooses; `capture` runs the PR's code (`mise run app:screenshots`, read-only token, no secrets, one leg per
+platform) and uploads each set and an unzipped one-file contact sheet; `comment`, the only job with
+`pull-requests: write`, checks nothing out, validates the screen names and artifact ids it is handed, and creates or
+updates one sticky comment. It is not a required check, and there is deliberately no comment command
+(`docs/07-supply-chain.md` §3.2). Its two no-checkout jobs are inline `gh api`, the one place a mise task cannot go.
+The same capture is the `app:screenshots` gate of `mac-run.yml`.
 
 One check on every PR has **no workflow file**: `Analyze (swift)`, from CodeQL *default setup*,
 which GitHub configures in repository settings and runs on a generated workflow you cannot see in
@@ -376,7 +392,9 @@ Supply-chain rules that apply to edits in `.github/`:
 - **Pin actions to full commit SHAs**, never tags; add the `# v4`-style comment and the mapping in the
   header block. The nightly audit fails the build otherwise.
 - Keep `permissions: contents: read` at workflow and job level, `persist-credentials: false` on every
-  checkout, and the trigger as `pull_request` — never `pull_request_target`.
+  checkout, and the trigger as `pull_request` — never `pull_request_target`. The two jobs with more
+  (`pull-requests: write` in `claude-pr.yml` and in `screenshots.yml`'s `comment`) check out and run nothing from
+  the pull request; a job that runs the pull request's code never holds a write token.
 - Xcode selection goes through `.github/scripts/select-xcode.sh`, not a third-party action.
 - Build tools reach CI only through mise with `MISE_LOCKED=1`, so every tool needs a `mise.lock` entry
   (URL and SHA-256). Bump a tool by editing `mise.toml` and running
