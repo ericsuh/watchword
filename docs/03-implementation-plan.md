@@ -252,3 +252,6 @@ half delivered** on a Mac; the transports are open.
   test and must be reviewed by a second person.
 - No new third-party dependency without an ADR.
 - `docs/` is updated in the same pull request as the behaviour it describes.
+- A pull request that adds or changes a screen adds it to the screenshot tour (`04-test-plan.md` §5.1: one
+  `Screens.capture` line in `ScreenshotTourTests`) and carries the `screenshots` label, so its screens are captured
+  on both platforms and linked from the pull request for review by eye (`screenshots.yml`).

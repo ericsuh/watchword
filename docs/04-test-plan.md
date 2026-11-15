@@ -122,7 +122,9 @@ job, runs it with the other UI tests, and a flow that breaks fails it there.
 - **The picture.** On macOS it is the app's window, not the screen, so nothing else on the machine is in it; on
   iOS it is the whole screen, so the keyboard and system dialogs are. Attachments are kept whether or not the test
   passes (`XCTAttachment.lifetime = .keepAlways`), and the tour ends by attaching `screens-index`, the list of what
-  it captured. Two things a reader of the pictures should expect: iOS leaves the keyboard out of a capture while a
+  it captured. A capture of a rotated device (the iPad set) is redrawn before it is attached, because the screen's
+  pixels arrive in portrait with the rotation as metadata a PNG does not keep. Two things a reader of the pictures
+  should expect: iOS leaves the keyboard out of a capture while a
   password field has the focus, so `onboarding` and `locked` show an empty band where it is on a device; and where
   the list and the item share the window (macOS, an iPad in landscape) `item-list-conflict` and
   `conflict-resolution` are the same picture, because the conflicted item is already selected.

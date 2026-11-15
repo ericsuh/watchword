@@ -48,6 +48,7 @@ the command in its step name.
 mise trust && mise install      # once per checkout
 mise run check                  # lint, supply-chain audits, package and adversarial tests
 mise run app:test               # iOS and macOS app suites (generates the Xcode project first)
+mise run app:screenshots        # a picture of every major screen, into Screenshots/ with a contact sheet
 mise tasks                      # everything else; `mise run <task> --help` for flags
 ```
 

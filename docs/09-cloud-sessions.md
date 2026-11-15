@@ -291,6 +291,11 @@ wrote. It is how a session without a Mac checks a screen it added to the tour, a
    it, a cloud session can verify a capture only from the log (step 3), and should say so: the pictures themselves
    are then checked by whoever opens the artifact or the pull request's screenshot comment in a browser.
 
+`screenshots.yml` can be dispatched the same way, and then also rewrites the pull request's screenshot comment:
+`gh workflow run screenshots.yml --ref <branch> -f pull_request=<number>`, with `-f appearance=dark` or
+`-f device=ipad` for the other sets. The pull request's head must be the dispatched commit. (GitHub accepted that
+dispatch before the file was on `main`, because the workflow had already run once for the pull request.)
+
 A capture is mostly the build and, on iOS, the simulator's first boot on a fresh runner; the tour itself runs for
 about a minute and a half. Measured on `xcode-27`: three to four minutes for the macOS job, nine to twelve for the
 iOS simulator job.
