@@ -335,8 +335,27 @@ observable from the extension). Milestone 2 enforces F11.2 at the vault boundary
 
 ### 6.8 Fuzzing (nightly)
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
-  `otpauth://` parser, and `HostMatcher.normalize`. None exists yet; the envelope decoder
-  (`Envelope.parse`) is the first candidate now that it is complete.
+  `otpauth://` parser, and `HostMatcher.normalize`.
+
+Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`, with thirteen targets
+selected by `WATCHWORD_FUZZ_TARGET`: `csv`, `password-csv`, `inflate`, `zip`, `1pux`, `1pux-archive`, `cxf`,
+`envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the import's
+scope derivation), `otpauth` and `passkey`. Each target runs a parser over arbitrary bytes and then checks
+what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports, an inflated
+stream is within its caps, every imported scope passes `ScopePolicy`, every one-time-password and passkey
+field decodes, an accepted envelope serialises to its own bytes); a broken invariant traps, which is a
+finding. `mise run fuzz` builds it with `-sanitize=fuzzer`, splits its time budget between the targets,
+reads the committed seeds in `Fuzz/Corpus/<target>` and writes findings to `artifacts/`. Built without the
+sanitiser the same executable replays inputs (`WatchwordFuzz replay <target> <file>`), which reproduces a
+finding on any toolchain, and mutates a corpus blindly; the task falls back to that, with a warning, where
+the toolchain has no libFuzzer runtime (`--require` fails instead). Item payloads are JSON decoded by
+Foundation after authentication (§5), so there is no CBOR item decoder to fuzz; the canonical CBOR encoder
+has no decoder at all.
+
+The harness is a package of its own so that the shipped manifest does not know it exists; the dependency
+and unsafe-confinement tripwires cover it (`07-supply-chain.md` §2). The first run found one defect, fixed
+with a regression test and a seed: the CSV writer wrote a first cell beginning with U+FEFF bare, and the
+reader then took it for a byte-order mark.
 
 ## 7. CI implementation
 

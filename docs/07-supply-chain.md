@@ -42,6 +42,18 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
   hand-bound foreign symbols (`@_silgen_name`, `@_cdecl`, `@_extern`) anywhere, and on symlinks or
   non-Swift files under `Sources/`. It is a tripwire for a malicious or careless contribution
   (milestone-1 review finding R1), with review as the backstop.
+- **[enforced]** The libFuzzer harness is a package of its own, `Fuzz/`, which depends on this repository by
+  path; the root `Package.swift` does not mention it, so nothing in it can be linked into an app. libFuzzer
+  calls a C function with a pointer and a length, which is the one thing outside `SecureMemory` that must name
+  a pointer type; keeping it outside the shipped package keeps "no unsafe code outside `SecureMemory`" true of
+  everything that ships. Both scripts cover the harness: `assert-no-dependencies.sh` fails if the root manifest
+  refers to `Fuzz/`, if `Fuzz/Package.swift` has any dependency but the repository itself, any product but the
+  `WatchwordFuzz` executable, a custom target path, a binary target, a plugin or `unsafeFlags`, or if
+  `Fuzz/Package.resolved` pins anything but the commits the root's does; `assert-unsafe-confined.sh` fails on
+  non-Swift files under `Fuzz/Sources`, on unsafe constructs or underscored attributes anywhere in `Fuzz/` but
+  `LibFuzzerEntry.swift`, and on any attribute there but `@_cdecl("LLVMFuzzerTestOneInput")`. The harness is
+  built with `-sanitize=fuzzer` from the command line (`mise run fuzz`), never from a manifest. Its seed
+  corpus (`Fuzz/Corpus/`) is data that only the fuzzer reads.
 - **[convention]** Any new dependency requires an ADR covering: why no first-party API suffices,
   the maintenance and audit story, and the pin-and-vendor plan. ADR 0001 already forbids
   third-party cryptography outright.

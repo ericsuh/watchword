@@ -767,6 +767,9 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
                                 scenario builders as the ports arrive
 Apps/ (Xcode project generated with XcodeGen from project.yml)
   Watchword (iOS/iPadOS), Watchword (macOS), AutoFillExtension (iOS), AutoFillExtension (macOS)
+Fuzz/ (a package of its own, depending on this one by path; nothing in it reaches an app)
+  Sources/WatchwordFuzz         libFuzzer targets for the parsers that read hostile bytes   [milestone 7]
+  Corpus/<target>               committed seed inputs
 ```
 
 Ports (protocols) injected into the core: `KeychainStore`, `BiometricGate`, `RandomSource`,

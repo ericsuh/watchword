@@ -27,7 +27,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
 | 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
 | 6 — hygiene | HIBP client, scheduling, strength estimator, reuse/age/2FA checks | the Watchtower-style report UI and its snapshot tests |
-| 7 — interchange (parsers and exporters done) | Parsers and adversarial parser tests, done; the fuzz targets — a better host for them | open: Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive, the session wiring and the screens |
+| 7 — interchange (parsers, exporters and fuzz targets done) | Parsers, adversarial parser tests, and the fuzz targets — a better host for them; done | open: Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive, the session wiring and the screens |
 | 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
 
 Four rules this split implies, all of which outlive the milestones they came from:
@@ -225,7 +225,7 @@ half delivered** on a Mac; the transports are open.
   `#if canImport` where URLSession needs it on Linux. Only the report UI and its snapshot tests need
   a Mac.
 
-## Milestone 7 — Interchange (parsers and exporters done)
+## Milestone 7 — Interchange (parsers, exporters and fuzz targets done)
 
 - `WatchwordInterchange`: 1PUX, 1Password CSV, Apple CSV, CXF import/export; Credential Exchange
   integration on iOS 26/macOS 26; encrypted Watchword archive; in-app instructions.
@@ -242,15 +242,18 @@ half delivered** on a Mac; the transports are open.
   and 1PUX-compatible export; CXF 1.0 import and export; the mapping into item drafts (injected identifiers,
   scopes only through the normaliser and the policy, one-time passwords through `OTPParameters`, passkeys
   through `PasskeyCredential`) with its report; duplicate detection; the instructions as data. Tests: fixtures
-  and round trips for each format, DEFLATE vectors from Python's `zlib`, archives from Python's `zipfile`, and the
-  `import parsers` adversarial area.
+  and round trips for each format, DEFLATE vectors from Python's `zlib`, archives from Python's `zipfile`, the
+  `import parsers` adversarial area, and the `Fuzz/` package with thirteen libFuzzer targets and a seed
+  corpus, run by `mise run fuzz` and the nightly workflow.
 - Open, all of it integration and most of it Mac-only: the session wiring (password re-entry before a
   plaintext export, `completeUnlessOpen` file protection, the standing warning, an import path through
   `VaultSession` that keeps imported history and timestamps); the encrypted Watchword archive; the OS
   Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
   and their XCUITests. Before shipping: a check of the CXF and 1PUX field names against the published
   formats and real exports from 1Password and Apple Passwords (the specifications were unreachable from the
-  session that wrote the parsers), and of the 1PUX export against 1Password's importer. The fuzz targets.
+  session that wrote the parsers), and of the 1PUX export against 1Password's importer. The nightly `fuzz`
+  job runs on the macOS runner, whose toolchain may lack the libFuzzer runtime; the task then replays the
+  seeds and mutates them blindly and says so, and a Linux leg is the way to get real fuzzing there.
 
 ## Milestone 8 — Hardening and release
 

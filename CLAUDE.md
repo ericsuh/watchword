@@ -32,7 +32,7 @@ mise run test --filter WatchwordMatchingTests.ItemRankerTests   # one XCTest cla
 mise run test --coverage                               # also writes an llvm-cov report to coverage.txt
 mise run test:adversarial                              # security suite only (its own CI job)
 mise run test:long --seed 1234                         # the nightly long randomised run; replay a nightly's seed
-mise run fuzz --max-total-time 60                      # libFuzzer harness (skips until Fuzz/ exists)
+mise run fuzz --max-total-time 60                      # libFuzzer over every target in Fuzz/ (--target <name>, --list)
 
 mise run lint                                          # swift format lint --strict (alias fmt:check)
 mise run fmt                                           # swift format --in-place
@@ -181,9 +181,13 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - Invalid UTF-8 is refused, never repaired. Cells and fields are data on import; only CSV *export* neutralises
   formulas.
 - Searches over an entry's fields, URLs or sections use sets or dictionaries: a file can make any list long, and the
-  adversarial suite assumes linear work.
+  fuzz and adversarial suites assume linear work.
 - Exporters return plaintext bytes and a report and do nothing else. Password re-entry, file protection and the OS
   Credential Exchange calls belong to the session and the apps.
+- The fuzz harness is its own package (`Fuzz/`, built only by `mise run fuzz`) so the shipped manifest never mentions
+  it; libFuzzer's entry point in `Fuzz/Sources/WatchwordFuzz/LibFuzzerEntry.swift` is the one pointer outside
+  `SecureMemory`, and both tripwires hold it there. A new parser of hostile bytes gets a target in `FuzzTarget` and a
+  seed in `Fuzz/Corpus/<target>/`.
 
 ### `SyncEngine` invariants
 
@@ -371,7 +375,7 @@ fails unless every other job succeeded and is the one check branch protection na
 runner bump never strands `main` waiting on a check that no longer reports. Everything Xcode-, AppKit- or
 screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is
 `mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
-runs, libFuzzer harnesses under `Fuzz/` (self-skipping), and an audit that every `uses:` is a 40-hex
+runs, the libFuzzer harness in `Fuzz/` (`mise run fuzz`), and an audit that every `uses:` is a 40-hex
 commit SHA. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS runner (`mise run ci:gate`), so a cloud
 session can run Mac-only gates before opening a pull request; it gates nothing. A dispatch runs the workflow and
 `ci:gate` as they are on that branch (one cut before mac-run.yml merged needs a rebase first), so `ci:gate`'s refusals

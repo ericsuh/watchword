@@ -114,7 +114,7 @@ else
         run "strict memory safety" swift build -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors
         if [ "$has_swift_format" -eq 1 ]; then
             run "lint" swift format lint --strict --recursive --configuration .swift-format \
-                Package.swift Sources Tests Apps
+                Package.swift Sources Tests Apps Fuzz/Package.swift Fuzz/Sources
         else
             skip "lint" "swift format is unavailable in this toolchain; let the GitHub Actions lint job cover it."
         fi

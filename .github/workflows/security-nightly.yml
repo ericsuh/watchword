@@ -44,9 +44,10 @@ jobs:
         run: mise run test:long --seed "$SEED"
 
   fuzz:
-    # libFuzzer harnesses for parsers and the envelope decoder (docs/04-test-plan.md §6.8).
-    # Each executable target under Fuzz/ is built with -sanitize=fuzzer and run for a bounded
-    # time. Skips cleanly until the first harness exists.
+    # libFuzzer harnesses for the import parsers, the envelope and sync-object decoders and the
+    # host, otpauth and passkey parsers (docs/04-test-plan.md §6.8). The Fuzz/ package is built
+    # with -sanitize=fuzzer and each target run for its share of the time. Where the toolchain
+    # has no libFuzzer runtime the task says so and replays and mutates the seed corpus instead.
     name: Fuzz parsers
     runs-on: xcode-27
     timeout-minutes: 90
