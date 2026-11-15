@@ -92,6 +92,7 @@ let package = Package(
         .testTarget(name: "WatchwordMatchingTests", dependencies: ["WatchwordMatching", "WatchwordModel"]),
 
         // Swift Testing suites.
+        .testTarget(name: "WatchwordModelTests", dependencies: ["WatchwordModel"]),
         .testTarget(name: "WatchwordGeneratorTests", dependencies: ["WatchwordGenerator", "WatchwordTestSupport"]),
         .testTarget(name: "WatchwordEnvelopeTests", dependencies: ["WatchwordEnvelope", "WatchwordTestSupport"]),
         .testTarget(name: "SecureMemoryTests", dependencies: ["SecureMemory", "WatchwordTestSupport", crypto]),
