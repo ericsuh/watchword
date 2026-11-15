@@ -24,6 +24,16 @@ extension PlatformLifecycle {
 /// clipboard copy on the way out, since the 60-second clear runs in this process (F5.6).
 @MainActor
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
+    #if DEBUG
+        /// The screenshot tour's dark pass (`AppEnvironment.uiTestForcesDarkAppearance`). The application's appearance,
+        /// rather than one window's, so sheets and dialogs are dark too.
+        func applicationWillFinishLaunching(_ notification: Notification) {
+            if AppEnvironment.uiTestForcesDarkAppearance() {
+                NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+            }
+        }
+    #endif
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

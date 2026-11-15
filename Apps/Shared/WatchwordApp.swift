@@ -12,6 +12,9 @@ struct WatchwordApp: App {
             RootView()
                 .environment(model)
                 .task { await model.start() }
+                #if DEBUG
+                    .preferredColorScheme(AppEnvironment.uiTestForcesDarkAppearance() ? .dark : nil)
+                #endif
         }
         #if os(macOS)
             .defaultSize(width: 820, height: 560)

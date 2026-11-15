@@ -31,6 +31,15 @@ enum AppEnvironment {
         return "\(version) (\(build))"
     }
 
+    #if DEBUG
+        /// A UI-test launch with `--uitest-dark` draws the app in the dark appearance whatever the system's is, so the
+        /// screenshot tour can capture a dark set without changing a setting on the machine (docs/04-test-plan.md §5).
+        /// Like `--uitest` itself, the switch does not exist in Release builds, and it changes nothing but colours.
+        static func uiTestForcesDarkAppearance(arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+            arguments.contains("--uitest") && arguments.contains("--uitest-dark")
+        }
+    #endif
+
     static func make(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         #if DEBUG
             if arguments.contains("--uitest") {
