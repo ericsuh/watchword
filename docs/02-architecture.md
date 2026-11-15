@@ -651,8 +651,9 @@ Hygiene is the one feature that talks to a third party, so it adds two positions
 ### 13.2 Pwned Passwords (F9.1)
 
 `PasswordDigest` is SHA-1 of the password's UTF-8 bytes as typed, split into `PwnedRangePrefix` (twenty
-bits, held as a number, so the type cannot carry more of the hash) and the other 35 hexadecimal characters,
-packed into 18 bytes of `SecureBytes`. It is not `Codable`, `Hashable` or printable. Item fields are Swift
+bits, held as a number, so the type cannot carry more of the hash; it prints as redacted, and `hex` is the
+accessor the request path is built from) and the other 35 hexadecimal characters, packed into 18 bytes of
+`SecureBytes`. It is not `Codable`, `Hashable` or printable. Item fields are Swift
 `String`s (PRD SEC4), so `init(utf8Of:)` takes one; the copy fed to the hash is in `SecureBytes` and wiped,
 and `init(password:)` takes `SecureBytes` for callers that have it.
 
@@ -679,10 +680,14 @@ retryable, and everything else (other statuses, oversized or malformed bodies) i
 given, ignores an entry dated in the future or filed under the wrong prefix, and stores only parsed 200
 responses. `InMemoryPwnedRangeCache` (512 prefixes, 32 MiB, oldest out) is the default. The ranges are
 public data, but *which prefixes a device holds* is not: each is twenty bits of the SHA-1 of one of the
-person's passwords, enough to discard all but one in a million guesses offline. A persisting implementation
-must therefore seal what it writes under a key that is gone when the vault locks, read and write nothing
-while locked, and keep it on the device; `CachedPwnedRange.encoded()` is the plaintext to seal (ADR 0005,
-amendment). This replaces the earlier plan of a plaintext `hibp_cache` table.
+person's passwords, enough to discard all but one in a million guesses offline. So the set does not outlive
+the keys, in memory or at rest: `HygieneEngine.lock()` calls the port's `lock()`, after which no prefix may
+be readable without the vault's keys. The in-memory cache empties itself. A persisting implementation must
+seal what it writes under a key that is gone when the vault locks, drop its plaintext copies at `lock()`,
+read and write nothing while locked, and keep it on the device; `CachedPwnedRange.encoded()` is the
+plaintext to seal (ADR 0005, amendment). The client asks "still unlocked?" both before storing a range and
+after, and removes the entry if the answer has changed, so a lock that lands while an entry is on its way
+into the cache still wins. This replaces the earlier plan of a plaintext `hibp_cache` table.
 
 ### 13.3 Scheduling (F9.2, ADR 0005)
 
@@ -692,17 +697,30 @@ It owns no timer, thread or clock.
 
 - An item with no ledger entry (`created`) or an entry for another version (`changed`) is due at once and
   first. That one rule covers creation, edit, and "changed since the last scan" after an unlock.
-- A weekly pass begins when the previous one *began* at least seven days ago. An item is due in a pass until
-  it has been scanned since the pass began; the pass's checks pass `freshAfter` to the client, so the pass
-  really asks again, once per prefix. A pass a lock interrupts is still in progress in the ledger
-  (`fullScanCompletedAt == nil`), so the next unlock resumes it.
+- A weekly pass begins when the previous one *began* at least seven days ago, whether or not that one
+  finished. An item is due in a pass until it has been scanned since the pass began; the pass's checks pass
+  `freshAfter` to the client, so the pass really asks again, once per prefix. A pass a lock interrupts is
+  still in progress in the ledger (`fullScanCompletedAt == nil`), so the next unlock resumes it. A pass that
+  cannot finish, because one item's range keeps failing, is still in progress a week later and the next one
+  begins all the same; it is never called complete while an item in it is unchecked.
 - With `keysResident` false the answer is `.locked` and the ledger is untouched.
 - Rate: a token bucket (five requests at once, then one per two seconds; every request is paid for, so an
   item with several passwords buys a proportionate wait), plus up to three seconds of injected jitter in the
   weekly pass. Any failure backs every request off, doubling from one minute to one hour and never less than
-  `Retry-After`; an item whose range cannot be used is also set aside (ten minutes, doubling to a day) so it
-  does not block the rest. Checks answered from the cache cost nothing. Times that are ahead of the clock
-  (a clock put back) are treated as wrong, not waited for.
+  `Retry-After`. Checks answered from the cache cost nothing.
+- The rate limit and the backoff are a value, `ScanPacing`, that **outlives a lock**: none of it is derived
+  from a password, and a phone locks and unlocks many times a day, so a scanner that forgot a `Retry-After`
+  or was handed a fresh burst at each unlock would hammer the API exactly when asked not to. The engine keeps
+  it across `lock()` and `unlock()`; it is not persisted, so a new process starts with a full burst.
+- No item blocks the rest. An item whose check failed goes to the back of the queue, behind every item that
+  has not failed and those that failed longer ago, so the backoff paces requests but the next one is for a
+  different item; otherwise whoever controls the path could stop the whole vault being checked by refusing
+  one range. An item whose range cannot be used at all (too large, malformed, an unexpected status) is also
+  set aside for a time of its own (ten minutes, doubling to a day), and a wait for such an item never sleeps
+  past the start of the next pass.
+- Times ahead of the clock (a clock put back) are treated as wrong, not waited for. A pass in progress whose
+  start is ahead of the clock by any amount is taken to have begun now: left in the future, every scan would
+  predate the pass and every item would be due again the moment it was scanned.
 
 `ScanLedger` records, per item, the version scanned, when, and the result per password field, plus the pass
 times. It is `Codable` with explicit, bounded shapes, and it is **derived from passwords** (a breach count
@@ -793,20 +811,31 @@ key in `hibp-api-key`. Unlike the range API this sends an identifier, so it is o
 argument that names the address is an `IdentifierDisclosure`, made by
 `.confirmedByPerson(sending:)` at the UI action in which the person asks, and nothing in the module makes
 one or looks an address up on a schedule. `EmailAddress` and `HIBPAPIKey` refuse anything that could add a
-header or change the path (the address is one percent-encoded segment); the key prints as redacted and an
-`HTTPRequest` prints its host and header names only. The response is bounded (2 MiB, 2,000 breaches) and
-reduced to plain text: control and bidirectional-formatting characters are removed, and the service's HTML
-description and logo URL are not carried. Nothing is cached or stored.
+header or change the path (the address is one percent-encoded segment). The key, the address, the
+disclosure, a URL (its path is the address, or twenty bits of a hash) and a request's headers all print as
+redacted or as names only; `HTTPSURL.absoluteString` and `HTTPHeaders.fields` are the two accessors an
+adapter sends from, and the two to search for. The response is bounded (2 MiB, 2,000 breaches, 64 data
+classes each) and the bounds apply *while reading*: the array is read one entry at a time and entry 2,001
+ends the read, so a body of 160,000 minimal objects is refused without decoding them. It is reduced to
+plain text: control and bidirectional-formatting characters are removed, and the service's HTML description
+and logo URL are not carried. Nothing is cached or stored.
 
 ### 13.7 The report and the engine
 
 `HygieneReport.make(analyses:ledger:now:policy:)` is pure. Per item it gives findings (kind, severity, field,
 a summary, a plain-language explanation, and the facts behind it for a UI that words things itself), badges
 (one per kind at `low` or above), and a breach status (`notApplicable`, `notChecked`, `clear`, `breached`,
-with the check time); and vault-wide totals, including how many items await a check and the oldest check,
-so stale results are visible (ADR 0005). Order is fixed: items worst first, then by lower-cased title bytes,
-then ID; findings by severity, kind, field. A breach result counts only for the item version it was made
-for. The report holds titles, so it is as private as the vault; it holds no password, hash or token.
+`incomplete`, with the check time); and vault-wide totals, including how many items await a check and the
+oldest check, so stale results are visible (ADR 0005). Order is fixed: items worst first, then by
+lower-cased title bytes, then ID; findings by severity, kind, field. A breach result counts only for the
+item version it was made for. The report holds titles, so it is as private as the vault; it holds no
+password, hash or token.
+
+`clear` is a statement about every password in the item, and it is not made on less. An item with more
+passwords than are analysed in one item (16) is `incomplete` once the sixteen are checked, with a finding
+that says how many were not looked at. Field IDs are whatever the item says and nothing makes them distinct,
+so two password fields that share an ID share one result, the worse of the two: a breached password cannot
+be overwritten by the clean one that follows it.
 
 | Finding | Severity |
 | --- | --- |
@@ -816,22 +845,37 @@ for. The report holds titles, so it is as private as the vault; it holds no pass
 | Two-step verification available, none set up (directory) | medium |
 | Unencrypted web address | low |
 | Passkey available, none set up (directory) | low |
+| More passwords than are checked in one item | low |
 | Password only | info |
 | Old password | info |
 
 `HygieneEngine` is the actor the session drives between unlock and lock: `unlock(reuseKey:ledger:items:now:)`,
 `update`/`remove` as items change, `next(now:)` and `scan(_:now:)` in a loop, `report(now:)`, `ledger()` to
-persist, `lock()`. It keeps an `ItemAnalysis` per item (strength, token, flags; never the password) and
-reads passwords only from the item handed to `scan`. Its invariants:
+persist, `lock()`. It keeps an `ItemAnalysis` per item (strength, token, flags; never the password; it prints
+as an ID and counts) and reads passwords only from the item handed to `scan`. Its invariants:
 
 - Everything derived from a password lives in one optional that `lock()` clears after zeroising the reuse
-  key. Every entry point that hashes checks it first; while locked `scan` returns `.locked`, and `update`,
-  `report`, `ledger` and `items(using:)` throw.
-- A scan re-checks the lock epoch after every suspension, and the client asks again before storing: a lock
-  that lands while a request is in flight wins. The response is dropped, nothing is cached, the ledger is
-  untouched, and a scan from before a lock cannot write into the session after it.
+  key, and `lock()` then has the prefix cache forget what it holds (§13.2). Every entry point that hashes
+  checks the optional first; while locked `scan` returns `.locked`, and `update`, `report`, `ledger` and
+  `items(using:)` throw. What survives a lock is `ScanPacing` and nothing else (§13.3).
+- A scan re-checks the lock epoch after every suspension, and the client asks again before storing and
+  after: a lock that lands while a request, or a cache write, is in flight wins. The response is dropped,
+  nothing stays cached, the ledger is untouched, and a scan from before a lock cannot write into the session
+  after it.
+- **`lock()` never waits long.** An actor runs one call at a time. `unlock` is `async`: it analyses one item,
+  suspends, and stops as soon as it finds the vault locked or its task cancelled (a cancelled unlock leaves
+  the engine locked). Until it returns, `next` answers `.wait(…, .analysing)`, `scan` answers `.busy` and
+  `report` throws `.analysing`, because deciding or reporting on part of a vault would call it cleaner than
+  it is; `update` and `remove` work, and what they say about an item outranks unlock's older copy of it.
+  Every other call does a bounded amount of work on one item.
+- **Stale copies are refused.** The session fetches an item and then calls `update` or `scan`, and the actor
+  is re-entrant, so a save can land in between. The engine remembers the highest version of each item it has
+  been shown; an older copy, or a copy from before the item was trashed or deleted, changes nothing
+  (`update` returns `false`, `scan` returns `.stale`), and a scan whose item was saved while its ranges were
+  being fetched records nothing. So a stale copy can neither replace a newer analysis nor mark a newer
+  password as checked.
 - One scan at a time; a check requested by a save obeys the same rate limit and backoff as the loop.
-- At most 16 passwords per item are analysed and checked.
+- At most 16 passwords per item are analysed and checked, and the report says when there were more.
 
 ### 13.8 Still to come, and how it plugs in
 
@@ -839,9 +883,12 @@ reads passwords only from the item handed to `scan`. Its invariants:
   refused, the response cut off at `maximumResponseBytes` of decoded body, a timeout, nothing logged (the
   port's documentation is the contract).
 - **Session wiring** in `VaultSession`: derive the reuse key from `Ksym` with its own HKDF label; on unlock,
-  unseal the ledger record and call `unlock` with the decrypted items; on save, `update` then `scan`; on
-  lock, `lock()` (before the keyset is zeroised); seal and store `ledger()` after scans; back
-  `PwnedRangeCache` with sealed local records.
+  unseal the ledger record and call `unlock` with the decrypted items, in a task of its own at no higher
+  priority than the one that locks; on save, `update` then `scan`, refetching on `.stale`; seal and store
+  `ledger()` after scans; back `PwnedRangeCache` with sealed local records. **On lock the session zeroises
+  the keyset first** and does not wait for this actor to do it: it cancels the unlock task if one is running,
+  then calls `lock()`, which returns after at most one item's analysis. The reuse key is the engine's own
+  copy, so nothing here can keep the vault's keys resident.
 - **Background glue**: `BGProcessingTask` (iOS) and `NSBackgroundActivityScheduler` (macOS) only wake the
   loop; whether anything runs is `next(now:)`'s decision, so a wake while locked does nothing.
 - **The report UI** and its snapshot tests, and the settings for the site directory and the API key.

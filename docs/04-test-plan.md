@@ -269,27 +269,49 @@ a real adapter would have been asked to send:
   breached-account API; an API key, address or version string cannot inject a header, a path or a host. A 200
   that cannot be read (empty, HTML, JSON, 60,000 lines) is never "not breached"; a listed suffix is found
   wherever it is in the range and a near miss is not; `Retry-After` of zero, a negative number or 10^12 neither
-  spins the scanner nor stops it.
+  spins the scanner nor stops it. An hour of locking and unlocking every minute after a 429 with
+  `Retry-After: 3600` sends nothing more, and a lock does not buy a new burst; refusing one range (503, or a
+  dropped connection, every time) does not stop the other items being checked, and the refused range is retried
+  at the backoff's pace; a breached-account response of 160,000 tiny breaches is refused at entry 2,001, without
+  decoding what follows.
 - *Readers of the device at rest (A2, A3, A8).* With keys absent the schedule answers `.locked` for any ledger and
   items and does not touch the ledger; the engine refuses every entry point that hashes or hands out derived
   data, touches neither network nor cache, and has zeroised the reuse key; a lock while a request is in flight
   drops the response (nothing cached, ledger untouched), including when the vault is unlocked again before the
   response arrives; the ledger's encoding holds no hash, prefix or token, and the types that do hold
-  password-derived material are not `Encodable`; digests, tokens, keys and the API key print as redacted; a
-  planted cache entry that is misfiled, post-dated or stale is not believed.
+  password-derived material are not `Encodable`; digests, tokens, keys and the API key print as redacted, and so
+  do strength estimates (the rank of a common password names it), analyses, range prefixes, cached ranges,
+  ledgers, the email address, URLs and header values; a planted cache entry that is misfiled, post-dated or
+  stale is not believed. After a lock the default prefix cache holds no prefix, including when the lock lands
+  while a range is on its way into the cache. A lock during `unlock` completes after one item's analysis, not
+  the vault's (asserted with a gate between items, three items into five hundred), and a cancelled unlock
+  leaves the engine locked with the reuse key zeroised.
 - *A malicious household member (A4).* Two thousand new items produce at most the burst and then one request per
   spacing, and a save cannot bypass the limit; one item with 3,000 password fields, megabyte passwords and a
-  megabyte title costs sixteen checks and is paid for at the usual rate; text from the breached-account API is
-  stripped of control and bidirectional characters and never carries the service's HTML.
+  megabyte title costs sixteen checks and is paid for at the usual rate, and is reported `incomplete`, never
+  clear; a breached password cannot hide behind a duplicate field ID or beyond the per-item cap; a stale copy
+  of an item cannot mark its newer, breached password as checked; a password of combining marks and look-alike
+  digits costs no more dictionary work (counted in table steps) and no more than ten times the time of a
+  password of words, measured against it in the same run; text from the breached-account API is stripped of
+  control and bidirectional characters and never carries the service's HTML.
 
 The functional suites (`WatchwordHygieneTests`) cover: SHA-1 prefix and suffix and the reuse HMAC against
 vectors from Python's `hashlib`/`hmac`; the parser on padded, unpadded, malformed, oversized and
 line-limit responses; cache expiry, `freshAfter`, the cache codec and its damage cases; every status class;
 the schedule's table (create, edit, changed since last scan, weekly, resume after a lock, pacing, jitter,
-backoff, per-item retry, clock rollback) with `FakeClock`; the estimator on known-weak and known-strong
-passwords, generated passwords and passphrases, each pattern's explanation, the embedded lists' counts and
-uniqueness, and bounded time on hostile input; reuse, age, `http` addresses, the site directory; the report's
-severities, ordering, determinism and totals; and the engine end to end.
+backoff, per-item retry, clock rollback, a failing item going to the back of the queue, a pass that cannot
+finish not blocking the next, a pass start slightly ahead of the clock, pacing handed on across a lock) with
+`FakeClock`; the estimator on known-weak and known-strong passwords (including a word, a year and a symbol,
+and keyboard columns and zigzags, none of which may score strong), generated passwords and passphrases, each
+pattern's explanation, the embedded lists' counts and uniqueness, the word table, and bounded time and
+bounded dictionary steps on hostile input; reuse, age, `http` addresses, the site directory; the report's
+severities, ordering, determinism and totals, and `incomplete`; the breached-account parser's leniency and
+its bounds; and the engine end to end, including stale copies, a save during a scan, a copy from before a
+trash or deletion, an unlock still analysing, and a second unlock superseding the first.
+
+The regression tests added after the first review of this module for the scheduling, locking, staleness,
+report, parser and rating faults were each checked by putting the fault back and seeing the test fail; the
+estimator's cost was measured before and after with the same inputs (`02-architecture.md` §13.4).
 
 Not covered, and why: no test calls the live service, and the fixtures are written to its documented format,
 not captured from it (it is not reachable from a cloud session); a capture on a Mac is open in milestone 6.

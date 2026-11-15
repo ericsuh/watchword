@@ -5,13 +5,16 @@ import WatchwordModel
 public enum HygieneEngineError: Error, Equatable, Sendable {
     /// Keys are not resident: nothing may be hashed, analysed or handed out.
     case locked
+    /// `unlock` is still analysing the items it was given, so a report now would be of part of the vault.
+    case analysing
 }
 
 /// What one call to `HygieneEngine.scan` did.
 public enum ScanOutcome: Hashable, Sendable {
     /// Keys are not resident. Nothing was hashed and nothing was sent.
     case locked
-    /// Another scan is in flight; this engine runs one at a time.
+    /// Another scan is in flight, or `unlock` is still analysing; this engine does one thing at a time. The item
+    /// stays due, and `next(now:)` will name it.
     case busy
     /// The item has no password, or is in the trash.
     case nothingToCheck
@@ -23,6 +26,10 @@ public enum ScanOutcome: Hashable, Sendable {
     case failed(PwnedPasswordsError)
     /// The vault locked while the scan was in flight. The response, if any, was dropped: nothing was stored.
     case interrupted
+    /// The copy handed in is not the item as the engine knows it: an older version than one it has analysed, or a
+    /// copy from before the item was trashed or deleted, or the item was saved again while its ranges were being
+    /// fetched. Nothing was recorded for it. Fetch the item again and ask `next(now:)`.
+    case stale
 }
 
 /// The part of hygiene that has state: what the session drives between unlock and lock (PRD F9.1 to F9.3,
@@ -34,10 +41,27 @@ public enum ScanOutcome: Hashable, Sendable {
 /// calls `lock()` when the vault locks.
 ///
 /// **Only while keys are resident.** Everything derived from a password (analyses, reuse tokens, the ledger, the
-/// report) lives in one optional that `lock()` sets to `nil` after zeroising the reuse key. Every entry point that
-/// hashes checks that optional first, and a scan re-checks it after every suspension, so a lock that lands while a
-/// request is in flight wins: the response is discarded, nothing is cached and the ledger is untouched. Passwords
-/// themselves are never kept: `scan` reads them from the item it is handed and drops them when it returns.
+/// report) lives in one optional that `lock()` sets to `nil` after zeroising the reuse key, and `lock()` then tells
+/// the prefix cache to forget what it holds in memory: which prefixes were asked for is twenty bits of each
+/// password's hash (ADR 0005, amendment). Every entry point that hashes checks that optional first, and a scan
+/// re-checks it after every suspension, so a lock that lands while a request is in flight wins: the response is
+/// discarded, nothing is cached and the ledger is untouched. Passwords themselves are never kept: `scan` reads them
+/// from the item it is handed and drops them when it returns.
+///
+/// **`lock()` never waits long.** An actor runs one call at a time, so `lock()` waits for whatever call is running
+/// to reach a suspension. `unlock` analyses one item and then suspends, every item, and stops as soon as it finds
+/// the vault locked or its task cancelled; every other call does a bounded amount of work on one item (at most
+/// sixteen passwords of at most 64 analysed characters). Even so, the session must not make its own lock wait for
+/// this actor: it zeroises the keyset first and calls `lock()` after, so that nothing here can keep the vault's
+/// keys resident.
+///
+/// **Stale copies are refused.** The session fetches an item and then calls `update` or `scan`, and the actor is
+/// re-entrant, so a save of the same item can land in between. The engine remembers the highest version of each
+/// item it has been shown; an older copy changes nothing (`update` returns `false`, `scan` returns `.stale`), so it
+/// can neither replace a newer analysis nor mark a newer password as checked.
+///
+/// What survives a lock is `ScanPacing` and nothing else: the rate limit and the server's `Retry-After` are not
+/// derived from a password, and forgetting them at every unlock would turn each unlock into a burst of requests.
 public actor HygieneEngine {
     private struct Resident {
         let reuseKey: ReuseKey
@@ -45,13 +69,29 @@ public actor HygieneEngine {
         var analyses: [UUID: ItemAnalysis] = [:]
         var reuse = ReuseIndex()
         var schedule: ScanSchedule
+        /// The highest version of each item seen since unlock, trashed and deleted items included.
+        var versions: [UUID: UInt64] = [:]
+        /// Items that were trashed or deleted at the version above: a copy of that version that is not trashed is
+        /// the item from before it went.
+        var gone: Set<UUID> = []
+        /// `unlock` has not finished analysing its items.
+        var loading = true
+    }
+
+    private enum Applied {
+        case analysed
+        case removed
+        case stale
     }
 
     private let client: PwnedPasswordsClient
     private let policy: HygienePolicy
     private let scanPolicy: ScanPolicy
+    private let checkpoint: @Sendable () async -> Void
     private var random: any RandomNumberGenerator
     private var resident: Resident?
+    /// The rate limit and backoff, kept across `lock()`; `nil` until the first lock.
+    private var pacing: ScanPacing?
     /// Incremented by every `lock()`. A scan compares it before and after each suspension.
     private var epoch: UInt64 = 0
     private var scanning = false
@@ -62,19 +102,39 @@ public actor HygieneEngine {
         client: PwnedPasswordsClient, policy: HygienePolicy = HygienePolicy(), scanPolicy: ScanPolicy = .standard,
         random: R = SystemRandomNumberGenerator()
     ) {
+        self.init(client: client, policy: policy, scanPolicy: scanPolicy, random: random) { await Task.yield() }
+    }
+
+    /// - Parameter checkpoint: what `unlock` awaits between items, so that other calls (`lock()` above all) can
+    ///   run. Production yields; a test passes a gate, to put a lock at a known item without sleeping.
+    init<R: RandomNumberGenerator & Sendable>(
+        client: PwnedPasswordsClient, policy: HygienePolicy, scanPolicy: ScanPolicy, random: R,
+        checkpoint: @escaping @Sendable () async -> Void
+    ) {
         self.client = client
         self.policy = policy
         self.scanPolicy = scanPolicy
         self.random = random
+        self.checkpoint = checkpoint
     }
 
     public var isUnlocked: Bool {
         resident != nil
     }
 
+    /// Whether `unlock` is still analysing the items it was given.
+    public var isAnalysing: Bool {
+        resident?.loading ?? false
+    }
+
     // MARK: Unlock and lock
 
-    /// Keys are now resident.
+    /// Keys are now resident. Returns once every item has been analysed.
+    ///
+    /// The engine is unlocked from the start of this call, and analyses one item at a time, suspending after each
+    /// so that `lock()`, `update` and `remove` can run in between. Until it returns, `next` answers `.wait(…,
+    /// .analysing)`, `scan` answers `.busy` and `report` throws `.analysing`. Call it from a task of no higher
+    /// priority than the one that locks.
     ///
     /// - Parameters:
     ///   - reuseKey: at least 32 bytes derived from the keyset for this purpose. The engine takes it over and
@@ -82,54 +142,97 @@ public actor HygieneEngine {
     ///   - ledger: the scan ledger the session unsealed, or an empty one.
     ///   - items: every item in every unlocked vault, decrypted. Trashed items are ignored. The engine keeps an
     ///     analysis of each, not the item.
-    public func unlock(reuseKey: SecureBytes, ledger: ScanLedger, items: [Item], now: Date) throws {
+    /// - Throws: `ReuseKeyError` for a key that is not one; `HygieneEngineError.locked` if `lock()` (or another
+    ///   `unlock`) ran before this one finished; `CancellationError` if the task was cancelled, in which case the
+    ///   engine is left locked.
+    public func unlock(reuseKey: SecureBytes, ledger: ScanLedger, items: [Item], now: Date) async throws {
         let key = try ReuseKey(reuseKey)
-        lock()
+        dropResident()
         // Locking zeroised the previous key. If the caller handed that same buffer in again, it is not a key now.
         guard !reuseKey.isZeroised else { throw ReuseKeyError.zeroised }
-        var state = Resident(
+        resident = Resident(
             reuseKey: key, analyzer: ItemAnalyzer(estimator: StrengthEstimator(now: now), policy: policy),
-            schedule: ScanSchedule(ledger: ledger, policy: scanPolicy))
-        for item in items where !item.isTrashed {
-            let analysis = state.analyzer.analyse(item, reuseKey: key)
-            state.analyses[item.id] = analysis
-            state.reuse.set(analysis.reuseTokens, for: item.id)
+            schedule: ScanSchedule(ledger: ledger, policy: scanPolicy, pacing: pacing))
+        let started = epoch
+        for item in items {
+            guard !Task.isCancelled else {
+                if isCurrent(started) { dropResident() }
+                throw CancellationError()
+            }
+            withResident { state in
+                // An `update` or `remove` that ran while this loop was suspended has the newer word on the item.
+                if state.versions[item.id] == nil, state.gone.contains(item.id) { return }
+                if state.versions[item.id] == item.version { return }
+                _ = Self.apply(item, to: &state)
+            }
+            await checkpoint()
+            guard isCurrent(started) else { throw HygieneEngineError.locked }
         }
-        // Results for items that no longer exist, or no longer have a password, describe nothing.
-        state.schedule.prune(keeping: Set(state.analyses.values.filter { !$0.passwords.isEmpty }.map(\.id)))
-        resident = state
+        withResident { state in
+            // Results for items that no longer exist, or no longer have a password, describe nothing.
+            state.schedule.prune(keeping: Set(state.analyses.values.filter { !$0.passwords.isEmpty }.map(\.id)))
+            state.loading = false
+        }
     }
 
-    /// Keys are going away. Zeroises the reuse key and drops everything derived from a password. A scan in flight
-    /// finds out when its request returns, and stores nothing.
-    public func lock() {
+    /// Keys are going away. Zeroises the reuse key and drops everything derived from a password, at once; then
+    /// has the prefix cache forget what it holds in memory. A scan in flight finds out when its request returns, and
+    /// stores nothing.
+    public func lock() async {
+        dropResident()
+        await client.lockCache()
+    }
+
+    /// The synchronous part of locking: after this, nothing derived from a password is reachable from the engine.
+    private func dropResident() {
         epoch &+= 1
-        resident?.reuseKey.zeroise()
+        if let state = resident {
+            pacing = state.schedule.pacing
+            state.reuseKey.zeroise()
+        }
         resident = nil
     }
 
     // MARK: Items
 
     /// An item was created, edited, restored, trashed or changed by sync.
-    public func update(_ item: Item) throws {
-        let updated: Void? = withResident { state in
-            if item.isTrashed {
-                state.analyses[item.id] = nil
-                state.reuse.remove(item.id)
-                state.schedule.forget(item.id)
-            } else {
-                let analysis = state.analyzer.analyse(item, reuseKey: state.reuseKey)
-                state.analyses[item.id] = analysis
-                state.reuse.set(analysis.reuseTokens, for: item.id)
-                if analysis.passwords.isEmpty { state.schedule.forget(item.id) }
-            }
+    ///
+    /// - Returns: `false` if the copy is stale (the engine has seen a newer version of the item, or this version
+    ///   after it was trashed or deleted) and nothing changed.
+    @discardableResult
+    public func update(_ item: Item) throws -> Bool {
+        guard let applied = withResident({ state in Self.apply(item, to: &state) }) else {
+            throw HygieneEngineError.locked
         }
-        guard updated != nil else { throw HygieneEngineError.locked }
+        return applied != .stale
+    }
+
+    /// Takes `item` into the resident state, unless it is a stale copy.
+    private static func apply(_ item: Item, to state: inout Resident) -> Applied {
+        if let seen = state.versions[item.id] {
+            if item.version < seen { return .stale }
+            if item.version == seen, state.gone.contains(item.id), !item.isTrashed { return .stale }
+        }
+        state.versions[item.id] = item.version
+        guard !item.isTrashed else {
+            state.gone.insert(item.id)
+            state.analyses[item.id] = nil
+            state.reuse.remove(item.id)
+            state.schedule.forget(item.id)
+            return .removed
+        }
+        state.gone.remove(item.id)
+        let analysis = state.analyzer.analyse(item, reuseKey: state.reuseKey)
+        state.analyses[item.id] = analysis
+        state.reuse.set(analysis.reuseTokens, for: item.id)
+        if analysis.passwords.isEmpty { state.schedule.forget(item.id) }
+        return .analysed
     }
 
     /// Runs `body` on the resident state, in place, or returns `nil` while locked. The state is taken out of the
     /// property for the duration so that it is uniquely referenced: mutating a copy would duplicate every analysis on
     /// every call. Nothing suspends in here, so no other caller can see the property empty.
+    @discardableResult
     private func withResident<T>(_ body: (inout Resident) -> T) -> T? {
         guard var state = resident else { return nil }
         resident = nil
@@ -137,11 +240,14 @@ public actor HygieneEngine {
         return body(&state)
     }
 
-    /// An item was permanently deleted.
+    /// An item was permanently deleted. A copy of it from before the deletion is refused from now on.
     public func remove(_ id: UUID) {
-        resident?.analyses[id] = nil
-        resident?.reuse.remove(id)
-        resident?.schedule.forget(id)
+        withResident { state in
+            state.gone.insert(id)
+            state.analyses[id] = nil
+            state.reuse.remove(id)
+            state.schedule.forget(id)
+        }
     }
 
     /// The items already using `password`, for the editor to warn before a reused password is saved.
@@ -154,7 +260,11 @@ public actor HygieneEngine {
 
     /// What the scanner should do now (`ScanSchedule.decide`). `.locked` whenever keys are not resident.
     public func next(now: Date) -> ScanDecision {
-        guard resident != nil else { return .locked }
+        // (A copy of the resident state must not outlive these checks: it would make every later change copy the
+        // analyses and the ledger.)
+        guard let loading = resident?.loading else { return .locked }
+        // Deciding on part of the vault could declare a pass finished that has not looked at most of it.
+        if loading { return .wait(until: now.addingTimeInterval(scanPolicy.requestSpacing), .analysing) }
         if scanning { return .wait(until: now.addingTimeInterval(scanPolicy.requestSpacing), .pacing) }
         let decision = withResident { state in
             let candidates = state.analyses.values.filter { !$0.passwords.isEmpty }.map(\.candidate)
@@ -168,15 +278,20 @@ public actor HygieneEngine {
     /// This is both the step `next(now:)` asks for and the check a save triggers; either way it honours the same
     /// rate limit and backoff, so a burst of saves cannot become a burst of requests.
     public func scan(_ item: Item, now: Date) async -> ScanOutcome {
-        guard resident != nil else { return .locked }
-        guard !scanning else { return .busy }
-        guard (try? update(item)) != nil else { return .locked }
+        guard let loading = resident?.loading else { return .locked }
+        guard !scanning, !loading else { return .busy }
         enum Start {
+            case stale
             case nothingToCheck
             case deferred(Date)
             case go(freshAfter: Date?)
         }
         let start: Start? = withResident { state in
+            switch Self.apply(item, to: &state) {
+            case .stale: return .stale
+            case .removed: return .nothingToCheck
+            case .analysed: break
+            }
             guard let analysis = state.analyses[item.id], !analysis.passwords.isEmpty else { return .nothingToCheck }
             if let until = state.schedule.earliestStart(for: item.id, now: now) { return .deferred(until) }
             // The weekly pass asks the server again: a cached range from before the pass began does not count.
@@ -186,6 +301,7 @@ public actor HygieneEngine {
         let freshAfter: Date?
         switch start {
         case nil: return .locked
+        case .stale: return .stale
         case .nothingToCheck: return .nothingToCheck
         case .deferred(let until): return .deferred(until: until)
         case .go(let fresh): freshAfter = fresh
@@ -207,7 +323,10 @@ public actor HygieneEngine {
                 }
                 if check.source == .network { requests += 1 }
                 if check.result.isBreached { breached += 1 }
-                results[field.id] = check.result
+                // Field IDs are whatever the item says, and nothing makes them distinct. Two password fields with
+                // one ID share one result, so it is the worse of the two: a breached password must never be
+                // overwritten by the clean one that happens to follow it.
+                results[field.id] = Self.worse(results[field.id], check.result)
             } catch {
                 guard isCurrent(started) else { return .interrupted }
                 let failure = error as? PwnedPasswordsError ?? .transport
@@ -218,10 +337,27 @@ public actor HygieneEngine {
             }
         }
         guard isCurrent(started) else { return .interrupted }
+        // The actor was free while the requests were in flight. If the item was saved, trashed or deleted
+        // meanwhile, these answers are about passwords it no longer has.
+        let unchanged = withResident { state in
+            state.versions[item.id] == item.version && !state.gone.contains(item.id)
+        }
+        guard unchanged == true else {
+            resident?.schedule.recordRequests(requests, now: now, jitter: jitter())
+            return .stale
+        }
         resident?.schedule.recordScan(
             item: item.id, version: item.version, results: results, networkRequests: requests, now: now,
             jitter: jitter())
         return .scanned(breachedPasswords: breached, networkRequests: requests)
+    }
+
+    private static func worse(_ earlier: PwnedPasswordResult?, _ later: PwnedPasswordResult) -> PwnedPasswordResult {
+        switch (earlier, later) {
+        case (.found(let first), .found(let second)): return .found(occurrences: max(first, second))
+        case (.found, .notFound): return earlier ?? later
+        case (.notFound, _), (nil, _): return later
+        }
     }
 
     private func isCurrent(_ started: UInt64) -> Bool {
@@ -234,9 +370,11 @@ public actor HygieneEngine {
 
     // MARK: Results
 
-    /// The report as of `now`.
+    /// The report as of `now`. Throws `.analysing` until `unlock` has returned: a report of the items analysed so
+    /// far would call the vault cleaner than it is.
     public func report(now: Date) throws -> HygieneReport {
         guard let state = resident else { throw HygieneEngineError.locked }
+        guard !state.loading else { throw HygieneEngineError.analysing }
         return HygieneReport.make(
             analyses: Array(state.analyses.values), ledger: state.schedule.ledger, now: now, policy: policy)
     }

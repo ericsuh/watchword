@@ -60,9 +60,14 @@ struct AdversarialHygieneTests {
         let clock = FakeClock(AdversarialHygieneTests.now)
         let engine: HygieneEngine
 
-        init(breached: [String: UInt32] = [:], scanPolicy: ScanPolicy = .standard, answer: Bool = true) async {
+        init(
+            breached: [String: UInt32] = [:], scanPolicy: ScanPolicy = .standard, answer: Bool = true,
+            gate: CheckpointGate? = nil
+        ) async {
             let client = PwnedPasswordsClient(http: http, cache: cache, userAgent: HygieneUserAgent(version: "1.0")!)
-            engine = HygieneEngine(client: client, scanPolicy: scanPolicy, random: SeededGenerator(seed: 3))
+            engine = HygieneEngine(
+                client: client, policy: HygienePolicy(), scanPolicy: scanPolicy, random: SeededGenerator(seed: 3)
+            ) { await gate?.pass() }
             if answer {
                 let server = SimulatedPwnedPasswords(breached: breached)
                 await http.respond { server.reply(to: $0) }
@@ -141,7 +146,7 @@ struct AdversarialHygieneTests {
         // And the sixth character never follows: no request URL is the start of a longer piece of any digest.
         let digests = passwords.map(Self.sha1Hex)
         for request in requests {
-            let text = request.url.absoluteString + request.headers.values.joined()
+            let text = request.url.absoluteString + request.headers.fields.values.joined()
             for digest in digests {
                 #expect(!text.contains(digest.prefix(6)))
             }
@@ -188,7 +193,7 @@ struct AdversarialHygieneTests {
         _ = try await rig.engine.report(now: Self.now)
         for request in await rig.http.requests {
             #expect(request.url.host == .pwnedPasswords)
-            let text = request.url.absoluteString + request.headers.map { $0.key + $0.value }.joined()
+            let text = request.url.absoluteString + request.headers.fields.map { $0.key + $0.value }.joined()
             #expect(!text.contains("alice"))
             #expect(!text.contains("example.com"))
             #expect(!text.contains("Item"))
@@ -227,7 +232,7 @@ struct AdversarialHygieneTests {
         #expect(
             request.url.absoluteString
                 == "https://haveibeenpwned.com/api/v3/breachedaccount/a%2F..%2Fb%40example.com?truncateResponse=false")
-        #expect(Set(request.headers.keys) == ["hibp-api-key", "User-Agent"])
+        #expect(request.headers.names == ["User-Agent", "hibp-api-key"])
     }
 
     // MARK: Keys absent
@@ -330,6 +335,204 @@ struct AdversarialHygieneTests {
         #expect(await rig.cache.stores.isEmpty)
     }
 
+    /// A3, or anyone who can read the process's memory after the vault has locked (the adversary lock-time
+    /// zeroisation exists for). The prefix cache names twenty bits of the SHA-1 of every password that was checked,
+    /// enough to reject all but one in a million guesses offline, so it must be gone when the keys are.
+    @Test("after a lock the default prefix cache holds no prefix")
+    func cacheEmptiedAtLock() async throws {
+        let http = FakeHTTPClient()
+        let server = SimulatedPwnedPasswords(breached: [:])
+        await http.respond { server.reply(to: $0) }
+        let cache = InMemoryPwnedRangeCache()
+        let engine = HygieneEngine(
+            client: PwnedPasswordsClient(http: http, cache: cache, userAgent: HygieneUserAgent(version: "1.0")!),
+            random: SeededGenerator(seed: 3))
+        let items = [Self.item(1, passwords: ["hunter2"]), Self.item(2, passwords: ["letmein"])]
+        let key = SecureBytes(copying: [UInt8](repeating: 0x5A, count: 32))
+        try await engine.unlock(reuseKey: key, ledger: ScanLedger(), items: items, now: Self.now)
+        for item in items {
+            #expect(await engine.scan(item, now: Self.now) == .scanned(breachedPasswords: 0, networkRequests: 1))
+        }
+        // The prefixes are those of Python's hashlib.sha1 for the two passwords (`SimulatedPwnedPasswords.digests`).
+        #expect(await cache.snapshot().map(\.range.prefix.hex) == ["B7A87", "F3BBB"])
+        await engine.lock()
+        #expect(await cache.snapshot().isEmpty)
+        #expect(await cache.count == 0)
+        #expect(key.isZeroised)
+    }
+
+    /// The same adversary, and the one moment the rule above could slip: the range has been fetched, the client has
+    /// been told the vault is still unlocked, and the lock lands before the entry reaches the cache. The entry
+    /// arrives after the lock emptied the cache; it must not stay.
+    @Test("a lock while a range is being stored still leaves the cache empty")
+    func lockDuringStore() async throws {
+        let rig = await Rig(breached: ["password": 3])
+        let item = Self.item(1, passwords: ["password"])
+        _ = try await rig.unlock([item])
+        await rig.cache.holdStores()
+        async let outcome = rig.engine.scan(item, now: Self.now)
+        await rig.cache.waitForHeldStore()
+        await rig.engine.lock()
+        #expect(await rig.cache.locks == 1)
+        await rig.cache.releaseStores()
+        #expect(await outcome == .interrupted)
+        #expect(await rig.cache.entries.isEmpty)
+
+        _ = try await rig.unlock([item])
+        #expect(try await rig.engine.ledger().entries.isEmpty)
+    }
+
+    /// A4, who fills a shared vault with items, and A3, who takes the device while it is unlocking. `unlock`
+    /// analyses every item, and an actor runs one call at a time; if it did that in one go, a lock would wait for
+    /// the whole vault and the reuse key would stay resident meanwhile. It stops at the next item instead.
+    @Test("a lock during unlock waits for one item, not for the vault")
+    func lockDuringUnlock() async throws {
+        let gate = CheckpointGate(holdingAfter: 3)
+        let rig = await Rig(gate: gate)
+        let items = (1...500).map { Self.item($0, passwords: ["pw-\($0)-Zq7!"]) }
+        let key = SecureBytes(copying: [UInt8](repeating: 0x5A, count: 32))
+        let unlocking = Task {
+            try await rig.engine.unlock(reuseKey: key, ledger: ScanLedger(), items: items, now: Self.now)
+        }
+        await gate.waitUntilHeld()
+        // Three items in, with 497 to go, the lock runs to completion.
+        await rig.engine.lock()
+        #expect(key.isZeroised)
+        #expect(await rig.engine.isUnlocked == false)
+        await gate.release()
+        await #expect(throws: HygieneEngineError.locked) { try await unlocking.value }
+        #expect(await gate.passes == 3)
+        #expect(await rig.engine.isUnlocked == false)
+        await #expect(throws: HygieneEngineError.locked) { try await rig.engine.report(now: Self.now) }
+        #expect(await rig.http.requests.isEmpty)
+    }
+
+    /// The same, when the session stops the unlock by cancelling its task (which needs no turn on the actor at
+    /// all). A cancelled unlock must not leave the engine half-unlocked with a live reuse key.
+    @Test("a cancelled unlock stops at the next item and leaves the engine locked")
+    func cancelledUnlock() async throws {
+        let gate = CheckpointGate(holdingAfter: 3)
+        let rig = await Rig(gate: gate)
+        let items = (1...500).map { Self.item($0, passwords: ["pw-\($0)-Zq7!"]) }
+        let key = SecureBytes(copying: [UInt8](repeating: 0x5A, count: 32))
+        let unlocking = Task {
+            try await rig.engine.unlock(reuseKey: key, ledger: ScanLedger(), items: items, now: Self.now)
+        }
+        await gate.waitUntilHeld()
+        unlocking.cancel()
+        await gate.release()
+        await #expect(throws: CancellationError.self) { try await unlocking.value }
+        #expect(await gate.passes == 3)
+        #expect(await rig.engine.isUnlocked == false)
+        #expect(key.isZeroised)
+    }
+
+    /// The service and the network path, which answer the server's side of the rate limit. A phone locks and
+    /// unlocks many times a day; if each unlock forgot `Retry-After` and refilled the burst, the service would see
+    /// a burst of range requests at every unlock, while asking for quiet.
+    @Test("a lock and unlock neither forgets Retry-After nor buys a new burst of requests")
+    func pacingSurvivesLock() async throws {
+        let rig = await Rig()
+        let items = (1...40).map { Self.item($0, passwords: ["pw-\($0)-Zq7!"]) }
+        var ledger = ScanLedger()
+        _ = try await rig.unlock(items)
+        await rig.http.enqueue(status: 429, headers: ["Retry-After": "3600"])
+        let start = await rig.clock.now()
+        // An hour of unlocking every minute and asking each time what to do.
+        for _ in 0..<59 {
+            let now = await rig.clock.now()
+            if case .scan(let id, _) = await rig.engine.next(now: now) {
+                _ = await rig.engine.scan(items.first { $0.id == id }!, now: now)
+            }
+            ledger = try await rig.engine.ledger()
+            await rig.engine.lock()
+            await rig.clock.advance(by: 60)
+            _ = try await rig.unlock(items, ledger: ledger)
+        }
+        #expect(await rig.clock.now() < start.addingTimeInterval(3600))
+        #expect(await rig.http.requests.count == 1)
+    }
+
+    /// The service and the network path again, this time failing one prefix and answering the rest. If the scanner
+    /// kept asking for the item that failed, an attacker on the path could stop every other password in the vault
+    /// from being checked by refusing a single range, for ever.
+    @Test("refusing one range does not stop the rest of the vault from being checked")
+    func oneRefusedRangeDoesNotStall() async throws {
+        for refusal in [FakeHTTPClient.Reply.response(HTTPResponse(status: 503)), .failure] {
+            let rig = await Rig(breached: ["letmein": 4])
+            let server = SimulatedPwnedPasswords(breached: ["letmein": 4])
+            // F3BBB is the range of "hunter2", which the most urgent item holds.
+            await rig.http.respond { $0.url.path.hasSuffix("/F3BBB") ? refusal : server.reply(to: $0) }
+            let passwords = ["hunter2", "letmein", "pw-3-Zq7!", "pw-4-Zq7!", "pw-5-Zq7!", "pw-6-Zq7!"]
+            let items = passwords.enumerated().map { Self.item($0.offset + 1, passwords: [$0.element]) }
+            _ = try await rig.unlock(items)
+            let start = await rig.clock.now()
+            while await rig.clock.now() < start.addingTimeInterval(86400) {
+                let now = await rig.clock.now()
+                switch await rig.engine.next(now: now) {
+                case .scan(let id, _): _ = await rig.engine.scan(items.first { $0.id == id }!, now: now)
+                case .wait(let until, _): await rig.clock.set(max(until, now.addingTimeInterval(1)))
+                case .idle, .locked: Issue.record("the refused item is still due")
+                }
+            }
+            let report = try await rig.engine.report(now: await rig.clock.now())
+            #expect(report.totals.itemsAwaitingBreachCheck == 1)
+            #expect(report.item(items[0].id)?.breachStatus == .notChecked)
+            #expect(report.item(items[1].id)?.findings.first?.kind == .breachedPassword)
+            let paths = await rig.http.requests.map(\.url.path)
+            #expect(Set(paths).count == 6)
+            // Within the first minute and a bit, everything else has been asked for.
+            #expect(paths.prefix(6).filter { $0.hasSuffix("/F3BBB") }.count == 1)
+            // And the refused range is retried at the backoff's pace, not hammered: about once an hour.
+            #expect(paths.filter { $0.hasSuffix("/F3BBB") }.count <= 30)
+        }
+    }
+
+    /// The session's own race, which a member of a shared vault can provoke by saving an item again and again
+    /// (A4): the scanner fetched version 1, and version 2, with a breached password, was saved before the scan
+    /// call arrived. The stale copy must not put version 1's clean result, or version 1's analysis, in its place.
+    @Test("a stale copy of an item cannot mark its newer, breached password as checked and clear")
+    func staleCopyCannotClear() async throws {
+        let rig = await Rig(breached: ["hunter2": 5])
+        let old = Self.item(1, passwords: ["pw-1-Zq7!"])
+        _ = try await rig.unlock([old])
+        _ = await rig.runUntilIdle([old])
+        let new = Self.item(1, passwords: ["hunter2"], version: 2)
+        try await rig.engine.update(new)
+        #expect(await rig.engine.scan(old, now: Self.now) == .stale)
+        #expect(try await rig.engine.update(old) == false)
+        let report = try await rig.engine.report(now: Self.now)
+        #expect(report.items.first?.breachStatus == .notChecked)
+        #expect(try await rig.engine.items(using: "hunter2") == [new.id])
+        #expect(await rig.engine.next(now: Self.now) == .scan(item: new.id, reason: .changed))
+    }
+
+    /// A4 or a hostile import, writing an item Watchtower will misread: two password fields under one field ID,
+    /// the breached one first, or a seventeenth password beyond the number checked per item. Neither may come out
+    /// as "clear".
+    @Test("a breached password cannot hide behind a duplicate field ID or beyond the per-item cap")
+    func noFalseClear() async throws {
+        let rig = await Rig(breached: ["password": 3])
+        var twins = Self.item(1, passwords: ["password", "pw-1-Zq7!-unbreached"])
+        twins.fields[1].id = twins.fields[0].id
+        let many = Self.item(2, passwords: (0..<16).map { "pw-2-\($0)-Zq7!" } + ["password"])
+        _ = try await rig.unlock([twins, many])
+        #expect(await rig.engine.scan(twins, now: Self.now) == .scanned(breachedPasswords: 1, networkRequests: 2))
+        await rig.clock.advance(by: 3600)
+        let later = await rig.clock.now()
+        #expect(await rig.engine.scan(many, now: later) == .scanned(breachedPasswords: 0, networkRequests: 16))
+        let report = try await rig.engine.report(now: later)
+        #expect(report.item(twins.id)?.breachStatus == .breached(checkedAt: Self.now))
+        #expect(report.item(twins.id)?.findings.first?.kind == .breachedPassword)
+        #expect(report.item(many.id)?.breachStatus == .incomplete(checkedAt: later))
+        #expect(report.item(many.id)?.findings.contains { $0.kind == .tooManyPasswords } == true)
+        for item in report.items {
+            if case .clear = item.breachStatus {
+                Issue.record("an item with an unchecked or breached password is clear")
+            }
+        }
+    }
+
     /// A2/A8 reading whatever the session persisted. The ledger is sealed by the session, but even its plaintext
     /// must hold nothing computed from a password except the per-field answer: no prefix, no hash, no token.
     @Test("the ledger holds no hash, prefix or token; analyses and digests are not encodable at all")
@@ -375,6 +578,77 @@ struct AdversarialHygieneTests {
         #expect(!printed.contains("feedface"))
         #expect(!printed.contains(token.bytes.hex.prefix(8)))
         #expect(!printed.contains("[1, 1, 1"))
+    }
+
+    /// The same reader. A strength estimate is derived from the password too: for one entry of a public list the
+    /// exact figure is the entry's rank, which names the password, and an analysis carries it beside the item's
+    /// title. And a request's URL is the person's email address (the breached-account lookup) or twenty bits of a
+    /// password's hash (a range), with the API key among its headers.
+    @Test("an estimate, an analysis, a URL, an address and a request's headers print nothing that identifies")
+    func redactionOfDerivedValues() throws {
+        let estimator = StrengthEstimator(referenceYear: 2026)
+        var printed = ""
+        func show(_ value: Any) {
+            printed += "\(value) " + String(describing: value) + String(reflecting: value)
+            dump(value, to: &printed)
+        }
+        // Entries 10, 16, 17 and 53 of the list: the exact estimates are 10, 16, 17 and 53 guesses.
+        for password in ["dragon", "monkey", "letmein", "iloveyou"] {
+            let assessment = estimator.assess(password)
+            #expect(assessment.weakness == .commonPassword)
+            show(assessment)
+        }
+        var item = Self.item(1, passwords: ["dragon", "Tr0ub4dor&3"])
+        item.title = "Private-Title"
+        let key = try ReuseKey(SecureBytes(copying: [UInt8](repeating: 1, count: 32)))
+        let analysis = ItemAnalyzer(estimator: estimator).analyse(item, reuseKey: key)
+        show(analysis)
+        show(analysis.passwords)
+        #expect(!printed.contains("guesses"))
+        #expect(!printed.contains("commonPassword"))
+        #expect(!printed.contains("Private-Title"))
+        #expect(!printed.contains(analysis.passwords[0].reuseToken.bytes.hex.prefix(8)))
+        // No number that could be an estimate: every digit run printed is part of an ID, a version or a score.
+        for estimate in ["1.0", "1.04", "1.2", "1.23", "1.72", "11.0"] {
+            #expect(!printed.contains(estimate))
+        }
+
+        printed = ""
+        let address = try #require(EmailAddress("alice.smith@example.org"))
+        let disclosure = IdentifierDisclosure.confirmedByPerson(sending: address)
+        let agent = try #require(HygieneUserAgent(version: "1.0"))
+        let lookup = BreachedAccountClient(http: FakeHTTPClient(), userAgent: agent)
+            .request(disclosing: disclosure, apiKey: try #require(HIBPAPIKey("feedfacefeedfacefeedface")))
+        let digest = PasswordDigest(utf8Of: "password")
+        let range = PwnedPasswordsClient(http: FakeHTTPClient(), cache: InMemoryPwnedRangeCache(), userAgent: agent)
+            .request(for: digest.prefix)
+        let cached = CachedPwnedRange(
+            range: try PwnedRangeParser.parse(
+                Array("0A1B2C3D4E5F60718293A4B5C6D7E8F9012:7".utf8), prefix: digest.prefix
+            ).range, fetchedAt: Self.now)
+        let ledger = ScanLedger(
+            entries: [
+                item.id: .init(itemVersion: 1, scannedAt: Self.now, results: [item.id: .found(occurrences: 424_242)])
+            ])
+        for value in [
+            address as Any, disclosure, lookup, lookup.url, lookup.headers, range, range.url, digest.prefix, cached,
+            ledger,
+        ] {
+            show(value)
+        }
+        // A breach count all but names the password, so a ledger does not print its results.
+        #expect(!printed.contains("424242"))
+        #expect(!printed.contains("alice"))
+        #expect(!printed.contains("smith"))
+        #expect(!printed.contains("example.org"))
+        #expect(!printed.contains("feedface"))
+        #expect(!printed.uppercased().contains("5BAA6"))
+        #expect(!printed.contains("/range/"))
+        #expect(!printed.contains("breachedaccount"))
+        // What an adapter needs is still there, under the two accessors to search for.
+        #expect(lookup.url.absoluteString.hasSuffix("/alice.smith%40example.org?truncateResponse=false"))
+        #expect(lookup.headers.fields["hibp-api-key"] == "feedfacefeedfacefeedface")
+        #expect(range.url.absoluteString == "https://api.pwnedpasswords.com/range/5BAA6")
     }
 
     // MARK: Hostile responses
@@ -531,11 +805,80 @@ struct AdversarialHygieneTests {
         let report = try await rig.engine.report(now: Self.now)
         #expect(report.totals.passwords == 16)
         #expect(try await rig.engine.ledger().entries[item.id]?.results.count == 16)
+        // And the report does not pretend the other 2,984 were looked at.
+        #expect(report.items.first?.breachStatus == .incomplete(checkedAt: Self.now))
+        #expect(report.items.first?.findings.contains { $0.detail == .notAnalysed(passwords: 2984) } == true)
         // Sixteen requests were made at once, so the next may not go for sixteen spacings less the burst.
         let other = Self.item(2, passwords: ["pw-2-Zq7!"])
         try await rig.engine.update(other)
         let wait = ScanPolicy.standard.requestSpacing * Double(16 - ScanPolicy.standard.burst + 1)
         #expect(await rig.engine.scan(other, now: Self.now) == .deferred(until: Self.now.addingTimeInterval(wait)))
+    }
+
+    /// A4 once more, choosing the *characters*. The estimator looks every stretch of a password up in its word
+    /// lists, in up to ten readings. Done by building and hashing a string per stretch, a password of combining
+    /// marks between look-alike digits cost several hundred times an ordinary one (hashing a non-ASCII string
+    /// normalises it), and a vault of such items held the engine, and so a lock, for minutes. The work is counted
+    /// in table steps, which no machine or script changes, and is bounded.
+    @Test("a password of combining marks and look-alikes costs no more dictionary work than one of letters")
+    func hostileScriptsCostNoMore() {
+        func steps(_ password: String) -> Int {
+            var matcher = StrengthMatcher(
+                Array(password.unicodeScalars.prefix(StrengthEstimator.maximumAnalysedLength)),
+                personal: PersonalDictionary([]), referenceYear: 2026, repeatDepth: 2)
+            _ = matcher.matchAll()
+            return matcher.dictionarySteps
+        }
+        // What a password of words and look-alike digits costs, at the full analysed length.
+        let wordy = "p4ssw0rd1 l3tm31n! 7r0ub4d0r 1l0v3y0u! m0nk3y1 dr4g0n7 qw3r7y| b4s3b4ll"
+        let designed = String(repeating: "a\u{323}\u{301}1o\u{31B}\u{323}|\u{F73}7", count: 7)
+        var generator = SeededGenerator(seed: TestEnvironment.seed(fallback: 31))
+        let pieces: [String] = ["\u{323}", "\u{301}", "\u{31B}", "\u{F73}", "1", "|", "7", "a", "o", "\u{200D}", "é"]
+        var hostile = [designed]
+        for _ in 0..<TestEnvironment.iterations(standard: 200, long: 5000) {
+            hostile.append((0..<64).map { _ in pieces[Int(generator.next() % UInt64(pieces.count))] }.joined())
+        }
+        // Ten readings of 64 scalars. Words walk a few scalars into the table from each start and marks walk
+        // none, so hostile text costs about what words cost, and both are far below the ceiling of ten readings
+        // of 64 starts of the longest word.
+        let ordinary = steps(wordy)
+        let worst = hostile.map(steps).max() ?? 0
+        #expect(steps(designed) <= 10 * 64 * 3)
+        #expect(worst <= 3 * ordinary)
+        #expect(ordinary <= 10 * 64 * (RankedDictionary.embedded.maximumWordLength + 1))
+
+        // And the time, measured against the wordy password on the same machine in the same moment, so the bound
+        // holds on a slow or busy one: the best of several runs of each. It was more than a hundred times.
+        let estimator = StrengthEstimator(referenceYear: 2026)
+        let clock = ContinuousClock()
+        func best(_ password: String) -> Duration {
+            (0..<7).map { _ in clock.measure { for _ in 0..<5 { _ = estimator.assess(password) } } }.min() ?? .zero
+        }
+        _ = estimator.assess(wordy)
+        let baseline = best(wordy)
+        for password in hostile.prefix(20) {
+            #expect(best(password) <= baseline * 10)
+        }
+    }
+
+    /// The service through the breached-account API (or a proxy the device trusts), answering the person's lookup
+    /// with as many breaches as two megabytes hold. The count must be bounded while reading: decoding all 160,000
+    /// before counting them cost many seconds of CPU for a response that was always going to be refused.
+    @Test("a breached-account response of very many tiny breaches is refused without decoding them all")
+    func breachCountBoundedWhileReading() throws {
+        let entry = "{\"Name\":\"a\"},"
+        var body = Array("[".utf8)
+        while body.count + entry.utf8.count + 16 < 2 * 1024 * 1024 { body.append(contentsOf: entry.utf8) }
+        // Whatever comes after the limit is not looked at: this last entry would make the response malformed.
+        body.append(contentsOf: "{\"Name\":7}]".utf8)
+        let clock = ContinuousClock()
+        var thrown: (any Error)?
+        let elapsed = clock.measure {
+            do { _ = try BreachedAccountClient.parse(body) } catch { thrown = error }
+        }
+        #expect(thrown as? BreachedAccountError == .responseTooLarge)
+        // A fraction of a second in practice (it was seventeen); the bound is loose because CI machines are shared.
+        #expect(elapsed < .seconds(8))
     }
 
     /// A4, or the service through the breached-account API: text that will be shown to a person. Control and

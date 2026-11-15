@@ -32,6 +32,8 @@ public enum HygieneFindingKind: Int, Hashable, Sendable, Comparable, CaseIterabl
     case passwordOnly = 6
     /// The password has not changed for a long time.
     case oldPassword = 7
+    /// The item has more passwords than are analysed in one item; the rest were not checked at all.
+    case tooManyPasswords = 8
 
     public static func < (lhs: HygieneFindingKind, rhs: HygieneFindingKind) -> Bool {
         lhs.rawValue < rhs.rawValue
@@ -48,6 +50,8 @@ public struct HygieneFinding: Hashable, Sendable {
         case reused(sharedWith: [UUID])
         case weak(score: StrengthScore, weakness: StrengthWeakness?)
         case unchanged(since: Date)
+        /// How many of the item's passwords were not looked at.
+        case notAnalysed(passwords: Int)
     }
 
     public let kind: HygieneFindingKind
@@ -72,8 +76,13 @@ public enum BreachStatus: Hashable, Sendable {
     case notApplicable
     /// Not checked at its current version yet: unknown, and shown as such (ADR 0005, consequences).
     case notChecked
+    /// Every password in the item was checked and none is in the corpus.
     case clear(checkedAt: Date)
     case breached(checkedAt: Date)
+    /// The passwords that were checked are not in the corpus, but the item has more than are checked in one item
+    /// (`ItemAnalyzer.maximumPasswordsPerItem`). Not clear, and not waiting for anything: the rest will not be
+    /// checked until they are moved to items of their own.
+    case incomplete(checkedAt: Date)
 }
 
 public struct ItemHygiene: Hashable, Sendable, Identifiable {
@@ -204,6 +213,9 @@ public struct HygieneReport: Hashable, Sendable {
                 findings.append(.unchanged(field: password.fieldID, since: since, now: now))
             }
         }
+        if analysis.passwordsNotAnalysed > 0 {
+            findings.append(.tooManyPasswords(notAnalysed: analysis.passwordsNotAnalysed))
+        }
         for field in analysis.insecureURLFields { findings.append(.insecureURL(field: field)) }
         if !analysis.passwords.isEmpty, !analysis.hasPasskey {
             if !analysis.hasOneTimeCode, analysis.siteCapabilities.contains(.oneTimeCodes) {
@@ -220,6 +232,9 @@ public struct HygieneReport: Hashable, Sendable {
             if lhs.kind != rhs.kind { return lhs.kind < rhs.kind }
             return (lhs.fieldID?.uuidString ?? "") < (rhs.fieldID?.uuidString ?? "")
         }
+        // Two fields that share an ID (nothing makes field IDs distinct) can produce the same finding twice.
+        var distinct = Set<HygieneFinding>()
+        findings = findings.filter { distinct.insert($0).inserted }
         var worst: [HygieneFindingKind: HygieneSeverity] = [:]
         for finding in findings where finding.severity >= .low {
             worst[finding.kind] = max(worst[finding.kind] ?? finding.severity, finding.severity)
@@ -234,7 +249,11 @@ public struct HygieneReport: Hashable, Sendable {
         } else if let entry, breached {
             status = .breached(checkedAt: entry.scannedAt)
         } else if let entry, !unchecked {
-            status = .clear(checkedAt: entry.scannedAt)
+            // "Clear" is a statement about every password in the item, so it is not made when some were never
+            // looked at.
+            status =
+                analysis.passwordsNotAnalysed > 0
+                ? .incomplete(checkedAt: entry.scannedAt) : .clear(checkedAt: entry.scannedAt)
         } else {
             status = .notChecked
         }
@@ -286,6 +305,16 @@ extension HygieneFinding {
             explanation: "This password has not changed for \(age). Age alone is not a reason to change a strong, "
                 + "unique password, but an old one predates the breaches this report can see.",
             detail: .unchanged(since: since))
+    }
+
+    static func tooManyPasswords(notAnalysed count: Int) -> HygieneFinding {
+        let rest = count == 1 ? "1 more password" : "\(count) more passwords"
+        return HygieneFinding(
+            kind: .tooManyPasswords, severity: .low, fieldID: nil, summary: "Too many passwords to check",
+            explanation: "This item holds \(rest) than are checked in one item "
+                + "(\(ItemAnalyzer.maximumPasswordsPerItem)). They were not checked for breaches, strength or "
+                + "reuse. Move them to items of their own.",
+            detail: .notAnalysed(passwords: count))
     }
 
     static func insecureURL(field: UUID) -> HygieneFinding {

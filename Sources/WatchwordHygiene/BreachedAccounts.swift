@@ -21,6 +21,14 @@ public struct EmailAddress: Hashable, Sendable {
     }
 }
 
+/// An address identifies a person, and the one place this module sends it is a request the person asked for; it
+/// prints as redacted so that it does not also reach a log (PRD N5). `value` is the accessor to search for.
+extension EmailAddress: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "EmailAddress(redacted)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: [], displayStyle: .struct) }
+}
+
 /// The person's Have I Been Pwned API key (PRD F9.4).
 ///
 /// It prints as `HIBPAPIKey(redacted)` and reflects as nothing; it is neither `Codable` nor `Hashable`. Where it is
@@ -72,6 +80,12 @@ public struct IdentifierDisclosure: Hashable, Sendable {
     public static func confirmedByPerson(sending address: EmailAddress) -> IdentifierDisclosure {
         IdentifierDisclosure(address: address)
     }
+}
+
+extension IdentifierDisclosure: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "IdentifierDisclosure(redacted)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: [], displayStyle: .struct) }
 }
 
 /// One breach an address appears in, reduced to bounded plain text.
@@ -176,16 +190,17 @@ public struct BreachedAccountClient: Sendable {
 
     static func parse(_ body: [UInt8]) throws -> [AccountBreach] {
         guard body.count <= maximumResponseBytes else { throw BreachedAccountError.responseTooLarge }
-        let wire: [WireBreach]
+        let wire: WireBreaches
         do {
-            wire = try JSONDecoder().decode([WireBreach].self, from: Data(body))
+            wire = try JSONDecoder().decode(WireBreaches.self, from: Data(body))
+        } catch is TooManyBreaches {
+            throw BreachedAccountError.responseTooLarge
         } catch {
             throw BreachedAccountError.malformedResponse
         }
-        guard wire.count <= maximumBreaches else { throw BreachedAccountError.responseTooLarge }
         var seen = Set<String>()
         var breaches: [AccountBreach] = []
-        for entry in wire {
+        for entry in wire.entries {
             let name = plainText(entry.name, limit: 128)
             // A breach with no name cannot be told from another; one named twice is listed once.
             guard !name.isEmpty, seen.insert(name).inserted else { continue }
@@ -244,8 +259,25 @@ public struct BreachedAccountClient: Sendable {
         return text
     }
 
-    /// The fields read from the service's breach model. Only the name is required; a field of the wrong type is
-    /// treated as absent.
+    private struct TooManyBreaches: Error {}
+
+    /// The response's array, read one entry at a time so that the count is bounded *before* the entries are decoded:
+    /// entry 2,001 ends the read. Decoding the whole array first and counting afterwards let a 2 MiB body of
+    /// 160,000 minimal objects cost seconds of work before it was refused.
+    private struct WireBreaches: Decodable {
+        var entries: [WireBreach] = []
+
+        init(from decoder: any Decoder) throws {
+            var container = try decoder.unkeyedContainer()
+            while !container.isAtEnd {
+                guard entries.count < BreachedAccountClient.maximumBreaches else { throw TooManyBreaches() }
+                entries.append(try container.decode(WireBreach.self))
+            }
+        }
+    }
+
+    /// The fields read from the service's breach model. Only the name is required; a field that is absent, null or
+    /// of the wrong type is treated as absent.
     private struct WireBreach: Decodable {
         var name: String
         var title: String?
@@ -270,13 +302,32 @@ public struct BreachedAccountClient: Sendable {
         init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             name = try container.decode(String.self, forKey: .name)
-            title = try? container.decode(String.self, forKey: .title)
-            domain = try? container.decode(String.self, forKey: .domain)
-            breachDate = try? container.decode(String.self, forKey: .breachDate)
-            accountCount = try? container.decode(UInt64.self, forKey: .accountCount)
-            dataClasses = try? container.decode([String].self, forKey: .dataClasses)
-            isVerified = try? container.decode(Bool.self, forKey: .isVerified)
-            isSensitive = try? container.decode(Bool.self, forKey: .isSensitive)
+            // Asked for only if present: a missing key costs a lookup, not a thrown and discarded error. A value
+            // of the wrong type still throws, once per field, for at most `maximumBreaches` entries.
+            func optional<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+                guard container.contains(key) else { return nil }
+                return try? container.decode(type, forKey: key)
+            }
+            title = optional(String.self, .title)
+            domain = optional(String.self, .domain)
+            breachDate = optional(String.self, .breachDate)
+            accountCount = optional(UInt64.self, .accountCount)
+            dataClasses = Self.dataClasses(in: container)
+            isVerified = optional(Bool.self, .isVerified)
+            isSensitive = optional(Bool.self, .isSensitive)
+        }
+
+        /// At most `maximumDataClasses` strings, read one at a time for the same reason the breaches are.
+        private static func dataClasses(in container: KeyedDecodingContainer<CodingKeys>) -> [String]? {
+            guard container.contains(.dataClasses),
+                var list = try? container.nestedUnkeyedContainer(forKey: .dataClasses)
+            else { return nil }
+            var classes: [String] = []
+            while !list.isAtEnd, classes.count < BreachedAccountClient.maximumDataClasses {
+                guard let entry = try? list.decode(String.self) else { return nil }
+                classes.append(entry)
+            }
+            return classes
         }
     }
 }

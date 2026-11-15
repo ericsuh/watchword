@@ -90,9 +90,10 @@ public struct PwnedPasswordsClient: Sendable {
     ///   - now: the time, from the caller's clock; cache expiry is measured against it.
     ///   - freshAfter: if given, a cached range fetched before this is not used. The weekly re-scan passes the time
     ///     its pass began, so the pass really asks again while still asking once per prefix.
-    ///   - stillAuthorised: asked after the network returns and before anything is stored or answered. `HygieneEngine`
-    ///     passes "the vault has not locked since this check began", so a lock during the request wins: the response
-    ///     is dropped and the check throws `.interrupted`.
+    ///   - stillAuthorised: asked after the network returns and before anything is stored or answered, and again
+    ///     once the range is in the cache. `HygieneEngine` passes "the vault has not locked since this check
+    ///     began", so a lock during the request or the store wins: the response is dropped, the cache does not keep
+    ///     it, and the check throws `.interrupted`.
     /// - Throws: `PwnedPasswordsError`, and nothing else.
     public func check(
         _ digest: PasswordDigest, now: Date, freshAfter: Date? = nil,
@@ -108,7 +109,20 @@ public struct PwnedPasswordsClient: Sendable {
         guard await stillAuthorised() else { throw PwnedPasswordsError.interrupted }
         guard let result = range.result(for: digest) else { throw PwnedPasswordsError.malformedResponse }
         await cache.store(CachedPwnedRange(range: range, fetchedAt: now))
+        // Asked again, because the store suspended: a lock that landed between the question above and the entry
+        // reaching the cache has already emptied the cache, and this entry would have outlived it. Whenever the
+        // lock came, either it runs after this store (and removes the entry) or this check runs after it.
+        guard await stillAuthorised() else {
+            await cache.remove(prefix)
+            throw PwnedPasswordsError.interrupted
+        }
         return PwnedCheck(result: result, source: .network, rangeFetchedAt: now)
+    }
+
+    /// The vault is locking: the cache drops whatever it holds in memory (`PwnedRangeCache.lock`). Which prefixes
+    /// were looked up is derived from the person's passwords, so it goes when the keys go (ADR 0005, amendment).
+    public func lockCache() async {
+        await cache.lock()
     }
 
     /// A cached range answers only if it is for the right prefix (a cache is storage, and storage can be wrong), was

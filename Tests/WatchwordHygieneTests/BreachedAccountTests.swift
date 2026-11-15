@@ -147,6 +147,80 @@ struct BreachedAccountTests {
         #expect(long.dataClasses.count == 64)
     }
 
+    @Test("a field that is missing, null or of the wrong type is absent; only the name is required")
+    func lenientFields() throws {
+        let body = """
+            [{"Name":"Bare"},
+             {"Name":"Nulls","Title":null,"Domain":null,"BreachDate":null,"PwnCount":null,"DataClasses":null,
+              "IsVerified":null,"IsSensitive":null},
+             {"Name":"Wrong","Title":7,"Domain":["x"],"BreachDate":20130101,"PwnCount":"many","DataClasses":"Passwords",
+              "IsVerified":"yes","IsSensitive":1},
+             {"Name":"Mixed","DataClasses":["Passwords",5,"Usernames"],"PwnCount":-3,"BreachDate":"2013-13-45"}]
+            """
+        let breaches = try BreachedAccountClient.parse(Array(body.utf8))
+        #expect(Set(breaches.map(\.name)) == ["Bare", "Nulls", "Wrong", "Mixed"])
+        for breach in breaches {
+            #expect(breach.title == breach.name)
+            #expect(breach.domain == nil)
+            #expect(breach.breachDate == nil)
+            #expect(breach.accountCount == nil)
+            #expect(breach.dataClasses.isEmpty)
+            #expect(breach.isVerified == false)
+            #expect(breach.isSensitive == false)
+        }
+        // An entry without a name is not a breach, and neither is a response that is not an array of objects.
+        for malformed in ["[{\"Title\":\"x\"}]", "[1,2,3]", "{\"Name\":\"x\"}", "[{\"Name\":5}]", "", "["] {
+            #expect(throws: BreachedAccountError.malformedResponse) {
+                try BreachedAccountClient.parse(Array(malformed.utf8))
+            }
+        }
+    }
+
+    @Test("the number of breaches is bounded while reading, not after: entry 2,001 ends the read")
+    func boundedWhileReading() throws {
+        func body(_ count: Int, then tail: String = "") -> [UInt8] {
+            let entries = (0..<count).map { "{\"Name\":\"b\($0)\"}" } + (tail.isEmpty ? [] : [tail])
+            return Array(("[" + entries.joined(separator: ",") + "]").utf8)
+        }
+        #expect(try BreachedAccountClient.parse(body(2000)).count == 2000)
+        #expect(throws: BreachedAccountError.responseTooLarge) { try BreachedAccountClient.parse(body(2001)) }
+        // What follows the 2,001st entry is never decoded: were it, this response would be malformed, not too
+        // large.
+        #expect(throws: BreachedAccountError.responseTooLarge) {
+            try BreachedAccountClient.parse(body(2001, then: "{\"NoName\":true}"))
+        }
+        #expect(throws: BreachedAccountError.malformedResponse) {
+            try BreachedAccountClient.parse(body(1999, then: "{\"NoName\":true}"))
+        }
+        // Data classes are bounded the same way.
+        let classes = (0..<1000).map { "\"c\($0)\"" }.joined(separator: ",")
+        let many = try BreachedAccountClient.parse(Array("[{\"Name\":\"n\",\"DataClasses\":[\(classes)]}]".utf8))
+        #expect(many.first?.dataClasses.count == BreachedAccountClient.maximumDataClasses)
+    }
+
+    @Test("neither the address nor the key appears when a request, its URL or its headers are printed")
+    func requestRedaction() {
+        let disclosure = IdentifierDisclosure.confirmedByPerson(sending: Self.address)
+        let request = BreachedAccountClient(http: FakeHTTPClient(), userAgent: Self.agent)
+            .request(disclosing: disclosure, apiKey: Self.key)
+        var printed = "\(request.url) \(String(reflecting: request.url)) \(request.headers) \(Self.address) "
+        printed += "\(disclosure) \(String(reflecting: request.headers)) \(String(reflecting: disclosure))"
+        dump(request.url, to: &printed)
+        dump(request.headers, to: &printed)
+        dump(Self.address, to: &printed)
+        dump(disclosure, to: &printed)
+        #expect(!printed.contains("alice"))
+        #expect(!printed.contains("example.com"))
+        #expect(!printed.contains("0123456789abcdef"))
+        #expect(printed.contains("haveibeenpwned.com"))
+        #expect(printed.contains("hibp-api-key"))
+        // The accessors an adapter sends from still carry everything.
+        #expect(request.url.absoluteString.contains("alice%40example.com"))
+        #expect(request.headers.fields["hibp-api-key"] == "0123456789abcdef0123456789abcdef")
+        #expect(request.headers["User-Agent"] == "Watchword/1.0")
+        #expect(request.headers.names == ["User-Agent", "hibp-api-key"])
+    }
+
     @Test(
         "addresses that are not plainly an email address are refused",
         arguments: [

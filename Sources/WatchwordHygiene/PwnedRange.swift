@@ -246,20 +246,28 @@ extension CachedPwnedRange {
 /// password was looked at again. Expiry is the client's decision (`PwnedPasswordsClient.cacheLifetime`), made against
 /// the time it is given; an implementation only stores and returns.
 ///
-/// An implementation that persists must seal what it writes under a key that is gone when the vault locks, and must
-/// read and write nothing while locked. The ranges are public, but the *set of prefixes* is derived from the person's
-/// passwords (see `PwnedRange`), and docs/adr/0005-hibp-while-locked.md allows nothing of that kind at rest in the
-/// clear. `CachedPwnedRange.encoded()` is the plaintext to seal. It should also stay on the device: it is a cache.
+/// The ranges are public, but the *set of prefixes* is derived from the person's passwords (see `PwnedRange`), and
+/// docs/adr/0005-hibp-while-locked.md allows nothing of that kind to outlive the keys in the clear, in memory or at
+/// rest. So `HygieneEngine.lock()` calls `lock()` here, and after it returns no prefix may be readable without the
+/// vault's keys: a cache that lives in memory forgets everything; one that persists must have sealed what it wrote
+/// under a key that is gone when the vault locks, drops its plaintext copies, and reads and writes nothing until
+/// the session unlocks it again. `CachedPwnedRange.encoded()` is the plaintext to seal. It should also stay on the
+/// device: it is a cache.
 public protocol PwnedRangeCache: Sendable {
     /// The entry for `prefix`, however old, or `nil`.
     func cachedRange(for prefix: PwnedRangePrefix) async -> CachedPwnedRange?
     /// Stores `entry`, replacing any entry for the same prefix. Failing to store is not an error.
     func store(_ entry: CachedPwnedRange) async
-    /// Forgets everything.
+    /// Forgets the entry for `prefix`, if there is one.
+    func remove(_ prefix: PwnedRangePrefix) async
+    /// Forgets everything, at rest included.
     func removeAll() async
+    /// The vault is locking. When this returns, nothing the cache holds can be read without the vault's keys.
+    func lock() async
 }
 
-/// A cache that lives as long as the process: the default until the session persists one, and what tests use.
+/// A cache that lives as long as the vault is unlocked: the default until the session persists one, and what tests
+/// use. It holds its entries in the clear, so `lock()` empties it.
 ///
 /// Bounded twice over: beyond `capacity` prefixes, or `maximumBytes` of ranges, the oldest entries go. A range is
 /// some tens of kilobytes today, so the defaults keep a large vault's worth; the byte limit is what holds if a server
@@ -301,9 +309,17 @@ public actor InMemoryPwnedRangeCache: PwnedRangeCache {
         }
     }
 
+    public func remove(_ prefix: PwnedRangePrefix) {
+        bytes -= entries.removeValue(forKey: prefix)?.range.packed.count ?? 0
+    }
+
     public func removeAll() {
         entries.removeAll()
         bytes = 0
+    }
+
+    public func lock() {
+        removeAll()
     }
 
     /// Every entry, ordered by prefix: what a persisting session would seal.

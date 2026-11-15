@@ -244,8 +244,202 @@ struct ScanScheduleTests {
         #expect(schedule.earliestStart(for: Self.id(2), now: now) == now.addingTimeInterval(900))
         await clock.advance(by: 900)
         let later = await clock.now()
-        #expect(schedule.decide(candidates: all, keysResident: true, now: later) == .scan(item: item, reason: .created))
+        // The request after the backoff is for a different item: the one that failed has gone to the back.
+        #expect(
+            schedule.decide(candidates: all, keysResident: true, now: later)
+                == .scan(item: Self.id(2), reason: .created))
+        #expect(item == Self.id(1))
         #expect(schedule.ledger.entries.isEmpty)
+    }
+
+    @Test("an item whose check keeps failing goes to the back, so the rest of the vault is still checked")
+    func failingItemDoesNotStall() async {
+        let clock = FakeClock()
+        var schedule = ScanSchedule()
+        let all = Self.candidates(6)
+        let bad = Self.id(1)
+        var scanned: [UUID] = []
+        var attemptsOnBad = 0
+        for _ in 0..<200 where scanned.count < 5 {
+            let now = await clock.now()
+            switch schedule.decide(candidates: all, keysResident: true, now: now) {
+            case .scan(let item, _) where item == bad:
+                attemptsOnBad += 1
+                schedule.recordFailure(
+                    item: item, error: .serverUnavailable(status: 503, retryAfter: 300), networkRequests: 1,
+                    now: now, jitter: 0)
+            case .scan(let item, _):
+                schedule.recordScan(item: item, version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
+                scanned.append(item)
+            case .wait(let until, _):
+                await clock.set(until)
+            default:
+                Issue.record("unexpected decision")
+                return
+            }
+        }
+        // The first request went to the most urgent item, which failed; every other item was then checked before
+        // it was asked for a second time.
+        #expect(Set(scanned) == Set(all.map(\.id)).subtracting([bad]))
+        #expect(attemptsOnBad == 1)
+        // Then it is the only one due, and is retried at the backoff's pace.
+        await clock.advance(by: 60)
+        let now = await clock.now()
+        #expect(schedule.decide(candidates: all, keysResident: true, now: now) == .scan(item: bad, reason: .created))
+    }
+
+    @Test("of two items that failed, the one that failed longer ago is tried first")
+    func failedLongestAgoFirst() async {
+        let clock = FakeClock()
+        var schedule = ScanSchedule(policy: ScanPolicy(initialBackoff: 10, maximumBackoff: 10))
+        let all = Self.candidates(2)
+        var order: [UUID] = []
+        for _ in 0..<6 {
+            let now = await clock.now()
+            guard case .scan(let item, _) = schedule.decide(candidates: all, keysResident: true, now: now) else {
+                Issue.record("expected a scan")
+                return
+            }
+            order.append(item)
+            schedule.recordFailure(item: item, error: .transport, networkRequests: 1, now: now, jitter: 0)
+            await clock.advance(by: 10)
+        }
+        #expect(order == [Self.id(1), Self.id(2), Self.id(1), Self.id(2), Self.id(1), Self.id(2)])
+    }
+
+    @Test("a pass that cannot finish does not stop the next one: a week on, the other items are checked again")
+    func unfinishedPassDoesNotBlockTheNext() async {
+        let clock = FakeClock()
+        let start = await clock.now()
+        var schedule = ScanSchedule()
+        let all = Self.candidates(3)
+        let bad = Self.id(1)
+        var healthyScans: [Date] = []
+        // Thirty days, with one item whose range is never usable.
+        while await clock.now() < start.addingTimeInterval(30 * 86400) {
+            let now = await clock.now()
+            switch schedule.decide(candidates: all, keysResident: true, now: now) {
+            case .scan(let item, _) where item == bad:
+                schedule.recordFailure(item: item, error: .malformedResponse, networkRequests: 1, now: now, jitter: 0)
+            case .scan(let item, _):
+                schedule.recordScan(item: item, version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
+                if item == Self.id(2) { healthyScans.append(now) }
+            case .wait(let until, _):
+                guard until > now else {
+                    Issue.record("a wait that ends now is a loop")
+                    return
+                }
+                await clock.set(until)
+            default:
+                Issue.record("the failing item is still due, so the schedule is never idle")
+                return
+            }
+        }
+        // Day 0, then once in each weekly pass: days 7, 14, 21 and 28.
+        #expect(healthyScans.count == 5)
+        for (index, time) in healthyScans.enumerated() {
+            let expected = start.addingTimeInterval(Double(index) * Self.week)
+            #expect(time >= expected && time < expected.addingTimeInterval(3600))
+        }
+        // The pass in progress is never called finished while an item in it has not been checked.
+        #expect(schedule.ledger.fullScanCompletedAt == nil)
+    }
+
+    @Test("waiting on a set-aside item never sleeps through the start of the next pass")
+    func retryWaitEndsAtTheNextPass() async {
+        let clock = FakeClock()
+        let start = await clock.now()
+        let policy = ScanPolicy(initialBackoff: 1, maximumBackoff: 1, itemRetryInitial: 6 * 86400)
+        var schedule = ScanSchedule(policy: policy)
+        let all = Self.candidates(1)
+        // Fails twice: the second retry is twelve days out, past the next pass.
+        for _ in 0..<2 {
+            let now = await clock.now()
+            guard case .scan(let item, _) = schedule.decide(candidates: all, keysResident: true, now: now) else {
+                Issue.record("expected a scan")
+                return
+            }
+            schedule.recordFailure(item: item, error: .responseTooLarge, networkRequests: 1, now: now, jitter: 0)
+            await clock.advance(by: 6 * 86400)
+        }
+        await clock.set(start.addingTimeInterval(6 * 86400 + 60))
+        let now = await clock.now()
+        #expect(
+            schedule.decide(candidates: all, keysResident: true, now: now)
+                == .wait(until: start.addingTimeInterval(Self.week), .retry))
+    }
+
+    @Test("a pass whose start is slightly ahead of the clock still scans each item once")
+    func passStartSlightlyAhead() async {
+        let clock = FakeClock()
+        var schedule = ScanSchedule()
+        let all = Self.candidates(3)
+        _ = await Self.drain(&schedule, all, clock: clock)
+        await clock.advance(by: 86400)
+        let now = await clock.now()
+        // A pass in progress that began 200 seconds from now: the clock was put back during it, or the ledger
+        // came from a clock that ran fast. Well inside the tolerance for clock error.
+        var ledger = schedule.ledger
+        ledger.fullScanStartedAt = now.addingTimeInterval(200)
+        ledger.fullScanCompletedAt = nil
+        var resumed = ScanSchedule(ledger: ledger)
+        let scanned = await Self.drain(&resumed, all, clock: clock, limit: 500)
+        #expect(scanned.count == 3)
+        #expect(Set(scanned) == Set(all.map(\.id)))
+        #expect(resumed.ledger.fullScanStartedAt == now)
+        #expect(resumed.passInProgressSince == nil)
+        // The pass's start is no later than any scan made in it, so a range cached during the pass counts as fresh.
+        #expect(resumed.ledger.entries.values.allSatisfy { $0.scannedAt >= now })
+    }
+
+    @Test("the rate limit and the backoff are handed on to the next schedule, so a lock does not reset them")
+    func pacingIsCarried() async {
+        let clock = FakeClock()
+        let policy = ScanPolicy(requestSpacing: 2, burst: 5, maximumJitter: 0)
+        var schedule = ScanSchedule(policy: policy)
+        let all = Self.candidates(20)
+        let now = await clock.now()
+        // The burst is spent, and then the server asks for an hour of quiet.
+        for _ in 0..<5 {
+            guard case .scan(let item, _) = schedule.decide(candidates: all, keysResident: true, now: now) else {
+                Issue.record("expected a scan")
+                return
+            }
+            schedule.recordScan(item: item, version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
+        }
+        #expect(
+            schedule.decide(candidates: all, keysResident: true, now: now)
+                == .wait(until: now.addingTimeInterval(2), .pacing))
+        var relocked = ScanSchedule(ledger: schedule.ledger, policy: policy, pacing: schedule.pacing)
+        #expect(
+            relocked.decide(candidates: all, keysResident: true, now: now)
+                == .wait(until: now.addingTimeInterval(2), .pacing))
+        // Without the pacing, the same moment would have been a fresh burst.
+        var forgetful = ScanSchedule(ledger: schedule.ledger, policy: policy)
+        if case .scan = forgetful.decide(candidates: all, keysResident: true, now: now) {
+        } else {
+            Issue.record("a schedule with no pacing starts with a full burst")
+        }
+
+        schedule.recordFailure(
+            item: Self.id(6), error: .rateLimited(retryAfter: 3600), networkRequests: 1, now: now, jitter: 0)
+        relocked = ScanSchedule(ledger: schedule.ledger, policy: policy, pacing: schedule.pacing)
+        let later = now.addingTimeInterval(10)
+        #expect(
+            relocked.decide(candidates: all, keysResident: true, now: later)
+                == .wait(until: now.addingTimeInterval(3600), .backoff))
+        #expect(relocked.earliestStart(for: Self.id(7), now: later) == now.addingTimeInterval(3600))
+    }
+
+    @Test("pacing handed in never holds more than the policy's burst")
+    func pacingIsBounded() async {
+        let clock = FakeClock()
+        let generous = ScanSchedule(policy: ScanPolicy(burst: 50))
+        var schedule = ScanSchedule(policy: ScanPolicy(burst: 2, maximumJitter: 0), pacing: generous.pacing)
+        let scanned = await Self.drain(&schedule, Self.candidates(4), clock: clock)
+        #expect(scanned.count == 4)
+        // Two at once, then one per spacing: four seconds for the last two.
+        #expect(await clock.now() == Date(timeIntervalSince1970: 1_800_000_000 + 4))
     }
 
     @Test("repeated failures back off exponentially, up to the maximum, and a success resets it")

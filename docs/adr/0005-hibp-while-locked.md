@@ -30,7 +30,10 @@ than its own reasoning, and one where it was more expensive than it needed to be
   holds is twenty bits of the SHA-1 of each of the person's passwords: with the file, an attacker can reject
   all but about one in a million guesses per password offline. So "nothing derived from a password is
   persisted" covers the cache too. A persisted cache is sealed under a key that is gone when the vault locks,
-  is neither read nor written while locked, and stays on the device. The default cache is in memory only.
+  is neither read nor written while locked, and stays on the device. The default cache is in memory only, and
+  memory counts: the set of prefixes must not outlive the keys there either, so locking empties it
+  (`PwnedRangeCache.lock()`, called by `HygieneEngine.lock()`), and an entry on its way into the cache when
+  the lock lands is removed.
 - **Breach results are derived from passwords.** A count from the range API all but names the password. The
   results the scanner keeps between launches (`ScanLedger`) are therefore persisted only sealed, never in the
   clear, and `HygieneEngine` hands the ledger out only while unlocked.
@@ -38,6 +41,10 @@ than its own reasoning, and one where it was more expensive than it needed to be
   weekly edit of every item: a new version, a new log segment and a merge for each, on every device. The
   ledger is one sealed, per-device, unsynced record holding, per item, the version scanned, the time and the
   per-field result. The report still shows when each item was last checked, and the oldest check overall.
+
+What does survive a lock is the scanner's rate limit and backoff (`ScanPacing`): a count of requests and
+three times, none derived from a password. Dropping them at lock would let every unlock forget the server's
+`Retry-After` and start a new burst.
 
 Unchanged: scanning needs the plaintext, so it runs only while keys are resident; a scan a lock interrupts
 resumes at the next unlock; with keys absent nothing is hashed, and a response that arrives after a lock is

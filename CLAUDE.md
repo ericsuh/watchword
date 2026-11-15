@@ -173,19 +173,43 @@ built, and milestone 6 what is still open (the `URLSession` adapter, session wir
   constants of `HygieneHost`; `HTTPSURL` has no public initialiser. Never add a configurable host, follow a
   redirect, or put anything else in a request.
 - A response that could not be read is an error, never "not breached": the parser's bounds (bytes, lines) fail closed
-  and counts saturate. Suffix comparison (`PwnedRange.result`) scans every entry without branching on a match.
+  and counts saturate. Suffix comparison (`PwnedRange.result`) scans every entry without branching on a match. The
+  breached-account response is bounded *while reading* (entry 2,001 ends the read); never decode a whole array and
+  count afterwards.
 - **Only while keys are resident (ADR 0005 and its amendment).** `HygieneEngine` keeps everything derived from a
-  password in one optional that `lock()` clears; every hashing entry point checks it, and a scan re-checks the lock
-  epoch after each suspension, so a lock during a request wins and nothing is cached or recorded. `PasswordDigest`,
+  password in one optional that `lock()` clears, and `lock()` then calls `PwnedRangeCache.lock()`, which empties the
+  in-memory cache: the set of prefixes is password-derived and must not outlive the keys, in memory either. Every
+  hashing entry point checks the optional, and a scan re-checks the lock epoch after each suspension (the client
+  again after its cache write), so a lock during a request wins and nothing is cached or recorded. `PasswordDigest`,
   `ReuseToken`, `ReuseIndex`, `ItemAnalysis` and the report are not `Codable`: keep them that way.
+- What survives a lock is `ScanPacing` (token bucket, backoff) and nothing else: it is not password-derived, and
+  dropping it would let each unlock forget `Retry-After` and start a new burst.
+- **`lock()` must never queue behind the vault.** `unlock` is `async`, analyses one item per turn and stops when it
+  finds the engine locked or its task cancelled; until it returns, `next` waits, `scan` is `.busy` and `report`
+  throws. Do not add a synchronous loop over every item to the actor. The session zeroises the keyset *before*
+  calling `lock()`, never after.
+- **Stale copies are refused.** The engine remembers the highest version of each item it has seen; an older copy
+  (or one from before a trash or deletion) changes nothing: `update` returns `false`, `scan` returns `.stale`. A
+  scan whose item changed while its requests were in flight records nothing.
+- "Clear" is about every password in the item: more than 16 password fields is `incomplete`, and two password
+  fields sharing an ID share the worse result. An unknown result is never "not breached".
 - The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts). They are persisted only
   sealed, per device, unsynced. Nothing here writes to disk.
+- Nothing password-derived or identifying prints: digests, tokens, prefixes (`hex` is the accessor), assessments
+  (the exact estimate is internal; a rank names a common password), analyses, ledgers, addresses, URLs
+  (`absoluteString`) and header values (`HTTPHeaders.fields`) all have redacting descriptions and mirrors. A new
+  type that holds any of these needs the same.
 - The breached-account lookup sends an identifier, so it takes an `IdentifierDisclosure` and nothing schedules it.
 - Time is a parameter and jitter an injected generator: no timers, no `Date()`, no sleeping, in the module or its
   tests. Every request is paid for in `ScanSchedule`'s token bucket, including the several an item with several
-  passwords makes.
-- The estimator analyses 64 scalars and keeps one match per stretch; anything that makes its cost depend on the
-  password's full length is a denial-of-service on a shared vault. Explanations never quote the password.
+  passwords makes. An item whose check failed goes to the back of the queue, and a new weekly pass begins a week
+  after the last began whether or not it finished: one range the server refuses must not stall the rest.
+- The estimator analyses 64 scalars, keeps one match per stretch, and looks words up by walking a sorted table of
+  scalar arrays (`WordTable`): never build or hash a `String` per stretch (hashing non-ASCII text normalises it, a
+  denial-of-service on a shared vault), and anything that makes its cost depend on the password's full length is
+  one too. A cover costs `k! ×` the product of its parts, without zxcvbn's `10000^(k-1)` bonus, which rated
+  `Spring2026!` strong; keyboard zigzags and parallel columns are single patterns. Explanations never quote the
+  password.
 
 ### `SyncEngine` invariants
 

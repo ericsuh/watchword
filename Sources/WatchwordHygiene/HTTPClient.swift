@@ -33,7 +33,7 @@ public struct HTTPSURL: Hashable, Sendable {
 
     /// `https://api.pwnedpasswords.com/range/XXXXX`: the constant path and five hexadecimal characters.
     static func pwnedRange(_ prefix: PwnedRangePrefix) -> HTTPSURL {
-        HTTPSURL(host: .pwnedPasswords, path: "/range/" + prefix.description)
+        HTTPSURL(host: .pwnedPasswords, path: "/range/" + prefix.hex)
     }
 
     /// `https://haveibeenpwned.com/api/v3/breachedaccount/<address>?truncateResponse=false`, the address as one
@@ -44,6 +44,8 @@ public struct HTTPSURL: Hashable, Sendable {
             path: "/api/v3/breachedaccount/" + encodedPathSegment(address.value) + "?truncateResponse=false")
     }
 
+    /// The whole URL, for the adapter to send. This is the one accessor that shows the path: printing an `HTTPSURL`
+    /// does not, so a search for `absoluteString` finds every place an address or a prefix could reach a log.
     public var absoluteString: String {
         "https://" + host.name + path
     }
@@ -77,6 +79,44 @@ public struct HTTPSURL: Hashable, Sendable {
     }
 }
 
+/// The path of a breached-account request is the person's email address, and the path of a range request is twenty
+/// bits of a password's hash: neither belongs in a log (PRD N5), so a URL prints as its host.
+extension HTTPSURL: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "https://\(host.name) (path withheld)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["host": host.name], displayStyle: .struct) }
+}
+
+/// The headers of a request. A value may be the person's API key, so the collection prints as its names only;
+/// `fields` is the one accessor that shows the values, for the adapter to send.
+public struct HTTPHeaders: Hashable, Sendable, ExpressibleByDictionaryLiteral {
+    /// Name to value, as sent. Values are single-line printable ASCII by construction.
+    public let fields: [String: String]
+
+    init(_ fields: [String: String]) {
+        self.fields = fields
+    }
+
+    public init(dictionaryLiteral elements: (String, String)...) {
+        fields = Dictionary(elements, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The header names, sorted.
+    public var names: [String] {
+        fields.keys.sorted()
+    }
+
+    public subscript(name: String) -> String? {
+        fields[name]
+    }
+}
+
+extension HTTPHeaders: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "[" + names.joined(separator: ", ") + "] (values withheld)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["names": names], displayStyle: .struct) }
+}
+
 /// One request, exactly as it would leave the device (docs/02-architecture.md §13).
 ///
 /// It is a value, so tests assert on the whole of what a real adapter would send: there is no other channel by which
@@ -91,13 +131,12 @@ public struct HTTPRequest: Hashable, Sendable {
 
     public let method: Method
     public let url: HTTPSURL
-    /// Header names as sent. Values are single-line printable ASCII by construction.
-    public let headers: [String: String]
+    public let headers: HTTPHeaders
     /// The adapter must stop reading, and fail, once the decoded body exceeds this many bytes. The clients check
     /// again: a response larger than this is refused whatever the adapter did.
     public let maximumResponseBytes: Int
 
-    init(url: HTTPSURL, headers: [String: String], maximumResponseBytes: Int) {
+    init(url: HTTPSURL, headers: HTTPHeaders, maximumResponseBytes: Int) {
         self.method = .get
         self.url = url
         self.headers = headers
@@ -114,7 +153,7 @@ public struct HTTPRequest: Hashable, Sendable {
 
 extension HTTPRequest: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public var description: String {
-        let names = headers.keys.sorted().joined(separator: ", ")
+        let names = headers.names.joined(separator: ", ")
         return "\(method.rawValue) https://\(url.host.name) (path withheld) [\(names)]"
     }
 

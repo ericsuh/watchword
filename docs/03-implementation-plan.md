@@ -238,6 +238,10 @@ half delivered** on a Mac; the transports are open.
 - `HygieneReport` and `HygieneEngine`, the actor the session will drive.
 - The `HTTPClient` port, with `FakeHTTPClient` and `SimulatedPwnedPasswords` in `WatchwordTestSupport`.
 - Tests: `WatchwordHygieneTests` and the adversarial suite "hygiene and breach checks" (`04-test-plan.md` §6.6).
+- Hardened after the first security review (each with a regression test): the lock path (the prefix cache is
+  emptied at lock, `unlock` is interruptible, pacing survives a lock), stale item copies, the estimator's cost on
+  non-ASCII input and its rating of cheap patterns in a row, a failing range no longer stalling the scan, the
+  report never calling a partly checked item clear, the breached-account parser's bound, and what prints.
   The fixtures are written to the API's documented format; the live service is not reachable from a cloud
   session and is never called by a test.
 

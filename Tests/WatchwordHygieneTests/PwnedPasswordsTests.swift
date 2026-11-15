@@ -41,7 +41,7 @@ struct PasswordDigestTests {
         arguments: SimulatedPwnedPasswords.digests.sorted { $0.key < $1.key })
     func prefixMatchesIndependentSHA1(_ vector: (key: String, value: String)) {
         let digest = PasswordDigest(utf8Of: vector.key)
-        #expect(digest.prefix.description == String(vector.value.prefix(5)))
+        #expect(digest.prefix.hex == String(vector.value.prefix(5)))
     }
 
     @Test(
@@ -68,7 +68,7 @@ struct PasswordDigestTests {
 
     @Test("a prefix parses from exactly five hex digits and prints in upper case")
     func prefixParsing() {
-        #expect(PwnedRangePrefix("5baa6")?.description == "5BAA6")
+        #expect(PwnedRangePrefix("5baa6")?.hex == "5BAA6")
         #expect(PwnedRangePrefix("00000")?.value == 0)
         #expect(PwnedRangePrefix("FFFFF")?.value == 0xFFFFF)
         for bad in ["", "5BAA", "5BAA61", "5BAAG", "5BAA ", "５BAA6", "5BAA6\n"] {

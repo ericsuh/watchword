@@ -55,6 +55,20 @@ public struct ScanLedger: Hashable, Sendable {
     }
 }
 
+/// A breach count all but names the password, so a ledger prints as its size and nothing else (PRD N5). Encoding it
+/// (to seal it) is the one way its contents leave the value.
+extension ScanLedger: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "ScanLedger(\(entries.count) items, results withheld)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["items": entries.count], displayStyle: .struct) }
+}
+
+extension ScanLedger.Entry: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "ScanLedger.Entry(version \(itemVersion), results withheld)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["itemVersion": itemVersion], displayStyle: .struct) }
+}
+
 /// Encoded with explicit, encoder-independent shapes (whole seconds, a count where zero means "not found", entries
 /// sorted by item), and decoded with bounds. The session seals the encoding, so what is decoded has already been
 /// authenticated; the bounds make a damaged or foreign blob a decoding error.
@@ -161,7 +175,8 @@ public struct ScanPolicy: Hashable, Sendable {
     public let initialBackoff: TimeInterval
     public let maximumBackoff: TimeInterval
     /// The wait before retrying an item whose range could not be used (too large, malformed, unexpected status);
-    /// doubled each time, up to `itemRetryMaximum`. Other items go on being scanned meanwhile.
+    /// doubled each time, up to `itemRetryMaximum`. Other items go on being scanned meanwhile. (An item whose check
+    /// failed for a reason that may pass, such as a 503, is not timed: it goes to the back of the queue.)
     public let itemRetryInitial: TimeInterval
     public let itemRetryMaximum: TimeInterval
     /// How far ahead of the clock a recorded time may be before it is treated as wrong.
@@ -209,6 +224,8 @@ public enum ScanWait: Hashable, Sendable {
     case backoff
     /// Everything still due failed recently and is waiting for its own retry time.
     case retry
+    /// `HygieneEngine.unlock` is still analysing the items it was given; nothing is decided on part of a vault.
+    case analysing
 }
 
 public enum ScanDecision: Hashable, Sendable {
@@ -222,6 +239,24 @@ public enum ScanDecision: Hashable, Sendable {
     case idle(nextFullScanAt: Date)
 }
 
+/// Where the scanner's rate limit and backoff stand: how many requests it may still make at once, and until when
+/// the server (or a failure) has told it to stay away.
+///
+/// **It outlives a lock.** None of it is derived from a password (it is a count of requests and three times), so
+/// nothing requires it to go when the vault locks, and it must not: a phone locks and unlocks many times a day, and
+/// a scanner that forgot a `Retry-After` of an hour, or was handed a fresh burst, at every unlock would hammer the
+/// API precisely when asked not to (PRD F9.2). `HygieneEngine` keeps it across `lock()` and `unlock()`. It is not
+/// persisted: a new process starts with a full burst, which the launch itself spaces out.
+public struct ScanPacing: Hashable, Sendable {
+    /// Requests that may go now; negative while paying off a step that made several.
+    var tokens: Double
+    var tokensAsOf: Date?
+    /// The weekly pass's next request is not before this (its jitter).
+    var weeklyNotBefore: Date?
+    var backoffUntil: Date?
+    var consecutiveFailures = 0
+}
+
 /// The scanner's scheduling policy, as a value (PRD F9.2, ADR 0005): given the items, the ledger and the time, what
 /// to do next. It owns no timer, thread or clock; the caller asks, acts, and reports back.
 ///
@@ -229,36 +264,46 @@ public enum ScanDecision: Hashable, Sendable {
 ///   and ahead of everything else.
 /// - **After unlock.** The same rule: anything that changed while the vault was locked (by sync) has a version the
 ///   ledger has not seen.
-/// - **Weekly.** A pass begins when the previous one began at least `fullScanInterval` ago. An item is due in a pass
-///   until it has been scanned since the pass began. A pass that a lock interrupts is still in progress in the
-///   ledger, so the next unlock carries on where it stopped, and the following pass is due a week after this one
-///   *began*.
+/// - **Weekly.** A pass begins when the previous one began at least `fullScanInterval` ago, whether or not that one
+///   finished. An item is due in a pass until it has been scanned since the pass began. A pass that a lock
+///   interrupts is still in progress in the ledger, so the next unlock carries on where it stopped, and the
+///   following pass is due a week after this one *began*. A pass that cannot finish (an item whose range keeps
+///   failing) does not hold up the next one.
 /// - **Only while keys are resident.** With `keysResident` false the answer is `.locked`, whatever is due, and the
 ///   ledger is not touched.
 /// - **Rate.** At most `burst` range requests at once, then one per `requestSpacing`; the weekly pass also waits a
 ///   random extra `maximumJitter`. A failure backs every request off, doubling up to `maximumBackoff`, and never for
-///   less than the server's `Retry-After`. Checks answered from the cache cost nothing and wait for nothing.
+///   less than the server's `Retry-After`. Checks answered from the cache cost nothing and wait for nothing. This
+///   state is `pacing`, and it outlives a lock (`ScanPacing`).
+/// - **No item blocks the rest.** An item whose check failed goes to the back of the queue, behind every item that
+///   has not failed or failed longer ago, so the backoff paces requests but the next one is for a different item.
+///   An item whose range cannot be used at all is also set aside for a time of its own.
 public struct ScanSchedule: Sendable {
     public let policy: ScanPolicy
     public private(set) var ledger: ScanLedger
+    /// The rate limit and backoff as they stand. Hand it to the next schedule (`init(ledger:policy:pacing:)`) so a
+    /// lock and unlock does not forget them.
+    public private(set) var pacing: ScanPacing
 
-    // None of this is persisted: it describes this run's requests.
-    private var tokens: Double
-    private var tokensAsOf: Date?
-    private var weeklyNotBefore: Date?
-    private var backoffUntil: Date?
-    private var consecutiveFailures = 0
+    // Not persisted, and not carried across a lock: which items failed in this unlocked period.
     private var itemRetries: [UUID: ItemRetry] = [:]
 
     private struct ItemRetry: Sendable {
         var failures: Int
-        var notBefore: Date
+        /// When the item last failed: the later, the further back in the queue.
+        var failedAt: Date
+        /// Set only for a failure that asking again cannot fix by itself: not before this.
+        var notBefore: Date?
     }
 
-    public init(ledger: ScanLedger = ScanLedger(), policy: ScanPolicy = .standard) {
+    /// - Parameter pacing: the previous schedule's `pacing`, if there was one in this process; `nil` starts with a
+    ///   full burst and no backoff.
+    public init(ledger: ScanLedger = ScanLedger(), policy: ScanPolicy = .standard, pacing: ScanPacing? = nil) {
         self.ledger = ledger
         self.policy = policy
-        tokens = Double(policy.burst)
+        self.pacing = pacing ?? ScanPacing(tokens: Double(policy.burst))
+        // Whatever was handed in, the bucket never holds more than the policy's burst.
+        self.pacing.tokens = min(self.pacing.tokens, Double(policy.burst))
     }
 
     /// What to do next. May begin or complete a weekly pass in the ledger.
@@ -279,7 +324,7 @@ public struct ScanSchedule: Sendable {
         }
 
         // The server's wishes come first: nothing is asked while backing off, whatever is due.
-        if let until = clamped(backoffUntil, now: now, limit: policy.maximumBackoff), until > now {
+        if let until = clamped(pacing.backoffUntil, now: now, limit: policy.maximumBackoff), until > now {
             return .wait(until: until, .backoff)
         }
 
@@ -295,10 +340,26 @@ public struct ScanSchedule: Sendable {
             }
         }
         guard !eligible.isEmpty else {
-            return .wait(until: earliestRetry ?? now.addingTimeInterval(policy.itemRetryInitial), .retry)
+            var until = earliestRetry ?? now.addingTimeInterval(policy.itemRetryInitial)
+            // The next pass makes every other item due again; do not sleep through its start.
+            if let started = ledger.fullScanStartedAt {
+                let nextPass = started.addingTimeInterval(policy.fullScanInterval)
+                if nextPass > now { until = min(until, nextPass) }
+            }
+            return .wait(until: until, .retry)
         }
 
+        // An item that failed waits behind every item that has not, and behind those that failed longer ago: one
+        // prefix the server will not answer must not be asked for again and again while the rest of the vault goes
+        // unchecked. A failure time ahead of the clock is a clock that moved; it sorts as "just now".
+        func failedAt(_ item: UUID) -> Date {
+            guard let failed = itemRetries[item]?.failedAt else { return .distantPast }
+            return min(failed, now)
+        }
         let next = eligible.min { lhs, rhs in
+            let leftFailure = failedAt(lhs.candidate.id)
+            let rightFailure = failedAt(rhs.candidate.id)
+            if leftFailure != rightFailure { return leftFailure < rightFailure }
             if lhs.reason != rhs.reason { return lhs.reason < rhs.reason }
             let left = lhs.scannedAt ?? .distantPast
             let right = rhs.scannedAt ?? .distantPast
@@ -308,11 +369,12 @@ public struct ScanSchedule: Sendable {
         guard let next else { return .idle(nextFullScanAt: now.addingTimeInterval(policy.fullScanInterval)) }
 
         refill(now: now)
-        if tokens < 1 {
-            return .wait(until: now.addingTimeInterval((1 - tokens) * policy.requestSpacing), .pacing)
+        if pacing.tokens < 1 {
+            return .wait(until: now.addingTimeInterval((1 - pacing.tokens) * policy.requestSpacing), .pacing)
         }
         if next.reason == .weekly,
-            let until = clamped(weeklyNotBefore, now: now, limit: policy.requestSpacing + policy.maximumJitter),
+            let until = clamped(
+                pacing.weeklyNotBefore, now: now, limit: policy.requestSpacing + policy.maximumJitter),
             until > now
         {
             return .wait(until: until, .pacing)
@@ -323,9 +385,11 @@ public struct ScanSchedule: Sendable {
     /// Whether a request for `item` may go now: the same limits as `decide`, for the check a save asks for directly.
     /// `nil` means yes; otherwise when to ask again.
     public mutating func earliestStart(for item: UUID, now: Date) -> Date? {
-        if let until = clamped(backoffUntil, now: now, limit: policy.maximumBackoff), until > now { return until }
+        if let until = clamped(pacing.backoffUntil, now: now, limit: policy.maximumBackoff), until > now {
+            return until
+        }
         refill(now: now)
-        if tokens < 1 { return now.addingTimeInterval((1 - tokens) * policy.requestSpacing) }
+        if pacing.tokens < 1 { return now.addingTimeInterval((1 - pacing.tokens) * policy.requestSpacing) }
         return nil
     }
 
@@ -353,11 +417,23 @@ public struct ScanSchedule: Sendable {
             ledger.fullScanCompletedAt = nil
             return
         }
-        // A start time in the future is a clock that has since been put back; waiting for it could mean never
-        // scanning again.
-        let startedInFuture = started > now.addingTimeInterval(policy.clockTolerance)
-        let intervalElapsed = now.timeIntervalSince(started) >= policy.fullScanInterval
-        if startedInFuture || (ledger.fullScanCompletedAt != nil && intervalElapsed) {
+        // A week after a pass began, the next one begins, finished or not. Waiting for a pass that cannot finish
+        // (one item whose range keeps failing) would mean no other item is ever checked again.
+        if now.timeIntervalSince(started) >= policy.fullScanInterval {
+            ledger.fullScanStartedAt = now
+            ledger.fullScanCompletedAt = nil
+            return
+        }
+        guard started > now else { return }
+        // A start time ahead of the clock is a clock that has since been put back, or a ledger from a device whose
+        // clock was fast.
+        if ledger.fullScanCompletedAt == nil {
+            // In progress: the pass began "now" as far as this clock can tell. Left in the future, every scan
+            // (dated now) would be before the pass began, so every item would be due again the moment it was
+            // scanned, and each time round would ask the server afresh, for as long as the start stayed ahead.
+            ledger.fullScanStartedAt = now
+        } else if started > now.addingTimeInterval(policy.clockTolerance) {
+            // Finished, at a time that has not happened: waiting a week from it could mean never scanning again.
             ledger.fullScanStartedAt = now
             ledger.fullScanCompletedAt = nil
         }
@@ -379,10 +455,15 @@ public struct ScanSchedule: Sendable {
     ) {
         ledger.entries[item] = ScanLedger.Entry(itemVersion: version, scannedAt: now, results: results)
         itemRetries[item] = nil
+        recordRequests(networkRequests, now: now, jitter: jitter)
+    }
+
+    /// Pays for requests that were answered, without recording a result: a scan whose item changed under it.
+    public mutating func recordRequests(_ networkRequests: Int, now: Date, jitter: Double) {
         spend(networkRequests, now: now, jitter: jitter)
         if networkRequests > 0 {
-            consecutiveFailures = 0
-            backoffUntil = nil
+            pacing.consecutiveFailures = 0
+            pacing.backoffUntil = nil
         }
     }
 
@@ -393,14 +474,19 @@ public struct ScanSchedule: Sendable {
         spend(networkRequests, now: now, jitter: jitter)
         // A lock is not a fault of the server or of the item.
         guard error != .interrupted else { return }
-        consecutiveFailures = min(consecutiveFailures + 1, 30)
-        let exponential = min(policy.maximumBackoff, policy.initialBackoff * pow(2, Double(consecutiveFailures - 1)))
-        backoffUntil = now.addingTimeInterval(max(exponential, error.retryAfter ?? 0))
+        pacing.consecutiveFailures = min(pacing.consecutiveFailures + 1, 30)
+        let exponential = min(
+            policy.maximumBackoff, policy.initialBackoff * pow(2, Double(pacing.consecutiveFailures - 1)))
+        pacing.backoffUntil = now.addingTimeInterval(max(exponential, error.retryAfter ?? 0))
+        // Either way the item goes to the back of the queue (`decide`). One whose range cannot be used is also
+        // not asked for again until a time of its own: asking sooner would get the same answer.
+        let failures = min((itemRetries[item]?.failures ?? 0) + 1, 30)
+        var retry = ItemRetry(failures: failures, failedAt: now, notBefore: nil)
         if !error.isRetryable {
-            let failures = min((itemRetries[item]?.failures ?? 0) + 1, 30)
             let wait = min(policy.itemRetryMaximum, policy.itemRetryInitial * pow(2, Double(failures - 1)))
-            itemRetries[item] = ItemRetry(failures: failures, notBefore: now.addingTimeInterval(wait))
+            retry.notBefore = now.addingTimeInterval(wait)
         }
+        itemRetries[item] = retry
     }
 
     /// Drops what is remembered about items that no longer exist, or are no longer candidates.
@@ -420,17 +506,19 @@ public struct ScanSchedule: Sendable {
         refill(now: now)
         // No floor worth the name: a step that made several requests (an item with several passwords) owes the
         // spacing for each of them, so the sustained rate holds whatever the items look like.
-        tokens = max(tokens - Double(requests), -1000)
+        pacing.tokens = max(pacing.tokens - Double(requests), -1000)
         let spread = min(max(jitter, 0), 1) * policy.maximumJitter
-        weeklyNotBefore = now.addingTimeInterval(policy.requestSpacing + spread)
+        pacing.weeklyNotBefore = now.addingTimeInterval(policy.requestSpacing + spread)
     }
 
     private mutating func refill(now: Date) {
-        if let asOf = tokensAsOf {
+        if let asOf = pacing.tokensAsOf {
             let elapsed = now.timeIntervalSince(asOf)
-            if elapsed > 0 { tokens = min(Double(policy.burst), tokens + elapsed / policy.requestSpacing) }
+            if elapsed > 0 {
+                pacing.tokens = min(Double(policy.burst), pacing.tokens + elapsed / policy.requestSpacing)
+            }
         }
-        tokensAsOf = now
+        pacing.tokensAsOf = now
     }
 
     /// `date`, unless it is further away than this run could have set it: then the clock moved, and the wait is cut

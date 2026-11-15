@@ -7,7 +7,11 @@ import SecureMemory
 ///
 /// Twenty bits, held as a number, so a value of this type cannot carry more of the hash than that, whatever it was
 /// built from.
-public struct PwnedRangePrefix: Hashable, Sendable, CustomStringConvertible {
+///
+/// The service is meant to see it; nobody else is. Twenty bits of a password's hash reject all but one guess in a
+/// million, so a prefix prints as redacted and `hex`, which the request path is built from, is the one accessor
+/// to search for (PRD N5, docs/adr/0005-hibp-while-locked.md).
+public struct PwnedRangePrefix: Hashable, Sendable {
     public static let hexLength = 5
 
     /// 0 ..< 2^20.
@@ -36,12 +40,18 @@ public struct PwnedRangePrefix: Hashable, Sendable, CustomStringConvertible {
     }
 
     /// Five upper-case hexadecimal digits, as the API's path takes them.
-    public var description: String {
+    public var hex: String {
         let digits = (0..<Self.hexLength).map { index in
             HexNibble.upperCase[Int(value >> UInt32(4 * (Self.hexLength - 1 - index)) & 0x0F)]
         }
         return String(decoding: digits, as: UTF8.self)
     }
+}
+
+extension PwnedRangePrefix: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "PwnedRangePrefix(redacted)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: [], displayStyle: .struct) }
 }
 
 enum HexNibble {

@@ -13,12 +13,15 @@ struct EngineRig {
     let clock = FakeClock(HygieneFixtures.now)
     let engine: HygieneEngine
 
+    /// - Parameter gate: if given, `unlock` passes through it after each item, so a test can hold it there.
     init(
-        breached: [String: UInt32] = [:], policy: HygienePolicy = HygienePolicy(), scanPolicy: ScanPolicy = .standard
+        breached: [String: UInt32] = [:], policy: HygienePolicy = HygienePolicy(), scanPolicy: ScanPolicy = .standard,
+        gate: CheckpointGate? = nil
     ) async {
         let client = PwnedPasswordsClient(http: http, cache: cache, userAgent: HygieneUserAgent(version: "1.0")!)
         engine = HygieneEngine(
-            client: client, policy: policy, scanPolicy: scanPolicy, random: SeededGenerator(seed: 11))
+            client: client, policy: policy, scanPolicy: scanPolicy, random: SeededGenerator(seed: 11)
+        ) { await gate?.pass() }
         let server = SimulatedPwnedPasswords(breached: breached)
         await http.respond { server.reply(to: $0) }
     }
@@ -162,9 +165,9 @@ struct HygieneEngineTests {
         #expect(report.item(items[0].id)?.breachStatus == .breached(checkedAt: HygieneFixtures.now))
         #expect(report.item(items[1].id)?.breachStatus == .notChecked)
         let outcomes = await rig.runUntilIdle(items)
-        // One scan, for the changed item; its range is still cached, so nothing is sent.
-        #expect(outcomes == [.scanned(breachedPasswords: 0, networkRequests: 0)])
-        #expect(await rig.http.requests.isEmpty)
+        // One scan, for the changed item. The lock emptied the prefix cache, so its range is asked for again.
+        #expect(outcomes == [.scanned(breachedPasswords: 0, networkRequests: 1)])
+        #expect(await rig.http.requests.count == 1)
         report = try await rig.engine.report(now: await rig.clock.now())
         #expect(report.totals.itemsAwaitingBreachCheck == 0)
     }
@@ -269,6 +272,218 @@ struct HygieneEngineTests {
         let informed = await EngineRig(policy: HygienePolicy(siteDirectory: EmbeddedSiteDirectory()))
         try await informed.unlock([item])
         #expect(try await informed.engine.report(now: HygieneFixtures.now).totals.itemsByKind[.twoFactorAvailable] == 1)
+    }
+
+    @Test("an older copy of an item changes nothing: it cannot replace the newer analysis or mark it checked")
+    func staleCopy() async throws {
+        let rig = await EngineRig(breached: ["hunter2": 5])
+        var item = HygieneFixtures.item(1)
+        try await rig.unlock([item])
+        await rig.runUntilIdle([item])
+        // The session fetched version 1 for a scan; before it could call `scan`, the person saved version 2, with
+        // a breached password.
+        let fetchedEarlier = item
+        item.fields[1].value = "hunter2"
+        item.version = 2
+        #expect(try await rig.engine.update(item))
+        let now = await rig.clock.now()
+        #expect(await rig.engine.scan(fetchedEarlier, now: now) == .stale)
+        #expect(try await rig.engine.update(fetchedEarlier) == false)
+
+        #expect(try await rig.engine.report(now: now).items[0].breachStatus == .notChecked)
+        #expect(await rig.engine.next(now: now) == .scan(item: item.id, reason: .changed))
+        #expect(try await rig.engine.items(using: "hunter2") == [item.id])
+        #expect(try await rig.engine.ledger().entries[item.id]?.itemVersion == 1)
+        #expect(await rig.engine.scan(item, now: now) == .scanned(breachedPasswords: 1, networkRequests: 1))
+        #expect(try await rig.engine.report(now: now).items[0].breachStatus == .breached(checkedAt: now))
+    }
+
+    @Test("an item saved while its ranges are being fetched is not recorded as checked")
+    func savedDuringScan() async throws {
+        let rig = await EngineRig(breached: ["hunter2": 5])
+        var item = HygieneFixtures.item(1)
+        try await rig.unlock([item])
+        let now = await rig.clock.now()
+        await rig.http.hold()
+        let scanning = item
+        async let outcome = rig.engine.scan(scanning, now: now)
+        await rig.http.waitForHeldRequest()
+        item.fields[1].value = "hunter2"
+        item.version = 2
+        try await rig.engine.update(item)
+        await rig.http.release()
+        #expect(await outcome == .stale)
+        #expect(try await rig.engine.ledger().entries[item.id] == nil)
+        #expect(try await rig.engine.report(now: now).items[0].breachStatus == .notChecked)
+        #expect(await rig.engine.next(now: now) == .scan(item: item.id, reason: .created))
+        #expect(await rig.engine.scan(scanning, now: now) == .stale)
+        #expect(await rig.engine.scan(item, now: now) == .scanned(breachedPasswords: 1, networkRequests: 1))
+    }
+
+    @Test("a copy from before an item was trashed or deleted does not bring it back")
+    func staleAfterRemoval() async throws {
+        let rig = await EngineRig()
+        let first = HygieneFixtures.item(1)
+        let second = HygieneFixtures.item(2)
+        try await rig.unlock([first, second])
+        let now = await rig.clock.now()
+
+        var trashed = first
+        trashed.trashedAt = now
+        trashed.version = 2
+        try await rig.engine.update(trashed)
+        #expect(await rig.engine.scan(first, now: now) == .stale)
+        #expect(try await rig.engine.update(first) == false)
+        // The same version, not trashed: the copy the scanner fetched just before the trash was written.
+        var before = trashed
+        before.trashedAt = nil
+        #expect(await rig.engine.scan(before, now: now) == .stale)
+
+        await rig.engine.remove(second.id)
+        #expect(await rig.engine.scan(second, now: now) == .stale)
+        #expect(try await rig.engine.report(now: now).items.isEmpty)
+        #expect(await rig.http.requests.isEmpty)
+
+        // Restored, as a newer version, it is an item again.
+        var restored = first
+        restored.version = 3
+        #expect(try await rig.engine.update(restored))
+        #expect(try await rig.engine.report(now: now).items.map(\.id) == [first.id])
+    }
+
+    @Test("a lock and unlock does not forget the server's Retry-After")
+    func backoffSurvivesLock() async throws {
+        let rig = await EngineRig()
+        let items = (1...8).map { HygieneFixtures.item($0) }
+        try await rig.unlock(items)
+        await rig.http.enqueue(status: 429, headers: ["Retry-After": "3600"])
+        let start = await rig.clock.now()
+        #expect(await rig.engine.scan(items[0], now: start) == .failed(.rateLimited(retryAfter: 3600)))
+        let ledger = try await rig.engine.ledger()
+        await rig.engine.lock()
+
+        // The phone is unlocked again ten seconds later, as phones are.
+        await rig.clock.advance(by: 10)
+        try await rig.unlock(items, ledger: ledger)
+        let now = await rig.clock.now()
+        #expect(await rig.engine.next(now: now) == .wait(until: start.addingTimeInterval(3600), .backoff))
+        #expect(await rig.engine.scan(items[1], now: now) == .deferred(until: start.addingTimeInterval(3600)))
+        #expect(await rig.http.requests.count == 1)
+    }
+
+    @Test("a lock and unlock does not hand the scanner a fresh burst")
+    func burstSurvivesLock() async throws {
+        let rig = await EngineRig()
+        let items = (1...12).map { HygieneFixtures.item($0) }
+        try await rig.unlock(items)
+        let now = await rig.clock.now()
+        for _ in 0..<5 {
+            guard case .scan(let id, _) = await rig.engine.next(now: now) else {
+                Issue.record("expected the burst")
+                return
+            }
+            _ = await rig.engine.scan(items.first { $0.id == id }!, now: now)
+        }
+        #expect(await rig.http.requests.count == 5)
+        for _ in 0..<3 {
+            let ledger = try await rig.engine.ledger()
+            await rig.engine.lock()
+            try await rig.unlock(items, ledger: ledger)
+            #expect(await rig.engine.next(now: now) == .wait(until: now.addingTimeInterval(2), .pacing))
+            #expect(await rig.engine.scan(items[11], now: now) == .deferred(until: now.addingTimeInterval(2)))
+        }
+        #expect(await rig.http.requests.count == 5)
+    }
+
+    @Test("while unlock is still analysing, nothing is decided or reported, and a save made meanwhile is kept")
+    func analysing() async throws {
+        let gate = CheckpointGate(holdingAfter: 2)
+        let rig = await EngineRig(gate: gate)
+        let loaded = (1...5).map { HygieneFixtures.item($0) }
+        var items = loaded
+        let unlocking = Task { try await rig.unlock(loaded) }
+        await gate.waitUntilHeld()
+        let now = await rig.clock.now()
+        #expect(await rig.engine.isUnlocked)
+        #expect(await rig.engine.isAnalysing)
+        #expect(await rig.engine.next(now: now) == .wait(until: now.addingTimeInterval(2), .analysing))
+        #expect(await rig.engine.scan(items[0], now: now) == .busy)
+        await #expect(throws: HygieneEngineError.analysing) { try await rig.engine.report(now: now) }
+
+        // Meanwhile the person edits the fifth item, which unlock has not reached, and deletes the fourth.
+        items[4].fields[1].value = "password"
+        items[4].version = 2
+        #expect(try await rig.engine.update(items[4]))
+        await rig.engine.remove(items[3].id)
+
+        await gate.release()
+        try await unlocking.value
+        #expect(await rig.engine.isAnalysing == false)
+        let report = try await rig.engine.report(now: now)
+        #expect(Set(report.items.map(\.id)) == Set(items.map(\.id)).subtracting([items[3].id]))
+        // Unlock's own copy of the fifth item was version 1, with a strong password; it did not replace the edit.
+        #expect(report.item(items[4].id)?.findings.contains { $0.kind == .weakPassword } == true)
+        #expect(await rig.engine.next(now: now) == .scan(item: items[0].id, reason: .created))
+        #expect(await rig.http.requests.isEmpty)
+    }
+
+    @Test("a second unlock supersedes one still analysing")
+    func supersededUnlock() async throws {
+        let gate = CheckpointGate(holdingAfter: 1)
+        let rig = await EngineRig(gate: gate)
+        let items = (1...3).map { HygieneFixtures.item($0) }
+        let first = Task { try await rig.unlock(items) }
+        await gate.waitUntilHeld()
+        try await rig.unlock([items[0]])
+        await gate.release()
+        await #expect(throws: HygieneEngineError.locked) { try await first.value }
+        #expect(try await rig.engine.report(now: HygieneFixtures.now).items.map(\.id) == [items[0].id])
+    }
+
+    @Test("two password fields that share an ID cannot hide a breached password behind a clean one")
+    func duplicateFieldIDs() async throws {
+        for breachedFirst in [true, false] {
+            let rig = await EngineRig(breached: ["password": 9])
+            // Nothing makes field IDs distinct: an import, or another member of a shared vault, can write this.
+            let shared = HygieneFixtures.fieldID(1)
+            let strong = HygieneFixtures.strongPassword(1)
+            let values = breachedFirst ? ["password", strong] : [strong, "password"]
+            var item = HygieneFixtures.item(1, password: nil)
+            item.fields += values.map { Field(id: shared, kind: .password, label: "Password", value: $0) }
+            try await rig.unlock([item])
+            let now = await rig.clock.now()
+            #expect(await rig.engine.scan(item, now: now) == .scanned(breachedPasswords: 1, networkRequests: 2))
+            #expect(try await rig.engine.ledger().entries[item.id]?.results == [shared: .found(occurrences: 9)])
+            let hygiene = try #require(try await rig.engine.report(now: now).item(item.id))
+            #expect(hygiene.breachStatus == .breached(checkedAt: now))
+            #expect(hygiene.findings.filter { $0.kind == .breachedPassword }.count == 1)
+            #expect(hygiene.findings.first?.detail == .breached(occurrences: 9))
+        }
+    }
+
+    @Test("an item with more passwords than are checked is never called clear")
+    func tooManyPasswords() async throws {
+        let rig = await EngineRig(breached: ["password": 9])
+        let extra = (2...16).map {
+            Field(
+                id: HygieneFixtures.fieldID(1, $0), kind: .password, label: "Password \($0)",
+                value: HygieneFixtures.strongPassword(100 + $0))
+        }
+        // The seventeenth password is the breached one, and it is beyond the cap.
+        let seventeenth = Field(id: HygieneFixtures.fieldID(1, 17), kind: .password, label: "Old", value: "password")
+        let item = HygieneFixtures.item(1, extra: extra + [seventeenth])
+        try await rig.unlock([item])
+        let now = await rig.clock.now()
+        #expect(await rig.engine.scan(item, now: now) == .scanned(breachedPasswords: 0, networkRequests: 16))
+        let report = try await rig.engine.report(now: now)
+        let hygiene = try #require(report.item(item.id))
+        #expect(hygiene.breachStatus == .incomplete(checkedAt: now))
+        let finding = try #require(hygiene.findings.first { $0.kind == .tooManyPasswords })
+        #expect(finding.severity == .low)
+        #expect(finding.detail == .notAnalysed(passwords: 1))
+        #expect(hygiene.badges.contains(HygieneBadge(kind: .tooManyPasswords, severity: .low)))
+        #expect(report.itemsNeedingAttention.map(\.id) == [item.id])
+        #expect(report.totals.itemsAwaitingBreachCheck == 0)
     }
 
     @Test("a short reuse key is refused and the engine stays locked")

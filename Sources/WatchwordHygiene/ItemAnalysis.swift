@@ -30,6 +30,14 @@ public struct PasswordFact: Hashable, Sendable {
     public let currentSince: Date?
 }
 
+/// Prints as the field it is about and nothing else: a strength estimate beside an item's title is not for a log
+/// (`StrengthAssessment`, PRD N5).
+extension PasswordFact: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "PasswordFact(field: \(fieldID), details withheld)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["fieldID": fieldID], displayStyle: .struct) }
+}
+
 /// One item, reduced to what the hygiene report is built from. Made while keys are resident (`ItemAnalyzer`), kept
 /// in memory until lock, never persisted: the title is as private as the item, and the reuse tokens are derived from
 /// its passwords.
@@ -39,6 +47,10 @@ public struct ItemAnalysis: Hashable, Sendable, Identifiable {
     public let title: String
     public let isArchived: Bool
     public let passwords: [PasswordFact]
+    /// How many password fields the item has beyond `ItemAnalyzer.maximumPasswordsPerItem`. They were not assessed,
+    /// are not in the reuse index and will not be breach-checked, so nothing may call the item clear (the report
+    /// says `incomplete`).
+    public let passwordsNotAnalysed: Int
     /// `url` fields whose address is plain `http`.
     public let insecureURLFields: [UUID]
     public let hasOneTimeCode: Bool
@@ -55,6 +67,19 @@ public struct ItemAnalysis: Hashable, Sendable, Identifiable {
     }
 }
 
+/// Prints as its ID, version and counts. The title is as private as the item, and the facts are password-derived.
+extension ItemAnalysis: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "ItemAnalysis(\(id), version \(version), \(passwords.count) passwords, details withheld)"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(self, children: ["id": id, "version": version], displayStyle: .struct)
+    }
+}
+
 /// Turns an item into an `ItemAnalysis` (PRD F9.3): strength of each password, the token for reuse detection, how
 /// long each password has been current, plain-`http` addresses, and which stronger sign-in methods the item has.
 ///
@@ -63,6 +88,7 @@ public struct ItemAnalysis: Hashable, Sendable, Identifiable {
 public struct ItemAnalyzer: Sendable {
     /// Passwords beyond this many in one item are not analysed or checked: an item is one account, and a shared item
     /// with thousands of password fields would otherwise buy thousands of estimates and range requests in one step.
+    /// The analysis records how many were left out (`ItemAnalysis.passwordsNotAnalysed`), and the report says so.
     public static let maximumPasswordsPerItem = 16
 
     public let estimator: StrengthEstimator
@@ -75,7 +101,11 @@ public struct ItemAnalyzer: Sendable {
 
     /// The password fields the scanner and the report look at, in field order.
     public static func passwordFields(of item: Item) -> [Field] {
-        Array(item.fields.lazy.filter { $0.kind == .password && !$0.value.isEmpty }.prefix(maximumPasswordsPerItem))
+        Array(item.fields.lazy.filter(isPassword).prefix(maximumPasswordsPerItem))
+    }
+
+    private static func isPassword(_ field: Field) -> Bool {
+        field.kind == .password && !field.value.isEmpty
     }
 
     public func analyse(_ item: Item, reuseKey: ReuseKey) -> ItemAnalysis {
@@ -94,8 +124,10 @@ public struct ItemAnalyzer: Sendable {
         for scope in item.scopes.prefix(64) {
             capabilities.formUnion(policy.siteDirectory.capabilities(ofHost: scope.host))
         }
+        let passwordFieldCount = item.fields.reduce(0) { $0 + (Self.isPassword($1) ? 1 : 0) }
         return ItemAnalysis(
             id: item.id, version: item.version, title: item.title, isArchived: item.archived, passwords: passwords,
+            passwordsNotAnalysed: max(0, passwordFieldCount - Self.maximumPasswordsPerItem),
             insecureURLFields: item.fields.filter { $0.kind == .url && Self.isInsecureURL($0.value) }.map(\.id),
             hasOneTimeCode: item.fields.contains { $0.kind == .totp && !$0.value.isEmpty },
             hasPasskey: item.fields.contains { $0.kind == .passkey && !$0.value.isEmpty },

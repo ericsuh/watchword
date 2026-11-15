@@ -234,6 +234,28 @@ struct ItemAnalysisTests {
         #expect(ItemAnalyzer.passwordFields(of: item).isEmpty)
     }
 
+    @Test("an analysis says how many passwords it left out, and prints nothing about any of them")
+    func passwordsNotAnalysed() throws {
+        let fields = (1...20).map {
+            Field(id: HygieneFixtures.fieldID(1, $0), kind: .password, label: "P", value: "dragon")
+        }
+        let empty = Field(id: HygieneFixtures.fieldID(1, 99), kind: .password, label: "Empty", value: "")
+        let item = HygieneFixtures.item(1, title: "Secret title", password: nil, extra: fields + [empty])
+        let analysis = HygieneFixtures.analyzer().analyse(item, reuseKey: try HygieneFixtures.reuseKey())
+        #expect(analysis.passwords.count == ItemAnalyzer.maximumPasswordsPerItem)
+        #expect(analysis.passwordsNotAnalysed == 4)
+        #expect(
+            HygieneFixtures.analyzer().analyse(HygieneFixtures.item(2), reuseKey: try HygieneFixtures.reuseKey())
+                .passwordsNotAnalysed == 0)
+        var printed = "\(analysis) \(String(reflecting: analysis)) \(analysis.passwords[0])"
+        dump(analysis, to: &printed)
+        dump(analysis.passwords[0], to: &printed)
+        #expect(!printed.contains("Secret title"))
+        #expect(!printed.contains("commonPassword"))
+        #expect(!printed.contains("Log10"))
+        #expect(printed.contains(item.id.uuidString))
+    }
+
     @Test("an item with very many password fields is analysed up to the cap")
     func cappedFields() throws {
         let extra = (2..<500).map {
@@ -338,6 +360,31 @@ struct HygieneReportTests {
         let fair = try #require(report.item(HygieneFixtures.id(2))?.findings.first { $0.kind == .weakPassword })
         #expect(fair.severity == .medium)
         #expect(!weak.explanation.contains("password\""))
+    }
+
+    @Test("unchecked passwords beyond the cap make an item incomplete, not clear; a breach among the rest shows")
+    func incomplete() throws {
+        let extra = (2...18).map {
+            Field(
+                id: HygieneFixtures.fieldID(1, $0), kind: .password, label: "P",
+                value: HygieneFixtures.strongPassword(200 + $0))
+        }
+        let item = HygieneFixtures.item(1, extra: extra)
+        var ledger = ScanLedger(entries: [item.id: HygieneFixtures.scanned(item, .notFound)])
+        var hygiene = try #require(try HygieneFixtures.report([item], ledger: ledger).item(item.id))
+        #expect(hygiene.breachStatus == .incomplete(checkedAt: HygieneFixtures.now.addingTimeInterval(-3600)))
+        let finding = try #require(hygiene.findings.first { $0.kind == .tooManyPasswords })
+        #expect(finding.detail == .notAnalysed(passwords: 2))
+        #expect(finding.explanation.contains("2 more passwords"))
+        #expect(hygiene.severity == .low)
+
+        // Not yet checked at all: still "not checked", which is the more urgent thing to say.
+        hygiene = try #require(try HygieneFixtures.report([item]).item(item.id))
+        #expect(hygiene.breachStatus == .notChecked)
+        // One of the sixteen that were checked is breached: breached.
+        ledger.entries[item.id]?.results[HygieneFixtures.fieldID(1, 3)] = .found(occurrences: 4)
+        hygiene = try #require(try HygieneFixtures.report([item], ledger: ledger).item(item.id))
+        #expect(hygiene.breachStatus == .breached(checkedAt: HygieneFixtures.now.addingTimeInterval(-3600)))
     }
 
     @Test("an old password is information, not an alarm")

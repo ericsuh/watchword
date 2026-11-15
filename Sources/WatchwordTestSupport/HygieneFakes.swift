@@ -89,11 +89,16 @@ public actor FakeHTTPClient: HTTPClient {
     }
 }
 
-/// A prefix cache that counts what is asked of it and stored in it, so a test can say "nothing was persisted".
+/// A prefix cache that counts what is asked of it and stored in it, so a test can say "nothing was persisted", and
+/// that can hold a store in mid-air, so a test can put a lock between a check and its entry reaching the cache.
 public actor RecordingPwnedRangeCache: PwnedRangeCache {
     public private(set) var entries: [PwnedRangePrefix: CachedPwnedRange] = [:]
     public private(set) var lookups: [PwnedRangePrefix] = []
     public private(set) var stores: [CachedPwnedRange] = []
+    public private(set) var locks = 0
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private var arrivals: [CheckedContinuation<Void, Never>] = []
 
     public init() {}
 
@@ -102,18 +107,89 @@ public actor RecordingPwnedRangeCache: PwnedRangeCache {
         return entries[prefix]
     }
 
-    public func store(_ entry: CachedPwnedRange) {
+    public func store(_ entry: CachedPwnedRange) async {
         stores.append(entry)
+        if holding {
+            await withCheckedContinuation { continuation in
+                held.append(continuation)
+                for arrival in arrivals { arrival.resume() }
+                arrivals.removeAll()
+            }
+        }
+        // Written after the wait: the worst case, an entry that lands after whatever happened meanwhile.
         entries[entry.range.prefix] = entry
+    }
+
+    public func remove(_ prefix: PwnedRangePrefix) {
+        entries[prefix] = nil
     }
 
     public func removeAll() {
         entries.removeAll()
     }
 
+    public func lock() {
+        locks += 1
+        entries.removeAll()
+    }
+
     /// Plants an entry without counting it as a store: a cache file someone else wrote.
     public func plant(_ entry: CachedPwnedRange, under prefix: PwnedRangePrefix) {
         entries[prefix] = entry
+    }
+
+    /// Makes stores wait, before they write, until `releaseStores()`.
+    public func holdStores() {
+        holding = true
+    }
+
+    /// Returns once a store is waiting.
+    public func waitForHeldStore() async {
+        guard held.isEmpty else { return }
+        await withCheckedContinuation { arrivals.append($0) }
+    }
+
+    public func releaseStores() {
+        holding = false
+        for continuation in held { continuation.resume() }
+        held.removeAll()
+    }
+}
+
+/// A checkpoint a test can stop at: `HygieneEngine.unlock` awaits one between items, and a test that passes
+/// `gate.pass` there can hold the unlock after a chosen number of items, act (lock, save, cancel) while it is held,
+/// and let it go, all without sleeping.
+public actor CheckpointGate {
+    public private(set) var passes = 0
+    private let holdAt: Int
+    private var arrived = false
+    private var held: CheckedContinuation<Void, Never>?
+    private var arrival: CheckedContinuation<Void, Never>?
+
+    /// - Parameter passes: the pass to hold at, counting from one.
+    public init(holdingAfter passes: Int) {
+        holdAt = passes
+    }
+
+    /// The checkpoint itself.
+    public func pass() async {
+        passes += 1
+        guard passes == holdAt else { return }
+        arrived = true
+        arrival?.resume()
+        arrival = nil
+        await withCheckedContinuation { held = $0 }
+    }
+
+    /// Returns once the checkpoint is holding.
+    public func waitUntilHeld() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { arrival = $0 }
+    }
+
+    public func release() {
+        held?.resume()
+        held = nil
     }
 }
 
