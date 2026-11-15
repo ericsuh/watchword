@@ -342,9 +342,19 @@ public enum DeviceRegistry {
         return admitted
     }
 
+    /// Credential changes this device does not follow that are worth evaluating as candidates; any beyond this many
+    /// are ignored (each costs a replay of the registry).
+    public static let maximumCandidates = 16
+
     /// Replays `entries` (as `admit` returned them). `genesis` and `credential` are what this device pinned: the
     /// genesis entry named by the account header it opened with the password, and the credential entry that header
     /// belongs to.
+    ///
+    /// Credential changes that are not on that chain are then looked at as candidates. A candidate is judged **as
+    /// if it were followed** — the registry replayed with it as the last checkpoint — and never by where it falls
+    /// among the entries no checkpoint has sealed yet: a revoked device that kept the account key can put a
+    /// back-dated revocation of the very device that changed the password in front of that change, and a device
+    /// that has not been given the new password yet must still see that there is one.
     public static func evaluate(
         _ entries: [ObjectDigest: RegistryEntry],
         accountID: UUID,
@@ -352,6 +362,47 @@ public enum DeviceRegistry {
         genesis: ObjectDigest,
         credential: ObjectDigest
     ) throws -> DeviceRegistryState {
+        let graph = try prepare(entries, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis)
+        var state = try replay(
+            entries, graph: graph, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis,
+            credential: credential)
+        let followed = Set(state.credentialChain.map(\.id))
+        let head = state.credential.id
+        var considered = 0
+        for id in graph.ids.sorted() where !followed.contains(id) && considered < maximumCandidates {
+            guard case .credential(_, _, let previous)? = entries[id]?.body else { continue }
+            // Where it branches off the chain this device follows: at the last link (a change this device has not
+            // confirmed) or at an earlier one (a fork). One that leads nowhere on the chain is nothing.
+            var cursor = previous
+            var steps = 0
+            while !followed.contains(cursor), steps < maximumEntries,
+                case .credential(_, _, let earlier)? = entries[cursor]?.body
+            {
+                cursor = earlier
+                steps += 1
+            }
+            guard followed.contains(cursor) else { continue }
+            considered += 1
+            guard
+                let alternative = try? replay(
+                    entries, graph: graph, accountID: accountID, accountSigningKey: accountSigningKey,
+                    genesis: genesis, credential: id)
+            else { continue }
+            if cursor == head {
+                state.pendingCredentials.append(alternative.credential)
+            } else {
+                state.forkedCredentials.append(alternative.credential)
+            }
+        }
+        state.pendingCredentials.sort { ($0.generation, $0.id) < ($1.generation, $1.id) }
+        state.forkedCredentials.sort { ($0.generation, $0.id) < ($1.generation, $1.id) }
+        return state
+    }
+
+    /// Checks the genesis entry and builds the graph of everything that descends from it.
+    private static func prepare(
+        _ entries: [ObjectDigest: RegistryEntry], accountID: UUID, accountSigningKey: [UInt8], genesis: ObjectDigest
+    ) throws -> Graph {
         guard entries.count <= maximumEntries else { throw DeviceRegistryError.tooManyEntries(entries.count) }
         guard let root = entries[genesis],
             case .genesis(let rootKey, let rootDevice, let rootEnrolmentKey) = root.body,
@@ -367,8 +418,17 @@ public enum DeviceRegistry {
         else { throw DeviceRegistryError.genesisUnavailable }
 
         // Entries that descend from the genesis entry, in a causal order, each with a bitset of its ancestors.
-        let graph = Graph(entries, genesis: genesis)
+        return Graph(entries, genesis: genesis)
+    }
 
+    /// Replays the registry along the credential chain that ends at `credential`.
+    private static func replay(
+        _ entries: [ObjectDigest: RegistryEntry], graph: Graph, accountID: UUID, accountSigningKey: [UInt8],
+        genesis: ObjectDigest, credential: ObjectDigest
+    ) throws -> DeviceRegistryState {
+        guard let root = entries[genesis], case .genesis(_, let rootDevice, let rootEnrolmentKey) = root.body else {
+            throw DeviceRegistryError.genesisUnavailable
+        }
         // The credential chain, from the one this device follows back to the genesis entry.
         var chain: [DeviceRegistryState.Credential] = []
         var cursor = credential
@@ -394,7 +454,6 @@ public enum DeviceRegistry {
             accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis, credentialChain: [chain[0]])
         state.connectedEntries = Set(graph.ids)
         var revokedKeys: Set<[UInt8]> = []
-        var offChain: [ObjectDigest: DeviceRegistryState.Credential] = [:]
 
         for id in graph.replayOrder(checkpoints: chain.map(\.id)) {
             let entry = entries[id]!
@@ -442,45 +501,23 @@ public enum DeviceRegistry {
                     continue
                 }
 
-            case .credential(let generation, let enrolmentKey, let previous):
+            case .credential(_, let enrolmentKey, let previous):
                 let next = state.credentialChain.count
-                if next < chain.count, chain[next].id == id {
-                    // A link of the chain this device follows: it must be what the rules allow, or the chain is not
-                    // one to follow.
-                    guard case .device(let author) = entry.author, deviceSigned(entry, by: author, in: state),
-                        previous == state.credential.id, credentialSigned(entry, by: state.credential)
-                    else { throw DeviceRegistryError.brokenCredentialChain }
-                    state.credentialChain.append(chain[next])
-                    state.validEntries.insert(id)
-                    continue
-                }
-                // Not on the chain: a change this device has not confirmed (it follows the last link), or a branch
-                // off an earlier link. Either counts for nothing until the person's password says otherwise; it is
-                // recorded only if it is what the rules allow where it stands.
+                // Not on the chain this replay follows: it counts for nothing here. Whether it is a change this
+                // device could follow is decided by replaying with it on the chain (`evaluate`).
+                guard next < chain.count, chain[next].id == id else { continue }
+                // A link of the chain: it must be what the rules allow where it stands — written by a registered
+                // device, signed by the enrolment key of the generation before — or the chain is not one to follow.
                 guard case .device(let author) = entry.author, deviceSigned(entry, by: author, in: state),
-                    graph.isAncestor(previous, of: id),
-                    let base = state.credentialChain.first(where: { $0.id == previous }) ?? offChain[previous],
-                    generation == base.generation + 1, credentialSigned(entry, by: base),
+                    previous == state.credential.id, credentialSigned(entry, by: state.credential),
                     (try? Signatures.validateSigningKey(enrolmentKey)) != nil
-                else { continue }
-                offChain[id] = .init(
-                    id: id, generation: generation, enrolmentKey: enrolmentKey, author: author, previous: previous)
+                else { throw DeviceRegistryError.brokenCredentialChain }
+                state.credentialChain.append(chain[next])
             }
             state.validEntries.insert(id)
         }
         guard state.credentialChain.count == chain.count else { throw DeviceRegistryError.brokenCredentialChain }
 
-        // Pending: descends from the last link. Forked: branches off an earlier one.
-        let head = state.credential.id
-        for candidate in offChain.values.sorted(by: { ($0.generation, $0.id) < ($1.generation, $1.id) }) {
-            var cursor = candidate
-            while let previous = cursor.previous, let parent = offChain[previous] { cursor = parent }
-            if cursor.previous == head {
-                state.pendingCredentials.append(candidate)
-            } else {
-                state.forkedCredentials.append(candidate)
-            }
-        }
         var hasValidChild: Set<ObjectDigest> = []
         for id in state.validEntries {
             for parent in entries[id]!.parents { hasValidChild.insert(parent) }

@@ -397,6 +397,39 @@ struct DeviceRegistryTests {
         #expect(sealed.credential.generation == 2)
     }
 
+    /// Found by the adversarial suite: a device that has not been given the new password replays the password
+    /// change among entries no checkpoint has sealed, where a back-dated revocation of the device that made the
+    /// change can sort in front of it. The change must be seen all the same, or that device could never follow it.
+    @Test("a back-dated revocation of the device that changed the password cannot hide the change")
+    func pendingChangeSurvivesBackdating() throws {
+        var exercised = false
+        for seed in UInt64(1)...12 {
+            var f = RegistryFixture(seed: seed)
+            let genesis = f.genesis(device: Self.a)
+            let addB = f.add(Self.b, by: Self.a, parents: [genesis])
+            let addX = f.add(Self.c, by: Self.a, parents: [addB])
+            let revokeX = f.revoke(Self.c, by: Self.a, parents: [addX])
+            _ = f.nextUnlockKey()
+            let change = f.credential(generation: 1, previous: genesis, by: Self.a, parents: [revokeX])
+            let backdated = [
+                f.revoke(Self.a, by: Self.c, parents: [addX]),
+                f.revoke(Self.a, by: Self.c, parents: [addX, addB]),
+                f.revoke(Self.a, by: Self.c, parents: [addX, genesis]),
+            ]
+            let entries = [genesis, addB, addX, revokeX, change] + backdated
+            exercised = exercised || backdated.contains { $0.id < revokeX.id }
+
+            // A device still on the old password: whatever it makes of the unsealed entries, it sees the change.
+            let behind = try f.evaluate(entries, genesis: genesis)
+            #expect(behind.pendingCredentials.map(\.id) == [change.id], "seed \(seed)")
+            // And following it settles everything: the revoked device is revoked, the others are not.
+            let followed = try f.evaluate(entries, genesis: genesis, credential: change)
+            #expect(Set(followed.devices.keys) == [Self.a, Self.b], "seed \(seed)")
+            #expect(followed.standing(of: Self.c) == .revoked)
+        }
+        #expect(exercised, "no seed put a back-dated revocation in front of the genuine one")
+    }
+
     @Test("two password changes at once are two branches; a device follows the one the person's password opens")
     func forks() throws {
         var f = RegistryFixture()

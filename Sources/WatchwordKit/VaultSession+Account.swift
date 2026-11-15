@@ -18,6 +18,18 @@ public struct DeviceInfo: Sendable, Hashable, Identifiable {
     public var revokedBy: UUID?
 }
 
+/// A device's ID and public signing key, made before it joins the account so that a registered device can vouch
+/// for it.
+public struct DeviceIdentity: Sendable, Hashable {
+    public var id: UUID
+    public var key: DevicePublicKey
+
+    public init(id: UUID, key: DevicePublicKey) {
+        self.id = id
+        self.key = key
+    }
+}
+
 /// What becomes of the account password when a device is revoked (docs/02-architecture.md §7.8). Both choices take
 /// the current password: removing a device is not something an unattended, unlocked session should be able to do.
 public enum RevocationPasswordChoice: Sendable, Hashable {
@@ -122,7 +134,11 @@ extension VaultSession {
     static let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     static let directoryObjectMaximumLength = 4096
     static let deletionMarker = Array("WWVD1-deleted".utf8)
+    /// Key derivations spent on candidate account headers in one unlock or enrolment: each costs as much as the
+    /// header's KDF parameters ask, up to the ceiling (SEC9).
     static let maximumHeaderAttempts = 3
+    /// Header names looked at during enrolment before giving up; the store may hold any number of planted ones.
+    static let maximumHeadersConsidered = 64
 
     // MARK: - Registry: loading and pinning
 
@@ -164,6 +180,11 @@ extension VaultSession {
             credential: anchor.credential, requiredHeads: anchor.heads)
         registryView = view
         return view
+    }
+
+    /// Forgets the evaluated registry, so the next use reads the local store again.
+    func invalidateRegistry() {
+        registryView = nil
     }
 
     static func evaluateRegistry(
@@ -636,8 +657,29 @@ extension VaultSession {
     /// only from the genesis entry that binding names, and each vault key only if a registered device vouched for it
     /// and it opens under the keyset for the vault and key its name says. A wrong password, a wrong Secret Key and a
     /// tampered header are one error, `CryptoError.authenticationFailed`.
-    public func enrol(password: String, secretKey: String, accountID: UUID? = nil) async throws {
-        try await enrol(password: password, secretKey: secretKey, accountID: accountID, assigningDeviceID: nil)
+    ///
+    /// `identity` is for a device that a registered device has already vouched for (`approveDevice`): it enrols as
+    /// that device, with the key `prepareDeviceIdentity` made. Without it the device takes a new ID and key and
+    /// registers itself with the enrolment key, which the password and Secret Key yield.
+    public func enrol(
+        password: String, secretKey: String, accountID: UUID? = nil, as identity: DeviceIdentity? = nil
+    ) async throws {
+        if let identity, let accountID = accountID ?? EmergencyKit.parseSetupCode(secretKey)?.accountID {
+            guard try await deviceKeys.publicKey(accountID: accountID, deviceID: identity.id) == identity.key else {
+                throw VaultError.enrolmentUnavailable
+            }
+        }
+        try await enrol(
+            password: password, secretKey: secretKey, accountID: accountID, assigningDeviceID: identity?.id)
+    }
+
+    /// Makes this installation's device key before it has the account, so that a registered device can vouch for it
+    /// (`approveDevice`) — the ID and public key are what the new device shows, as a QR code say. Nothing secret
+    /// leaves this device, and nothing here gives it access: it still needs the password and the Secret Key.
+    public func prepareDeviceIdentity(accountID: UUID) async throws -> DeviceIdentity {
+        guard keys == nil, try await loadAccount() == nil else { throw VaultError.enrolmentUnavailable }
+        let id = UUID.random(using: &random)
+        return DeviceIdentity(id: id, key: try await deviceKeys.create(accountID: accountID, deviceID: id))
     }
 
     /// As `enrol`, with the new device's ID chosen by the caller: for tests that need to name the device.
@@ -674,13 +716,18 @@ extension VaultSession {
         guard !names.isEmpty else { throw VaultError.accountNotOnTransport }
 
         var opened: (header: AccountHeaderObject, unlockKey: EncryptionKey, keyset: Keyset, personal: UUID)?
-        for candidate in names.prefix(Self.maximumHeaderAttempts) {
+        var derivations = 0
+        for candidate in names.prefix(Self.maximumHeadersConsidered)
+        where derivations < Self.maximumHeaderAttempts {
+            // A header that is not what its name says, or whose KDF parameters are out of bounds, costs a fetch and
+            // nothing more; only one that parses is worth a derivation, and only a few of those are tried.
             guard
-                let bytes = try await transport.fetch(
+                let bytes = try? await transport.fetch(
                     candidate.name, maximumLength: AccountHeaderObject.maximumLength),
                 let header = try? AccountHeaderObject.parse(bytes), header.accountID == accountID,
                 header.generation == candidate.generation, header.author == candidate.author
             else { continue }
+            derivations += 1
             // `accountUnlockKey` validates the KDF parameters again before any work (SEC5, SEC9).
             let unlockKey = try TwoSecretKeyDerivation.accountUnlockKey(
                 password: password, secretKey: secretKey, accountID: accountID, parameters: header.kdf,
@@ -743,7 +790,12 @@ extension VaultSession {
             personalVaultKeyID: Self.zeroUUID, kdf: header.kdf, salt: header.salt, unlockKeyID: header.unlockKeyID,
             wrappedKeyset: header.wrappedKeyset, keysetVersion: header.keysetVersion,
             credentialGeneration: header.generation, createdAt: now, emergencyKitConfirmedAt: now)
-        let deviceKey = try await deviceKeys.create(accountID: accountID, deviceID: deviceID)
+        let deviceKey: DevicePublicKey
+        if let prepared = try await deviceKeys.publicKey(accountID: accountID, deviceID: deviceID) {
+            deviceKey = prepared
+        } else {
+            deviceKey = try await deviceKeys.create(accountID: accountID, deviceID: deviceID)
+        }
         let enrolment = EnrolmentKey.derive(from: unlockKey, accountID: accountID)
         defer { enrolment.zeroise() }
         let registration = try await signedRegistryEntry(
@@ -993,7 +1045,11 @@ extension VaultSession {
                 accountID: accountID, generation: stored.header.generation, author: stored.header.author
             ).name
             currentName = name
-            if !listed.contains(name) {
+            // Any device puts back a header the store has lost — unless it knows its own to be out of date (the
+            // password was changed elsewhere), or is no longer a device of the account.
+            if !listed.contains(name), view.state.pendingCredentials.isEmpty,
+                view.state.standing(of: account.deviceID) == .active
+            {
                 report.headerPublished = try await create(name, contents: stored.row.envelope, on: transport)
             }
         }
