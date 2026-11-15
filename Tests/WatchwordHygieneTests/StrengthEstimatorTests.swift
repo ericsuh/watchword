@@ -95,8 +95,10 @@ struct StrengthEstimatorTests {
         for list in [passwords, lines(EmbeddedWordLists.englishWords), lines(EmbeddedWordLists.surnames), eff] {
             #expect(list.allSatisfy { $0 == $0.lowercased() && (3...32).contains($0.unicodeScalars.count) })
         }
-        #expect(RankedDictionary.embedded.words["password"] == DictionaryHit(rank: 2, source: .commonPassword))
-        #expect(RankedDictionary.embedded.words["abacus"]?.source == .passphraseWord)
+        #expect(RankedDictionary.embedded.hit(for: "password") == DictionaryHit(rank: 2, source: .commonPassword))
+        #expect(RankedDictionary.embedded.hit(for: "abacus")?.source == .passphraseWord)
+        #expect(RankedDictionary.embedded.hit(for: "abacu") == nil)
+        #expect(RankedDictionary.embedded.hit(for: "abacuss") == nil)
         #expect(RankedDictionary.embedded.maximumWordLength <= 32)
     }
 
@@ -279,12 +281,137 @@ struct StrengthEstimatorTests {
         let right = StrengthMatch(start: 4, end: 7, pattern: .sequence, guesses: 16)
         let cover = StrengthEstimator.cheapestCover(length: 8, matches: [left, right, whole])
         #expect(cover.sequence == [whole])
-        #expect(cover.guesses == 33)
-        // With nothing matched, brute force: 10^n + 1.
-        #expect(StrengthEstimator.cheapestCover(length: 3, matches: []).guesses == 1001)
+        #expect(cover.guesses == 32)
+        // With nothing matched, brute force: 10^n.
+        #expect(StrengthEstimator.cheapestCover(length: 3, matches: []).guesses == 1000)
         #expect(StrengthEstimator.cheapestCover(length: 0, matches: []).guesses == 1)
         // Matches outside the password are ignored, not trusted.
         let outside = StrengthMatch(start: 2, end: 9, pattern: .sequence, guesses: 1)
-        #expect(StrengthEstimator.cheapestCover(length: 3, matches: [outside]).guesses == 1001)
+        #expect(StrengthEstimator.cheapestCover(length: 3, matches: [outside]).guesses == 1000)
+    }
+
+    @Test("a cover of k parts costs k! times the product of its parts, and nothing is added for having parts")
+    func coverArithmetic() {
+        // Three parts of 100 guesses each: 3! × 100^3. zxcvbn would add 10000^2 here, which alone is "strong".
+        let parts = (0..<3).map { StrengthMatch(start: $0 * 3, end: $0 * 3 + 2, pattern: .sequence, guesses: 100) }
+        let cover = StrengthEstimator.cheapestCover(length: 9, matches: parts)
+        #expect(cover.sequence == parts)
+        #expect(cover.guesses == 6_000_000)
+        #expect(StrengthEstimator.score(guesses: cover.guesses) == .fair)
+    }
+
+    @Test(
+        "a word, a year and a symbol, or a few common passwords in a row, is not a strong password",
+        arguments: [
+            "Spring2026!", "Autumn2026!", "Monday2026!", "Tiger2025!", "love2026you", "qwertyuiopasdfghjklzxcvbnm",
+            "abc123def456", "monkey!dragon!", "loveyoubaby", "Summer2024", "Welcome2025!", "dragon2026",
+        ])
+    func cheapPatternsInARow(_ password: String) {
+        let assessment = Self.estimator.assess(password)
+        #expect(assessment.score <= .fair, "scored \(assessment.score.rawValue)")
+        #expect(assessment.weakness != nil)
+        #expect(assessment.explanation != StrengthEstimator.nothingPredictable)
+    }
+
+    @Test(
+        "keyboard patterns of more than one stroke are weak: columns side by side, zigzags, with or without shift",
+        arguments: [
+            "2w3e4r5t6y", "rfvtgbyhn", "3edc4rfv5tgb", "nhy6bgt5vfr4", "0okm9ijn8uhb", "zaq1xsw2cde3vfr4",
+            "!QAZ@WSX#EDC", "qazwsxedcrfvtgbyhnujm", "1qaz2wsx3edc", "qawsedrftg", "147258369",
+        ])
+    func keyboardShapes(_ password: String) {
+        let assessment = Self.estimator.assess(password)
+        #expect(assessment.score <= .weak, "scored \(assessment.score.rawValue)")
+        #expect(assessment.weakness == .keyboardPattern || assessment.weakness == .commonPassword)
+    }
+
+    @Test("a zigzag is worth the turns of one period; an irregular walk keeps every turn")
+    func turns() {
+        #expect(StrengthMatcher.effectiveTurns([3, 3, 3, 3]) == 1)
+        #expect(StrengthMatcher.effectiveTurns([4, 2, 4, 2, 4, 2, 4, 2, 4]) == 2)
+        #expect(StrengthMatcher.effectiveTurns([4, 4, 2, 4, 4, 2, 4, 4, 2]) == 2)
+        #expect(StrengthMatcher.effectiveTurns([4, 2, 3, 0, 5]) == 5)
+        #expect(StrengthMatcher.effectiveTurns([4, 2]) == 2)
+        #expect(StrengthMatcher.effectiveTurns([4]) == 1)
+        #expect(StrengthMatcher.effectiveTurns([]) == 0)
+    }
+
+    @Test("a strong password is only said to have no pattern when none was found")
+    func strongExplanations() {
+        let random = Self.estimator.assess("x7#Vq9!mLp2$Zr8@Wn4&")
+        #expect(random.explanation == StrengthEstimator.nothingPredictable)
+        let phrase = Self.estimator.assess("correct horse battery staple")
+        #expect(phrase.score == .veryStrong)
+        #expect(phrase.weakness == nil)
+        #expect(phrase.explanation == StrengthEstimator.strongButPatterned)
+    }
+
+    @Test("an assessment gives the order of magnitude, and prints the score only")
+    func magnitude() {
+        // "dragon" is entry 10 of the common-password list: the exact estimate would name it.
+        let dragon = Self.estimator.assess("dragon")
+        #expect(dragon.guessesMagnitude == 1)
+        #expect(Self.estimator.assess("").guessesMagnitude == 0)
+        #expect((19...20).contains(Self.estimator.assess("x7#Vq9!mLp2$Zr8@Wn4&").guessesMagnitude))
+        var printed = "\(dragon) \(String(reflecting: dragon))"
+        dump(dragon, to: &printed)
+        #expect(!printed.contains("1.0"))
+        #expect(!printed.contains("Log10"))
+        #expect(!printed.contains("commonPassword"))
+        #expect(printed.contains("score"))
+    }
+
+    @Test("the word table finds exactly the words it holds, by narrowing one scalar at a time")
+    func wordTable() {
+        func scalars(_ text: String) -> [UInt32] { text.unicodeScalars.map(\.value) }
+        let words = ["cat", "catalogue", "cater", "dog", "do", "пароль", "zebra"]
+        let table = WordTable(words.enumerated().map { (word: scalars($0.element), value: $0.offset) })
+        #expect(table.count == 7)
+        #expect(table.maximumWordLength == 9)
+        for (index, word) in words.enumerated() {
+            #expect(table.value(of: scalars(word)) == index)
+        }
+        for absent in ["", "c", "ca", "cats", "catalog", "d", "dogs", "парол", "zebras", "a", "~"] {
+            #expect(table.value(of: scalars(absent)) == nil)
+        }
+        // Narrowing by a scalar nothing continues with empties the range, which is what ends a walk.
+        var range = table.all
+        range = table.narrow(range, depth: 0, by: 0x63)
+        #expect(range.count == 3)
+        #expect(table.narrow(range, depth: 1, by: 0x301).isEmpty)
+        #expect(WordTable<Int>([]).narrow(0..<0, depth: 0, by: 0x61).isEmpty)
+    }
+
+    @Test("the dictionary matchers do a bounded number of steps, the same whatever script the password is in")
+    func dictionarySteps() {
+        func steps(_ password: String, personal: [String] = []) -> Int {
+            var matcher = StrengthMatcher(
+                Array(password.unicodeScalars.prefix(StrengthEstimator.maximumAnalysedLength)),
+                personal: PersonalDictionary(personal), referenceYear: 2026, repeatDepth: 2)
+            _ = matcher.matchAll()
+            return matcher.dictionarySteps
+        }
+        // Each of the ten readings (plain, reversed, eight look-alike readings) reads at most the longest word
+        // from each of 64 starts, in two tables.
+        let longest = max(RankedDictionary.embedded.maximumWordLength, PersonalDictionary.maximumLength) + 1
+        let ceiling = 10 * 64 * longest * 2
+        // Combining marks between look-alike characters: no stretch is a word, so each start is abandoned as soon
+        // as a mark is reached, at most three scalars in.
+        let marks = String(repeating: "a\u{323}\u{301}1o\u{31B}\u{323}|\u{F73}7", count: 7)
+        #expect(steps(marks) <= 10 * 64 * 3)
+        var generator = SeededGenerator(seed: TestEnvironment.seed(fallback: 4))
+        for _ in 0..<TestEnvironment.iterations(standard: 50, long: 2000) {
+            var view = String.UnicodeScalarView()
+            for _ in 0..<64 {
+                let ranges: [ClosedRange<UInt32>] = [0x21...0x7E, 0x300...0x36F, 0x400...0x4FF, 0x4E00...0x5000]
+                let range = ranges[Int(generator.next() % 4)]
+                let value = range.lowerBound + UInt32(generator.next() % UInt64(range.count))
+                if let scalar = Unicode.Scalar(value) { view.append(scalar) }
+            }
+            let password = String(view)
+            #expect(steps(password, personal: [password, "пароль-пароль", "1|7"]) <= ceiling)
+        }
+        // The most a password made of words costs is still under the ceiling.
+        #expect(steps(String(repeating: "password1!|7", count: 6)) <= ceiling)
     }
 }

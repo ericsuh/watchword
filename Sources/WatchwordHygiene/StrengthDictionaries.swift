@@ -21,6 +21,77 @@ struct DictionaryHit: Sendable, Equatable {
     var source: DictionarySource
 }
 
+/// Words held as sorted arrays of scalar values, so that a stretch of a password is looked up by narrowing a range
+/// of the table one scalar at a time, the way a trie is walked.
+///
+/// This is what bounds the estimator's work on hostile input. A stretch is abandoned at the first scalar no word
+/// continues with, each step is two binary searches over integers, and nothing is hashed or built per stretch. An
+/// earlier version made a `String` of every stretch and looked it up in a `String`-keyed dictionary; hashing a
+/// non-ASCII `String` normalises it, which let a password of combining marks cost several hundred times an ordinary
+/// one (review of milestone 6).
+struct WordTable<Value: Sendable>: Sendable {
+    /// Sorted lexicographically by scalar value; a word sorts before every longer word it begins.
+    private let words: [[UInt32]]
+    private let values: [Value]
+    /// No word is longer than this many scalars.
+    let maximumWordLength: Int
+
+    /// - Parameter entries: distinct words. With a word listed twice, which value is kept is unspecified.
+    init(_ entries: [(word: [UInt32], value: Value)]) {
+        let sorted = entries.sorted { $0.word.lexicographicallyPrecedes($1.word) }
+        words = sorted.map(\.word)
+        values = sorted.map(\.value)
+        maximumWordLength = words.reduce(0) { max($0, $1.count) }
+    }
+
+    var count: Int { words.count }
+
+    /// Every word: the range to start narrowing from.
+    var all: Range<Int> { 0..<words.count }
+
+    /// Of the words in `range`, all of which begin with the same `depth` scalars, those whose next scalar is
+    /// `scalar`.
+    func narrow(_ range: Range<Int>, depth: Int, by scalar: UInt32) -> Range<Int> {
+        // A word of exactly `depth` scalars has no next scalar and sorts first; it counts as less than any scalar.
+        func next(_ index: Int) -> Int64 {
+            let word = words[index]
+            return depth < word.count ? Int64(word[depth]) : -1
+        }
+        let wanted = Int64(scalar)
+        var low = range.lowerBound
+        var high = range.upperBound
+        while low < high {
+            let middle = low + (high - low) / 2
+            if next(middle) < wanted { low = middle + 1 } else { high = middle }
+        }
+        let first = low
+        high = range.upperBound
+        while low < high {
+            let middle = low + (high - low) / 2
+            if next(middle) <= wanted { low = middle + 1 } else { high = middle }
+        }
+        return first..<low
+    }
+
+    /// The value of the word that is exactly the `depth` scalars the words of `range` share, if that is a word.
+    func value(in range: Range<Int>, depth: Int) -> Value? {
+        guard !range.isEmpty, words[range.lowerBound].count == depth else { return nil }
+        return values[range.lowerBound]
+    }
+
+    /// The value of `word`, for tests and for building: one walk of the table.
+    func value(of word: some Sequence<UInt32>) -> Value? {
+        var range = all
+        var depth = 0
+        for scalar in word {
+            range = narrow(range, depth: depth, by: scalar)
+            depth += 1
+            if range.isEmpty { return nil }
+        }
+        return value(in: range, depth: depth)
+    }
+}
+
 /// Every embedded list in one table: lower-cased word to its best (lowest) rank.
 ///
 /// A rank is how many guesses an attacker working down that list needs to reach the word. For the frequency lists it
@@ -28,9 +99,10 @@ struct DictionaryHit: Sendable, Equatable {
 /// every word in it costs the size of the list, which makes a passphrase of `n` words cost `7776^n`, the same number
 /// `WatchwordGenerator`'s entropy estimate gives.
 struct RankedDictionary: Sendable {
-    let words: [String: DictionaryHit]
-    /// No word is longer than this many scalars, so no longer substring needs looking up.
-    let maximumWordLength: Int
+    let table: WordTable<DictionaryHit>
+
+    /// No word is longer than this many scalars, so no longer stretch can be one.
+    var maximumWordLength: Int { table.maximumWordLength }
 
     /// Built once, on first use: about 23,000 entries.
     static let embedded = RankedDictionary(lists: [
@@ -44,21 +116,22 @@ struct RankedDictionary: Sendable {
 
     /// - Parameter lists: newline-separated words, best first; a non-`nil` rank applies to every word of that list.
     init(lists: [(text: String, source: DictionarySource, uniformRank: Int?)]) {
-        var words: [String: DictionaryHit] = [:]
-        var longest = 0
+        var words: [Substring: DictionaryHit] = [:]
         for list in lists {
             var position = 0
             for line in list.text.split(separator: "\n", omittingEmptySubsequences: true) {
                 position += 1
-                let word = String(line)
                 let hit = DictionaryHit(rank: list.uniformRank ?? position, source: list.source)
-                if let existing = words[word], existing.rank <= hit.rank { continue }
-                words[word] = hit
-                longest = max(longest, word.unicodeScalars.count)
+                if let existing = words[line], existing.rank <= hit.rank { continue }
+                words[line] = hit
             }
         }
-        self.words = words
-        maximumWordLength = longest
+        table = WordTable(words.map { (word: $0.key.unicodeScalars.map(\.value), value: $0.value) })
+    }
+
+    /// The best rank of `word`, which must already be lower case.
+    func hit(for word: String) -> DictionaryHit? {
+        table.value(of: word.unicodeScalars.lazy.map(\.value))
     }
 }
 
@@ -74,7 +147,10 @@ struct PersonalDictionary: Sendable {
     static let minimumLength = 3
     static let maximumLength = 32
 
+    /// Word to rank: the order the words were found in, first is 1.
     let words: [String: Int]
+    /// The same words, for looking up stretches of a password (`WordTable`).
+    let table: WordTable<Int>
 
     /// Lower-cases each input and splits it at anything that is not a letter or a digit; keeps the pieces of a usable
     /// length, and also each run joined across `.`, `-` and `_` (`j.smith@example.com` gives `smith`, `example`,
@@ -82,12 +158,17 @@ struct PersonalDictionary: Sendable {
     /// scalars.
     init(_ inputs: [String]) {
         var words: [String: Int] = [:]
+        var entries: [(word: [UInt32], value: Int)] = []
         func add(_ scalars: [Unicode.Scalar]) {
             guard (Self.minimumLength...Self.maximumLength).contains(scalars.count) else { return }
             var view = String.UnicodeScalarView()
             view.append(contentsOf: scalars)
             let word = String(view)
-            if words[word] == nil { words[word] = words.count + 1 }
+            // `String` equality is canonical equivalence, so two spellings of one word are one entry here and must
+            // be one entry in the table: only the first spelling is kept.
+            guard words[word] == nil else { return }
+            words[word] = words.count + 1
+            entries.append((scalars.map(\.value), words.count))
         }
         for input in inputs.prefix(Self.maximumInputs) {
             var piece: [Unicode.Scalar] = []
@@ -110,6 +191,8 @@ struct PersonalDictionary: Sendable {
             add(joined)
         }
         self.words = words
+        // Two spellings that `String` tells apart never share scalars, so the table's words are distinct.
+        table = WordTable(entries)
     }
 }
 

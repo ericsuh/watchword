@@ -717,13 +717,40 @@ explained by a ranked word list (plain, reversed, and with look-alike substituti
 variations), a keyboard walk (US QWERTY and a keypad, built from the printed rows), a repeat (its unit
 analysed recursively, two levels), a sequence, a recent year or a date; `cheapestCover` is the
 minimum-guesses search over those matches, with brute force between them. The result is a `StrengthScore`
-(0–4 at 10^3, 10^6, 10^8 and 10^10 guesses), `guessesLog10`, and a `StrengthWeakness` with one plain
-sentence that never quotes the password. The item's own title, usernames and hosts are passed as personal
-inputs and rank ahead of every list.
+(0–4 at 10^3, 10^6, 10^8 and 10^10 guesses), the estimate's order of magnitude (`guessesMagnitude`), and a
+`StrengthWeakness` with one plain sentence that never quotes the password. The exact estimate stays inside
+the module, and an assessment prints as its score only: for a password that is one entry of a public list
+the exact figure is the entry's rank, which names it. The item's own title, usernames and hosts are passed
+as personal inputs and rank ahead of every list.
+
+Two deliberate differences from the paper, both because the reference design rated guessable passwords
+strong:
+
+- **No bonus for having parts.** A cover of `k` matches costs `k! × g1 × … × gk`. The paper adds
+  `10000^(k-1)`, which alone lifts any three cheap patterns to 10^8 and any four to 10^12: `Spring2026!` (a
+  word, a year, a symbol) scored strong, and the search preferred "a word and eight random characters" to
+  "two words and two symbols". Guessing programs order candidates by likelihood, not by the number of parts,
+  so a password is as strong as its parts multiply out to and no stronger. When a strong password's cover
+  does contain patterns (a passphrase), the explanation says it is built from recognisable parts, not that
+  no pattern was found.
+- **Keyboard shapes, not only strokes.** A walk whose directions repeat with a short period (a zigzag such
+  as `2w3e4r5t6y`) is worth the turns of one period, and walks of the same shape side by side
+  (`1qaz2wsx3edc`, `rfvtgbyhn`, `!QAZ@WSX#EDC`) are one pattern: a walk, a direction to step in, and a count.
+  Counted stroke by stroke, each of these came out stronger than random characters of the same length.
+
+Three common passwords in a row (`password1qwerty1dragon1`) still score strong: that is what `3! ×` the
+product of three ranks in the hundreds comes to, and the scale says so honestly.
 
 Bounded: only the first 64 scalars are analysed (`truncated` says so). What follows can only add guesses, so
 the estimate for a longer password is a lower bound, and an assessment costs the same for 64 characters or
-ten thousand (milliseconds). One match is kept per stretch, so the search sees at most `n(n+1)/2`.
+ten thousand. One match is kept per stretch, so the search sees at most `n(n+1)/2`. The word lists are held
+as one sorted table of scalar arrays (`WordTable`) and a stretch is looked up by narrowing a range of it one
+scalar at a time, abandoning the stretch at the first scalar no word continues with; nothing is built or
+hashed per stretch, so the cost does not depend on the script the password is in. (Looking each stretch up
+as a `String` cost a password of combining marks several hundred times an ordinary one, because hashing a
+non-ASCII string normalises it: 26 to 33 ms against 0.2 ms now, compiled with `-O` on Linux; not measured on
+Apple hardware.) The price is that a word from the item's own title matches by exact scalars, not by
+canonical equivalence.
 
 The word lists are Swift source (one multi-line literal each; about 300 kB in all), each file carrying its
 source, commit and licence (`07-supply-chain.md` §2.2):

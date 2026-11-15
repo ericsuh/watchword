@@ -73,57 +73,81 @@ struct StrengthMatcher {
 
     // MARK: Dictionary words
 
-    private func lookUp(_ word: String) -> DictionaryHit? {
-        let listed = RankedDictionary.embedded.words[word]
-        guard let rank = personal.words[word] else { return listed }
-        let own = DictionaryHit(rank: rank, source: .personal)
+    /// How many times a word table was narrowed: the unit of work of the dictionary matchers, and what the tests
+    /// bound, because it does not depend on the machine. At most two per scalar read (one per table).
+    private(set) var dictionarySteps = 0
+
+    /// The better of what the lists and the item's own words say about one stretch.
+    private static func better(_ listed: DictionaryHit?, _ ownRank: Int?) -> DictionaryHit? {
+        guard let ownRank else { return listed }
+        let own = DictionaryHit(rank: ownRank, source: .personal)
         guard let listed, listed.rank < own.rank else { return own }
         return listed
     }
 
-    /// Calls `visit` for every stretch of `text` that is a known word.
-    private func forEachWord(in text: [Unicode.Scalar], _ visit: (Int, Int, String, DictionaryHit) -> Void) {
-        let longest = max(RankedDictionary.embedded.maximumWordLength, PersonalDictionary.maximumLength)
+    /// Every stretch of `text` that is a known word, with its best rank.
+    ///
+    /// From each start the two tables are walked together, one scalar at a time, and the walk stops at the first
+    /// scalar no word continues with. Nothing is built or hashed per stretch, so the cost is the same whatever script
+    /// the password is in: at most `count × longest word × 2` steps, and for text that is not made of words, about
+    /// two steps per scalar.
+    private mutating func words(in text: [Unicode.Scalar]) -> [(start: Int, end: Int, hit: DictionaryHit)] {
+        let listed = RankedDictionary.embedded.table
+        let own = personal.table
+        var found: [(start: Int, end: Int, hit: DictionaryHit)] = []
         for start in text.indices {
-            var view = String.UnicodeScalarView()
-            for end in start..<min(text.count, start + longest) {
-                view.append(text[end])
-                guard end - start + 1 >= PersonalDictionary.minimumLength else { continue }
-                let word = String(view)
-                if let hit = lookUp(word) { visit(start, end, word, hit) }
+            var listedRange = listed.all
+            var ownRange = own.all
+            var depth = 0
+            for end in start..<text.count {
+                let scalar = text[end].value
+                if !listedRange.isEmpty {
+                    listedRange = listed.narrow(listedRange, depth: depth, by: scalar)
+                    dictionarySteps += 1
+                }
+                if !ownRange.isEmpty {
+                    ownRange = own.narrow(ownRange, depth: depth, by: scalar)
+                    dictionarySteps += 1
+                }
+                depth += 1
+                if listedRange.isEmpty && ownRange.isEmpty { break }
+                guard depth >= PersonalDictionary.minimumLength else { continue }
+                let hit = Self.better(
+                    listed.value(in: listedRange, depth: depth), own.value(in: ownRange, depth: depth))
+                if let hit { found.append((start, end, hit)) }
             }
         }
+        return found
     }
 
     private mutating func matchDictionary() {
-        var found: [StrengthMatch] = []
-        forEachWord(in: lower) { start, end, _, hit in
-            let guesses = Double(hit.rank) * capitalisationVariations(start, end)
-            found.append(
+        for word in words(in: lower) {
+            let guesses = Double(word.hit.rank) * capitalisationVariations(word.start, word.end)
+            record(
                 StrengthMatch(
-                    start: start, end: end,
-                    pattern: .dictionary(source: hit.source, rank: hit.rank, reversed: false, substituted: false),
+                    start: word.start, end: word.end,
+                    pattern: .dictionary(
+                        source: word.hit.source, rank: word.hit.rank, reversed: false, substituted: false),
                     guesses: guesses))
         }
-        for match in found { record(match) }
     }
 
     private mutating func matchReversedDictionary() {
         let reversed = Array(lower.reversed())
-        var found: [StrengthMatch] = []
-        forEachWord(in: reversed) { start, end, word, hit in
+        for word in words(in: reversed) {
             // A palindrome is the same word forwards; it has been counted.
-            guard String(word.unicodeScalars.reversed().map(Character.init)) != word else { return }
-            let from = count - 1 - end
-            let to = count - 1 - start
-            let guesses = Double(hit.rank) * capitalisationVariations(from, to) * 2
-            found.append(
+            let stretch = reversed[word.start...word.end]
+            guard !stretch.elementsEqual(stretch.reversed()) else { continue }
+            let from = count - 1 - word.end
+            let to = count - 1 - word.start
+            let guesses = Double(word.hit.rank) * capitalisationVariations(from, to) * 2
+            record(
                 StrengthMatch(
                     start: from, end: to,
-                    pattern: .dictionary(source: hit.source, rank: hit.rank, reversed: true, substituted: false),
+                    pattern: .dictionary(
+                        source: word.hit.source, rank: word.hit.rank, reversed: true, substituted: false),
                     guesses: guesses))
         }
-        for match in found { record(match) }
     }
 
     /// The letters each look-alike character can stand for. Three are ambiguous, so at most eight readings of a
@@ -144,14 +168,14 @@ struct StrengthMatcher {
         }
         guard any else { return }
         ambiguous.sort { $0.value < $1.value }
-        var found: [StrengthMatch] = []
         for choice in 0..<(1 << ambiguous.count) {
             let translated = lower.map { scalar -> Unicode.Scalar in
                 guard let letters = Self.lookAlikes[scalar] else { return scalar }
                 guard letters.count > 1, let position = ambiguous.firstIndex(of: scalar) else { return letters[0] }
                 return letters[(choice >> position) & 1]
             }
-            forEachWord(in: translated) { start, end, _, hit in
+            for word in words(in: translated) {
+                let (start, end) = (word.start, word.end)
                 // Which look-alikes this word used, and how many ways the same word could have been disguised.
                 var variations = 1.0
                 var seen: [Unicode.Scalar] = []
@@ -161,16 +185,16 @@ struct StrengthMatcher {
                     let plain = lower[start...end].filter { $0 == translated[index] }.count
                     variations *= plain == 0 ? 2 : Self.choices(disguised + plain, upTo: min(disguised, plain))
                 }
-                guard !seen.isEmpty else { return }
-                let guesses = Double(hit.rank) * capitalisationVariations(start, end) * variations
-                found.append(
+                guard !seen.isEmpty else { continue }
+                let guesses = Double(word.hit.rank) * capitalisationVariations(start, end) * variations
+                record(
                     StrengthMatch(
                         start: start, end: end,
-                        pattern: .dictionary(source: hit.source, rank: hit.rank, reversed: false, substituted: true),
+                        pattern: .dictionary(
+                            source: word.hit.source, rank: word.hit.rank, reversed: false, substituted: true),
                         guesses: guesses))
             }
         }
-        for match in found { record(match) }
     }
 
     /// How many capitalisations of the word an attacker tries before this one: none for lower case, two for the
@@ -207,12 +231,23 @@ struct StrengthMatcher {
 
     // MARK: Keyboard walks
 
+    /// One maximal run of neighbouring keys.
+    private struct KeyboardWalk {
+        var start: Int
+        var end: Int
+        /// The direction of each step, as an index into the graph's fixed order of neighbours.
+        var directions: [Int]
+        var shifted: Int
+
+        var length: Int { end - start + 1 }
+    }
+
     private mutating func matchKeyboard(_ graph: KeyboardGraph) {
+        var walks: [KeyboardWalk] = []
         var start = 0
         while start < count - 1 {
             var end = start + 1
-            var lastDirection: Int?
-            var turns = 0
+            var directions: [Int] = []
             var shifted = isShifted(original[start], on: graph) ? 1 : 0
             while end < count, let around = graph.neighbours[original[end - 1]] {
                 let wanted = original[end]
@@ -230,22 +265,81 @@ struct StrengthMatcher {
                     }
                 }
                 guard let direction else { break }
-                if direction != lastDirection {
-                    turns += 1
-                    lastDirection = direction
-                }
+                directions.append(direction)
                 end += 1
             }
             // Two adjacent keys are too common in ordinary words to count: a walk is three or more.
             if end - start > 2 {
-                let length = end - start
+                let walk = KeyboardWalk(start: start, end: end - 1, directions: directions, shifted: shifted)
+                walks.append(walk)
+                let turns = Self.effectiveTurns(directions)
                 record(
                     StrengthMatch(
                         start: start, end: end - 1, pattern: .keyboard(turns: turns),
-                        guesses: Self.keyboardGuesses(graph, length: length, turns: turns, shifted: shifted)))
+                        guesses: Self.keyboardGuesses(graph, length: walk.length, turns: turns, shifted: shifted)))
             }
             start = end
         }
+        matchParallelWalks(walks, on: graph)
+    }
+
+    /// How many turns a walk is worth. Each change of direction is a turn, except that a walk whose directions
+    /// repeat with a short period (a zigzag such as `2w3e4r5t`, down and back up again and again) is one shape
+    /// repeated: it is worth the turns of one period, however long it goes on. Counting every turn of a zigzag made
+    /// a ten-key zigzag cost more than ten random characters.
+    static func effectiveTurns(_ directions: [Int]) -> Int {
+        func turns(in steps: ArraySlice<Int>) -> Int {
+            var turns = 0
+            var last: Int?
+            for direction in steps where direction != last {
+                turns += 1
+                last = direction
+            }
+            return turns
+        }
+        let all = turns(in: directions[...])
+        guard directions.count >= 2 else { return all }
+        for period in 1...min(4, directions.count / 2) {
+            let periodic = (period..<directions.count).allSatisfy { directions[$0] == directions[$0 - period] }
+            if periodic { return min(all, turns(in: directions.prefix(period))) }
+        }
+        return all
+    }
+
+    /// Walks of the same shape side by side: `1qaz2wsx3edc`, `rfvtgbyhn`, `!QAZ@WSX`. Each column is a walk of its
+    /// own (the last key of one is not next to the first key of the next), and as separate patterns three of them
+    /// multiply up to a strong password. They are one pattern: a walk, a direction to step in, and how many times.
+    private mutating func matchParallelWalks(_ walks: [KeyboardWalk], on graph: KeyboardGraph) {
+        var first = 0
+        while first < walks.count {
+            var last = first
+            while last + 1 < walks.count, walks[last + 1].start == walks[last].end + 1,
+                walks[last + 1].directions == walks[first].directions,
+                isNeighbour(original[walks[last + 1].start], of: original[walks[last].start], on: graph)
+            {
+                last += 1
+            }
+            if last > first {
+                let copies = last - first + 1
+                let length = walks[first].length
+                let total = walks[last].end - walks[first].start + 1
+                let shifted = walks[first...last].reduce(0) { $0 + $1.shifted }
+                let turns = Self.effectiveTurns(walks[first].directions)
+                let guesses =
+                    Self.keyboardGuesses(graph, length: length, turns: turns, shifted: 0) * graph.averageDegree
+                    * Double(copies) * Self.shiftVariations(length: total, shifted: shifted)
+                record(
+                    StrengthMatch(
+                        start: walks[first].start, end: walks[last].end, pattern: .keyboard(turns: turns + 1),
+                        guesses: guesses))
+            }
+            first = last + 1
+        }
+    }
+
+    private func isNeighbour(_ scalar: Unicode.Scalar, of other: Unicode.Scalar, on graph: KeyboardGraph) -> Bool {
+        guard let around = graph.neighbours[other] else { return false }
+        return around.contains { $0?.plain == scalar || ($0?.shifted != nil && $0?.shifted == scalar) }
     }
 
     private func isShifted(_ scalar: Unicode.Scalar, on graph: KeyboardGraph) -> Bool {
@@ -264,11 +358,14 @@ struct StrengthMatcher {
                     binomial(walk - 1, turn - 1) * graph.startingPositions * pow(graph.averageDegree, Double(turn))
             }
         }
-        if shifted > 0 {
-            let plain = length - shifted
-            guesses *= plain == 0 ? 2 : choices(length, upTo: min(shifted, plain))
-        }
-        return guesses
+        return guesses * shiftVariations(length: length, shifted: shifted)
+    }
+
+    /// The ways to hold shift for `shifted` of `length` keys: none if no key is shifted, two if all are.
+    static func shiftVariations(length: Int, shifted: Int) -> Double {
+        guard shifted > 0 else { return 1 }
+        let plain = length - shifted
+        return plain <= 0 ? 2 : choices(length, upTo: min(shifted, plain))
     }
 
     // MARK: Repeats

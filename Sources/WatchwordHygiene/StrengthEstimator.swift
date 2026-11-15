@@ -75,10 +75,15 @@ public enum StrengthWeakness: String, Hashable, Sendable, CaseIterable {
     }
 }
 
+/// What the estimator says about one password.
+///
+/// **Not for a log.** For a password that is one entry of a public list, the exact estimate is that entry's rank,
+/// which names the password; so the exact figure stays inside the module, `guessesMagnitude` is all a caller gets,
+/// and printing, interpolating or reflecting an assessment shows the score and nothing else (PRD N5).
 public struct StrengthAssessment: Hashable, Sendable {
     public let score: StrengthScore
-    /// log10 of the estimated number of guesses an attacker needs.
-    public let guessesLog10: Double
+    /// log10 of the estimated number of guesses an attacker needs. Internal: see the type's comment.
+    let guessesLog10: Double
     /// `nil` when the password is strong or very strong.
     public let weakness: StrengthWeakness?
     /// One plain sentence: why it is weak, or that nothing predictable was found.
@@ -86,6 +91,17 @@ public struct StrengthAssessment: Hashable, Sendable {
     /// Whether the password was longer than `StrengthEstimator.maximumAnalysedLength`, so the estimate is of its
     /// beginning only.
     public let truncated: Bool
+
+    /// The estimate as an order of magnitude: about `10^n` guesses, for a UI that wants to say more than the score.
+    public var guessesMagnitude: Int {
+        Int(min(max(guessesLog10.rounded(.down), 0), 400))
+    }
+}
+
+extension StrengthAssessment: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "StrengthAssessment(score: \(score.rawValue), details withheld)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["score": score], displayStyle: .struct) }
 }
 
 /// A zxcvbn-class strength estimator (PRD F9.3, docs/02-architecture.md §13).
@@ -144,12 +160,19 @@ public struct StrengthEstimator: Hashable, Sendable {
         let weakness = score >= .strong ? nil : Self.weakness(cheapest.sequence, length: scalars.count)
         // Finite whatever the arithmetic did: the largest count a Double holds is the ceiling.
         let guesses = min(max(cheapest.guesses, 1), Double.greatestFiniteMagnitude)
+        // "No pattern" is said only when none was found: a strong password built from recognisable parts is
+        // strong because there are enough of them, and saying nothing was found would be false.
+        let patterned = cheapest.sequence.contains { $0.pattern != .bruteForce }
         return StrengthAssessment(
             score: score, guessesLog10: guesses.isNaN ? 0 : log10(guesses), weakness: weakness,
-            explanation: weakness?.explanation
-                ?? "No predictable pattern was found; this would take a long time to guess.",
+            explanation: weakness?.explanation ?? (patterned ? Self.strongButPatterned : Self.nothingPredictable),
             truncated: truncated)
     }
+
+    static let nothingPredictable = "No predictable pattern was found; this would take a long time to guess."
+    static let strongButPatterned =
+        "This is built from recognisable parts, such as words, dates or keyboard patterns, but there are enough of "
+        + "them that it would still take a long time to guess."
 
     /// The estimate alone, for a repeated unit.
     static func guesses(
@@ -175,13 +198,18 @@ public struct StrengthEstimator: Hashable, Sendable {
     static let bruteForceCardinality = 10.0
     static let minimumGuessesForSingleCharacter = 10.0
     static let minimumGuessesForSeveralCharacters = 50.0
-    /// What trying one more pattern in a sequence costs an attacker before the sequence itself is tried.
-    static let guessesBeforeLongerSequence = 10_000.0
 
     /// The sequence of non-overlapping matches covering all `length` scalars that needs the fewest guesses, where a
-    /// sequence of `k` matches with guess counts `g1…gk` needs `k! × g1 × … × gk + 10000^(k-1)`: the patterns
-    /// can come in any order, and an attacker tries shorter sequences first. A dynamic programme over the end position
-    /// and the number of matches, as in the zxcvbn paper.
+    /// sequence of `k` matches with guess counts `g1…gk` needs `k! × g1 × … × gk`: the patterns can come in any
+    /// order. A dynamic programme over the end position and the number of matches, as in the zxcvbn paper.
+    ///
+    /// **One deliberate difference from zxcvbn.** The paper adds `10000^(k-1)` to a sequence of `k` matches, for the
+    /// shorter sequences an attacker is assumed to exhaust first. That term alone lifts any three cheap patterns to
+    /// 10^8 guesses and any four to 10^12, so `Spring2026!` (a word, a year, a symbol: a few million guesses for a
+    /// rule-based cracker) scored strong, and the search preferred "a word and eight random characters" to "two
+    /// words and two symbols". Guessing programs order candidates by likelihood, not by the number of parts, so the
+    /// term is left out: a password is as strong as its parts multiply out to, and no stronger. The factorial and
+    /// the floor under each part still keep the search from preferring many small pieces.
     static func cheapestCover(length: Int, matches: [StrengthMatch]) -> (guesses: Double, sequence: [StrengthMatch]) {
         guard length > 0 else { return (1, []) }
         var endingAt = [[StrengthMatch]](repeating: [], count: length)
@@ -211,8 +239,7 @@ public struct StrengthEstimator: Hashable, Sendable {
                 guard match.start > 0, let previous = optimal[match.start - 1][sequenceLength - 1] else { return }
                 product *= previous.product
             }
-            var total = factorial(sequenceLength) * product
-            total += pow(guessesBeforeLongerSequence, Double(sequenceLength - 1))
+            let total = factorial(sequenceLength) * product
             // A sequence that is no shorter and no cheaper than one already found to this point cannot be part of
             // the answer.
             for (otherLength, other) in optimal[match.end] where otherLength <= sequenceLength {
