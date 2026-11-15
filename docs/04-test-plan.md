@@ -46,7 +46,7 @@ that a test target may contain both as long as a single test does not mix their 
 | --- | --- |
 | F1.x items/fields | Codable round trips; property test "any item survives encode→decode"; history kept whatever its age or length, with `FakeClock`, and an edit past the payload limit refused rather than pruned |
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
-| F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
+| F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes (protocol core, milestone 4, `WatchwordSharingTests`: "Membership record format", "Sharing formats: known answers", "Membership chain rules", "Membership ledger", "Fingerprint verification and invitations", "Key grants and rotation", and "Shared vault simulation" — two and three members with real keysets over a hostile store: create, invite, verify, accept, write, role change, removal with rotation, leaving, an interrupted rotation, concurrent administrators, deletion; through `VaultSession` and a real transport: open) |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
@@ -242,8 +242,45 @@ context; a locked device with no trusted key in the Keychain, which refuses ever
 until the next unlock; pending deletions planted in the local sync state (A8) — unsigned, badly signed, signed by
 another key, or another device's — none of which is published; the sync adapter used after `lock()`; and the
 keyring refusing to sign as another device. The Keychain item protection suite checks the new `accountSigningKey`
-item like the others and that every item has its own account name. Still to come with
-milestone 4: member key substitution, membership records, revocation and read-only enforcement.
+item like the others and that every item has its own account name.
+
+**Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
+membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):
+
+- *Forged membership*: every single-bit flip of a genuine record; unsigned records, records signed with the
+  attacker's key under an administrator's name, by an account that was never a member; a genesis the verified owner
+  did not sign; a signature made under another `SignatureDomain`; a copy with a spoilt signature listed ahead of the
+  genuine record.
+- *Stale administrators and former members*: signing after demotion or removal; going back to an epoch at which
+  they were still an administrator with a hash ground down to win (refused on a device that has the real chain, on a
+  fresh device in either order, and corrected on a device shown only the attacker's branch); adding themselves back
+  with a new record, the owner's old signature, or the old record.
+- *Key substitution*: the directory substituting the invitee's key (caught by the comparison; nothing is wrapped),
+  substituting a pinned contact's key (refused and reported), returning another account's bundle or a low-order key,
+  substituting the owner's key towards an invitee; an administrator putting a key of their own under the invitee's
+  account in the chain; an invitation to a vault ID already held under another owner.
+- *After revocation*: the old vault key against records sealed since, also relabelled with the new key ID; an old
+  grant replayed under the new key's name; a fresh grant of a planted key from a former administrator, from an
+  administrator demoted since, and from an administrator of another vault; a former member asking for the new key;
+  writes by a former member and by a read-only member reaching the store and being refused by every remaining
+  member; a write in another member's name.
+- *Fork and rollback*: a store serving an older chain; a saved ledger truncated, spliced, altered byte by byte or
+  planted; a store showing two halves of a household different branches.
+- *Role escalation*: every way a member or an administrator can sign for more than their role, including roles
+  changed on the side inside another operation's member list; an administrator using up the chain's epochs.
+- *Leave requests*: replayed after the member was invited back, into another vault, relabelled, or signed by
+  someone else.
+- *Two administrators*: removing each other at once (nobody is removed, the owner can still act); the owner's
+  removal of an administrator against that administrator's own record at the same epoch, in every order.
+- *Local state*: pins planted in the contacts store.
+- *Oversized and malformed*: seeded damage to every format (throws, or returns exactly what the bytes say);
+  megabyte inputs to every parser; inflated counts; more candidates than a call examines; a flood of unsigned
+  records naming a reused key.
+
+Known answers for the formats (records, hashes, a leave request, published bundles, the fingerprint code) come from
+an independent Python implementation (`SharingKnownAnswerTests`). Still to come with integration: the same
+adversaries against `VaultSession` and `SyncEngine` (a former member's *segments* refused in `SyncKeyring.verify`,
+read-only writes refused by the transport fake), and anything that depends on the device registry.
 
 ### 6.5 Interchange (milestone 7)
 - Zip-slip entry names, nested zip bombs beyond the ratio cap, 1PUX with 10^6 items, CSV cells
