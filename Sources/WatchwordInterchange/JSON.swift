@@ -51,7 +51,8 @@ struct JSONObject: Hashable, Sendable {
         self.members = members.map { Member(key: $0.0, value: $0.1) }
     }
 
-    /// The value for `key`. Keys are unique: the reader refuses a repeated one.
+    /// The value for `key`. Keys are unique: the reader refuses a repeated one. A scan of the members, so a caller
+    /// looping over something a file sized must look a key up outside the loop.
     subscript(key: String) -> JSONValue? {
         members.first { $0.key == key }?.value
     }

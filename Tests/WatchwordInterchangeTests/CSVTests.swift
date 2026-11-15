@@ -85,23 +85,36 @@ struct CSVTests {
         #expect(try self.rows(encoded) == rows)
     }
 
+    /// A quote followed by a combining mark is one character that is not a quote, so a search by characters leaves
+    /// it undoubled, and the cell then ends early for a reader that works on bytes, as spreadsheets do.
+    @Test("A quote is doubled even when a combining mark follows it")
+    func quoteBeforeCombiningMark() throws {
+        let cell = "x\"\u{301},=cmd|' /C calc'!A0"
+        let encoded = CSVWriter.encode([[cell, "y"]])
+        #expect(Array(encoded.utf8) == Array("\"x\"\"\u{301},=cmd|' /C calc'!A0\",y\r\n".utf8))
+        #expect(try rows(encoded) == [[cell, "y"]])
+    }
+
     @Test("Whatever the writer writes, the reader reads back")
     func roundTrip() throws {
         var generator = SeededGenerator(seed: TestEnvironment.seed(fallback: 0xC5F))
-        let alphabet = Array("ab,\"\r\n '=+-@\t;é日\u{FEFF}")
+        // Scalars, joined freely, so that combining marks land after quotes, commas and line breaks.
+        let alphabet = "ab,\"\r\n '=+-@\t;é日\u{FEFF}\u{301}".unicodeScalars.map { String($0) }
         for _ in 0..<TestEnvironment.iterations(standard: 200, long: 20_000) {
             let rows = (0..<Int.random(in: 1...4, using: &generator)).map { _ in
                 (0..<Int.random(in: 1...4, using: &generator)).map { _ in
-                    String(
-                        (0..<Int.random(in: 0...6, using: &generator)).map { _ in
-                            alphabet.randomElement(using: &generator)!
-                        })
+                    (0..<Int.random(in: 0...6, using: &generator)).map { _ in
+                        alphabet.randomElement(using: &generator)!
+                    }.joined()
                 }
             }
             // A record of one empty cell is a blank line, which the reader skips by design.
             let expected = rows.filter { $0 != [""] }
             let parsed = try CSVReader.parse(Array(CSVWriter.encode(rows).utf8)).map(\.fields)
-            #expect(parsed == expected)
+            // Scalar for scalar: string equality would forgive a difference in normalisation.
+            #expect(
+                parsed.map { $0.map { Array($0.unicodeScalars) } }
+                    == expected.map { $0.map { Array($0.unicodeScalars) } })
         }
     }
 

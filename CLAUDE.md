@@ -180,6 +180,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `JSONSerialization`: its behaviour differs between Linux and Apple platforms.
 - Invalid UTF-8 is refused, never repaired. Cells and fields are data on import; only CSV *export* neutralises
   formulas.
+- Checks on names, cells and URLs work on bytes or Unicode scalars, never on `Character`s and never through
+  Foundation's string searches or white-space sets: to `split` and `hasPrefix`, a slash followed by a combining mark
+  is not a slash (`../` + U+0301 passed as a name until review caught it), and `whitespacesAndNewlines` differs
+  between Linux and Apple platforms. Use `UTF8Text.trimmed`.
 - Searches over an entry's fields, URLs or sections use sets or dictionaries: a file can make any list long, and the
   fuzz and adversarial suites assume linear work.
 - Exporters return plaintext bytes and a report and do nothing else. Password re-entry, file protection and the OS

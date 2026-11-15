@@ -21,7 +21,8 @@ public struct ZIPArchive: Sendable {
         public let name: String
         public let compressedSize: Int
         public let uncompressedSize: Int
-        public var isDirectory: Bool { name.hasSuffix("/") }
+        /// A name ending in a slash, judged on its bytes.
+        public var isDirectory: Bool { nameBytes.last == UInt8(ascii: "/") }
 
         let nameBytes: [UInt8]
         let flags: UInt16
@@ -142,10 +143,11 @@ public struct ZIPArchive: Sendable {
             try ZIPArchive.validateEntryName(name)
             guard names.insert(name).inserted else { throw InterchangeError.duplicateArchiveEntry(name) }
 
-            if method == 0 || name.hasSuffix("/") {
+            let isDirectory = nameBytes.last == UInt8(ascii: "/")
+            if method == 0 || isDirectory {
                 guard compressedSize == uncompressedSize else { throw InterchangeError.malformedArchive(.sizeMismatch) }
             }
-            if name.hasSuffix("/") {
+            if isDirectory {
                 guard uncompressedSize == 0 else { throw InterchangeError.malformedArchive(.sizeMismatch) }
             }
             guard
@@ -178,7 +180,9 @@ public struct ZIPArchive: Sendable {
     /// The decompressed contents of the member named exactly `name`, checked against its recorded size and CRC-32.
     /// This is the only way data leaves the archive.
     public func contents(of name: String) throws -> [UInt8] {
-        guard let entry = entries.first(where: { $0.name == name }) else {
+        // Byte for byte: string equality would also accept a canonically equivalent spelling of the name.
+        let wanted = Array(name.utf8)
+        guard let entry = entries.first(where: { $0.nameBytes == wanted }) else {
             throw InterchangeError.missingArchiveEntry(name)
         }
         guard entry.uncompressedSize <= limits.maximumDocumentBytes else { throw limits.exceeded(.documentBytes) }
@@ -232,22 +236,29 @@ public struct ZIPArchive: Sendable {
     /// path, a drive letter, a `..` or `.` component, an empty component, a backslash (a separator on Windows), or
     /// a control character. Only a trailing slash, marking a directory, may leave a component empty.
     public static func validateEntryName(_ name: String) throws {
+        // On bytes, as a file system or an extractor would see the name. By characters, a slash followed by a
+        // combining mark is one character that is not a slash, and `../` + U+0301 would pass as an ordinary name.
         let refusal = InterchangeError.forbiddenEntryName(name)
-        guard !name.isEmpty, !name.hasPrefix("/") else { throw refusal }
-        for scalar in name.unicodeScalars {
-            guard scalar.value >= 0x20, scalar.value != 0x7F, scalar != "\\" else { throw refusal }
+        let bytes = Array(name.utf8)
+        let slash = UInt8(ascii: "/")
+        let dot = UInt8(ascii: ".")
+        guard let first = bytes.first, first != slash else { throw refusal }
+        for byte in bytes {
+            guard byte >= 0x20, byte != 0x7F, byte != UInt8(ascii: "\\") else { throw refusal }
         }
-        let scalars = Array(name.unicodeScalars.prefix(2))
-        if scalars.count == 2, scalars[1] == ":", scalars[0].isASCII, scalars[0].properties.isAlphabetic {
-            throw refusal
-        }
-        var components = name.split(separator: "/", omittingEmptySubsequences: false)
+        let isLetter =
+            (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(first)
+            || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(first)
+        if isLetter, bytes.count >= 2, bytes[1] == UInt8(ascii: ":") { throw refusal }
+        var components = bytes.split(separator: slash, omittingEmptySubsequences: false)
         if components.last?.isEmpty == true {
             components.removeLast()
         }
         guard !components.isEmpty else { throw refusal }
         for component in components {
-            guard !component.isEmpty, component != ".", component != ".." else { throw refusal }
+            guard !component.isEmpty, !component.elementsEqual([dot]), !component.elementsEqual([dot, dot]) else {
+                throw refusal
+            }
         }
     }
 

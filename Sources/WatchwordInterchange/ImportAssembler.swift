@@ -165,7 +165,7 @@ struct ImportAssembler {
         for index in mark.entries..<entries.count {
             guard let identifier = entries[index].reference.sourceID, let names = tags[identifier] else { continue }
             for name in names where name.utf8.count <= limits.maximumFieldBytes {
-                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmed = UTF8Text.trimmed(name)
                 if !trimmed.isEmpty { entries[index].item.tags.insert(trimmed) }
             }
         }
@@ -202,7 +202,7 @@ struct ImportAssembler {
         var scopeHosts = Set<String>()
         var refusedURLs = Set<String>()
         for url in record.urls {
-            let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = UTF8Text.trimmed(url)
             guard !trimmed.isEmpty else { continue }
             switch ScopeDerivation.scope(forURL: trimmed, stripsLeadingWWW: options.stripsLeadingWWW) {
             case .success(let scope):
@@ -242,12 +242,12 @@ struct ImportAssembler {
             }
         }
 
-        var tags = Set(record.tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        var tags = Set(record.tags.map { UTF8Text.trimmed($0) }.filter { !$0.isEmpty })
         if record.favorite, let favoriteTag = options.favoriteTag, !favoriteTag.isEmpty {
             tags.insert(favoriteTag)
         }
 
-        var title = record.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var title = UTF8Text.trimmed(record.title)
         guard !(title.isEmpty && fields.isEmpty && scopes.isEmpty && record.notes.isEmpty) else {
             skip(reference, record.hadUnimportableContent ? .nothingImportable : .empty)
             return
@@ -328,7 +328,7 @@ struct ImportAssembler {
     /// `OTPParameters`, or a bare Base32 secret with the default parameters. Throws `OTPAuthError` for anything a
     /// code could not be computed from.
     static func canonicalOneTimePasswordURI(_ value: String) throws -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = UTF8Text.trimmed(value)
         let parameters: OTPParameters
         let isURI = trimmed.lowercased().hasPrefix("otpauth:")
         if isURI {

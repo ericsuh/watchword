@@ -662,7 +662,8 @@ the input is hostile and the module may not use unsafe code or an Apple framewor
 central directory, validates *every* member, and decompresses only the one member asked for; nothing is
 extracted to disk and a nested archive is never opened. It refuses, each with a typed error: a member name
 that could escape a directory (absolute, drive letter, `.`/`..`/empty component, backslash, control
-character) even though no name becomes a path; encryption, ZIP64 (sentinel sizes, the extra field, the
+character; judged on the name's bytes, since by characters a slash followed by a combining mark is not a
+slash) even though no name becomes a path; encryption, ZIP64 (sentinel sizes, the extra field, the
 locator, a streaming writer's local header), multi-disk archives, and every compression method but stored
 and deflate; members whose data overlaps another member's or the directory (the non-recursive bomb); and
 any archive with two readings (an end record that is not the last thing in the file, a directory that does
@@ -680,7 +681,10 @@ refuses repeated keys, lone surrogates and NUL, bounds its recursion, and walks 
 `skipValue` checks syntax without allocating and reports a value's extent, and only a value already measured
 to be within one entry's size is materialised. Memory is therefore proportional to one item, not to the file.
 Input must be valid UTF-8 (an optional byte-order mark is skipped); invalid UTF-8 and UTF-16 are refused, never
-repaired, because a replacement character inside a password is a different password.
+repaired, because a replacement character inside a password is a different password. Wherever the module
+trims or searches text from a file it does so on bytes or scalars with its own code (`UTF8Text.trimmed`
+removes ASCII white space only): Foundation's white-space sets and string searches differ between Linux and
+Apple platforms, and a difference there is a difference in what becomes a scope.
 
 **CSV (`CSVReader`, `CSVWriter`, `PasswordCSV`).** An RFC 4180 reader that also accepts LF line ends and
 blank lines, and refuses a quote inside an unquoted cell, text after a closing quote, a bare carriage return,

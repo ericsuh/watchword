@@ -13,7 +13,7 @@ public enum PasswordCSV {
         case custom(String)
 
         init(header: String) {
-            switch header.trimmingCharacters(in: .whitespaces).lowercased() {
+            switch UTF8Text.trimmed(header).lowercased() {
             case "title": self = .title
             case "url", "website": self = .url
             case "username": self = .username
@@ -133,7 +133,7 @@ public enum PasswordCSV {
     }
 
     private static func isTrue(_ cell: String) -> Bool {
-        ["true", "1", "yes"].contains(cell.trimmingCharacters(in: .whitespaces).lowercased())
+        ["true", "1", "yes"].contains(UTF8Text.trimmed(cell).lowercased())
     }
 
     /// Whether a cell looks like the output of `CSVWriter.neutralised`: an apostrophe, then a formula character.

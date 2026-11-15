@@ -28,6 +28,19 @@ struct ZIPArchiveTests {
         #expect(throws: InterchangeError.missingArchiveEntry("Stored.txt")) { try archive.contents(of: "Stored.txt") }
     }
 
+    /// Swift compares strings by canonical equivalence, under which the Kelvin sign equals `K`. A member is found by
+    /// its bytes, so a look-alike name is not the member asked for.
+    @Test("A member is looked up by the bytes of its name")
+    func byteExactLookup() throws {
+        let archive = try ZIPArchive(ZIPFixture([ZIPFixture.Member(name: "\u{212A}ey", contents: text)]).bytes())
+        #expect("\u{212A}ey" == "Key")
+        #expect(throws: InterchangeError.missingArchiveEntry("Key")) { try archive.contents(of: "Key") }
+        #expect(try archive.contents(of: "\u{212A}ey") == text)
+        // A directory is one by its last byte, not its last character.
+        let marked = try ZIPArchive(ZIPFixture([ZIPFixture.Member(name: "dir/\u{301}", contents: text)]).bytes())
+        #expect(marked.entries.map(\.isDirectory) == [false])
+    }
+
     @Test("Reads archives with a comment, a data descriptor, and an empty directory")
     func variants() throws {
         let commented = ZIPFixture(

@@ -112,7 +112,7 @@ public enum DuplicateDetector {
         if names.isEmpty { names = [""] }
         var keys = Set<String>()
         if item.scopes.isEmpty {
-            let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let title = UTF8Text.trimmed(item.title).lowercased()
             guard !title.isEmpty else { return [] }
             for name in names {
                 keys.insert("\u{0}\(title)\u{0}\(name)")

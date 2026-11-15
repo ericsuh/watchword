@@ -45,10 +45,12 @@ enum FuzzTarget: String, CaseIterable, Sendable {
         case .csv:
             guard let records = try? CSVReader.parse(bytes, limits: limits) else { return }
             // What the reader read, the writer writes and the reader reads again.
+            // Compared byte for byte: string equality would forgive a change of normalisation.
             let rows = records.map(\.fields)
             let written = Array(CSVWriter.encode(rows).utf8)
             let reread = try? CSVReader.parse(written, limits: .standard)
-            require(reread?.map(\.fields) == rows.filter { $0 != [""] }, "CSV does not round-trip")
+            let expected = rows.filter { $0 != [""] }.map { $0.map { Array($0.utf8) } }
+            require(reread?.map { $0.fields.map { Array($0.utf8) } } == expected, "CSV does not round-trip")
         case .passwordCSV:
             guard
                 let result = try? PasswordCSV.importFile(
@@ -65,6 +67,11 @@ enum FuzzTarget: String, CaseIterable, Sendable {
             require(archive.entries.count <= limits.maximumArchiveEntries, "too many members")
             for entry in archive.entries {
                 require((try? ZIPArchive.validateEntryName(entry.name)) != nil, "member name was not validated")
+                // And independently of the validator, on the bytes an extractor would act on.
+                let name = Array(entry.name.utf8)
+                let components = name.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+                require(name.first != UInt8(ascii: "/"), "an absolute member name was accepted")
+                require(!components.contains { $0.elementsEqual([0x2E, 0x2E]) }, "a member name climbs a directory")
                 if let contents = try? archive.contents(of: entry.name) {
                     require(contents.count == entry.uncompressedSize, "member size differs from its declaration")
                     require(contents.count <= limits.maximumDocumentBytes, "member past the document limit")

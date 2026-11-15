@@ -75,6 +75,20 @@ struct ImportMappingTests {
         }
     }
 
+    /// Foundation's white-space set differs by platform and includes U+200B on Apple's; trimming with it would make
+    /// `example.com` + U+200B a scope on a Mac and a refused URL on Linux.
+    @Test("Trimming removes ASCII white space only, on every platform")
+    func trimming() {
+        #expect(UTF8Text.trimmed(" \t\r\n a b \n") == "a b")
+        #expect(UTF8Text.trimmed("") == "")
+        #expect(UTF8Text.trimmed(" \n ") == "")
+        #expect(UTF8Text.trimmed("\u{200B}a\u{200B}").unicodeScalars.count == 3)
+        #expect(UTF8Text.trimmed("\u{A0}a\u{3000}").unicodeScalars.count == 3)
+        // A space carrying a combining mark is not white space.
+        #expect(UTF8Text.trimmed(" \u{301}a").unicodeScalars.count == 2)
+        #expect(UTF8Text.trimmed("a \u{301}").unicodeScalars.count == 3)
+    }
+
     @Test("Limits can be tightened and never loosened")
     func limits() {
         let standard = InterchangeLimits.standard

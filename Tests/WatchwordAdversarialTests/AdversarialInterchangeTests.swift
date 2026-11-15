@@ -49,6 +49,7 @@ struct AdversarialInterchangeTests {
         arguments: [
             "../evil", "../../etc/passwd", "/etc/passwd", "a/../../b", "a/..", "..", ".", "./a", "a/./b", "a//b", "/",
             "a\\..\\b", "..\\evil", "C:\\Windows\\evil", "C:evil", "c:/evil", "a\u{0}b", "a\nb", "a\u{7F}b",
+            "../\u{301}evil", "/\u{301}etc/passwd", "a/../\u{301}b", "a//\u{301}b",
             "files/\u{1B}[2J",
         ])
     func zipSlip(_ name: String) {

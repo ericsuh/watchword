@@ -70,6 +70,22 @@ enum UTF8Text {
     static func string(_ bytes: some Collection<UInt8>) -> String {
         String(decoding: bytes, as: UTF8.self)
     }
+
+    /// `text` without leading and trailing ASCII white space (space, tab, line feed, carriage return).
+    ///
+    /// Not Foundation's `whitespacesAndNewlines`: that set differs between platforms and, on Apple's, includes
+    /// U+200B, so trimming with it would turn `example.com\u{200B}` into `example.com` on one platform and not on
+    /// another. Scalars, not characters: a space followed by a combining mark is not white space.
+    static func trimmed(_ text: String) -> String {
+        func isSpace(_ scalar: Unicode.Scalar) -> Bool {
+            scalar == " " || scalar == "\t" || scalar == "\n" || scalar == "\r"
+        }
+        let scalars = text.unicodeScalars
+        guard let first = scalars.firstIndex(where: { !isSpace($0) }),
+            let last = scalars.lastIndex(where: { !isSpace($0) })
+        else { return "" }
+        return String(scalars[first...last])
+    }
 }
 
 /// A UUID drawn from an injected generator (RFC 4122 version 4), so imports are reproducible in tests and take

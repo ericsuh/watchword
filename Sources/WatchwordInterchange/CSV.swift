@@ -162,6 +162,15 @@ public enum CSVWriter {
             || scalars.first.map { $0 == " " || $0 == "\t" || $0 == "\u{FEFF}" } == true
             || scalars.last.map { $0 == " " || $0 == "\t" } == true
         guard needsQuotes else { return field }
-        return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        // Scalar by scalar, not with a string search: a search by characters does not see the quote in a quote
+        // followed by a combining mark, and an undoubled quote ends the cell for whatever reads the file next.
+        var quoted = String.UnicodeScalarView()
+        quoted.append("\"")
+        for scalar in scalars {
+            if scalar == "\"" { quoted.append("\"") }
+            quoted.append(scalar)
+        }
+        quoted.append("\"")
+        return String(quoted)
     }
 }

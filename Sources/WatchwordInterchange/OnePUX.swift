@@ -167,10 +167,14 @@ public enum OnePUX {
             let title = section.string("title") ?? ""
             for entry in section.array("fields") ?? [] {
                 guard let field = entry.object, let values = field.object("value") else { continue }
+                // Looked up once, outside the loop: a lookup is a scan of the object, and a field with thousands
+                // of members and thousands of values would otherwise cost their product.
+                let label = field.string("title") ?? ""
+                let identifier = field.string("id") ?? ""
                 for member in values.members {
                     appendField(
-                        type: member.key, value: member.value, label: field.string("title") ?? "",
-                        identifier: field.string("id") ?? "", section: title, to: &record)
+                        type: member.key, value: member.value, label: label, identifier: identifier, section: title,
+                        to: &record)
                 }
             }
         }

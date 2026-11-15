@@ -255,7 +255,8 @@ milestone 4: member key substitution, membership records, revocation and read-on
 Done in milestone 7, as "Adversarial: import parsers" (`AdversarialInterchangeTests`, adversary A7), with
 every case above and the attacks a parser author would add to them:
 
-- ZIP: twenty escaping member names, in an archive whose wanted member is a good one; undecodable and empty
+- ZIP: twenty-four escaping member names (four of them hiding a separator before a combining mark, which a
+  check by characters does not see), in an archive whose wanted member is a good one; undecodable and empty
   names; a bomb that is honest about its size (refused on the declaration), one that lies (stopped at the
   lie) and the bare stream (stopped at the ratio); declared sizes of 2 GB and 4 GB; a nested archive that is
   never opened and a nested bomb; overlapping members; more members than the limit; encryption, ZIP64,
