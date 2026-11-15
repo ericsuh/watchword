@@ -284,9 +284,8 @@ the device ID keeps two simultaneous snapshots from sharing a name) and older se
 garbage-collected once every known device acknowledges the snapshot.
 
 Merging: item versions carry a Lamport clock and device ID; the highest (lamport, deviceID) wins per
-field group; losers are kept in the item's history (F7.4). §7.5 describes what milestone 3 built. Membership operations are totally
-ordered by the owner's signature chain; a member's device only accepts a membership change signed
-by a current admin as of the previous state.
+field group; losers are kept in the item's history (F7.4). §7.5 describes what milestone 3 built. Membership operations
+do not travel in log segments: they are a signed chain of their own, beside the log (§8.2, §8.3).
 
 ### 7.2 Transport A: CloudKit (primary)
 
@@ -456,25 +455,253 @@ of the same account in the process, so XCUITest drives a concurrent rename throu
 
 ## 8. Sharing protocol
 
-1. Owner O creates vault V, VK, and a membership record `M0 = sign(O, {vaultID, epoch 0, members:
-   [O: admin]})`.
-2. O invites U: transport share is sent (CloudKit share URL or folder share). O fetches U's
-   published X25519/Ed25519 public keys and shows U's fingerprint
-   (`SHA-512("WW-fingerprint-v1"||accountID||pkX||pkEd)` truncated to 60 bytes and rendered as a
-   60-digit safety number in twelve groups of five, and as a QR; SHA-512 because 60 digits need 60
-   bytes of digest). U sees O's fingerprint on acceptance. Both must confirm (F4.2).
-3. O writes `W = HPKE.seal(pk_U, VK, info)` plus `M1 = sign(O, {epoch 1, members: [O, U(role)]})`.
-4. U's device verifies M1's signature against O's verified key, unwraps VK, and stores it wrapped
-   under its own Ksym.
-5. Removal of U: O generates VK', re-encrypts all live records of V with VK' (new keyID), writes
-   wraps for all remaining members, writes `M2` with U removed and `keyID'`, and removes U from the
-   transport share. Devices of remaining members accept VK' only if M2 is signed by an admin per M1.
-   Records still under the old keyID after M2 are readable by U only if they already had them;
-   nothing new is encrypted to the old key.
-6. Leaving is the same as removal, initiated by the member; admins perform the rotation on next
-   sync (the leaving member cannot generate VK' because it must be signed by an admin).
+As built in milestone 4's protocol core, `WatchwordSharing`. The module is portable (real cryptography through
+`WatchwordCrypto`, the key directory and the contacts store behind ports) and is exercised in-process by simulated
+members with real keysets over a hostile store. It is **not yet wired into `VaultSession`, `SyncEngine` or a
+transport's own sharing** (CloudKit `CKShare`, a shared folder); §8.8 says what that integration calls.
 
-Admin succession and vault deletion are owner-only operations in v1.
+### 8.1 Model
+
+A shared vault has **members**, each an account with a role:
+
+| Role | May |
+| --- | --- |
+| owner | everything an administrator may; and alone: grant or revoke the administrator role, remove an administrator, delete the vault. Exactly one, fixed for the life of the vault: never removed, never re-roled. |
+| administrator | invite and remove members who are not administrators, change them between read-write and read-only, rotate the vault key |
+| read-write | read and write items |
+| read-only | read items. They hold the vault key like everyone else: this is a rule the clients keep, **not cryptography** (F4.5, §8.7) |
+
+Membership is a **chain of signed records**, one per change, each naming its epoch (the previous one plus one), the
+hash of its predecessor, the operation, the member list and vault key that result, and signed under
+`SignatureDomain.membership` by an account that was an administrator in the state before it. Two consequences of the
+table carry the rest of the design:
+
+- **The set of accounts that may sign changes only in records the owner signed.** (Everything that adds or removes
+  an administrator is the owner's.)
+- **The owner can always sign the next record**, so no sequence of records, honest or hostile, leaves a vault that
+  nobody can administer. Ownership transfer is not in v1; the last 4,096 epochs of a chain accept only the owner's
+  signature, so an administrator cannot use the chain up either.
+
+### 8.2 Formats, and what is in the clear
+
+Every format is binary, little-endian, with one canonical encoding, a four-byte magic and a version byte, and a
+bounded parser: a size is checked before anything is copied, a count before anything is allocated, and bytes that
+would not re-encode to themselves are refused (SEC9). Sizes: at most 64 members; epochs up to 65,535; a record is at
+most 10,040 bytes.
+
+| Object | Magic | Contents | Signed by |
+| --- | --- | --- | --- |
+| Membership record | `WWMR` | vault ID, epoch, previous hash, signer, operation (`createVault`, `addMember`, `removeMember`, `memberLeft`, `changeRole`, `rotateKey`, `deleteVault`) with operands, vault key ID and the epoch that introduced it, the resulting members (account ID, role, epoch added, X25519 and Ed25519 keys, bundle self-signature) in account order | the signer |
+| Key grant | `WWKG` | a `VaultKeyGrant`: vault, key ID, sender, recipient, recipient's X25519 key, HPKE encapsulated key, ciphertext (§4) | the sender (`.vaultKeyGrant`) |
+| Leave request | `WWLR` | vault, account, the epoch the member was added | the member |
+| Published key bundle | `WWKB` | account ID, X25519 key, Ed25519 key | self-signature (`.publicKeyBundle`) |
+| Invitation | `WWIV` | vault ID, owner's account ID | nobody: it only says whose fingerprint to ask about |
+| Contact pin (local) | `WWCP` | pinning account, method, time, the contact's bundle | the pinning account |
+| Saved ledger (local) | `WWML` | account, vault, digest of the owner's keys, head epoch and hash; then the records | the account, over the checkpoint |
+| Rotation plan (local) | `WWRP` | reason, base head, new key ID, the membership record, the grants | (its contents are) |
+
+Signatures of the membership protocol all use `SignatureDomain.membership`; the leading magic keeps one kind from
+verifying as another. A record's **hash** is `SHA-256("WW-membership-hash-v1" ‖ signed content)`: the signature is
+left out, so one record has one identity however its signature is encoded.
+
+**Membership records are in the clear, and signed. Nothing of the membership protocol is sealed under the vault
+key.** An invitee must check the whole chain back to the owner *before* holding the key, and a member added after a
+rotation holds no earlier key at all, so a chain sealed under vault keys could be verified by neither. What the store
+(A1) learns is the vault's shape: pseudonymous account IDs and public keys, roles, and when membership changed, which
+the transport's own share list (CloudKit participants, a shared folder's members) already tells it by real identity.
+What it must not be able to do is *change* membership, which is what the threat model's "vault membership" asset
+needs and what the signatures and the hash chain give. Names never enter a record: the label a person sees for a
+member is the one they chose when they verified that member's fingerprint, in their own contacts store. The vault key
+appears only inside HPKE grants. Envelope kind `membership` (2) stays reserved.
+
+Objects live on the transport under a prefix of their own, beside sync's `vault/<vaultID>/` (§7.1), immutable and
+written once like sync's:
+
+```
+sharing/<vaultID>/membership/<epoch, 20 digits>-<record hash, hex>
+sharing/<vaultID>/grant/<keyID>/<recipient account>/<SHA-256 of the object, hex>
+sharing/<vaultID>/leave/<account>/<SHA-256 of the object, hex>
+```
+
+Names are content-addressed: two administrators writing the same epoch write two objects rather than fight over
+one, publishing twice is harmless, and nobody can occupy another writer's name. Names are parsed exactly
+(`SharingObjectLocation`), as sync's are.
+
+### 8.3 The ledger: verification, forks, rollback
+
+`MembershipLedger` is one device's verified copy of a chain and the only source of a `MembershipState`.
+
+**Trust anchor.** Two things, both local: the owner's key bundle, pinned when the vault was created or when the
+person accepting an invitation confirmed the owner's fingerprint out of band (§8.4); and the chain the device has
+already accepted, which the ledger holds. Everything the store offers is a candidate.
+
+**Verifying a record** against the state before it, cheapest first: the vault, the epoch (exactly the next), the
+previous hash; the signer is a member and an administrator of the previous state; the operation is one that signer
+may perform (§8.1); the key rule (a removal or departure names a key ID the chain has never used, `rotateKey` likewise,
+nothing else changes the key); the signature, under the key the *previous state* lists for the signer; and last what
+the record brought with it: a new member's key bundle is validated, a departure's embedded leave request is checked,
+and the member list must be exactly the previous list with the operation applied. Unsigned junk costs at most one
+signature check. Each failure is a typed `MembershipError`; a refused record changes nothing.
+
+**What the store cannot do.** Candidates are only ever *added* to the tree the accepted chain is part of, so:
+it cannot forge (every record is signed back to the owner's pinned key); it cannot roll back (a shorter chain is a
+subset of what the ledger holds); and it cannot choose between forks (below). It can withhold, as everywhere in sync,
+and then the ledger stays where it is.
+
+**Concurrent administrators.** Two administrators may each write the record for the same epoch without seeing the
+other's. Every device settles it the same way, whatever the order of arrival: `MembershipLedger.ingest` builds the
+tree of valid records and walks it from the genesis, choosing at each fork
+
+1. the branch whose **first owner-signed record comes at the earliest epoch**; then
+2. the **lower hash** of the record at the fork.
+
+A device that had accepted the losing record reorganises onto the winner (`IngestReport.superseded`), and the loser's
+author plans again on the new head (`RotationStatus.superseded`; planning a removal that has since happened throws
+`nothingToDo`). Why this rule is safe:
+
+- Between branches *without* an owner-signed record, every signer is an administrator on both (the set changes only
+  in owner-signed records), so the choice is between equals and the hash is as good as any.
+- A **former administrator** can go back to an epoch at which they still were one and publish a competing record,
+  even with a hash ground down to win. But their removal or demotion was signed by the owner at or after that
+  epoch, and their branch holds no owner-signed record, so it loses on every device however it is timed. A device
+  the store showed *only* their branch follows it until the owner's record arrives, which is no worse than not
+  having heard of the removal.
+- The owner's own records dominate, so the owner can always settle a dispute, and any owner-signed record seals
+  everything before it against administrators.
+
+Two residual cases are deterministic but not prevented: the owner's own devices signing different records for one
+epoch (settled by the rule; the losing device plans again), and a store that isolates one of the owner's devices so
+that it signs on a stale branch (§8.8, "what is not solved").
+
+**Persistence.** `persisted(signedBy:)` writes a checkpoint (this account, the vault, a digest of the owner's keys,
+the head) signed by the account's own key, then the records. `restore` trusts none of it: the checkpoint must carry
+this account's signature and name this vault and owner, every record is verified again from the genesis, and the
+result must reach the checkpoint's head (`LedgerError.rolledBack` otherwise). A saved ledger that was truncated,
+altered or planted fails closed. An older blob of the device's own, put back, restores as that older state; the next
+ingest moves it forward.
+
+### 8.4 Fingerprints, verified contacts, invitations (F4.1, F4.2, SEC3)
+
+Accounts publish their `PublicKeyBundle` in a **key directory**, a port (`KeyBundleDirectory`) whose adapter is the
+account record on the transport. It is a store like any other: what it returns is parsed, validated, must be for the
+account asked about, and is then only a *candidate*.
+
+A bundle's **fingerprint** is `SHA-512("WW-fingerprint-v1" ‖ accountID ‖ pkX ‖ pkEd)` truncated to 60 bytes, shown as
+a 60-digit **safety number** in twelve groups of five, and as a QR code carrying
+`"WWFP1-" ‖ hex(accountID ‖ fingerprint)` (158 characters; one scan names the account and authenticates its bundle).
+A typed number matches only as sixty ASCII digits with ASCII spaces ignored; a scanned payload is parsed exactly;
+both comparisons are constant-time.
+
+**Verified contacts** (`VerifiedContacts` over the `VerifiedContactStore` port). Confirming a fingerprint, by typed
+number, by scan, or by the person's own comparison, **pins** the bundle: a record signed by the pinning account's own
+key. From then on a different bundle for that account, from anywhere, is refused and reported
+(`SharingError.keySubstituted`), never silently adopted; replacing a pin is a separate, explicit act. A pin that does
+not verify is ignored, so an attacker with the file (A8) cannot plant trust, only delete it, which puts the contact
+back in front of the person. Bundles are compared by account and keys, not by self-signature, because Ed25519 signing
+may be randomised.
+
+A `VerifiedContact` value exists only once a fingerprint was confirmed (or for the account's own bundle), and the two
+operations that matter take nothing less: wrapping a vault key to an invitee, and anchoring a chain to an owner.
+
+```
+inviter:  begin ─► awaitingVerification ─confirm─► verified ─issue─► issued
+                   (show the invitee's number)     (sign addMember, HPKE-wrap the key)
+invitee:  begin ─► awaitingVerification ─confirm─► verified ─accept─► accepted
+                   (show the owner's number)       (verify the chain, open the grant)
+```
+
+- The inviter (owner or administrator) wraps the vault key only from `verified`. A contact pinned earlier starts
+  there; one whose published bundle differs from their pin stops at `begin`.
+- The invitee verifies the **owner**, whoever invited them: an administrator's key is in the chain under the owner's
+  signature, and every other member's under an administrator's. Trust in member keys is therefore transitive through
+  the chain, rooted in one out-of-band comparison per person; a member who wants more compares fingerprints with
+  another member directly, and the pin then guards that key too. (Review finding D17: the UI must show unverified
+  members as such.)
+- `accept` builds the ledger from the store's candidates anchored to the verified owner, requires this account to be
+  a member **with its own keys** (an administrator who was handed a substituted key for the invitee is caught here:
+  `ownKeySubstituted`), and opens the grant of the current key (§8.5).
+- An invitation to a vault ID the device already holds under another owner is refused (`vaultOwnerConflict`): vault
+  IDs are not secret, and accepting it would let the sender stand in as the owner of someone else's vault.
+
+### 8.5 Key grants
+
+A grant is found at `(vault, key ID, recipient)` and those come from its storage location, never from the grant
+(§4). The chain then names **the one account entitled to have sent it**: the signer of the record through which the
+recipient became entitled to that key, which is the record that introduced the key if the recipient was a member
+then (the genesis, a rotation, a removal), or else the record that added the recipient while the key was current.
+That signer was an administrator in the verified chain at that epoch by the chain's own rules, and their key comes
+from the chain. Nobody else's grant is accepted (`MembershipLedger.grantSender`, `openGrant`): not a former member's
+or former administrator's, not an administrator of another vault's, not one from an administrator demoted since
+(a demotion does not rotate, so "an administrator when the key was introduced" alone would still let them plant a
+key on a member added later). Only then does `VaultKeyGrant.open` check signature, addressing and ciphertext. A
+member is entitled only to keys that were current while they were a member; a newcomer reads older records because
+rotation re-seals them (§8.6), not by being given old keys.
+
+### 8.6 Removal, leaving and rotation (F4.3, F4.4)
+
+Removing a member or carrying out a departure **always rotates** (the verifier refuses a removal that keeps the
+key). `RotationPlanner.plan` produces a `RotationPlan`, pure data the integrator executes, in this order:
+
+1. **Revoke transport access** for the departing account. First, because it takes effect at once on the server.
+2. **Publish the grants**: the new key wrapped to every remaining member, the planner's own account included.
+3. **Publish the membership record** that removes the member and names the new key.
+4. **Re-seal** every record not under the current key (`MembershipLedger.recordsToReseal(in:)`), as new versions
+   through the ordinary save path, repeating until the list is empty.
+
+The plan holds no key in the clear: the new key exists only inside the grants, and the planning device obtains it
+like everyone else, by opening its own grant once the record is in its chain. So the plan can be saved and resumed
+after any interruption; every step is safe to repeat; and its status is read from what the device sees
+(`awaitingPublication`, `resealing(remaining:)`, `complete`, `superseded`), not from a counter.
+
+**Pending rotation** (F4.3) is observable on every device, `MembershipLedger.pendingRotation`: a departure
+requested and not yet carried out, a plan of this device's not yet in the chain, the current key not yet held, and
+records still sealed under an earlier key.
+
+**Leaving.** The member's device publishes a signed `LeaveRequest` and leaves the transport share; it cannot write
+the record itself, which names a key it must not hold. The next unlocked device of an administrator (the owner, if
+the leaver is an administrator) turns the request into a rotation whose record carries the request's signature, so
+"left" in the chain always means the member said so. A request is bound to the vault and to one stint of membership
+(the epoch the member was added), so replaying it after the member has been invited back, or into another vault,
+does nothing.
+
+**Per-item keys** were considered and rejected (`adr/0007-rotation-reencrypts-records.md`): rotation re-encrypts.
+
+### 8.7 Permissions (F4.5)
+
+One question, `MembershipState.writePermission(for:)` (and `MembershipLedger.writePermission(for:atEpoch:)`):
+may this account write to the vault? Allowed for the owner, administrators and read-write members of a vault that
+has not been deleted. The client asks it before its own writes and before merging anyone else's.
+
+It is **not cryptographic**: a read-only member holds the vault key, and a former member holds every key of their
+time, so either can produce a ciphertext that decrypts. What stops it counting is every remaining member's client
+asking, and the transport's own permission where it has one (CloudKit's read-only participant). When judging someone
+else's write, ask about the ledger's *current* epoch: a former member can date a write as they please. The cost is
+that a removed member's last, not-yet-merged edits are refused with the rest.
+
+### 8.8 What integration calls, and what is not solved
+
+For each shared vault a session keeps a `MembershipLedger` (saved after every change of head), the vault's keys, and
+at most one `RotationPlan`. On sync: list `sharing/<vaultID>/membership/` and `ingest`; if the head changed, persist,
+fetch the grant of the current key if it is not held (`openGrant(of:from:as:)`) and store the key wrapped under Ksym;
+if a record of this device's was superseded, plan again; list `leave/` and, as an administrator, plan a rotation for
+each `pendingLeaveRequests`; continue any saved plan. `SyncKeyring.verify` is where `writePermission` plugs in, with
+the author's signing key taken from the ledger's state.
+
+Not solved here, and to be decided with integration:
+
+- **One signing key per account** (review finding D9). A lost device of an administrator can sign membership records
+  until the account key is replaced. The device registry belongs in front of this module's signature checks.
+- **An isolated owner device.** A store that shows one of the owner's devices only a former administrator's branch
+  can obtain an owner-signed record on it. The rule then picks between two branches the owner signed; the other
+  device's removal is superseded and must be planned again. Until it is, members who follow the stale branch seal to
+  a key the former administrator holds. Closing this needs the owner's devices to refuse to sign while they disagree,
+  which is device-registry work.
+- **Account key replacement.** A member with new account keys is removed and invited again; there is no record that
+  replaces a member's bundle in place.
+- **A deleted or exhausted chain.** After `deleteVault`, or at epoch 65,535, membership is frozen; items move to a new
+  vault (F4.6's "move to a shared vault" is that mechanism).
+- **Keys from a superseded record.** A device that followed a losing branch may have sealed records under its key;
+  it keeps that key until nothing it holds is sealed under it (`recordsToReseal` lists them).
 
 ## 9. AutoFill and service matching (`WatchwordMatching`)
 
@@ -669,7 +896,9 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordStore        record-store port, in-memory and SQLite stores     [milestone 2, done]
   Sources/WatchwordSync         change log, merge, SyncTransport protocol,
                                 SQLite sync state                                  [milestone 3; transports open]
-  Sources/WatchwordSharing      membership, invitations, rotation                  [milestone 4]
+  Sources/WatchwordSharing      membership chain, verified contacts, invitations,
+                                key grants, rotation plans                         [milestone 4; protocol core,
+                                                                                    integration open]
   Sources/WatchwordHygiene      HIBP client, strength, reuse                       [milestone 6]
   Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
   Sources/WatchwordKit          VaultSession façade, UnlockPolicy, AutoLockPolicy,
@@ -693,14 +922,17 @@ store `SQLiteSyncStateStore`. Production adapters live in the package (`Watchwor
 `SQLiteRecordStore`) rather than `Apps/`, so the strict-memory-safety job, the unsafe tripwire,
 lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live in
 `WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`).
+Milestone 4 adds `KeyBundleDirectory` and `VerifiedContactStore` (§8.4), each with an in-memory implementation in
+`WatchwordSharing`, and in `WatchwordTestSupport` the hostile store and simulated members of the sharing tests
+(`HostileSharingStore`, `SimulatedMember`, `SharingHousehold`, `ForgedRecord`).
 
 ## 16. Open questions tracked as ADR candidates
 
 - Whether to offer iCloud Keychain storage of the Secret Key as an opt-in convenience (`adr/0004`).
 - Argon2id adoption path (`adr/0003`).
-- Per-item keys (wrapped by VK) to make rotation O(members) instead of O(items), including
-  re-upload. Promoted from "deferred" to a milestone-4 decision by the review (finding D10):
-  rotation runs on every membership change, so its cost is not a tail case.
+- Per-item keys (wrapped by VK) to make rotation O(members) instead of O(items): **decided in milestone 4, against**
+  (`adr/0007-rotation-reencrypts-records.md`, closing review finding D10). Rotation re-encrypts; a per-blob content
+  key is the thing to add if attachments arrive.
 - A device registry signed by existing devices (review finding D9). Today every device holds the
   account Ed25519 key, so a lost device cannot be excluded without rotating the account key.
   Needed before sync ships. `SyncKeyring.verify` is where it plugs in: it already decides, per object, whether
