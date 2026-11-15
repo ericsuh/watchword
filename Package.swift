@@ -134,7 +134,7 @@ let package = Package(
         .testTarget(
             name: "WatchwordAutoFillTests",
             dependencies: [
-                "WatchwordAutoFill", "WatchwordModel", "WatchwordMatching", "WatchwordGenerator",
+                "WatchwordAutoFill", "WatchwordModel", "WatchwordMatching", "WatchwordGenerator", "WatchwordKit",
                 "WatchwordTestSupport", crypto,
             ]
         ),
