@@ -21,6 +21,7 @@ final class ImportExportTests: XCTestCase {
         XCTAssertFalse(app.reveal(AccessibilityID.Import.commit).isEnabled, "imported before the duplicate was decided")
 
         app.tap(AccessibilityID.Import.choice("Library") + ".merge")
+        app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
         let host = app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch
         XCTAssertTrue(host.waitForExistence(timeout: 30), app.debugDescription)
         XCTAssertEqual(host.value.map { "\($0)" }, "0", "a website accepted for the person")

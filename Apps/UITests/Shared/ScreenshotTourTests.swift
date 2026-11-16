@@ -194,6 +194,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.element(AccessibilityID.Invite.safetyNumber).click()
         Screens.capture(
             "invite-fingerprint", in: app, showing: "Inviting: the other person's safety number, to compare first")
+        app.reveal(AccessibilityID.Invite.comparedByEye)
         app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
         app.tap(AccessibilityID.Invite.confirm)
         app.tap(AccessibilityID.Invite.send)
@@ -273,6 +274,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.element(AccessibilityID.Import.duplicate("Library")).click()
         Screens.capture("import-review", in: app, showing: "The import's review: a duplicate waiting for a choice")
         app.tap(AccessibilityID.Import.choice("Library") + ".merge")
+        app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
         let host = app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch
         XCTAssertTrue(host.waitForExistence(timeout: 30), app.debugDescription)
         Screens.capture(

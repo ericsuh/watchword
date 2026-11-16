@@ -40,6 +40,7 @@ final class VaultSharingTests: XCTestCase {
         app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
         XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).waitForExistence(timeout: 30))
         XCTAssertFalse(app.element(AccessibilityID.Invite.send).exists, "a role offered before the comparison")
+        app.reveal(AccessibilityID.Invite.comparedByEye)
         app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
         app.tap(AccessibilityID.Invite.confirm)
         app.tap(AccessibilityID.Invite.send)
