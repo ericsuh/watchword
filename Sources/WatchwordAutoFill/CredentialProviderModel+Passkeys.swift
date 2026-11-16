@@ -492,11 +492,11 @@ extension CredentialProviderModel {
         in snapshot: VaultSnapshot
     ) -> [PasskeyRegistrationCandidate] {
         guard !userName.isEmpty else { return [] }
-        let below = "." + relyingParty.value
+        let below = "." + relyingParty.host.value
         return snapshot.inUse.filter { item in
             item.loginNames.contains(userName) && !candidates.contains { $0.itemID == item.id }
                 && item.scopes.contains {
-                    ScopePolicy.isAcceptable($0) && ($0.host == relyingParty.value || $0.host.hasSuffix(below))
+                    ScopePolicy.isAcceptable($0) && ($0.host == relyingParty.host.value || $0.host.hasSuffix(below))
                 }
         }
         .prefix(maximumCredentialListCount)

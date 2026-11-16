@@ -1037,7 +1037,11 @@ the credential stores its relying party ID and signs for no other, and the item 
 pass `AutoFillGate` for that relying party as a host, like any release. A relying party ID is a
 `RelyingPartyID` value, which exists only after `HostNormalizer` and `ScopePolicy` have accepted
 the string in its one canonical spelling, so `com`, `Google.com` and `google.com.` are never
-hashed, stored or signed for.
+hashed, stored or signed for. That spelling is lower-case ASCII, with A-labels for an
+internationalised name, and it is what is hashed and stored; matching uses the ID as `HostNormalizer`
+gives it (`RelyingPartyID.host`), which since a domain normalises as its URL does (§9.1's pipeline) can
+be the Unicode form, so a new passkey item's scope is in that form too and matches its own relying
+party on any platform's Foundation.
 
 ### 9.2 As built in milestone 5 (`WatchwordAutoFill`, the portable core)
 

@@ -1,6 +1,7 @@
 import Crypto
 import Foundation
 import Testing
+import WatchwordMatching
 import WatchwordModel
 import WatchwordTestSupport
 
@@ -354,8 +355,12 @@ struct PasskeyAuthenticatorTests {
         let relyingParty = try RelyingPartyID(value)
         #expect(relyingParty.value == value)
         #expect(relyingParty.hash == Data(SHA256.hash(data: Data(value.utf8))))
-        #expect(relyingParty.scope.host == value)
+        let normalized = try HostNormalizer.normalize(ServiceIdentifier(value, kind: .domain))
+        #expect(relyingParty.host == normalized)
+        #expect(relyingParty.scope.host == normalized.value)
         #expect(relyingParty.scope.includeSubdomains)
+        // The scope a new passkey item gets must match the requests for its own relying party, A-labels or not.
+        #expect(ScopeMatcher.match(relyingParty.scope, host: normalized)?.isExact == true)
     }
 
     @Test(

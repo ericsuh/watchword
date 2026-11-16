@@ -25,6 +25,10 @@ public enum RelyingPartyIDError: Error, Equatable, Sendable {
 public struct RelyingPartyID: Hashable, Sendable, CustomStringConvertible {
     /// Lower-case ASCII, exactly as it is hashed.
     public let value: String
+    /// The ID as `HostNormalizer` gives it, the form every scope and every request is compared in. For an
+    /// internationalised ID this can be the Unicode form of `value`'s A-labels (Foundation maps a URL's host as IDNA
+    /// does, and a domain normalises as its URL does), so matching uses this and hashing uses `value`.
+    public let host: NormalizedHost
 
     public init(_ raw: String) throws {
         let host: NormalizedHost
@@ -35,18 +39,32 @@ public struct RelyingPartyID: Hashable, Sendable, CustomStringConvertible {
         } catch {
             throw RelyingPartyIDError.notAHostname(.invalidHost(raw))
         }
-        guard host.value == raw, host.isASCII else { throw RelyingPartyIDError.notCanonical(raw) }
+        // The one spelling is judged on the raw bytes: lower-case ASCII letters, digits, hyphens and inner dots. The
+        // normalised host may differ from it only by decoding A-labels, so it must keep the same labels' count.
+        let canonical =
+            raw.utf8.allSatisfy { byte in
+                (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte)
+                    || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                    || byte == UInt8(ascii: "-") || byte == UInt8(ascii: ".")
+            }
+            && !raw.hasPrefix(".") && !raw.hasSuffix(".") && !raw.contains("..")
+        let rawLabels = raw.split(separator: ".", omittingEmptySubsequences: false)
+        guard canonical, host.labels.count == rawLabels.count, host.isASCII ? host.value == raw : raw.contains("xn--")
+        else { throw RelyingPartyIDError.notCanonical(raw) }
         // An IPv6 literal contains a colon; a dotted name whose last label is all digits is an IPv4 address.
-        let lastLabel = host.labels.last ?? ""
-        guard !raw.contains(":"), !lastLabel.allSatisfy(\.isNumber) else {
+        let lastLabel = rawLabels.last.map(String.init) ?? ""
+        guard !lastLabel.allSatisfy(\.isNumber) else {
             throw RelyingPartyIDError.ipAddress(raw)
         }
+        // Both forms must pass: the embedded suffix list may name an internationalised suffix in either.
         do {
             try ScopePolicy.validate(ServiceScope(host: raw))
+            try ScopePolicy.validate(ServiceScope(host: host.value))
         } catch let error as ScopeValidationError {
             throw RelyingPartyIDError.scopeRejected(error)
         }
         value = raw
+        self.host = host
     }
 
     public var description: String { value }
@@ -64,7 +82,8 @@ public struct RelyingPartyID: Hashable, Sendable, CustomStringConvertible {
 
     /// The scope a new item created for a passkey of this relying party gets. Subdomains are included because that is
     /// what a relying party ID means: the credential is usable from the ID's host and every host below it.
+    /// It is in the normalised form, so it matches `serviceIdentifier` whatever Foundation does with A-labels.
     public var scope: ServiceScope {
-        ServiceScope(host: value, includeSubdomains: true)
+        ServiceScope(host: host.value, includeSubdomains: true)
     }
 }
