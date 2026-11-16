@@ -285,6 +285,8 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - The sharing UI: invitation and fingerprint screens (safety number, QR display and scan), the member list with
   unverified members shown as such (D17), "pending rotation" (F4.3), and the wording F4.3 and F4.5 require.
 - Scenarios S3 and S4 end to end through `VaultSession` over `InMemorySyncTransport`, and the manual CloudKit run.
+- The session's answer to `MembershipLedger.continuesInLaterFormat` (`02-architecture.md` §8.9): the vault read-only,
+  and the person told to update. The ledger already refuses proposals, plans and the device's own writes.
 
 ## Milestone 5 — AutoFill
 
@@ -440,6 +442,17 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - Environment: **Mac.** The external crypto review reads source anywhere, but the performance (N1,
   N2) and accessibility (N4) passes measure a running app, and the privacy manifest and TestFlight
   submission go through Xcode and App Store Connect.
+
+## Later (after the first release)
+
+- **Ownership transfer of a shared vault** (owner decision, 2026-11-16: wanted, in a future version). The design is
+  `02-architecture.md` §8.9: a `transferOwnership` record in a later `WWMR` format version, signed by the current
+  owner and accepted by the new one; rules that read "the owner" as the owner of the state before each record; a fork
+  rule that counts transfers first, then records signed by the owner of their time; an invitation that names the
+  current owner. Already in place: devices on this version fail closed on a later-format record the owner signed
+  (`MembershipLedger.continuesInLaterFormat`), so the first release with sharing is the minimum version a transfer
+  can rely on. To do then: the operation and its acceptance, the rule and fork-rule changes with
+  `LongRunningMembershipForkTests` extended to transfers, the invitation change, and the screens.
 
 ## Working agreements
 

@@ -392,10 +392,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 
 ### `WatchwordSharing` invariants
 
-- **The owner is fixed** (never removed, never re-roled), and **the administrator set changes only in records the
-  owner signed**: adding, removing or re-roling an administrator and deleting the vault are owner-only
+- **The owner is fixed in this version** (never removed, never re-roled), and **the administrator set changes only in
+  records the owner signed**: adding, removing or re-roling an administrator and deleting the vault are owner-only
   (`MembershipRules.authorise`). The fork rule and "nobody can be locked out" both rest on these two; do not add an
-  operation that breaks either (ownership transfer needs a new design, not a new case).
+  operation that breaks either. Ownership transfer is wanted in a future version and needs the design in
+  `docs/02-architecture.md` §8.9 (a later format version; "owner" read per state; transfers counted first by the fork
+  rule), not a new case here.
+- **A later format fails closed** (§8.9): `MembershipRecord.laterFormat` reads the prefix every later format keeps,
+  and a record of one that extends a held record and verifies under the owner of the state it follows stops the
+  ledger there (`continuesInLaterFormat`: chain cut, no proposals, plans or own writes). Keep the prefix, the trailing
+  signature and `maximumLength` stable, or a future version's records become junk to this one, which then carries on.
 - A record is verified against the state *before* it, and the signer's key comes from that state, never from the
   record. Cheap checks first, then the signature, and only then anything the record brought with it (a new member's
   bundle, a leave request). The member list in a record must equal the previous list with the operation applied.

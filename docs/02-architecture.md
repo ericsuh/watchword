@@ -841,8 +841,9 @@ table carry the rest of the design:
 - **The set of accounts that may sign changes only in records the owner signed.** (Everything that adds or removes
   an administrator is the owner's.)
 - **The owner can always sign the next record**, so no sequence of records, honest or hostile, leaves a vault that
-  nobody can administer. Ownership transfer is not in v1; the last 4,096 epochs of a chain accept only the owner's
-  signature, so an administrator cannot use the chain up either.
+  nobody can administer. Ownership transfer is not in this version (the owner wants it in a future one; §8.9 is the
+  design it must follow, and what this version already does so that it can); the last 4,096 epochs of a chain accept
+  only the owner's signature, so an administrator cannot use the chain up either.
 
 ### 8.2 Formats, and what is in the clear
 
@@ -859,7 +860,7 @@ at most 2,048 bytes; a record is at most 12,090 bytes.
 | Published key bundle | `WWKB` | account ID, X25519 key, Ed25519 key | self-signature (`.publicKeyBundle`) |
 | Invitation | `WWIV` | vault ID, owner's account ID | nobody: it only says whose fingerprint to ask about |
 | Contact pin (local) | `WWCP` | pinning account, method, time, the contact's bundle | the pinning account |
-| Saved ledger (local) | `WWML` | account, vault, digest of the owner's keys, head epoch and hash; then the accepted records, then the records held from losing branches | the account, over the checkpoint |
+| Saved ledger (local) | `WWML` | account, vault, digest of the owner's keys, head epoch and hash; then the accepted records, then the records held from losing branches and any later-format records held (§8.9) | the account, over the checkpoint |
 | Rotation plan (local) | `WWRP` | planner, vault, base head, new key ID, kind of rotation, the membership record, the grants | the planner's account, over all of it |
 
 Signatures of the membership protocol all use `SignatureDomain.membership`; the leading magic keeps one kind from
@@ -1168,7 +1169,9 @@ and the records it has proposed and not yet seen adopted. `SimulatedMember` in `
 written out against a hostile store. One sync pass, in this order:
 
 1. **Membership.** List `sharing/<vaultID>/membership/`; skip names that are not a membership object's, that carry a
-   hash the ledger `holds`, or whose contents were refused as `malformed` or `invalid` before (both are permanent);
+   hash the ledger `holds`, or whose contents were refused as `malformed` or `invalid` before (both are permanent,
+   except `malformed(.unsupportedFormatVersion)` and `malformed(.unknownOperation)`: a later format, §8.9, which is
+   offered again until the ledger holds it in `laterFormatRecords`);
    fetch the rest, drop any whose contents are not what the name commits to (`SharingObjectLocation.isName(of:)`),
    and `ingest` what remains. Offer `unconnected` objects again next time. Persist.
 2. **Member keys.** `checkMemberKeys` against the verified contacts; report `substituted` members to the person.
@@ -1248,6 +1251,71 @@ Not solved here, and to be decided with integration:
 - **Keys from a superseded record.** A device that followed a losing branch may have sealed records under its key;
   it keeps that key until nothing it holds is sealed under it (`recordsToReseal` lists them). A device that never
   held that key cannot read those records until one that did has sealed them again.
+
+### 8.9 Ownership transfer (future)
+
+The owner is fixed **in this version**: no record removes, re-roles or replaces the owner (`MembershipRules.authorise`
+throws `ownerIsFixed`). The owner wants a way to hand a vault to another member (owner decision, 2026-11-16) and has
+deferred it to a future version. This is how it plugs in, checked against the module as built; nothing in the record
+format, the rules or the fork rule precludes it, and the one thing that was missing, how a device on this version
+behaves when the vault goes on without it, is now built (below).
+
+**The record.** A new operation, `transferOwnership(to: account)`, in a later format version of `WWMR` (version 3;
+the operation byte and the version byte both leave room). Signed by the current owner, the account that is the
+owner in the state before it, and carrying the new owner's own signature over the same content (an acceptance, as a
+departure carries the member's leave request), so nobody becomes owner without asking to. The new owner must be a
+member, and an administrator, in the state before it; the old owner stays a member as an administrator (or as the
+record says), and their key bundle stays in the list. It does not change the vault key: nobody leaves.
+
+**The rules.** `MembershipRules.authorise` gains the case: the owner alone may sign it, its target must be an
+administrator, the acceptance must verify under the target's key from the state before it. Everything that today
+says "the owner" means "the member whose role is owner in the state before this record", which is already how the
+signer's key is found (§8.3: the signer's key comes from that state, never from the record). The genesis check alone
+stays anchored on the pinned owner (`VerifiedContact`), because the genesis has no state before it; an invitation
+then names the *current* owner, whose fingerprint the invitee verifies, and the invitee checks the chain back to a
+genesis whose owner is reached from the current one by transfers each signed by its predecessor.
+
+**The fork rule must then count transfers first.** Today it prefers the path with the most records signed by the
+owner, computed against the pinned owner (`MembershipLedger.resolve`, `signedByOwner`); in this version the two are
+the same account. With transfers, two things change:
+
+1. *Owner-signed is judged per record*: a record counts if its signer is the owner **in the state before it**. That
+   is computable for every node from its parent's state, which the ledger already holds.
+2. *Transfers come before owner-signed counts.* Otherwise the former owner, who signed records as owner before the
+   transfer, could fork from just before it and outsign the new owner, which is S1 again with the owner as the
+   former administrator. The order becomes: the most transfers on the path, then the most records signed by the
+   owner of their time, then the most records, then the lower hash. A former owner cannot add a transfer without the
+   new owner's acceptance, and a transfer needs both signatures, so the path with the transfer wins on every device
+   however the records are timed.
+
+The same reasoning carries the other rules: the administrator set changes only in records signed by the owner of
+their time, and the owner of every state can sign the next record, so nobody is locked out. `owedRemovals` and
+`hasStanding` ask "may this signer do this on the accepted head", which a transfer answers like any role change.
+
+**Devices on an older version must fail closed, and this one does.** A device that cannot read the transfer must not
+take it for junk: it would carry on with the former owner as owner and split from every updated device. So every later
+format keeps this version's prefix (magic, version, vault ID, epoch, previous hash, signer) and a trailing 64-byte
+signature under `SignatureDomain.membership` over everything before it, and fits `MembershipRecord.maximumLength`.
+This version reads that much of any record it cannot parse (`MembershipRecord.laterFormat`): a later format version,
+or this one with an operation it does not know. If such a record extends a record the ledger holds, is in its place
+(epoch next, same vault) and verifies under the key of the account that is the owner in the state it follows, the
+ledger **stops there**: the accepted chain is the path to that record and nothing after it, whatever else is offered
+and in whatever order (`continuesInLaterFormat`, `laterFormatRecords`, held so that serving less rolls nothing back);
+the device proposes nothing and plans no rotation (`SharingError.requiresNewerVersion`) and may not write
+(`WriteRefusal.requiresNewerVersion`). Other members' writes are judged on the stopped chain and merged, read-only,
+until the update; an updated device re-judges everything against the full chain (§8.7's "taken out, not only kept
+out"). Anything else in a later format's clothing (unsigned, signed by an administrator, misplaced) is junk: one
+signature check at most, and nothing changes. Only the owner can stop the chain, and the owner can already delete the
+vault. The held records are saved with the ledger (`WWML`, after the branch records; `restore` accepts them as the
+one kind of saved record this version cannot parse, and only if they still stop the chain), and §8.8's step 1 offers
+a later-format object again until the ledger holds it. The adversarial tests are `laterFormatStopsTheChain` and
+`laterFormatImpostors`.
+
+**What the future version still has to do:** the operation and its acceptance; the rule changes above (and
+`LongRunningMembershipForkTests` extended with transfers); the invitation naming the current owner and the
+genesis-to-current-owner check; the UI (offer, accept, and what each member is told); and a minimum version, so that
+a transfer is offered only once the version that fails closed (this one) is what members run, which it is from the
+first release with sharing.
 
 ## 9. AutoFill and service matching (`WatchwordMatching`)
 

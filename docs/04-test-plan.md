@@ -332,6 +332,11 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   their pushed segments are rejected by remaining members.
 - Read-only member's writes are rejected by the transport fake and never merged.
 - Two admins remove each other concurrently → deterministic outcome, no vault lock-out.
+- A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
+  with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
+  and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed
+  by an administrator or a writer, unsigned, for another vault or at the wrong epoch change nothing, at one
+  signature check each at most (`laterFormatStopsTheChain`, `laterFormatImpostors`, in "sharing and membership").
 
 **Implemented in milestone 3** (`AdversarialSyncTests`, suite "Adversarial: sync log", with the fake keyring):
 the server's reorder/duplicate/drop/stale-snapshot cases, a byte flipped anywhere in a segment, objects moved to
