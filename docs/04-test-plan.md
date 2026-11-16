@@ -108,7 +108,9 @@ with password re-entry, import of 1PUX/CSV fixtures.
   the old one refused with the way out shown, the new one accepted), `QuarantineTests` (a version jumping past the
   launch's ceiling held aside, listed by item and discarded only through the confirmation) and `ImportExportTests`
   (an import whose duplicate must be decided first, a merge naming the `www` host it would add, off until accepted,
-  with the password hidden; a CSV export's report and the standing warning; a backup restored with its date shown).
+  with the password hidden; a CSV export's report and the standing warning; a backup restored with its date shown;
+  and a lock, through a Debug-only "Lock now" on the screen, with the merge review or the export report open, after
+  which neither is there).
   `--uitest` gives them what a release build lacks: sync and sharing over in-memory ports shared with `UITestPeer`
   (another device of the account and another person's account, in the app's process), a version-jump ceiling of 16
   so the peer can produce a quarantined version through the real sync path, breach checks answered by
@@ -116,12 +118,22 @@ with password re-entry, import of 1PUX/CSV fixtures.
   last exported archive in place of the system's file picker, and Settings' Debug-only section to drive the peer.
   Elements are found by `AccessibilityID` (`Apps/Shared/AccessibilityID.swift`), compiled into the UI-test bundles
   as well, so the identifiers are one list both sides share; they are stable, and a rename changes every test that
-  uses it.
+  uses it. The steps they share (`AccountScreenSteps.swift`) are platform-aware: on iOS a form is scrolled by
+  swiping; on macOS by a scroll-wheel event on the scroll view that holds the target, or else the frontmost sheet's,
+  never one a sheet covers (the first macOS run failed with "unable to find hit point" scrolling the main window under
+  Settings). Opening and closing a screen retry a click that did not take, and every such failure attaches the whole
+  element tree (`attachTree`), kept whether or not the test passes. Sheets the account screens open close by clearing
+  their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS.
 - Their logic is tested on Linux without a simulator: every account screen's state and decisions are a model in
   `WatchwordPresentation` (`02-architecture.md` §15), and `WatchwordPresentationTests` drives those models over real
   `VaultSession`s ("Screen models: vaults", "… devices", "… a password changed by someone else", "… held-aside
-  changes", "… sharing", "… security report", "… import, export and restore", and the wording suites). What only an
-  XCUITest checks is that the views lay the models out and pass the taps on.
+  changes", "… sharing", "… member trust", "… hosts a merge would add", "… security report", "… import, export and
+  restore", and the wording suites; with `WatchwordKitTests` "Vault session: held-aside versions and the lock
+  signal"). The adversarial area "account screens" (`AdversarialAccountScreenTests`) attacks them: a pasted
+  fingerprint code taken for a comparison, a look-alike host from an import file, a shared vault renamed "Personal",
+  a device named to pass for this one; and "shared vaults through the session" has the member list after a relaunch
+  with a substituted key (`06-adversarial-review.md` §P). What only an XCUITest checks is that the views lay the models
+  out and pass the taps on.
 - Accessibility audit (`XCUIApplication.performAccessibilityAudit()`) runs on every screen.
 
 ### 5.1 The screenshot tour

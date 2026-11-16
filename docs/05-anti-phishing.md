@@ -169,6 +169,23 @@ dialog people click through.
 the item, inside the app, which requires: unlocking, opening the item, typing the host, and
 confirming a warning that names the site being added. That deliberate friction is the feature.
 
+**A website an import would add to an existing item.** The duplicate screen (`ImportModel`, `MergeHost`) shows
+each host a merge would add in its ASCII form, punycode for any label in another alphabet (`аmazon.com` is
+`xn--mazon-3ve.com`), with the registrable domain in bold, how far the scope reaches ("and its subdomains", "this
+address only", and its exclusions), and `PhishingDetector`'s assessment against every item in the vault. A host that
+resembles a saved site, or uses another alphabet at all, carries a warning that names the site, and switching it on
+asks a second time ("Accept Anyway"). The switch is off to begin with, as every addition is (`MergeChoices`). Before
+this, the screen showed the host as the file spelled it, so a file could offer the bank's item a look-alike that
+rendered as the bank (review of the account screens, finding 3).
+
+**Comparing fingerprints before sharing.** A fingerprint code (`WWFP1-…`) pasted from a message only names the
+account: anyone who can message the person can send a code for an account of their own. The invite screen still asks
+for the typed safety number or the person's own "they match", and the pin records which (`VerificationMethod`,
+S16). `scannedCode` is for a code read by the camera from the other person's screen, which the app does not do yet,
+so it never records one. The role step names the account being invited and says how its keys were confirmed, never
+"the numbers match" unless they were compared (finding 2). Accepting an invitation from an owner verified before
+still asks before joining (finding 8).
+
 **Ambiguous match.** Both accounts listed with their distinguishing field (username/email) and the
 matched scope. Nothing pre-selected.
 
