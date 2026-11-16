@@ -184,8 +184,8 @@ let package = Package(
         .testTarget(
             name: "WatchwordPlatformTests",
             dependencies: [
-                "WatchwordPlatform", "WatchwordKit", "WatchwordSync", "WatchwordHygiene", "SecureMemory",
-                "WatchwordTestSupport",
+                "WatchwordPlatform", "WatchwordKit", "WatchwordSync", "WatchwordHygiene", "WatchwordModel",
+                "SecureMemory", "WatchwordTestSupport",
             ]
         ),
 

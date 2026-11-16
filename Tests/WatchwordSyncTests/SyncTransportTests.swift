@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WatchwordTestSupport
 
 @testable import WatchwordSync
 
@@ -28,49 +29,29 @@ enum TransportFixtures {
     static let prefix = SyncObjectLocation.vaultPrefix(SyncFixtures.vault)
 }
 
-/// One contract, every transport (docs/02-architecture.md §7): immutable objects in a flat namespace.
+/// One contract, every transport (docs/02-architecture.md §7): immutable objects in a flat namespace. The checks are
+/// `SyncTransportContract`'s, which `WatchwordPlatformTests` also runs against the coordinated iCloud Drive transport and
+/// the CloudKit transport.
 @Suite("Sync transport contract")
 struct SyncTransportContractTests {
     @Test("objects round-trip and are listed by prefix", arguments: TransportKind.allCases)
     func roundTrip(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        #expect(try await transport.list(prefix: TransportFixtures.prefix).isEmpty)
-        #expect(try await transport.fetch(TransportFixtures.name, maximumLength: 100) == nil)
-        try await transport.create(TransportFixtures.name, contents: [1, 2, 3])
-        let other = SyncObjectLocation.snapshot(
-            vaultID: SyncFixtures.otherVault, author: SyncFixtures.deviceB, lamport: 9)
-        try await transport.create(other.name, contents: [4])
-        #expect(try await transport.list(prefix: TransportFixtures.prefix) == [TransportFixtures.name])
-        #expect(try await transport.list(prefix: "vault/").count == 2)
-        #expect(try await transport.fetch(TransportFixtures.name, maximumLength: 100) == [1, 2, 3])
+        #expect(try await SyncTransportContract.roundTrip(kind.make()) == [])
     }
 
     @Test("an object is written once and never overwritten", arguments: TransportKind.allCases)
     func immutable(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        try await transport.create(TransportFixtures.name, contents: [1])
-        await #expect(throws: SyncTransportError.objectExists(TransportFixtures.name)) {
-            try await transport.create(TransportFixtures.name, contents: [2])
-        }
-        #expect(try await transport.fetch(TransportFixtures.name, maximumLength: 100) == [1])
+        #expect(try await SyncTransportContract.immutable(kind.make()) == [])
     }
 
     @Test("an object larger than the reader's limit is refused", arguments: TransportKind.allCases)
     func sizeLimit(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        try await transport.create(TransportFixtures.name, contents: Array(repeating: 7, count: 101))
-        await #expect(throws: SyncTransportError.objectTooLarge(TransportFixtures.name)) {
-            try await transport.fetch(TransportFixtures.name, maximumLength: 100)
-        }
+        #expect(try await SyncTransportContract.sizeLimit(kind.make()) == [])
     }
 
     @Test("deletion removes one object and tolerates absence", arguments: TransportKind.allCases)
     func deletion(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        try await transport.create(TransportFixtures.name, contents: [1])
-        try await transport.delete(TransportFixtures.name)
-        try await transport.delete(TransportFixtures.name)
-        #expect(try await transport.list(prefix: TransportFixtures.prefix).isEmpty)
+        #expect(try await SyncTransportContract.deletion(kind.make()) == [])
     }
 }
 
