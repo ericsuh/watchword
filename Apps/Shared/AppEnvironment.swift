@@ -66,7 +66,7 @@ enum AppEnvironment {
                         configuration: VaultConfiguration(appVersion: appVersion, kdf: .fixed(.baseline)),
                         sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport)
                     ),
-                    UITestPeer(primaryStore: store, primaryKeychain: keychain, transport: transport))
+                    UITestPeer(transport: transport))
             }
         #endif
         let info = Bundle.main.infoDictionary ?? [:]

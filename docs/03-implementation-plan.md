@@ -214,11 +214,10 @@ half delivered** on a Mac; the transports are open.
   - **Not verified on a Mac.** Everything above built and ran on Linux only; `SystemKeychainStore` gained two
     Keychain item names without being compiled, and `SQLiteSyncStateStore`/`SQLiteRecordStore` are unchanged but
     now hold new record kinds. Dispatch `mac-run.yml` before relying on it.
-  - **`Apps/` was not touched and needs a follow-up:** `UITestPeer` still copies the account header and vault-key
-    wraps into its second session, which no longer makes a device of the account (it has no registration). It
-    must call `VaultSession.enrol(password:secretKey:accountID:)` over the shared in-memory transport after the
-    app's session has synced once; until then `SyncConflictTests` will fail. The app also needs UI for vaults,
-    devices, a changed password (`passwordChangedOnAnotherDevice`, `ignoringPasswordChange`) and revocation.
+  - **`Apps/`:** `UITestPeer` now joins as any new device does, `VaultSession.enrol` with the Emergency Kit's setup
+    code over the shared in-memory transport, after the app's session has synced once (`SyncConflictTests` does).
+    The app still needs UI for vaults, devices, a changed password (`passwordChangedOnAnotherDevice`,
+    `ignoringPasswordChange`) and revocation.
 - **Still open (Mac):** `CloudKitTransport` and the coordinated iCloud Drive wrapper around `FileSyncTransport`, and
   with them sync in production builds (until then the app is built without `SyncSettings`) and a driver for
   `AutoSyncPolicy` (timers, push and file-presenter hints); the manual CloudKit workflow; the Secure Enclave

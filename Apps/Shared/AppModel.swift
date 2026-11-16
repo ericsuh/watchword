@@ -257,10 +257,11 @@ final class AppModel {
     #if DEBUG
         /// UI tests only: the simulated other device renames every item, as if edited there.
         func renameOnOtherDevice() async {
-            guard let uiTestPeer else { return }
+            guard let uiTestPeer, let session else { return }
             uiTestPeerStatus = nil
             await perform {
-                try await uiTestPeer.renameItems(appending: " elsewhere")
+                let kit = try await session.emergencyKit()
+                try await uiTestPeer.renameItems(appending: " elsewhere", kit: kit)
                 self.uiTestPeerStatus = "Renamed on the other device."
             }
         }

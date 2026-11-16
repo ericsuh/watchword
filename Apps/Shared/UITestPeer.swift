@@ -10,28 +10,23 @@
     /// lets an XCUITest make a change "elsewhere", so conflicts and merges can be driven through the real UI and the
     /// real keyring. Debug builds launched with `--uitest` only.
     ///
-    /// Enrolment copies the account header, the vault-key wraps and the Secret Key from the app's in-memory ports:
-    /// what enrolment from the account header on the transport will deliver once it exists (milestone 3, open). The
-    /// peer unlocks with the password the test passes in `WATCHWORD_UITEST_PASSWORD`.
+    /// It joins the account as any new device does (`VaultSession.enrol`): from the transport, the password the test
+    /// passes in `WATCHWORD_UITEST_PASSWORD` and the Emergency Kit's setup code, so it registers itself in the device
+    /// registry and the app's device accepts what it signs. The app must have synced once first, so the account's
+    /// objects are on the transport.
     actor UITestPeer {
         static let passwordVariable = "WATCHWORD_UITEST_PASSWORD"
 
-        let primaryStore: InMemoryRecordStore
-        let primaryKeychain: InMemoryKeychainStore
         let transport: InMemorySyncTransport
         private var session: VaultSession?
 
-        init(
-            primaryStore: InMemoryRecordStore, primaryKeychain: InMemoryKeychainStore, transport: InMemorySyncTransport
-        ) {
-            self.primaryStore = primaryStore
-            self.primaryKeychain = primaryKeychain
+        init(transport: InMemorySyncTransport) {
             self.transport = transport
         }
 
         /// Syncs, appends `suffix` to the title of every item not in the trash, and syncs again.
-        func renameItems(appending suffix: String) async throws {
-            let peer = try await enrolled()
+        func renameItems(appending suffix: String, kit: EmergencyKit) async throws {
+            let peer = try await enrolled(kit: kit)
             try await peer.sync()
             for item in try await peer.items().items where !item.isTrashed {
                 var edited = item
@@ -41,23 +36,14 @@
             try await peer.sync()
         }
 
-        private func enrolled() async throws -> VaultSession {
+        private func enrolled(kit: EmergencyKit) async throws -> VaultSession {
             if let session { return session }
-            guard var account = await primaryStore.loadAccount() else { throw VaultError.noAccount }
-            let wraps = await primaryStore.records(in: account.personalVaultID, kind: .vaultKeyWrap)
-            account.deviceID = UUID()
-            let store = InMemoryRecordStore()
-            try await store.commit(StoreChange(account: .create(account), upserts: wraps))
-            let keychain = InMemoryKeychainStore()
-            let item = KeychainItem.secretKey(accountID: account.accountID)
-            if let secretKey = await primaryKeychain.read(item, prompt: "") {
-                await keychain.store(secretKey, for: item)
-            }
             let peer = VaultSession(
-                store: store, keychain: keychain, biometrics: UnavailableBiometricGate(),
+                store: InMemoryRecordStore(), keychain: InMemoryKeychainStore(), biometrics: UnavailableBiometricGate(),
                 configuration: VaultConfiguration(appVersion: "uitest-peer", kdf: .fixed(.baseline)),
                 sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport))
-            try await peer.unlock(password: ProcessInfo.processInfo.environment[Self.passwordVariable] ?? "")
+            try await peer.enrol(
+                password: ProcessInfo.processInfo.environment[Self.passwordVariable] ?? "", secretKey: kit.setupCode)
             session = peer
             return peer
         }
