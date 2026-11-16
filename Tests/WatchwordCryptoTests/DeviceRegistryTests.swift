@@ -582,6 +582,91 @@ struct DeviceRegistryTests {
         let named = try f.evaluate(entries + [naming], genesis: genesis, credential: change)
         #expect(named.retainedEntries.isSuperset(of: [naming.id, byRevoked[1].id]))
     }
+
+    /// Review of the device registry ("puppets"): the revoked device registers a device of its own in an entry that
+    /// can never count, then signs any number of entries in that puppet's name with a key it made. Each verifies
+    /// against the dead registration, and the puppet was never revoked; none may count, so none is kept. The same
+    /// holds when the puppet registers a second puppet (a valid signature, a dead registration), when the dead
+    /// registration is one a checkpoint sealed as void, and when the puppet enrols with a key the revoked device
+    /// published in a credential change of its own.
+    @Test("a device registered by an entry that can never count writes nothing that is kept, however deep the chain")
+    func puppets() throws {
+        var f = RegistryFixture()
+        let x = Self.c
+        let genesis = f.genesis(device: Self.a)
+        let addB = f.add(Self.b, by: Self.a, parents: [genesis])
+        let addX = f.add(x, by: Self.a, parents: [addB])
+        // X adds a device of its own at the same time as its revocation; A's password change, which saw both, seals
+        // it as void.
+        let sealedPuppet = f.add(RegistryFixture.deviceID(0xF3), by: x, parents: [addX])
+        let revokeX = f.revoke(x, by: Self.a, parents: [addX])
+        _ = f.nextUnlockKey()
+        let change = f.credential(generation: 1, previous: genesis, by: Self.a, parents: [revokeX, sealedPuppet])
+        let honest = [genesis, addB, addX, sealedPuppet, revokeX, change]
+
+        func junk(_ index: Int, _ tag: UInt8) -> UUID {
+            UUID(uuid: (0x4A, tag, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, UInt8(index >> 8), UInt8(index & 0xFF)))
+        }
+        func flood(by puppet: UUID, from registration: RegistryEntry, tag: UInt8, count: Int = 64) -> [RegistryEntry] {
+            (0..<count).map { f.revoke(junk($0, tag), by: puppet, parents: [registration]) }
+        }
+
+        // As the verifier found it: a registration with a garbage author signature, after the checkpoint.
+        let y = RegistryFixture.deviceID(0xF1)
+        var forgedAdd = f.add(y, by: x, parents: [change])
+        forgedAdd.authorSignature = [UInt8](repeating: 0, count: 64)
+        // Signed properly by X, after its revocation was sealed.
+        let w = RegistryFixture.deviceID(0xF4)
+        let signedAdd = f.add(w, by: x, parents: [change])
+        // A chain: Y, registered only by the forged entry, registers Z with a signature that verifies.
+        let z = RegistryFixture.deviceID(0xF2)
+        let addZ = f.add(z, by: y, parents: [forgedAdd])
+        // An enrolment with a key X published in a password change of its own.
+        _ = f.nextUnlockKey()
+        let ownChange = f.credential(generation: 2, previous: change, by: x, parents: [change])
+        let enrolled = RegistryFixture.deviceID(0xF5)
+        let enrolment = f.enrol(enrolled, credential: ownChange, generation: 2, parents: [ownChange])
+
+        let planted =
+            [forgedAdd, signedAdd, addZ, ownChange, enrolment]
+            + flood(by: y, from: forgedAdd, tag: 1) + flood(by: z, from: addZ, tag: 2)
+            + flood(by: RegistryFixture.deviceID(0xF3), from: sealedPuppet, tag: 3)
+            + flood(by: w, from: signedAdd, tag: 4) + flood(by: enrolled, from: enrolment, tag: 5)
+        let entries = honest + planted
+        let state = try f.evaluate(entries, genesis: genesis, credential: change)
+        #expect(state.retainedEntries == Set(honest.map(\.id)))
+        #expect(Set(state.devices.keys) == [Self.a, Self.b])
+        #expect(state.pendingCredentials.isEmpty)
+        for puppet in [y, z, w, enrolled, RegistryFixture.deviceID(0xF3)] {
+            #expect(state.standing(of: puppet) == .unknown)
+        }
+        // A device still on the old password sees the change. Until it follows it, X's revocation is not final
+        // there, so what X signs itself may yet count and is kept (as X's own entries are); but nothing that relies
+        // on the forged registration ever counts, on any credential, and none of it is kept.
+        let behind = try f.evaluate(entries, genesis: genesis)
+        #expect(behind.pendingCredentials.map(\.id) == [change.id])
+        let forgedChain =
+            [forgedAdd, addZ]
+            + planted.filter { entry in
+                if case .device(let author) = entry.author { return author == y || author == z }
+                return false
+            }
+        #expect(behind.retainedEntries.isDisjoint(with: forgedChain.map(\.id)))
+
+        // At the registry's size limit, the flood is still not counted: the registry is not refused.
+        let full = try f.evaluate(
+            honest + [forgedAdd] + flood(by: y, from: forgedAdd, tag: 6, count: DeviceRegistry.maximumEntries),
+            genesis: genesis, credential: change)
+        #expect(full.retainedEntries == Set(honest.map(\.id)))
+
+        // Honest histories are untouched: B registers a device after the change, and that device writes.
+        let d = Self.d
+        let addD = f.add(d, by: Self.b, parents: [change])
+        let byD = f.add(RegistryFixture.deviceID(0xE6), by: d, parents: [addD])
+        let fine = try f.evaluate(entries + [addD, byD], genesis: genesis, credential: change)
+        #expect(fine.retainedEntries == Set((honest + [addD, byD]).map(\.id)))
+        #expect(fine.standing(of: RegistryFixture.deviceID(0xE6)) == .active)
+    }
 }
 
 @Suite("Published account header")

@@ -328,15 +328,18 @@ public struct DeviceRegistryState: Sendable, Hashable {
 ///
 /// An entry is applied only if, at its place in that order, its author is a registered device that has not been
 /// revoked (or the current enrolment key, for a device registering itself) and its signatures verify. A device's
-/// entry must also descend from an entry that registered that device with that key: a device writes only once it
-/// is registered, so an honest entry always does, and the rule makes "can this entry ever count?" a question its
-/// ancestors answer for good. A revoked device's ID and key are never accepted again.
+/// entry must also descend from an entry that registered that device with that key and that counted: a device
+/// writes only once it is registered, so an honest entry always does, and the rule makes "can this entry ever
+/// count?" a question its ancestors answer for good. A revoked device's ID and key are never accepted again.
 ///
 /// Some entries can never count, whatever arrives later, and are not kept (`DeviceRegistryState.retainedEntries`):
 /// one beyond the last checkpoint whose author was revoked before it, one by a device that nothing it descends from
 /// registered under a key that verifies it, and one by an enrolment key it does not descend from, that does not
-/// verify it, or whose generation has been replaced. They also move nothing in the replay order, and a checkpoint
-/// seals the order of what it had seen: an entry that arrives later cannot reorder the layers before it.
+/// verify it, or whose generation has been replaced — and, transitively, whatever relies on one of them: a device's
+/// entry none of whose verifying registrations can count, an enrolment citing a credential entry that cannot. (A
+/// revoked device would otherwise register a puppet in a void entry and flood in the puppet's name.) They also move
+/// nothing in the replay order, and a checkpoint seals the order of what it had seen: an entry that arrives later
+/// cannot reorder the layers before it.
 public enum DeviceRegistry {
     /// Far more than any household's devices produce; a registry whose entries worth keeping exceed it is refused,
     /// not used.
@@ -489,8 +492,20 @@ public enum DeviceRegistry {
 
         // 2. What can never count past the last checkpoint: its author revoked by then, or nothing it descends from
         //    able to make it count. It is not kept, and orders nothing.
+        //
+        //    An entry counts only through what it relies on — a device's entry through an entry that registered
+        //    that device under a key that verifies it, an enrolment through the credential entry it cites — so
+        //    deadness spreads: an entry whose every such ancestor is dead is dead too. Otherwise a revoked device
+        //    registers a puppet in a dead entry and floods in the puppet's name, each entry verifying against the
+        //    dead registration, and the puppet's own registrations of further puppets likewise. `graph.ids` is a
+        //    causal order, so each entry is judged after everything it relies on, and once.
+        //
+        //    What a checkpoint sealed is final: a sealed entry may be relied on only if it counted.
         let revokedBehindCheckpoint = Set(state.revoked.keys)
         var dead: Set<Int> = []
+        func mayCount(_ j: Int) -> Bool {
+            layer[j] < unsealed ? state.validEntries.contains(graph.ids[j]) : !dead.contains(j)
+        }
         for i in 0..<graph.ids.count where layer[i] == unsealed {
             if graph.unverifiable.contains(i) {
                 dead.insert(i)
@@ -498,10 +513,17 @@ public enum DeviceRegistry {
             }
             switch entries[graph.ids[i]]!.author {
             case .device(let author):
-                if revokedBehindCheckpoint.contains(author) { dead.insert(i) }
+                let registered = graph.registrations[author, default: []].contains { registration in
+                    graph.isAncestor(index: registration.index, of: i) && mayCount(registration.index)
+                        && graph.verifyingKeys[i].contains(registration.key)
+                }
+                if revokedBehindCheckpoint.contains(author) || !registered { dead.insert(i) }
             case .enrolment(let cited):
-                // A generation this chain has replaced never registers anyone again.
-                if let position = chain.firstIndex(where: { $0.id == cited }), position != chain.count - 1 {
+                // A generation this chain has replaced never registers anyone again, and a credential entry that
+                // can never count never was one.
+                if let position = chain.firstIndex(where: { $0.id == cited }) {
+                    if position != chain.count - 1 { dead.insert(i) }
+                } else if let c = graph.index[cited], !mayCount(c) {
                     dead.insert(i)
                 }
             }
@@ -593,20 +615,18 @@ public enum DeviceRegistry {
         }
     }
 
-    /// Whether `author` is registered here and signed `entry`, which descends from an entry that registered the
-    /// author under that key.
+    /// Whether `author` is registered here and signed `entry` (`Graph.verifyingKeys`), which descends from an entry
+    /// that registered the author under that key and that counted in this replay. An entry that registered a device
+    /// but counted for nothing registers nobody, so nothing that relies on it counts either (the puppet finding).
     private static func deviceSigned(
         _ entry: RegistryEntry, id: ObjectDigest, by author: UUID, in state: DeviceRegistryState, graph: Graph
     ) -> Bool {
-        guard let device = state.devices[author], let index = graph.index[id],
-            graph.registrations[author, default: []].contains(where: {
+        guard let device = state.devices[author], let index = graph.index[id] else { return false }
+        return graph.verifyingKeys[index].contains(device.key)
+            && graph.registrations[author, default: []].contains(where: {
                 $0.key == device.key && graph.isAncestor(index: $0.index, of: index)
+                    && state.validEntries.contains(graph.ids[$0.index])
             })
-        else { return false }
-        return
-            (try? DeviceSignatures.verify(
-                entry.authorSignature, for: entry.deviceMessage, domain: .deviceRegistry, deviceID: author,
-                key: device.key)) != nil
     }
 
     private static func credentialSigned(_ entry: RegistryEntry, by previous: DeviceRegistryState.Credential) -> Bool {
@@ -626,9 +646,13 @@ public enum DeviceRegistry {
         /// For each device ID, the entries that register it (genesis and add bodies, valid or not) and the key each
         /// names.
         var registrations: [UUID: [(index: Int, key: DevicePublicKey)]] = [:]
+        /// For each entry by a device, the keys its ancestors register that device under and that verify the entry's
+        /// author signature: each distinct key is tried once, here, and every replay reads the answer.
+        var verifyingKeys: [Set<DevicePublicKey>] = []
         /// Entries no replay can ever apply, whatever else arrives, judged from their ancestors alone: by a device
         /// that no ancestor registers under a key that verifies the entry, or by an enrolment key that is not an
-        /// ancestor or does not verify it.
+        /// ancestor or does not verify it. Whether the registration it relies on can itself count is a question for
+        /// each replay (`DeviceRegistry.replay`, step 2).
         var unverifiable: Set<Int> = []
 
         init(_ entries: [ObjectDigest: RegistryEntry], genesis: ObjectDigest) {
@@ -674,17 +698,25 @@ public enum DeviceRegistry {
                     break
                 }
             }
+            verifyingKeys = [Set<DevicePublicKey>](repeating: [], count: order.count)
             for (position, id) in order.enumerated() where position != 0 {
                 let entry = entries[id]!
                 let verifiable: Bool
                 switch entry.author {
                 case .device(let author):
-                    verifiable = registrations[author, default: []].contains { registration in
-                        isAncestor(index: registration.index, of: position)
-                            && (try? DeviceSignatures.verify(
-                                entry.authorSignature, for: entry.deviceMessage, domain: .deviceRegistry,
-                                deviceID: author, key: registration.key)) != nil
+                    var tried: Set<DevicePublicKey> = []
+                    for registration in registrations[author, default: []]
+                    where isAncestor(index: registration.index, of: position)
+                        && tried.insert(registration.key).inserted
+                    {
+                        if (try? DeviceSignatures.verify(
+                            entry.authorSignature, for: entry.deviceMessage, domain: .deviceRegistry, deviceID: author,
+                            key: registration.key)) != nil
+                        {
+                            verifyingKeys[position].insert(registration.key)
+                        }
                     }
+                    verifiable = !verifyingKeys[position].isEmpty
                 case .enrolment(let cited):
                     let key: [UInt8]?
                     switch entries[cited]?.body {

@@ -604,6 +604,112 @@ struct AdversarialAccountTests {
         #expect(try await late.store.records(in: f.accountID, kind: .deviceRegistry).count < 32)
     }
 
+    /// Threat: the revoked device described above (account key, its own revoked device key), after a revocation made
+    /// **with a password change**, with write access to the transport. It cannot write in its own name, so it
+    /// registers puppets: an `add` of a device whose key it made, behind the checkpoint, once with a garbage author
+    /// signature and once signed properly by its own key; and through the first puppet, a second one whose
+    /// registration verifies. It then fills the registry to its size limit with entries in the puppets' names, each
+    /// verifying against a registration in an ancestor, by devices nobody ever revoked. A puppet's registration
+    /// never counted, so nothing that relies on it does: none of it is stored or counted, the next revocation still
+    /// spreads, and a new device still enrols (review of the device registry, finding "puppets", W26).
+    @Test("a revoked device cannot flood the registry in the name of devices it registered itself")
+    func puppetFlood() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        _ = try await f.enrolled(Self.deviceC)
+        let lost = try await f.enrolled(Self.deviceX)
+        let session = lost.session
+        let account = try #require(await session.account)
+        let keys = try #require(await session.keys)
+
+        try await f.a.session.revokeDevice(
+            Self.deviceX, password: .change(current: TestVault.password, new: Self.newPassword))
+        try await f.a.session.sync()
+        await b.session.lock()
+        try await b.session.syncAll()
+        try await b.session.unlock(password: Self.newPassword)
+        try await b.session.sync()
+        // What the transport shows after the change: the revoked device names it, so its entries come after it.
+        let heads = try await f.registryView(f.a).state.heads
+
+        var generator = SeededGenerator(seed: 99)
+        func puppet(_ last: UInt8) -> (UUID, SoftwareDeviceKey) {
+            (
+                UUID(uuidString: "D0000000-0000-4000-8000-0000000000\(String(format: "%02X", last))")!,
+                SoftwareDeviceKey.generate(using: &generator)
+            )
+        }
+        func signed(_ entry: RegistryEntry, by device: (UUID, SoftwareDeviceKey)) throws -> RegistryEntry {
+            var entry = entry
+            entry.accountSignature = try keys.keyset.sign(entry.accountMessage, domain: .deviceRegistry)
+            entry.authorSignature = try device.1.sign(
+                prepared: DeviceSignatures.signedBytes(
+                    domain: .deviceRegistry, deviceID: device.0, message: entry.deviceMessage))
+            return entry
+        }
+        let y = puppet(0xE1)
+        let z = puppet(0xE2)
+        let w = puppet(0xE3)
+        // Y: registered by the revoked device without a valid author signature.
+        var addY = RegistryEntry(
+            accountID: f.accountID, parents: heads, author: .device(Self.deviceX),
+            body: .add(RegistryDevice(id: y.0, key: try y.1.publicKey(), label: [])))
+        addY.accountSignature = try keys.keyset.sign(addY.accountMessage, domain: .deviceRegistry)
+        addY.authorSignature = [UInt8](repeating: 0, count: 64)
+        // W: registered by the revoked device with its own key, which verifies.
+        let addW = try await session.signedRegistryEntry(
+            parents: heads, author: .device(Self.deviceX),
+            body: .add(RegistryDevice(id: w.0, key: try w.1.publicKey(), label: [])), account: account,
+            keyset: keys.keyset)
+        // Z: registered by Y, with Y's key.
+        let addZ = try signed(
+            RegistryEntry(
+                accountID: f.accountID, parents: [addY.id], author: .device(y.0),
+                body: .add(RegistryDevice(id: z.0, key: try z.1.publicKey(), label: []))), by: y)
+        for registration in [addY, addW, addZ] { await f.plant(registration) }
+        let puppets = [(y, addY), (z, addZ), (w, addW)]
+        for index in 0..<DeviceRegistry.maximumEntries {
+            let (author, registration) = puppets[index % puppets.count]
+            let junk = UUID(
+                uuid: (0x4A, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, UInt8(index >> 8), UInt8(index & 0xFF)))
+            await f.plant(
+                try signed(
+                    RegistryEntry(
+                        accountID: f.accountID, parents: [registration.id], author: .device(author.0),
+                        body: .revoke(junk)), by: author))
+        }
+
+        try await f.a.session.sync()
+        try await b.session.sync()
+        for device in [f.a, b] {
+            let rows = try await device.store.records(in: f.accountID, kind: .deviceRegistry)
+            #expect(rows.count < 32, "none of it is stored")
+            let state = try await f.registryView(device).state
+            #expect([y.0, z.0, w.0].allSatisfy { state.standing(of: $0) == .unknown })
+            #expect(state.retainedEntries.count < 32)
+        }
+
+        // A revokes C as well, with another password change: it still syncs, and the change still spreads.
+        let third = "yet another passphrase entirely"
+        try await f.a.session.revokeDevice(Self.deviceC, password: .change(current: Self.newPassword, new: third))
+        let revoking = try await f.a.session.syncAll()
+        #expect(!revoking.registryUnavailable && revoking.account.headerPublished)
+        let told = try await b.session.syncAll()
+        #expect(told.awaitingNewPassword && !told.registryUnavailable)
+        await b.session.lock()
+        try await b.session.unlock(password: third)
+        try await b.session.sync()
+        #expect(try await f.registryView(b).state.standing(of: Self.deviceC) == .revoked)
+
+        // And a new device enrols with the newest password, from a transport still full of puppets.
+        let late = f.fresh(seed: 77)
+        try await late.session.enrol(password: third, secretKey: f.kit.setupCode)
+        let joined = try await f.registryView(late).state
+        #expect(joined.standing(of: Self.deviceC) == .revoked && joined.standing(of: Self.deviceX) == .revoked)
+        #expect([y.0, z.0, w.0].allSatisfy { joined.standing(of: $0) == .unknown })
+        #expect(try await late.store.records(in: f.accountID, kind: .deviceRegistry).count < 32)
+    }
+
     /// Threat: the revoked device described above (account key and its own device key), once a password change
     /// has sealed its revocation. One of its entries, written at the same time as its revocation, was seen by an
     /// honest device and so sealed by the checkpoint, behind the revocation. It appends a revocation of its own that
