@@ -11,8 +11,8 @@
     /// endpoint (inside TLS: a mis-issued certificate, a CDN, the operator), able to answer any request with any status,
     /// headers and body, at any pace. It must not be able to exhaust memory (an endless or huge body), hold a scan open
     /// (a server that never answers, or drips), or send the request — the prefix and the API key header — to another
-    /// host or over plain HTTP by redirecting. Runs on a Mac only (`URLSession`); not in `adversarial-suites.txt`, which
-    /// Linux also checks (docs/04-test-plan.md §6.6).
+    /// host or over plain HTTP by redirecting. Runs on a Mac only (`URLSession`); required there through its `darwin:`
+    /// line in `adversarial-suites.txt` (docs/04-test-plan.md §6.6).
     @Suite("Adversarial: Apple adapters: HTTP client", .tags(.adversarial))
     struct AdversarialURLSessionHTTPClientTests {
         static let fast = URLSessionHTTPClient.Limits(idleTimeout: 0.5, totalTimeout: 1)

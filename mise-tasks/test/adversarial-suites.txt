@@ -1,6 +1,8 @@
 # @Suite display names of the adversarial areas, one per line. `test` and `test:adversarial` fail unless each appears
 # in the test output, so a renamed or deleted suite cannot pass silently as "fewer tests ran". Renaming a suite breaks
-# CI on purpose: update this list alongside it. (Data, not a task: mise runs only executable files.)
+# CI on purpose: update this list alongside it. A `darwin:` prefix marks a suite only an Apple platform can build; it
+# is required on macOS and skipped, with a note, elsewhere (adversarial-suites.sh). (Data, not a task: mise runs only
+# executable files.)
 envelope and KDF
 AutoFill service matching
 AutoFill request model
@@ -8,8 +10,8 @@ password generator
 phishing resistance
 crypto core
 unlock and quick unlock
-local vault store
-Keychain item protection
+darwin: local vault store
+darwin: Keychain item protection
 sync log
 sync log, item metadata
 sync with real keys
@@ -23,3 +25,6 @@ encrypted Watchword archive
 interchange through the session
 synced breach-check results
 device-local store files
+darwin: Apple adapters: HTTP client
+darwin: Apple adapters: iCloud Drive transport
+darwin: Apple adapters: CloudKit transport

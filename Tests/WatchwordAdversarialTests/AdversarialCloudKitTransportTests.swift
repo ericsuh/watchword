@@ -12,7 +12,7 @@
     /// record, payloads too large, in a plain field, or two at once, and arbitrary errors (a `retryAfterSeconds` of
     /// years). The transport must hand the engine at most what a record under that exact name holds, within the
     /// reader's limit, in one reading, and turn the rest into a typed refusal; how long a stated wait lasts is bounded
-    /// by `AutoSyncPolicy`. Runs on a Mac only; not in `adversarial-suites.txt`, which Linux also checks.
+    /// by `AutoSyncPolicy`. Runs on a Mac only; required there through its `darwin:` line in `adversarial-suites.txt`.
     @Suite("Adversarial: Apple adapters: CloudKit transport", .tags(.adversarial))
     struct AdversarialCloudKitTransportTests {
         typealias Transport = CloudKitTransport<FakeCloudKitDatabase>

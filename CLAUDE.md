@@ -809,9 +809,10 @@ directions are tested; keep both when adjusting constants.
   `"shared vaults through the session"`, `"encrypted Watchword archive"`, `"interchange through the session"`,
   `"synced breach-check results"`, `"device-local store files"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
-  (which adversary from `docs/02-architecture.md` §2, with what access) it checks. The Mac-only adapter suites
-  (`"Apple adapters: HTTP client"`, `"…: iCloud Drive transport"`, `"…: CloudKit transport"`) are deliberately not in the
-  list, which Linux checks too; `docs/04-test-plan.md` §6.10 says so.
+  (which adversary from `docs/02-architecture.md` §2, with what access) it checks. A suite only an Apple platform can
+  build (`"local vault store"`, `"Keychain item protection"`, `"Apple adapters: HTTP client"`, `"…: iCloud Drive
+  transport"`, `"…: CloudKit transport"`) has a `darwin:` line: required on macOS, reported as not required on Linux
+  (`mise-tasks/test/adversarial-suites.sh`), so a Linux run's tests and adversarial gates pass outright.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
   adapter must add or update an adversarial test (`docs/03-implementation-plan.md`, working
   agreements).

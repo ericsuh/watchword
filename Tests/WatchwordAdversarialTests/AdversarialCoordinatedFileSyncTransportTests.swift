@@ -11,7 +11,7 @@
     /// `FileSyncTransport` must still hold with coordination in between, and the iCloud-specific paths (placeholders,
     /// conflict versions) must not open a way around them: a planted link is never followed, a planted placeholder is at
     /// most a withheld object (which A1 could always do), and nothing is ever written over an existing object. Runs on a
-    /// Mac only; not in `adversarial-suites.txt`, which Linux also checks.
+    /// Mac only; required there through its `darwin:` line in `adversarial-suites.txt`.
     @Suite("Adversarial: Apple adapters: iCloud Drive transport", .tags(.adversarial))
     struct AdversarialCoordinatedFileSyncTransportTests {
         static func root() -> URL {

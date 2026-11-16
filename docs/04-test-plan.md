@@ -841,9 +841,9 @@ change still writes; and `manyKeysForOneDevice`: 2,048 registrations of one devi
 ### 6.10 Apple platform adapters (milestones 3 and 6)
 
 The adapters in `WatchwordPlatform` face the same adversaries as the ports they implement; each suite's doc comment
-names its threat. One runs everywhere; the rest need Apple frameworks and run on a Mac only, so they are **not** in
-`mise-tasks/test/adversarial-suites.txt`, which Linux checks too (adding them would make every Linux run report them
-missing). A rename of one of them is therefore not caught by CI.
+names its threat. One runs everywhere; the rest need Apple frameworks and run on a Mac only, so their lines in
+`mise-tasks/test/adversarial-suites.txt` carry a `darwin:` prefix: required on macOS, where a rename fails CI as any
+other does, and reported as not required on Linux, where they cannot compile.
 
 - **"Adversarial: device-local store files"** (`AdversarialDeviceLocalStoreTests`, portable, listed). A8 with write
   access to the App Group container: a link planted under a record's name is neither read nor written through (the

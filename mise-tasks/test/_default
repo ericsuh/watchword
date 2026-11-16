@@ -53,9 +53,6 @@ grep -Eq "\[[0-9]+/[1-9][0-9]*\] Testing [A-Za-z]+Tests\.|Test Case .* passed|Ex
   || { echo "::error::No XCTest tests were executed"; exit 1; }
 
 # Every adversarial area's @Suite must have run (adversarial-suites.txt says why).
-missing=0
-while IFS= read -r suite; do
-  case "$suite" in "" | "#"*) continue ;; esac
-  grep -Fq "$suite" "$log" || { echo "::error::Adversarial suite missing: $suite"; missing=1; }
-done < "$(dirname "${BASH_SOURCE[0]}")/adversarial-suites.txt"
-exit "$missing"
+# shellcheck source=adversarial-suites.sh
+source "$(dirname "${BASH_SOURCE[0]}")/adversarial-suites.sh"
+check_adversarial_suites "$log"
