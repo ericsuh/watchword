@@ -427,7 +427,6 @@ struct AdversarialAutoFillRequestTests {
                         #expect(
                             list.passwords.filter { $0.userName == user }.map(\.itemID) == [item.id],
                             "round \(round): \(user) is not one account on \(probe)")
-                        #expect(!list.otherAccounts.contains { $0.itemID == item.id })
                     }
                 }
             }

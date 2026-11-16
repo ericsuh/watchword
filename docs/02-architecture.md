@@ -1259,8 +1259,9 @@ Scope matching produces a **specificity** score per (item, scope): exact host ma
 `2 × labelCount + 1`; subdomain match (host ends with `"." + scope.host` and
 `includeSubdomains`) scores `2 × scopeLabelCount`; `excludedHosts` veto. An item's score is the
 best of its scopes. Ranking then applies **shadowing**: an item is *shadowed* if another matching
-item has a strictly higher score. Shadowed items are shown under "Other accounts on this site" and
-never pre-selected or auto-filled (F6.6).
+item has a strictly higher score. Shadowed items are never offered, listed, pre-selected or filled
+on that host by the extension; they are reachable in the app only (F6.6; the extension's "other
+accounts on this site" list was removed by owner decision, 2026-11-16).
 
 Scenario S1: retail item scoped `amazon.com` (subdomains on); AWS item scoped
 `signin.aws.amazon.com` and `console.aws.amazon.com`. On `www.amazon.com`, only retail matches. On
@@ -1427,7 +1428,7 @@ names neither, so both keep ranking and neither is listed, released, written or 
 
 | Request (AuthenticationServices entry point) | Method | Answer |
 | --- | --- | --- |
-| Credential list (`prepareCredentialList`) | `credentialList(for:passkey:)` | passwords of the most specific matches, passkeys of the relying party, "other accounts on this site", a suggestion only for a sole match; or `LookAlikeWarning` |
+| Credential list (`prepareCredentialList`) | `credentialList(for:passkey:)` | passwords of the most specific matches and passkeys of the relying party (never the accounts they shadow), a suggestion only for a sole match; or `LookAlikeWarning` |
 | Password, chosen in the list | `password(for:identifiers:)` | `PasswordCredential` |
 | Password, QuickType (`provideCredentialWithoutUserInteraction`) | `passwordWithoutInteraction(for:)` | the credential for an identity the planner would publish now; otherwise `requiresInteraction` or a refusal |
 | One-time codes (iOS 18) | `oneTimeCodeList`, `oneTimeCode`, `oneTimeCodeWithoutInteraction` | `OneTimeCode` with the seconds remaining |
@@ -1459,9 +1460,12 @@ What holds across all of them:
   decides it (§9 above); the lists read the page through `AutoFillGate.page`, as a release does. Domain
   identifiers and passkeys are unchanged, and a QuickType fill on an `http` page cannot be refused,
   since the tap does not name the page.
-- **Shadowed accounts are shown, not released.** `otherAccounts` lists items that match the host
-  less specifically (F6.6). The gate refuses them even when chosen, as it always has; to use one
-  on that host the person adds the host to the item, in the app.
+- **Shadowed accounts are neither listed nor released.** An item that matches the host less
+  specifically than another (F6.6) is not in the list (there is no "other accounts" part: listing
+  what cannot be used served nothing; owner decision, 2026-11-16), and the gate refuses it even
+  when chosen, as it always has; to use one on that host the person adds the host to the item, in
+  the app. A new item that would outrank accounts already offered still says how many it would
+  hide (`NewItemProposal.hiddenAccounts`).
 - **Archived and excluded items rank but are not released; trashed items do neither.** An archived
   AWS item still keeps the retail login off the console. An item marked "exclude from AutoFill
   suggestions" is reachable only by opening the app (F6.8): the extension does not list it, does

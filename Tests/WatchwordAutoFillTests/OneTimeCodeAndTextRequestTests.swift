@@ -238,7 +238,7 @@ struct OneTimeCodeAndTextRequestTests {
         )
     }
 
-    @Test("text is gated like any release: wrong site, look-alike and other accounts are refused")
+    @Test("text is gated like any release: wrong site, look-alike and shadowed accounts are refused")
     func textGated() async {
         let harness = AutoFillHarness(items: Fixtures.all)
         for (item, field, identifier) in [

@@ -147,7 +147,6 @@ struct SaveAndGenerateRequestTests {
             return
         }
         #expect(Set(list.passwords.map(\.userName)) == [Fixtures.email, "work@example.com"])
-        #expect(list.otherAccounts.isEmpty)
         #expect(list.suggested == nil)
         // The first account's one-time code is still its own to give.
         #expect(

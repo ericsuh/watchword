@@ -190,8 +190,10 @@ Requirement IDs are stable and referenced from the test plan.
 - F6.5 Save new logins offered by sites (save-password requests) and honour site password rules in
   generate-password requests.
 - F6.6 Matching rule: among items whose scopes match the requested host, the most specific scope
-  wins; less specific matches are shown in a secondary "other accounts on this site" list and are
-  never pre-selected (S1).
+  wins; less specific matches are *shadowed*: never offered, listed or released on that host by the
+  AutoFill extension, and reachable only in the app (S1). Listing what cannot be used served
+  nothing, so the extension's "other accounts on this site" list was removed (decided by the owner
+  on 2026-11-16, `06-adversarial-review.md` §K, K8).
 - F6.7 Handle relying-party credential-update reports (unused password, renamed passkey, unknown
   credential) by updating or flagging the item.
 - F6.8 A per-item "exclude from AutoFill suggestions" toggle. Publishing an identity hands the

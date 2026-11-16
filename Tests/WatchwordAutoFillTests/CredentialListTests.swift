@@ -19,7 +19,7 @@ struct CredentialListTests {
 
     // MARK: List
 
-    @Test("the list holds the most specific matches, keeps other accounts apart and suggests a sole match")
+    @Test("the list holds the most specific matches only, not the accounts they shadow, and suggests a sole match")
     func listForOneHost() async throws {
         let harness = AutoFillHarness(items: Fixtures.all)
         let console = try Self.list(await harness.model.credentialList(for: [Self.console]))
@@ -27,15 +27,14 @@ struct CredentialListTests {
         #expect(console.passwords.first?.userName == Fixtures.email)
         #expect(console.passwords.first?.matchedHost == "signin.aws.amazon.com")
         #expect(console.passwords.first?.hasOneTimeCode == true)
-        #expect(console.otherAccounts.map(\.title) == ["Amazon"])
-        #expect(console.otherAccounts.first?.matchedHost == "amazon.com")
+        // Retail matches the console less specifically: shadowed, so neither listed nor released (F6.6).
+        #expect(!console.passwords.contains { $0.itemID == Fixtures.amazonRetail.id })
         #expect(console.suggested?.itemID == Fixtures.awsRoot.id)
         #expect(console.hosts == ["signin.aws.amazon.com"])
         #expect(console.passkeys.isEmpty)
 
         let shop = try Self.list(await harness.model.credentialList(for: [Self.shop]))
         #expect(shop.passwords.map(\.title) == ["Amazon"])
-        #expect(shop.otherAccounts.isEmpty)
         #expect(shop.suggested?.itemID == Fixtures.amazonRetail.id)
     }
 
@@ -49,7 +48,6 @@ struct CredentialListTests {
         let list = try Self.list(await harness.model.credentialList(for: [Self.shop]))
         #expect(list.passwords.map(\.title) == ["Amazon", "Amazon (work)"])
         #expect(list.suggested == nil)
-        #expect(list.otherAccounts.isEmpty)
     }
 
     @Test("an item with several login names is listed once per name")
@@ -141,7 +139,7 @@ struct CredentialListTests {
         let list = try Self.list(await harness.model.credentialList(for: [Self.console]))
         #expect(list.passwords.isEmpty)
         #expect(list.suggested == nil)
-        #expect(list.otherAccounts.map(\.title) == ["Amazon"])
+        #expect(list.isEmpty)
         let outcome = await harness.model.password(
             for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email), identifiers: [Self.console]
         )
@@ -205,11 +203,11 @@ struct CredentialListTests {
         #expect(!String(reflecting: Outcome.success(credential)).contains("aws-password"))
     }
 
-    @Test("an explicit choice is authorised again: other accounts and other sites' items are refused (SEC6)")
+    @Test("an explicit choice is authorised again: shadowed accounts and other sites' items are refused (SEC6)")
     func choiceIsReauthorized() async {
         let harness = AutoFillHarness(items: Fixtures.all)
         for (itemID, identifier) in [
-            (Fixtures.amazonRetail.id, Self.console),  // shown under "other accounts", never released there
+            (Fixtures.amazonRetail.id, Self.console),  // shadowed there: neither listed nor released
             (Fixtures.awsRoot.id, Self.shop),
             (Fixtures.bank.id, Self.shop),
             (Fixtures.amazonRetail.id, Fixtures.domain("arnazon.com")),
@@ -434,7 +432,7 @@ struct CredentialListTests {
         // The excluded AWS item still keeps the retail login off the console.
         let console = try Self.list(await harness.model.credentialList(for: [Self.console]))
         #expect(console.passwords.isEmpty)
-        #expect(console.otherAccounts.map(\.itemID) == [Fixtures.amazonRetail.id])
+        #expect(console.isEmpty)
         #expect(
             await harness.model.password(
                 for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email),

@@ -19,13 +19,24 @@ struct AutoFillScenarioTests {
     func s1() async throws {
         let harness = AutoFillHarness(items: [Fixtures.amazonRetail, Fixtures.awsRoot])
 
-        // The console: AWS is the list, retail is an "other account", and only AWS can be released.
+        // The console: AWS is the list, and only AWS can be released. Retail is shadowed there: neither listed nor
+        // released, by choice included (PRD F6.6; owner decision 2026-11-16).
         guard case .list(let consoleList) = await harness.model.credentialList(for: [Self.console]) else {
             Issue.record("no list for the console")
             return
         }
         #expect(consoleList.passwords.map(\.itemID) == [Fixtures.awsRoot.id])
-        #expect(consoleList.otherAccounts.map(\.itemID) == [Fixtures.amazonRetail.id])
+        #expect(!consoleList.passwords.contains { $0.itemID == Fixtures.amazonRetail.id })
+        #expect(
+            await harness.model.password(
+                for: PasswordChoice(itemID: Fixtures.amazonRetail.id, userName: Fixtures.email),
+                identifiers: [Self.console]
+            ).refusal?.isGateRefusal == true)
+        #expect(
+            await harness.model.oneTimeCode(
+                for: FieldChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(103)),
+                identifiers: [Self.console]
+            ).refusal?.isGateRefusal == true)
         #expect(consoleList.suggested?.itemID == Fixtures.awsRoot.id)
         let awsPassword = try await harness.model.password(
             for: PasswordChoice(itemID: Fixtures.awsRoot.id, userName: Fixtures.email), identifiers: [Self.console]
@@ -46,7 +57,6 @@ struct AutoFillScenarioTests {
             return
         }
         #expect(shopList.passwords.map(\.itemID) == [Fixtures.amazonRetail.id])
-        #expect(shopList.otherAccounts.isEmpty)
         let retailCode = try await harness.model.oneTimeCode(
             for: FieldChoice(itemID: Fixtures.amazonRetail.id, fieldID: Fixtures.id(103)), identifiers: [Self.shop]
         ).value

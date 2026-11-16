@@ -503,7 +503,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `Item` it looked up itself, and an explicit choice by the person is authorised like any other (SEC6, F11.1).
 - **No override.** Nothing releases after a refusal: no flag, no presence level, no second call (F11.4, F11.7). A
   look-alike host gets `LookAlikeWarning` in place of a list. Do not add a "fill anyway".
-- Shadowed items are listed (`otherAccounts`) and never released; archived items and items marked
+- Shadowed items are neither listed nor released (owner decision, 2026-11-16: the extension has no "other accounts"
+  list; they are reachable in the app only); archived items and items marked
   `excludedFromSuggestions` rank but are not listed, released or written (F6.8: reachable only in the app); trashed
   items do neither. The gate ranks among items with only the scopes `ScopePolicy` accepts, so a stored `com` scope
   matches nothing; the stored item is not rewritten. An item ID two readable items share names neither

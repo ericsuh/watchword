@@ -63,8 +63,9 @@ that a test target may contain both as long as a single test does not mix their 
 Each test is written once against `VaultSession` and once as an XCUITest where UI is involved.
 
 - **E2E-S1 Amazon vs AWS.** Seed both items. Request credential list for
-  `https://signin.aws.amazon.com/signin` → primary list contains only the AWS item, retail is in
-  the shadowed list; request for `https://www.amazon.com/ap/signin` → only retail. Assert the
+  `https://signin.aws.amazon.com/signin` → the list contains only the AWS item, and retail (shadowed)
+  is neither listed nor released, by choice included; request for `https://www.amazon.com/ap/signin`
+  → only retail. Assert the
   TOTP returned for each matches the right item. Assert that with both items in the vault neither
   has a QuickType password or code identity, and that the retail identity a stale store still holds,
   handed back as stored, releases nothing (`02-architecture.md` §9.1: a tap does not name the page).
@@ -270,7 +271,7 @@ specification, plus vectors from independent Python implementations for HPKE wit
   mixed case, IDN homographs (`xn--` forms) and raw Unicode, IPv6 hosts, `file:` and `data:`
   schemes → never match an unrelated item.
 - Public-suffix boundaries once PSL is integrated (`co.uk` scope must not match everything).
-- Shadowed items are never auto-selected; the request handler refuses to return a credential for a
+- Shadowed items are never listed or auto-selected; the request handler refuses to return a credential for a
   service identifier the chosen item does not match (defence in depth against UI bugs).
 - Passkey assertion for a relying party different from the stored `rpID` is refused.
 

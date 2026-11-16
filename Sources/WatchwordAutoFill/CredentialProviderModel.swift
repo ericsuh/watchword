@@ -67,13 +67,15 @@ public actor CredentialProviderModel {
 
     // MARK: - Credential list (PRD F6.1, F6.6)
 
-    /// The list for `prepareCredentialList`: logins the gate would release for the named hosts, the less specific
-    /// accounts kept apart, and, when `passkey` is given, the passkeys of its relying party.
+    /// The list for `prepareCredentialList`: logins the gate would release for the named hosts and, when `passkey` is
+    /// given, the passkeys of its relying party. Nothing else: an account the ranker shadows on the host (one that
+    /// matches less specifically than another) is never released there, so it is not listed either; it stays
+    /// reachable in the app (PRD F6.6, owner decision 2026-11-16).
     ///
     /// When nothing matches and a host resembles a saved site, the answer is the warning instead of an empty list
     /// (F11.3). A page loaded over plain `http` lists nothing, and when it is the only page named the answer is
-    /// `refused(.gate(.insecurePage))` (F6.9). When the system names no site at all there is nothing to authorise a password for, and a request
-    /// without passkey parameters is refused.
+    /// `refused(.gate(.insecurePage))` (F6.9). When the system names no site at all there is nothing to authorise a
+    /// password for, and a request without passkey parameters is refused.
     public func credentialList(
         for identifiers: [ServiceIdentifier], passkey request: PasskeyAssertionRequest? = nil
     ) async -> CredentialListOutcome {
@@ -117,7 +119,7 @@ public actor CredentialProviderModel {
             }
         }
 
-        if passwords.isEmpty && passkeys.isEmpty && matching.shadowed.isEmpty {
+        if passwords.isEmpty && passkeys.isEmpty {
             if let warning = Self.warning(for: assessedHosts, in: snapshot) {
                 return .warning(warning)
             }
@@ -130,13 +132,8 @@ public actor CredentialProviderModel {
         }
         return .list(
             CredentialList(
-                hosts: assessedHosts.map(\.value), passwords: passwords, passkeys: passkeys,
-                otherAccounts: matching.shadowed.map {
-                    OtherAccountEntry(
-                        itemID: $0.item.id, title: $0.item.title,
-                        userName: $0.item.loginNames.first { !$0.isEmpty } ?? "", matchedHost: $0.match.scope.host)
-                },
-                suggested: suggested, passkeyRefusal: passkeyRefusal))
+                hosts: assessedHosts.map(\.value), passwords: passwords, passkeys: passkeys, suggested: suggested,
+                passkeyRefusal: passkeyRefusal))
     }
 
     /// The password for a login the person chose in the extension's list. The choice is authorised again here: what
@@ -616,17 +613,15 @@ struct Matching {
     /// they are neither ranked nor assessed, and a list with nothing else to show is refused as `insecurePage`.
     var insecurePages: [NormalizedHost] = []
     /// Items in use that are a most specific match for at least one host. Archived and excluded items, and items
-    /// that share an ID, take part in the ranking and are in neither list.
+    /// that share an ID, take part in the ranking and are not listed. Items the ranking shadows are not listed
+    /// either: the gate never releases them on the host (PRD F6.6).
     var primary: [RankedMatch] = []
-    /// Items in use that match only less specifically: "other accounts on this site".
-    var shadowed: [RankedMatch] = []
     /// The item to suggest first: set when every usable identifier's decision is to fill this one item.
     var onlyFill: UUID?
 
     init(identifiers: [ServiceIdentifier], snapshot: VaultSnapshot) {
         var fills = Set<UUID>()
         var undecided = false
-        var shadowedCandidates: [RankedMatch] = []
         for identifier in identifiers.prefix(ReleaseGate.maximumIdentifiers) {
             let host: NormalizedHost
             // The gate's own reading of the page, so a list cannot show what a release would refuse.
@@ -650,18 +645,11 @@ struct Matching {
             where snapshot.isInUse(match.item) && !primary.contains(where: { $0.item.id == match.item.id }) {
                 primary.append(match)
             }
-            shadowedCandidates.append(contentsOf: ranking.shadowed.filter { snapshot.isInUse($0.item) })
             switch AutoFillGate.decide(for: identifier, among: snapshot.rankable) {
             case .fill(let match) where snapshot.isInUse(match.item): fills.insert(match.item.id)
             case .fill, .chooseAmong: undecided = true
             case .refuse: break
             }
-        }
-        for match in shadowedCandidates
-        where !primary.contains(where: { $0.item.id == match.item.id })
-            && !shadowed.contains(where: { $0.item.id == match.item.id })
-        {
-            shadowed.append(match)
         }
         if !undecided, fills.count == 1 { onlyFill = fills.first }
     }
