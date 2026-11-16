@@ -128,6 +128,12 @@ enum FuzzTarget: String, CaseIterable, Sendable {
                 require(!host.value.isEmpty, "an empty host was vouched for")
                 require(host.value == host.value.lowercased(), "a host was not lower-cased")
             }
+            // One host, one normalised form: as a domain and as the URL of that domain (HostNormalizer.mapLikeAURL).
+            if let domain = try? HostNormalizer.normalize(ServiceIdentifier(text, kind: .domain)),
+                let url = try? HostNormalizer.normalize(ServiceIdentifier("https://\(text)/", kind: .url))
+            {
+                require(domain == url, "a host normalised differently as a domain and as a URL")
+            }
             for strips in [false, true] {
                 if case .success(let scope) = ScopeDerivation.scope(forURL: text, stripsLeadingWWW: strips) {
                     require(ScopePolicy.isAcceptable(scope), "a derived scope is one the policy refuses")

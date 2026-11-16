@@ -506,7 +506,14 @@ verified against the real toolchain would otherwise widen matching:
 
 Conversely, Foundation's IDNA compatibility mapping is *honoured*: fullwidth `ＡMAZON.com` and
 Kelvin-sign `amazonK.com` arrive folded to `amazon.com`, which is what a browser resolves.
-Characters IDNA keeps distinct (Cyrillic `а`) stay distinct and never match an ASCII scope.
+Characters IDNA keeps distinct (Cyrillic `а`) stay distinct and never match an ASCII scope. A bare
+domain is mapped the same way, by parsing it as `https://<domain>/` once its own checks have passed, so one
+host has one normalised form whichever kind of identifier carries it. Until the import fuzzer found it, a
+domain was only lower-cased: `ＡMAZON.com` was `ａmazon.com` as a domain and `amazon.com` as a URL, so a
+scope saved from one never matched the other, and a bare-host scope an import made came back from its own
+export as a different host. Where Foundation finds no host, an ASCII domain keeps its checked form (malformed
+punycode stays visible to the phishing checks, and matches nothing that arrives as a URL) and a non-ASCII
+one is refused.
 
 Types carry the guarantee: `ScopeMatcher` and `ItemRanker` accept only a `NormalizedHost`, whose
 initializer is internal to the module, so the only way to obtain one is through the normaliser.

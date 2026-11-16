@@ -44,7 +44,8 @@ public enum HostNormalizationError: Error, Hashable, Sendable {
 /// folded to `amazon.com`, matching what a browser resolves. Characters that IDNA keeps distinct,
 /// such as Cyrillic `а`, stay distinct and therefore never match an ASCII scope. That is the safe
 /// outcome for matching, but it is silent, so `PhishingDetector` exists to turn that silence into
-/// a warning.
+/// a warning. A bare domain is parsed the same way (`mapLikeAURL`), so a host normalises alike whichever kind of
+/// identifier carries it.
 public enum HostNormalizer {
     private static let allowedSchemes: Set<String> = ["http", "https"]
 
@@ -75,7 +76,8 @@ public enum HostNormalizer {
         switch identifier.kind {
         case .domain:
             try rejectASCIIPercentEscapes(in: trimmed)
-            return try validate(host: trimmed)
+            let shaped = try validate(host: trimmed)
+            return try mapLikeAURL(domain: trimmed, shaped: shaped)
         case .url:
             guard let components = URLComponents(string: trimmed) else {
                 throw HostNormalizationError.invalidHost(trimmed)
@@ -96,6 +98,38 @@ public enum HostNormalizer {
             }
             return try validate(host: host)
         }
+    }
+
+    /// A domain identifier normalises to exactly what the same host gives as a URL, `https://<domain>/`.
+    ///
+    /// Foundation's URL parsing maps a host as IDNA does (fullwidth letters and the ideographic full stop folded,
+    /// compatibility characters decomposed, valid punycode decoded); a bare domain used to be lower-cased only. So
+    /// one host had two normalised forms: `ＡMAZON.com` was `ａmazon.com` as a domain and `amazon.com` as a URL, and
+    /// a scope saved from one never matched a request made with the other (and an import's bare-host scope came back
+    /// as another host from an export of it). Parsing the domain the same way makes the two agree by construction,
+    /// whatever a platform's Foundation maps.
+    ///
+    /// `shaped` has already passed every check on the raw domain, so the URL built here is a scheme and a host and
+    /// nothing else; what Foundation reads back is checked again all the same. An IPv6 literal has no such URL form
+    /// and keeps `shaped`. When Foundation finds no host, an all-ASCII domain keeps `shaped` too, unchanged from what
+    /// it always normalised to (a label IDNA refuses, such as malformed punycode, must stay visible to
+    /// `PhishingDetector`, and the URL form of it matches nothing); a non-ASCII one is refused, since how it would
+    /// resolve is unknown.
+    static func mapLikeAURL(domain: String, shaped: NormalizedHost) throws -> NormalizedHost {
+        if shaped.value.contains(":") { return shaped }
+        guard
+            let components = URLComponents(string: "https://\(domain)/"),
+            components.user == nil, components.password == nil, components.port == nil,
+            components.path == "/", components.query == nil, components.fragment == nil,
+            let host = components.host, !host.isEmpty
+        else {
+            if domain.unicodeScalars.allSatisfy(\.isASCII) { return shaped }
+            throw HostNormalizationError.invalidHost(domain)
+        }
+        if let encoded = components.percentEncodedHost {
+            try rejectASCIIPercentEscapes(in: encoded)
+        }
+        return try validate(host: host)
     }
 
     /// Permits percent-escapes only for non-ASCII bytes, which is how Foundation represents an

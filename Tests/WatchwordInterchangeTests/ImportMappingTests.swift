@@ -28,6 +28,18 @@ struct ImportMappingTests {
         try ScopePolicy.validate(scope)
     }
 
+    /// A file's bare host and the URL an export writes for the scope made from it must name the same scope, or an
+    /// import, export and import again lands the item's secrets on a host it was never scoped to (the `cxf` fuzz
+    /// target found `htxconcealedϓtringo.uk`, which HostNormalizer mapped as a URL and only lower-cased as a domain).
+    @Test(
+        "A bare host and the URL written for its scope derive the same scope",
+        arguments: ["htxconcealed\u{03D3}tringo.uk", "\u{FF21}MAZON.com", "shop\u{3002}example.com", "Example.COM"])
+    func bareHostMatchesItsURL(_ host: String) throws {
+        let scope = try ScopeDerivation.scope(forURL: host).get()
+        #expect(try ScopeDerivation.scope(forURL: ScopeDerivation.canonicalURL(for: scope)).get() == scope)
+        #expect(try ScopeDerivation.scope(forURL: "https://\(host)/").get() == scope)
+    }
+
     @Test("An address scope does not include subdomains; a host scope does")
     func subdomains() throws {
         #expect(try !ScopeDerivation.scope(forURL: "http://10.0.0.1/").get().includeSubdomains)

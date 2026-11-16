@@ -339,7 +339,9 @@ if the matcher changes.
 *Normalisation (F11.6).* In `HostNormalizerTests`: ASCII percent-escapes rejected, non-ASCII
 escapes accepted, zero-width/bidi/soft-hyphen rejected, over-long hosts and labels rejected,
 user-info rejected, and the IDNA compatibility mapping asserted as honoured so a future
-"hardening" change cannot silently break legitimate matching.
+"hardening" change cannot silently break legitimate matching. A host normalises alike as a domain and as a
+URL (fullwidth, Kelvin sign, ideographic full stop, compatibility characters), a non-ASCII domain the URL
+parser cannot read is refused, and the `host` fuzz target checks the same agreement on arbitrary input.
 
 *Still to come:* a UI test that the AutoFill extension presents no override affordance on a
 suspicious host, and that adding a mismatched host as a scope requires the confirmation in F11.7
