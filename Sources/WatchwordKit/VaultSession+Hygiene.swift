@@ -55,7 +55,7 @@ struct HygieneRuntime {
 
     let engine: HygieneEngine
     let settings: HygieneSettings
-    /// Under the device-local key; `nil` while locked.
+    /// The device-local key; `nil` while locked, and until the engine's unlock task has read the device secret.
     var localKey: EncryptionKey?
     /// The engine's `unlock`, running in a task of its own; cancelled by `lock()`.
     var unlockTask: Task<Void, Never>?
@@ -149,10 +149,11 @@ struct RangeCacheIndex: Hashable {
 // Hygiene in the session (PRD F9.1 to F9.3; docs/02-architecture.md §13.8; ADR 0005 and its amendment).
 //
 // The session owns one `HygieneEngine` for its lifetime (so the engine's pacing survives a lock). At every unlock it
-// derives the reuse key from the keyset (`DeviceLocalKeys.hygieneReuseKey`, never the raw key) and the device-local
-// key, unseals the scan ledger and starts the engine's `unlock` in a task of its own; `lock()` zeroises the keyset
-// first, then drops the engine's keys (the engine runs on the session's executor), then the local key, cancels that
-// task and has the engine empty its cache, never the other way round. Saves update the
+// derives the reuse key from the keyset (`DeviceLocalKeys.hygieneReuseKey`, never the raw key) and starts the
+// engine's `unlock` in a task of its own, which derives the device-local key from the keyset and this device's
+// Keychain secret and unseals the scan ledger; `lock()` zeroises the keyset first, then drops the engine's keys (the
+// engine runs on the session's executor), then the local key, cancels that task and has the engine empty its cache,
+// never the other way round. Saves update the
 // engine; every query reconciles it with the store first, so a sync merge, a deletion or anything else that changed
 // a row is reflected in what the person is shown. Nothing here runs by itself: the UI or a background task calls
 // `runHygieneStep()`, and the engine's schedule decides whether anything is sent.
@@ -165,7 +166,7 @@ extension VaultSession {
 
     /// After `install`: keys are resident. Derives the engine's keys now, on the actor, and starts its unlock.
     func startHygiene() {
-        guard let settings = configuration.hygiene, let keys, let account else { return }
+        guard let settings = configuration.hygiene, let keys else { return }
         if hygieneRuntime == nil {
             let client = PwnedPasswordsClient(
                 http: settings.http, cache: SealedPwnedRangeCache(session: self), userAgent: settings.userAgent)
@@ -179,7 +180,7 @@ extension VaultSession {
         let epoch = lockEpoch
         runtime.unlockTask?.cancel()
         runtime.localKey?.zeroise()
-        runtime.localKey = DeviceLocalKeys.deviceLocalKey(keyset: keys.keyset, deviceID: account.deviceID)
+        runtime.localKey = nil
         runtime.readyEpoch = nil
         runtime.known = [:]
         let reuseKey = DeviceLocalKeys.hygieneReuseKey(keyset: keys.keyset)
@@ -218,6 +219,7 @@ extension VaultSession {
             reuseKey.zeroise()
             return
         }
+        await installLocalKey(since: epoch)
         let ledger = await loadScanLedger(since: epoch) ?? ScanLedger()
         let listing: ItemListing
         let deleted: Set<UUID>
@@ -242,6 +244,39 @@ extension VaultSession {
         }
         guard epoch == lockEpoch, keys != nil else { return }
         hygieneRuntime?.readyEpoch = epoch
+    }
+
+    /// Derives the device-local key from the keyset and this device's secret, which it reads from the Keychain
+    /// (creating it the first time). Without the secret (the Keychain refused), there is no local key for this unlock:
+    /// the engine runs from an empty ledger and nothing is cached or stored, which is the safe reading.
+    private func installLocalKey(since epoch: UInt64) async {
+        guard let account else { return }
+        guard let secret = try? await deviceLocalSecret(accountID: account.accountID) else { return }
+        defer { secret.zeroise() }
+        guard epoch == lockEpoch, let keys, self.account?.deviceID == account.deviceID,
+            let key = try? DeviceLocalKeys.deviceLocalKey(
+                keyset: keys.keyset, deviceSecret: secret, deviceID: account.deviceID)
+        else { return }
+        hygieneRuntime?.localKey?.zeroise()
+        hygieneRuntime?.localKey = key
+    }
+
+    /// This device's secret for its local records (`KeychainItem.deviceLocalSecret`). The Keychain is the only place
+    /// it is kept: never in the store, never synced. One of any other length is replaced (it would open nothing).
+    private func deviceLocalSecret(accountID: UUID) async throws -> SecureBytes {
+        let item = KeychainItem.deviceLocalSecret(accountID: accountID)
+        if let stored = try await keychain.read(item, prompt: "") {
+            if stored.count == DeviceLocalKeys.deviceSecretLength { return stored }
+            stored.zeroise()
+        }
+        let fresh = SecureBytes(randomCount: DeviceLocalKeys.deviceSecretLength, using: &random)
+        do {
+            try await keychain.store(fresh, for: item)
+        } catch {
+            fresh.zeroise()
+            throw error
+        }
+        return fresh
     }
 
     /// Waits for the engine's unlock of this unlock, then brings it up to date with the store. Throws `locked` if the

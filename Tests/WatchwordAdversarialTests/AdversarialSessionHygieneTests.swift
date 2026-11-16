@@ -18,9 +18,11 @@ import WatchwordTestSupport
 ///   result, in memory or in the device-local store; and a record planted from elsewhere must not be believed.
 /// - **The service and the network path**, which choose when a response arrives: a response that comes back after the
 ///   lock must not be recorded anywhere.
-/// - **Another device of the account, or another account on the same device** (A4 at its strongest: it holds a
-///   keyset): its sealed records must not open as this device's, so it can neither read this device's ledger nor
-///   hand it one that says a breached password was checked and found clear.
+/// - **Another device of the account, or another account on the same device** (A4 at its strongest: it holds the
+///   account's keyset, as every device of the account does, a revoked one included, §7.8, and knows this device's ID,
+///   which is on every row and stream the device writes): its sealed records must not open as this device's, so it
+///   can neither read this device's ledger nor hand it one that says a breached password was checked and found clear.
+///   What it lacks is this device's secret, in this device's Keychain (review finding K1).
 @Suite("Adversarial: hygiene in the vault session", .tags(.adversarial))
 struct AdversarialSessionHygieneTests {
     typealias Fixture = HygieneSessionFixture
@@ -105,29 +107,44 @@ struct AdversarialSessionHygieneTests {
         #expect(await fixture.http.requests.count == sent + 1, "asked for again, not answered from a cache")
     }
 
-    /// Another device of the same account holds the same keyset: the device-local key it derives is a different
-    /// key, under a different key ID, so a record sealed here neither opens there nor is accepted here from there.
-    @Test("a sealed local record does not open under another device's key, or another account's")
+    /// Another device of the same account holds the same keyset, and may claim this device's ID: without this
+    /// device's secret, the device-local key it derives is a different key, under a different key ID, so a record
+    /// sealed here neither opens there nor is accepted here from there. Nor does the secret alone, without the keyset.
+    @Test(
+        "a sealed local record does not open under another device's key, another account's, or one without the secret")
     func localKeyIsPerDevice() throws {
         let accountID = UUID()
         let keyset = Keyset.generate(accountID: accountID)
         let other = Keyset.generate(accountID: UUID())
         let thisDevice = UUID()
-        let here = DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceID: thisDevice)
-        let there = DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceID: UUID())
-        let elsewhere = DeviceLocalKeys.deviceLocalKey(keyset: other, deviceID: thisDevice)
-        #expect(here.keyID != there.keyID && here.keyID != elsewhere.keyID)
+        var random = SeededGenerator(seed: 0x5EC7)
+        let secret = SecureBytes(randomCount: DeviceLocalKeys.deviceSecretLength, using: &random)
+        let otherSecret = SecureBytes(randomCount: DeviceLocalKeys.deviceSecretLength, using: &random)
+        let here = try DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceSecret: secret, deviceID: thisDevice)
+        let there = try DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceSecret: otherSecret, deviceID: UUID())
+        let elsewhere = try DeviceLocalKeys.deviceLocalKey(keyset: other, deviceSecret: secret, deviceID: thisDevice)
+        // Another device of the account, claiming this device's ID: everything but the secret.
+        let claimant = try DeviceLocalKeys.deviceLocalKey(
+            keyset: keyset, deviceSecret: otherSecret, deviceID: thisDevice)
+        #expect(Set([here.keyID, there.keyID, elsewhere.keyID, claimant.keyID]).count == 4)
         // Derived again, the same key: the ledger survives a relaunch and a password change (the keyset is kept).
-        #expect(DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceID: thisDevice).keyID == here.keyID)
+        #expect(
+            try DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceSecret: secret, deviceID: thisDevice).keyID
+                == here.keyID)
+        #expect(throws: CryptoError.invalidKeyLength(16)) {
+            try DeviceLocalKeys.deviceLocalKey(
+                keyset: keyset, deviceSecret: secret.extracting(0..<16), deviceID: thisDevice)
+        }
         let reuse = DeviceLocalKeys.hygieneReuseKey(keyset: keyset)
         #expect(reuse.unprotectedCopy() != keyset.symmetricKey.material.unprotectedCopy(), "never the raw key")
 
         let name = DeviceLocalKeys.recordName("scan-ledger", key: here)
         #expect(DeviceLocalKeys.recordName("scan-ledger", key: there) != name)
+        #expect(DeviceLocalKeys.recordName("scan-ledger", key: claimant) != name)
         let sealed = try RecordCipher.seal(
             Array("{\"entries\":[]}".utf8),
             context: VaultSession.localContext(name: name, accountID: accountID, key: here), key: here)
-        for key in [there, elsewhere] {
+        for key in [there, elsewhere, claimant] {
             // Under the other key's own context: the header names a different key.
             #expect(throws: (any Error).self) {
                 try RecordCipher.open(
@@ -169,6 +186,106 @@ struct AdversarialSessionHygieneTests {
         }
     }
 
+    /// A4 at its strongest, with A8's access to this device's files: another device of the account (a revoked one
+    /// included: revocation does not take the keyset back, §7.8) holds the keyset and knows this device's ID, which
+    /// is on every row and stream it writes. It must neither open this device's ledger nor plant one that says a
+    /// breached password was checked and found clear.
+    @Test("a keyset holder that knows this device's ID can neither read nor forge its sealed ledger")
+    func ledgerForgedByAKeysetHolderIsIgnored() async throws {
+        let (fixture, vaultID) = try await Self.unlocked()
+        let session = fixture.session
+        let item = try await session.save(
+            Fixture.login(vaultID, title: "Forum", host: "forum.example", password: "password"))
+        try await fixture.scanUntilIdle()
+        let epoch = await session.lockEpoch
+        let keyset = try #require(await session.keys?.keyset)
+        let account = try #require(await session.account)
+        // Which file is the ledger, the adversary can tell by its size; the test asks the session.
+        let victimName = try #require(await session.localName("scan-ledger", since: epoch))
+        let atRest = try #require(await fixture.local.contents[victimName])
+
+        let forgingKey = try Self.forgingKey(keyset: keyset, deviceID: account.deviceID)
+        let forgedName = DeviceLocalKeys.recordName("scan-ledger", key: forgingKey)
+        for name in [victimName, forgedName] {
+            #expect(throws: (any Error).self, "the adversary opened this device's ledger") {
+                try RecordCipher.open(
+                    atRest,
+                    context: VaultSession.localContext(name: name, accountID: account.accountID, key: forgingKey),
+                    key: forgingKey)
+            }
+        }
+
+        let field = try #require(item.fields.first { $0.kind == .password }).id
+        let now = await fixture.clock.now()
+        let forged = ScanLedger(
+            entries: [item.id: .init(itemVersion: item.version, scannedAt: now, results: [field: .notFound])],
+            fullScanStartedAt: now, fullScanCompletedAt: now)
+        let plaintext = try Array(JSONEncoder().encode(forged))
+        for name in [victimName, forgedName] {
+            let envelope = try RecordCipher.seal(
+                plaintext,
+                context: VaultSession.localContext(name: name, accountID: account.accountID, key: forgingKey),
+                key: forgingKey)
+            await fixture.local.write(envelope, as: name)
+        }
+
+        await session.lock()
+        try await session.unlock(password: TestVault.password)
+        let report = try await session.hygieneReport()
+        #expect(report.totals.itemsAwaitingBreachCheck == 1, "the forged ledger was believed")
+        try await fixture.scanUntilIdle()
+        let after = try await session.hygieneReport()
+        #expect(after.item(item.id)?.findings.contains { $0.kind == .breachedPassword } == true)
+    }
+
+    /// A8 keeps an older sealed ledger of this device's own and puts it back later (review finding K3, accepted): it
+    /// opens, because it is this device's, but it is an authentic earlier reading, so every check it records is older
+    /// than the one it replaces and the next weekly pass is due no later than it was. Here the pass the rolled-back
+    /// ledger describes is over, so the item is due at once (after the rate limit, which is kept outside the ledger).
+    @Test("an older ledger of this device's own, put back, defers no check")
+    func rolledBackLedgerDefersNothing() async throws {
+        let (fixture, vaultID) = try await Self.unlocked()
+        let session = fixture.session
+        let item = try await session.save(
+            Fixture.login(vaultID, title: "Forum", host: "forum.example", password: "password"))
+        try await fixture.scanUntilIdle()
+        guard case .idle(let nextPass) = try await session.runHygieneStep() else {
+            Issue.record("not idle after the first pass")
+            return
+        }
+        let name = try #require(await session.localName("scan-ledger", since: await session.lockEpoch))
+        let older = try #require(await fixture.local.contents[name])
+
+        await fixture.clock.set(nextPass.addingTimeInterval(1))
+        #expect(try await fixture.scanUntilIdle().count == 1, "the weekly pass checked the item again")
+        guard case .idle = try await session.runHygieneStep() else {
+            Issue.record("not idle after the second pass")
+            return
+        }
+        await fixture.local.write(older, as: name)
+
+        await session.lock()
+        try await session.unlock(password: TestVault.password)
+        var step = try await session.runHygieneStep()
+        if case .wait(let until, .pacing) = step {
+            // The rate limit since the second pass's request, which is not the ledger's to set: the item is due.
+            await fixture.clock.set(until.addingTimeInterval(1))
+            step = try await session.runHygieneStep()
+        }
+        guard case .scanned(item.id, .scanned) = step else {
+            Issue.record("after the rollback the first step was \(step), not a check of the item")
+            return
+        }
+    }
+
+    /// The best the adversary of `ledgerForgedByAKeysetHolderIsIgnored` can do: everything it holds, the keyset and
+    /// this device's ID, and a device secret of its own (it has no way to this device's Keychain).
+    static func forgingKey(keyset: Keyset, deviceID: UUID) throws -> EncryptionKey {
+        var random = SeededGenerator(seed: 0xF0F0)
+        let ownSecret = SecureBytes(randomCount: DeviceLocalKeys.deviceSecretLength, using: &random)
+        return try DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceSecret: ownSecret, deviceID: deviceID)
+    }
+
     /// A8 plants another account's sealed ledger and ranges under this device's names, for an item it has given the
     /// same ID and version: if believed, the ledger would say the breached password was checked. It is not believed:
     /// the item is due, and the planted ranges answer nothing.
@@ -182,6 +299,7 @@ struct AdversarialSessionHygieneTests {
         shared.id = planted.id
         shared.vaultID = victimVault
         try await victim.session.save(shared)
+        await victim.session.hygieneSettled()
 
         let epoch = await victim.session.lockEpoch
         let attackerEpoch = await attacker.session.lockEpoch

@@ -27,11 +27,16 @@ public enum KeychainItem: Hashable, Sendable {
     /// newest entries it has applied. Not secret; in the Keychain rather than the database so that an attacker with
     /// the file (A8) can neither substitute a registry of their own nor roll this one back to before a revocation.
     case deviceRegistryAnchor(accountID: UUID)
+    /// 32 random bytes this device made for itself, mixed with the keyset into the key that seals its local records
+    /// (`DeviceLocalKeys.deviceLocalKey`; docs/02-architecture.md §13.8). Device-only and never synced: it is what
+    /// another device of the account, which holds the same keyset, does not have, so it can neither read this
+    /// device's scan ledger and prefix cache nor plant its own.
+    case deviceLocalSecret(accountID: UUID)
 
     public var accountID: UUID {
         switch self {
         case .secretKey(let id), .quickUnlockKey(let id), .quickUnlockState(let id), .accountSigningKey(let id),
-            .deviceSigningKey(let id), .deviceRegistryAnchor(let id):
+            .deviceSigningKey(let id), .deviceRegistryAnchor(let id), .deviceLocalSecret(let id):
             return id
         }
     }
@@ -42,6 +47,7 @@ public enum KeychainItem: Hashable, Sendable {
             .secretKey(accountID: accountID), .quickUnlockKey(accountID: accountID),
             .quickUnlockState(accountID: accountID), .accountSigningKey(accountID: accountID),
             .deviceSigningKey(accountID: accountID), .deviceRegistryAnchor(accountID: accountID),
+            .deviceLocalSecret(accountID: accountID),
         ]
     }
 }

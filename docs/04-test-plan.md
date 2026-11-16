@@ -567,11 +567,14 @@ session's device-local key and its record of what the engine saw are gone, the s
 every byte in the device-local store is ciphertext (no record magic, ledger key, item ID or prefix in hexadecimal),
 under names that are keyed digests; a scan whose response is held until after the lock reports `interrupted`,
 leaves the device-local store byte for byte as it was, and after the next unlock the item is still due and is
-asked for again; the device-local key differs per device of an account and per account, is never the raw key,
-and a sealed record opens neither under another device's or account's key nor under another name; a ledger and
-range planted from another account's device under this device's names, for an item given the same ID and
-version, are not believed. Functional: "Vault session: hygiene" (reports, reuse, an edit due at once, rows the
-sync engine wrote reconciled, the ledger and cache surviving a relaunch, eviction and erasure with the account).
+asked for again; the device-local key differs per device of an account and per account, and from a key derived
+with this device's ID but another device's secret, is never the raw key, and a sealed record opens neither under
+another device's or account's key nor under another name; a ledger and range planted from another account's device
+under this device's names, for an item given the same ID and version, are not believed; a holder of the account's
+keyset that knows this device's ID can neither open its ledger nor plant one saying a breached password is clear
+(K1); and an older ledger of this device's own, put back, defers no check (K3). Functional: "Vault session: hygiene" (reports, reuse, an edit due at once, rows the
+sync engine wrote reconciled, the ledger and cache surviving a relaunch, eviction and erasure with the account,
+the device secret kept in the Keychain and its loss making the sealed records open as nothing).
 
 The functional suites (`WatchwordHygieneTests`) cover: SHA-1 prefix and suffix and the reuse HMAC against
 vectors from Python's `hashlib`/`hmac`; the parser on padded, unpadded, malformed, oversized and

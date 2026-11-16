@@ -40,8 +40,8 @@ public actor InMemoryDeviceLocalStore: DeviceLocalStore {
         records.removeAll()
     }
 
-    /// Everything stored, by name: what someone reading the device at rest would find.
-    public var contents: [UUID: [UInt8]] {
+    /// Everything stored, by name: what someone reading the device at rest would find. For tests only, so not public.
+    package var contents: [UUID: [UInt8]] {
         records
     }
 }

@@ -300,6 +300,9 @@ milestone 2 stores full item records only.
   - `deviceRegistryAnchor` — what this device trusts of the device registry: the genesis entry, the credential
     entry it follows and the newest entries it has applied. Not secret; in the Keychain so that A8 can neither
     substitute a registry nor roll one back to before a revocation.
+  - `deviceLocalSecret` — 32 random bytes this device makes for itself, mixed with the keyset into the key that
+    seals its unsynced local records (the hygiene ledger and prefix cache, §13.8), so that another device of the
+    account, which holds the same keyset, can neither read them nor plant its own.
 
 ## 7. Sync
 
@@ -1888,13 +1891,22 @@ as an ID and counts) and reads passwords only from the item handed to `scan`. It
 turns it on and carries the `HTTPClient` port, the user agent, the policies and the `DeviceLocalStore` port;
 there is no host to configure. The session owns one `HygieneEngine` for its lifetime, so pacing survives a lock.
 
-- **Keys.** At every unlock, on the actor, the session derives from the keyset two keys of its own
-  (`DeviceLocalKeys`, in `WatchwordCrypto`): the reuse key, `HKDF-SHA256(Ksym, salt: accountID,
+- **Keys.** At every unlock, on the actor, the session derives two keys of its own (`DeviceLocalKeys`, in
+  `WatchwordCrypto`, `package` access): the reuse key, `HKDF-SHA256(Ksym, salt: accountID,
   "WW-hygiene-reuse-v1")`, handed to the engine, which zeroises it at its lock; and the device-local key,
-  `HKDF-SHA256(Ksym, salt: accountID ‖ deviceID, "WW-device-local-v1")` (32 bytes of key and 16 of key ID),
-  which seals this device's records and never leaves the actor. Neither is the raw key; another device of the
-  account derives a different local key from the same keyset, and a password change keeps both (the keyset is
-  kept).
+  `HKDF-SHA256(Ksym ‖ device secret, salt: accountID ‖ deviceID, "WW-device-local-v1")` (32 bytes of key and 16
+  of key ID), which seals this device's records and never leaves the actor. The **device secret** is 32 random
+  bytes this device makes at its first unlock and keeps in its Keychain (`deviceLocalSecret`, §6): device-only,
+  never synced, never on a transport. It is there because the keyset is not this device's alone: every device of
+  the account holds it, a revoked one included (§7.8), and a device ID is on every row and stream the device
+  writes, so a key derived from those two alone could be derived by any of them, which could then read this
+  device's ledger and plant one of its own (docs/06 K1). With the secret, another device of the account derives a
+  different key even when it claims this device's ID, and the secret alone (someone reading the Keychain without
+  the password) opens nothing either. Neither key is the raw key, and a password change keeps both (the keyset and
+  the secret are kept). A store restored onto other hardware arrives without the secret: its records open as
+  nothing and everything is due again. The secret is read in the engine's unlock task; until it is, and if the
+  Keychain refuses it, there is no local key, so nothing is read or stored and the engine starts from an empty
+  ledger.
 - **Unlock.** The engine's `unlock` runs in a task of its own (utility priority) with the decrypted items and
   the unsealed ledger, after any engine lock still in flight. Every query waits for it, then reconciles.
 - **Lock.** `lock()` zeroises the keyset, then drops the engine's reuse key and everything derived from a password
@@ -1923,8 +1935,11 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   (`SealedPwnedRangeCache`) holds nothing in memory: each lookup and store goes through the session, which
   refuses while locked, so its `lock()` has nothing to drop. One record per prefix (`CachedPwnedRange.encoded()`)
   and a sealed index (prefix, fetch time, size) bound it to 512 prefixes and 32 MiB, expired ranges first, then
-  the oldest. A record planted from another device or account does not open and answers nothing. Deleting the
-  account erases the store.
+  the oldest. A record planted from another account, or sealed by another device of this account (which has the
+  keyset and this device's ID but not its secret), does not open and answers nothing. An older ledger of this
+  device's own, put back by someone who can write the files (A8), does open: it is accepted as what it is, an
+  authentic earlier reading, whose every check is older than the one it replaces, so nothing becomes due later than
+  it was (docs/06 K3). Deleting the account erases the store and the secret.
 - **What the UI calls:** `hygieneReport()`, `itemsUsingPassword(_:)` for the editor's reuse warning, and
   `runHygieneStep()`. All throw `locked` while locked and `hygieneNotConfigured` without settings.
 

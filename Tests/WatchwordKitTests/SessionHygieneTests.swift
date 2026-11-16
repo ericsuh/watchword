@@ -127,8 +127,46 @@ struct SessionHygieneTests {
         #expect(await fixture.local.contents.count == 7)
         await fixture.session.hygieneCacheRemove(nil)
         #expect(await fixture.local.contents.count == 2)
+        let accountID = try #require(await fixture.session.account?.accountID)
+        #expect(await fixture.keychain.contains(.deviceLocalSecret(accountID: accountID)))
         try await fixture.session.deleteAccount(password: TestVault.password)
         #expect(await fixture.local.contents.isEmpty)
+        #expect(await !fixture.keychain.contains(.deviceLocalSecret(accountID: accountID)))
+    }
+
+    /// The device secret (`KeychainItem.deviceLocalSecret`) is made at the first unlock and kept only in this device's
+    /// Keychain. A store restored onto other hardware arrives without it, as here: its sealed records open as nothing,
+    /// so everything is due again, and a new secret is made.
+    @Test("without this device's Keychain secret, the sealed ledger and cache open as nothing")
+    func deviceSecretIsInTheKeychain() async throws {
+        let (fixture, vaultID) = try await Self.unlocked()
+        let item = try await fixture.session.save(
+            Fixture.login(vaultID, title: "Forum", host: "forum.example", password: "password"))
+        try await fixture.scanUntilIdle()
+        let accountID = try #require(await fixture.session.account?.accountID)
+        let secretItem = KeychainItem.deviceLocalSecret(accountID: accountID)
+        let secret = try #require(await fixture.keychain.raw(secretItem))
+        #expect(secret.count == 32)
+
+        // A relaunch with the same Keychain reads the same secret: nothing is due.
+        await fixture.session.lock()
+        try await fixture.session.unlock(password: TestVault.password)
+        #expect(try await fixture.session.hygieneReport().totals.itemsAwaitingBreachCheck == 0)
+        #expect(await fixture.keychain.raw(secretItem) == secret)
+
+        await fixture.session.lock()
+        await fixture.keychain.delete(secretItem)
+        try await fixture.session.unlock(password: TestVault.password)
+        let report = try await fixture.session.hygieneReport()
+        #expect(report.totals.itemsAwaitingBreachCheck == 1)
+        #expect(await fixture.session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6"))) == nil)
+        let renewed = try #require(await fixture.keychain.raw(secretItem))
+        #expect(renewed.count == 32 && renewed != secret)
+        try await fixture.scanUntilIdle()
+        #expect(
+            try await fixture.session.hygieneReport().item(item.id)?.findings.contains {
+                $0.kind == .breachedPassword
+            } == true)
     }
 
     @Test("hygiene calls on a session without hygiene settings say so; while locked they say locked")

@@ -472,13 +472,14 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   absent or the version the model read. Never let a stale editor's draft through `ItemMerge.stamped`.
 - Every read goes through `openItem`, which returns `ItemMerge.canonical` of the decrypted item (Y30): the UI and
   AutoFill never see sync metadata as a writer claimed it.
-- Hygiene keys (`DeviceLocalKeys`) are derived on the actor at unlock and the device-local key never leaves it.
-  The engine runs on the session's executor (`SharesExecutor`), so `lock()` zeroises the keyset, then drops the
-  engine's keys synchronously (`assumeIsolated { $0.dropKeys() }`, K2), then that key; only emptying the prefix cache
-  is left to a task. The ledger and the
-  prefix cache are written only sealed, to the `DeviceLocalStore`, never to the record store or a transport, and
-  every hygiene query reconciles the engine with the store first. No timer: the UI or a background task calls
-  `runHygieneStep()`.
+- Hygiene keys (`DeviceLocalKeys`, `package`) are derived on the actor at unlock and the device-local key never
+  leaves it. That key takes the keyset *and* this device's secret from its Keychain (`KeychainItem.deviceLocalSecret`,
+  K1): never derive it from the keyset and device ID alone, which every device of the account has. The engine runs on
+  the session's executor (`SharesExecutor`), so `lock()` zeroises the keyset, then drops the engine's keys
+  synchronously (`assumeIsolated { $0.dropKeys() }`, K2), then that key; only emptying the prefix cache is left to a
+  task. The ledger and the prefix cache are written only sealed, to the `DeviceLocalStore`, never to the record store
+  or a transport, and every hygiene query reconciles the engine with the store first. No timer: the UI or a
+  background task calls `runHygieneStep()`.
 - Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
   exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
   signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting
