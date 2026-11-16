@@ -26,10 +26,10 @@ struct EngineRig {
         await http.respond { server.reply(to: $0) }
     }
 
-    func unlock(_ items: [Item], ledger: ScanLedger = ScanLedger()) async throws {
+    func unlock(_ items: [Item], ledger: ScanLedger = ScanLedger(), synced: [SyncedScanEvidence] = []) async throws {
         // A fresh copy each time: the engine zeroises the key it was given when it locks.
         let key = SecureBytes(copying: (0..<32).map { UInt8($0) })
-        try await engine.unlock(reuseKey: key, ledger: ledger, items: items, now: await clock.now())
+        try await engine.unlock(reuseKey: key, ledger: ledger, items: items, synced: synced, now: await clock.now())
     }
 
     /// Runs the loop the session runs, moving the clock through waits. Returns the outcomes of the scans.
@@ -123,7 +123,7 @@ struct HygieneEngineTests {
         #expect(await rig.http.requests.isEmpty)
     }
 
-    @Test("trashing or deleting an item takes it out of the report and the ledger")
+    @Test("trashing an item takes it out of the report; deleting it takes it out of the ledger too")
     func removal() async throws {
         let rig = await EngineRig()
         var first = HygieneFixtures.item(1, password: "shared-secret-1")
@@ -138,10 +138,12 @@ struct HygieneEngineTests {
         var report = try await rig.engine.report(now: HygieneFixtures.now)
         #expect(report.items.map(\.id) == [second.id])
         #expect(report.totals.itemsByKind[.reusedPassword] == nil)
-        #expect(try await rig.engine.ledger().entries[first.id] == nil)
+        // Kept while trashed: its results are about its passwords, which a restore brings back (review finding N1).
+        #expect(try await rig.engine.ledger().entries[first.id] != nil)
         #expect(await rig.engine.scan(first, now: HygieneFixtures.now) == .nothingToCheck)
 
         await rig.engine.remove(second.id)
+        await rig.engine.remove(first.id)
         report = try await rig.engine.report(now: HygieneFixtures.now)
         #expect(report.items.isEmpty)
         #expect(try await rig.engine.ledger().entries.isEmpty)
@@ -157,9 +159,11 @@ struct HygieneEngineTests {
         await rig.engine.lock()
         await rig.http.forgetRequests()
 
-        // While locked, sync replaced item 2. A day later the vault is unlocked with the stored ledger.
+        // While locked, sync replaced item 2's password. A day later the vault is unlocked with the stored ledger.
+        // (A result is bound to the password it judged, so a new version with the same password would not be due.)
         await rig.clock.advance(by: 86400)
         items[1].version = 8
+        items[1].fields[1].value = "replaced-by-sync-Qx7!"
         try await rig.unlock(items, ledger: ledger)
         var report = try await rig.engine.report(now: await rig.clock.now())
         #expect(report.item(items[0].id)?.breachStatus == .breached(checkedAt: HygieneFixtures.now))

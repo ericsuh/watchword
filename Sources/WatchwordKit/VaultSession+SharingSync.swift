@@ -503,6 +503,18 @@ extension VaultSession {
             bytes += SharedBytes.littleEndian(metadata.createdAt.timeIntervalSince1970.bitPattern)
             bytes += SharedBytes.littleEndian(author.version) + SharedBytes.bytes(author.device)
             return [(author, SharedStreamIndex.ValueKey(device: author.device, digest: Self.valueDigest(bytes)))]
+        case .scanStatus:
+            // One value per device's observation, attributed to the device and revision it carries (§13.9): a removed
+            // member's observation counts only inside its cut, whoever's version carries it on.
+            guard let record = try? openScanStatus(row, keys: keys) else { return nil }
+            return record.attributedObservations.map { observation in
+                let revision = Revision(version: observation.revision, device: observation.device)
+                let bytes = [EnvelopeKind.scanStatus.rawValue] + observation.bytes
+                return (
+                    revision,
+                    SharedStreamIndex.ValueKey(device: observation.device, digest: Self.valueDigest(bytes))
+                )
+            }
         default:
             return []
         }
@@ -609,7 +621,7 @@ extension VaultSession {
             sharing.vaults[vaultID]?.needsReconcile = true
             return
         }
-        for kind in [EnvelopeKind.item, .vaultMetadata] {
+        for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
             for row in try await store.records(in: vaultID, kind: kind) where !(try await judgeAdmits(row)) {
                 try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
                 // The engine's store, not the session's writer: this is not a deletion to publish.

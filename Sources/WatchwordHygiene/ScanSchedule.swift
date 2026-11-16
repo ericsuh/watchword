@@ -7,9 +7,13 @@ import Foundation
 /// under a key that is gone when the vault locks, exactly like an item: the session encodes it and seals it as a
 /// local record, and `HygieneEngine` hands it out only while unlocked (docs/adr/0005-hibp-while-locked.md and its
 /// amendment). It is per-device state and is not synced: writing a scan time into every item each week would turn
-/// the scan into a weekly edit of the whole vault.
+/// the scan into a weekly edit of the whole vault. What other devices learn of this device's checks travels in a
+/// record of its own (`SyncedScanRecord`, docs/02-architecture.md §13.9), and what this device learns of theirs is
+/// weighed against this ledger, never written over it.
 ///
-/// Nothing in it comes from a password directly: no hash, no prefix, no keyed token.
+/// No hash and no prefix of a password. It does hold keyed digests (`ScanBinding`, under a key derived from the reuse
+/// key), which tie each result to the password it judged; sealed under the device-local key, they say nothing to
+/// anyone who could not decrypt the items anyway.
 public struct ScanLedger: Hashable, Sendable {
     public static let maximumEntries = 200_000
     public static let maximumResultsPerEntry = 64
@@ -42,22 +46,69 @@ public struct ScanLedger: Hashable, Sendable {
     }
 
     public struct Entry: Hashable, Sendable {
-        /// The item version whose passwords were checked. A result says nothing about any other version.
+        /// The item version whose passwords were checked. Without `bindings` (a ledger from before they were kept),
+        /// a result says nothing about any other version.
         public var itemVersion: UInt64
         public var scannedAt: Date
         /// Per password field.
         public var results: [UUID: PwnedPasswordResult]
+        /// Per password field, the binding of the password that was checked (`ScanBinding`, under this device's own
+        /// binding key). With them, a result counts for the password it judged at whatever version the item is now,
+        /// and for no other password: an edit of the notes leaves it standing, a changed password does not.
+        public var bindings: [UUID: ScanBinding]
 
-        public init(itemVersion: UInt64, scannedAt: Date, results: [UUID: PwnedPasswordResult]) {
+        public init(
+            itemVersion: UInt64, scannedAt: Date, results: [UUID: PwnedPasswordResult],
+            bindings: [UUID: ScanBinding] = [:]
+        ) {
             self.itemVersion = itemVersion
             self.scannedAt = scannedAt
             self.results = results
+            self.bindings = bindings
+        }
+
+        /// The result this check reached for the password bound by `binding`, the worse one if two fields held it;
+        /// `nil` if it did not check that password.
+        func result(for binding: ScanBinding) -> PwnedPasswordResult? {
+            var found: PwnedPasswordResult?
+            for (field, bound) in bindings where bound == binding {
+                guard let result = results[field] else { continue }
+                if case .found(let count) = result {
+                    if case .found(let earlier) = found, earlier >= count { continue }
+                    found = result
+                } else if found == nil {
+                    found = result
+                }
+            }
+            return found
+        }
+    }
+
+    /// A breach another device of the vault reported for one of an item's passwords, as this device took it in
+    /// (`HygieneEngine.updateSynced`). Kept here, sealed, so that the report goes on showing it whatever later records
+    /// say: only this device's own later check of the password removes it (ADR 0005, amendment of 2026-11-16).
+    public struct Reported: Hashable, Sendable {
+        public var occurrences: UInt32
+        /// When the reporting device checked, by its clock, never later than this device's clock when it took the
+        /// report in.
+        public var reportedAt: Date
+
+        public init(occurrences: UInt32, reportedAt: Date) {
+            self.occurrences = max(1, occurrences)
+            self.reportedAt = reportedAt
         }
     }
 
     public var entries: [UUID: Entry]
     /// Items whose last check did not complete. An item leaves when a check of it completes, or when it goes.
     public var failures: [UUID: Failure]
+    /// Breaches other devices reported, per item and password binding (this device's own binding key). A password
+    /// leaves when this device checks it itself, or when the item no longer holds it.
+    public var reported: [UUID: [ScanBinding: Reported]]
+    /// Since when this device has let other devices' checks stand in for its own check of an item. Bounded by
+    /// `ScanPolicy.maximumSyncDeferral`: past it, this device checks the item itself, which clears the mark. So a
+    /// synced result postpones this device's check, never replaces it.
+    public var deferred: [UUID: Date]
     /// When the weekly pass in progress, or the last one, began.
     public var fullScanStartedAt: Date?
     /// When that pass finished; `nil` while it is in progress, which is how an interrupted pass is recognised and
@@ -66,10 +117,12 @@ public struct ScanLedger: Hashable, Sendable {
 
     public init(
         entries: [UUID: Entry] = [:], fullScanStartedAt: Date? = nil, fullScanCompletedAt: Date? = nil,
-        failures: [UUID: Failure] = [:]
+        failures: [UUID: Failure] = [:], reported: [UUID: [ScanBinding: Reported]] = [:], deferred: [UUID: Date] = [:]
     ) {
         self.entries = entries
         self.failures = failures
+        self.reported = reported
+        self.deferred = deferred
         self.fullScanStartedAt = fullScanStartedAt
         self.fullScanCompletedAt = fullScanCompletedAt
     }
@@ -105,7 +158,19 @@ extension ScanLedger.Entry: CustomStringConvertible, CustomDebugStringConvertibl
 /// authenticated; the bounds make a damaged or foreign blob a decoding error.
 extension ScanLedger: Codable {
     private enum CodingKeys: String, CodingKey {
-        case entries, failures, fullScanStartedAt, fullScanCompletedAt
+        case entries, failures, fullScanStartedAt, fullScanCompletedAt, reported, deferred
+    }
+
+    private struct WireReported: Codable {
+        var item: UUID
+        var bindings: [String]
+        var occurrences: [UInt32]
+        var reportedAt: [Int64]
+    }
+
+    private struct WireDeferred: Codable {
+        var item: UUID
+        var since: Int64
     }
 
     private struct WireFailure: Codable {
@@ -122,6 +187,8 @@ extension ScanLedger: Codable {
         var scannedAt: Int64
         var fields: [UUID]
         var occurrences: [UInt32]
+        /// Parallel to `fields`; absent in a ledger from before bindings were kept.
+        var bindings: [String]?
     }
 
     public init(from decoder: any Decoder) throws {
@@ -138,9 +205,46 @@ extension ScanLedger: Codable {
                 guard results[field] == nil else { throw Self.corrupted(decoder, "field listed twice") }
                 results[field] = occurrences == 0 ? .notFound : .found(occurrences: occurrences)
             }
-            entries[entry.item] = Entry(itemVersion: entry.version, scannedAt: scannedAt, results: results)
+            var bindings: [UUID: ScanBinding] = [:]
+            if let wireBindings = entry.bindings {
+                guard wireBindings.count == entry.fields.count else { throw Self.corrupted(decoder, "bindings") }
+                for (field, hex) in zip(entry.fields, wireBindings) {
+                    guard let binding = ScanBinding(hex: hex) else { throw Self.corrupted(decoder, "binding") }
+                    bindings[field] = binding
+                }
+            }
+            entries[entry.item] = Entry(
+                itemVersion: entry.version, scannedAt: scannedAt, results: results, bindings: bindings)
         }
         self.entries = entries
+        let wireReported = try container.decodeIfPresent([WireReported].self, forKey: .reported) ?? []
+        guard wireReported.count <= Self.maximumEntries else { throw Self.corrupted(decoder, "too many reports") }
+        var reported: [UUID: [ScanBinding: Reported]] = [:]
+        for report in wireReported {
+            guard reported[report.item] == nil, !report.bindings.isEmpty,
+                report.bindings.count <= Self.maximumResultsPerEntry,
+                report.occurrences.count == report.bindings.count, report.reportedAt.count == report.bindings.count
+            else { throw Self.corrupted(decoder, "report") }
+            var bound: [ScanBinding: Reported] = [:]
+            for index in report.bindings.indices {
+                guard let binding = ScanBinding(hex: report.bindings[index]), bound[binding] == nil,
+                    report.occurrences[index] > 0, let at = Self.date(report.reportedAt[index])
+                else { throw Self.corrupted(decoder, "report") }
+                bound[binding] = Reported(occurrences: report.occurrences[index], reportedAt: at)
+            }
+            reported[report.item] = bound
+        }
+        self.reported = reported
+        let wireDeferred = try container.decodeIfPresent([WireDeferred].self, forKey: .deferred) ?? []
+        guard wireDeferred.count <= Self.maximumEntries else { throw Self.corrupted(decoder, "too many deferrals") }
+        var deferred: [UUID: Date] = [:]
+        for mark in wireDeferred {
+            guard deferred[mark.item] == nil, let since = Self.date(mark.since) else {
+                throw Self.corrupted(decoder, "deferral")
+            }
+            deferred[mark.item] = since
+        }
+        self.deferred = deferred
         // Absent in a ledger with no failures.
         let wireFailures = try container.decodeIfPresent([WireFailure].self, forKey: .failures) ?? []
         guard wireFailures.count <= Self.maximumEntries else { throw Self.corrupted(decoder, "too many failures") }
@@ -166,14 +270,33 @@ extension ScanLedger: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         let wire = entries.sorted { $0.key.uuidString < $1.key.uuidString }.map { id, entry in
             let fields = entry.results.keys.sorted { $0.uuidString < $1.uuidString }
+            // Bindings only when every field has one, which is how the engine records them.
+            let bindings = fields.compactMap { entry.bindings[$0]?.hex }
             return WireEntry(
                 item: id, version: entry.itemVersion, scannedAt: Self.seconds(entry.scannedAt), fields: fields,
                 occurrences: fields.map { field in
                     if case .found(let occurrences) = entry.results[field] { return occurrences }
                     return 0
-                })
+                }, bindings: bindings.count == fields.count && !fields.isEmpty ? bindings : nil)
         }
         try container.encode(wire, forKey: .entries)
+        if !reported.isEmpty {
+            let wireReported = reported.sorted { $0.key.uuidString < $1.key.uuidString }.compactMap {
+                item, bound -> WireReported? in
+                let ordered = bound.sorted { $0.key < $1.key }.prefix(Self.maximumResultsPerEntry)
+                guard !ordered.isEmpty else { return nil }
+                return WireReported(
+                    item: item, bindings: ordered.map(\.key.hex), occurrences: ordered.map(\.value.occurrences),
+                    reportedAt: ordered.map { Self.seconds($0.value.reportedAt) })
+            }
+            try container.encode(wireReported, forKey: .reported)
+        }
+        if !deferred.isEmpty {
+            let wireDeferred = deferred.sorted { $0.key.uuidString < $1.key.uuidString }.map {
+                WireDeferred(item: $0.key, since: Self.seconds($0.value))
+            }
+            try container.encode(wireDeferred, forKey: .deferred)
+        }
         if !failures.isEmpty {
             let wireFailures = failures.sorted { $0.key.uuidString < $1.key.uuidString }.map { id, failure in
                 WireFailure(
@@ -217,10 +340,18 @@ extension ScanLedger: Codable {
 public struct ScanCandidate: Hashable, Sendable {
     public let id: UUID
     public let version: UInt64
+    /// When every password the item holds now was last checked, as far as anything besides the ledger entry for this
+    /// very version can tell: this device's own check of the same passwords at an earlier version, and checks other
+    /// devices of the vault synced (`HygieneEngine`, which bounds them: none dated beyond the clock's tolerance, none
+    /// later than now, and none at all once `ScanPolicy.maximumSyncDeferral` has run out). `nil` if some password is
+    /// covered by nothing. It counts for a weekly pass if it is from since the pass began or from within the last
+    /// `fullScanInterval`.
+    public let coveredAt: Date?
 
-    public init(id: UUID, version: UInt64) {
+    public init(id: UUID, version: UInt64, coveredAt: Date? = nil) {
         self.id = id
         self.version = version
+        self.coveredAt = coveredAt
     }
 }
 
@@ -243,14 +374,20 @@ public struct ScanPolicy: Hashable, Sendable {
     /// failed for a reason that may pass, such as a 503, is not timed: it goes to the back of the queue.)
     public let itemRetryInitial: TimeInterval
     public let itemRetryMaximum: TimeInterval
-    /// How far ahead of the clock a recorded time may be before it is treated as wrong.
+    /// How far ahead of the clock a recorded time may be before it is treated as wrong. A synced scan time further
+    /// ahead than this is ignored altogether.
     public let clockTolerance: TimeInterval
+    /// The longest other devices' synced checks may stand in for this device's own check of an item. Each synced
+    /// check postpones this device's own by at most a pass (`fullScanInterval`: a check counts for the pass it is
+    /// in), and all of them together by at most this (and the pass it ends in), so a vault member who keeps reporting
+    /// "not found" cannot keep this device from ever asking itself. Never less than `fullScanInterval`.
+    public let maximumSyncDeferral: TimeInterval
 
     public init(
         fullScanInterval: TimeInterval = 7 * 24 * 60 * 60, requestSpacing: TimeInterval = 2, burst: Int = 5,
         maximumJitter: TimeInterval = 3, initialBackoff: TimeInterval = 60, maximumBackoff: TimeInterval = 3600,
         itemRetryInitial: TimeInterval = 600, itemRetryMaximum: TimeInterval = 24 * 60 * 60,
-        clockTolerance: TimeInterval = 300
+        clockTolerance: TimeInterval = 300, maximumSyncDeferral: TimeInterval = 28 * 24 * 60 * 60
     ) {
         // Held within sane bounds whatever is passed: a zero spacing would be a request loop.
         self.fullScanInterval = max(60 * 60, fullScanInterval)
@@ -261,7 +398,8 @@ public struct ScanPolicy: Hashable, Sendable {
         self.maximumBackoff = min(max(self.initialBackoff, maximumBackoff), 24 * 60 * 60)
         self.itemRetryInitial = min(max(1, itemRetryInitial), 7 * 24 * 60 * 60)
         self.itemRetryMaximum = min(max(self.itemRetryInitial, itemRetryMaximum), 7 * 24 * 60 * 60)
-        self.clockTolerance = max(0, clockTolerance)
+        self.clockTolerance = min(max(0, clockTolerance), 24 * 60 * 60)
+        self.maximumSyncDeferral = min(max(self.fullScanInterval, maximumSyncDeferral), 365 * 24 * 60 * 60)
     }
 
     public static let standard = ScanPolicy()
@@ -506,15 +644,23 @@ public struct ScanSchedule: Sendable {
     }
 
     private func reason(for candidate: ScanCandidate, passStart: Date?, now: Date) -> ScanReason? {
-        guard let entry = ledger.entries[candidate.id] else { return .created }
-        if entry.itemVersion != candidate.version { return .changed }
-        if let passStart {
-            // A scan dated after now did not happen in this pass, whatever the ledger says: the clock moved.
-            if entry.scannedAt < passStart || entry.scannedAt > now.addingTimeInterval(policy.clockTolerance) {
-                return .weekly
-            }
+        let entry = ledger.entries[candidate.id]
+        let own = entry.flatMap { $0.itemVersion == candidate.version ? $0.scannedAt : nil }
+        guard own != nil || candidate.coveredAt != nil else { return entry == nil ? .created : .changed }
+        guard let passStart else { return nil }
+        // A scan dated after now did not happen in this pass, whatever the ledger says: the clock moved.
+        let latest = now.addingTimeInterval(policy.clockTolerance)
+        if let own, own >= passStart, own <= latest { return nil }
+        // A check of the same passwords at another version, or another device's, counts for this pass if it ran
+        // since the pass began or within the last interval: a device's first pass begins when it first asks, and a
+        // check another device made the day before is as good as one made since. Either way the next check of each
+        // password is due at most one interval after the last one anywhere.
+        if let covered = candidate.coveredAt, covered <= latest,
+            covered >= passStart || covered >= now.addingTimeInterval(-policy.fullScanInterval)
+        {
+            return nil
         }
-        return nil
+        return .weekly
     }
 
     private mutating func beginPassIfDue(now: Date) {
@@ -545,6 +691,13 @@ public struct ScanSchedule: Sendable {
         }
     }
 
+    /// Brings the schedule's own times up to `now` (a clock put back, a weekly pass due to begin) without deciding
+    /// anything: what `decide` does first, for a caller that asks `reason(for:now:)` before it decides.
+    public mutating func advance(now: Date) {
+        distrustFutureTimes(now: now)
+        beginPassIfDue(now: now)
+    }
+
     /// The time the weekly pass in progress began, if one is: cached ranges older than this are not used by it.
     public var passInProgressSince: Date? {
         ledger.fullScanCompletedAt == nil ? ledger.fullScanStartedAt : nil
@@ -555,13 +708,72 @@ public struct ScanSchedule: Sendable {
     /// - Parameters:
     ///   - networkRequests: how many range requests it took; none if the cache answered.
     ///   - jitter: a uniform random number in `0..<1` from the caller's generator, for the weekly pass's spacing.
+    ///   - bindings: per field, the binding of the password checked; this device's own check of each of them
+    ///     replaces any breach another device reported for it.
     public mutating func recordScan(
-        item: UUID, version: UInt64, results: [UUID: PwnedPasswordResult], networkRequests: Int, now: Date,
-        jitter: Double
+        item: UUID, version: UInt64, results: [UUID: PwnedPasswordResult], bindings: [UUID: ScanBinding] = [:],
+        networkRequests: Int, now: Date, jitter: Double
     ) {
-        ledger.entries[item] = ScanLedger.Entry(itemVersion: version, scannedAt: now, results: results)
+        ledger.entries[item] = ScanLedger.Entry(
+            itemVersion: version, scannedAt: now, results: results, bindings: bindings)
         ledger.failures[item] = nil
+        ledger.deferred[item] = nil
+        if var reports = ledger.reported[item] {
+            for binding in bindings.values { reports[binding] = nil }
+            ledger.reported[item] = reports.isEmpty ? nil : reports
+        }
         recordRequests(networkRequests, now: now, jitter: jitter)
+    }
+
+    /// Takes in a breach another device reported for the password bound by `binding` (this device's binding), checked
+    /// at `at` by that device's clock and already bounded by the caller. Ignored if this device's own check of that
+    /// password is newer and found it clear: its own newer check is the one thing that outranks a reported breach.
+    /// Returns whether the ledger changed.
+    @discardableResult
+    public mutating func recordReported(
+        item: UUID, binding: ScanBinding, occurrences: UInt32, at: Date
+    ) -> Bool {
+        if let entry = ledger.entries[item], let own = entry.result(for: binding), entry.scannedAt > at {
+            if own == .notFound { return false }
+        }
+        var reports = ledger.reported[item] ?? [:]
+        let previous = reports[binding]
+        let merged = ScanLedger.Reported(
+            occurrences: max(previous?.occurrences ?? 0, occurrences),
+            reportedAt: max(previous?.reportedAt ?? at, at))
+        guard merged != previous else { return false }
+        if previous == nil, reports.count >= ScanLedger.maximumResultsPerEntry { return false }
+        if ledger.reported[item] == nil, ledger.reported.count >= ScanLedger.maximumEntries { return false }
+        reports[binding] = merged
+        ledger.reported[item] = reports
+        return true
+    }
+
+    /// Keeps only the reports for passwords the item still holds (`bindings`, this device's).
+    public mutating func keepReports(of item: UUID, for bindings: Set<ScanBinding>) -> Bool {
+        guard let reports = ledger.reported[item] else { return false }
+        let kept = reports.filter { bindings.contains($0.key) }
+        guard kept.count != reports.count else { return false }
+        ledger.reported[item] = kept.isEmpty ? nil : kept
+        return true
+    }
+
+    /// Since when synced checks have stood in for this device's own check of `item`, marking now if they had not.
+    /// `nil` once they have done so for longer than `maximumSyncDeferral`: this device checks the item itself.
+    public mutating func syncDeferral(of item: UUID, now: Date) -> Date? {
+        guard let since = ledger.deferred[item] else {
+            // An item that cannot be marked is not deferred: unmarked, it would be deferred from "now" at every pass,
+            // and the limit would never run out for it (review finding N2).
+            guard ledger.deferred.count < ScanLedger.maximumEntries else { return nil }
+            ledger.deferred[item] = now
+            return now
+        }
+        return now.timeIntervalSince(since) > policy.maximumSyncDeferral ? nil : since
+    }
+
+    /// Whether `item` is marked as deferring to synced checks.
+    public func isDeferring(_ item: UUID) -> Bool {
+        ledger.deferred[item] != nil
     }
 
     /// Pays for requests that were answered, without recording a result: a scan whose item changed under it.
@@ -615,16 +827,30 @@ public struct ScanSchedule: Sendable {
             networkRequests: networkRequests, error: error, now: now, jitter: jitter, policy: policy)
     }
 
-    /// Drops what is remembered about items that no longer exist, or are no longer candidates.
+    /// Drops what is remembered about items that no longer exist.
     public mutating func prune(keeping items: Set<UUID>) {
         ledger.entries = ledger.entries.filter { items.contains($0.key) }
         ledger.failures = ledger.failures.filter { items.contains($0.key) }
+        ledger.reported = ledger.reported.filter { items.contains($0.key) }
+        ledger.deferred = ledger.deferred.filter { items.contains($0.key) }
     }
 
-    /// Forgets one item's result, so it is due again.
+    /// An item that still exists has left the candidates for now: trashed, or without a password. Only its failed
+    /// check goes. What this device found, the breaches it took in and since when synced checks have stood in for its
+    /// own all stay: each is about a password (by binding), and the password may come back with a restore or an edit.
+    /// Forgotten here, a breach this device saw would be hidden on another device's word when it did, and the
+    /// deferral limit would start again at every trash and restore (review finding N1, docs/02-architecture.md
+    /// §13.9).
+    public mutating func setAside(_ item: UUID) {
+        ledger.failures[item] = nil
+    }
+
+    /// Forgets one item's result, so it is due again: the item is gone for good.
     public mutating func forget(_ item: UUID) {
         ledger.entries[item] = nil
         ledger.failures[item] = nil
+        ledger.reported[item] = nil
+        ledger.deferred[item] = nil
     }
 
     /// Overwrites every remembered time that is further ahead of `now` than this policy could have set it.
@@ -641,6 +867,18 @@ public struct ScanSchedule: Sendable {
         let weeklyLimit = now.addingTimeInterval(policy.requestSpacing + policy.maximumJitter)
         if let until = pacing.weeklyNotBefore, until > weeklyLimit { pacing.weeklyNotBefore = weeklyLimit }
 
+        // A deferral mark after now would let synced checks stand in for this device's own for as long as the clock
+        // stays behind it, and a report dated after now would outrank this device's own checks: both happened now.
+        if ledger.deferred.values.contains(where: { $0 > now }) {
+            ledger.deferred = ledger.deferred.mapValues { min($0, now) }
+        }
+        if ledger.reported.values.contains(where: { $0.values.contains { $0.reportedAt > now } }) {
+            ledger.reported = ledger.reported.mapValues { reports in
+                reports.mapValues {
+                    ScanLedger.Reported(occurrences: $0.occurrences, reportedAt: min($0.reportedAt, now))
+                }
+            }
+        }
         guard !ledger.failures.isEmpty else { return }
         let retryLimit = now.addingTimeInterval(policy.itemRetryMaximum)
         var corrected: [UUID: ScanLedger.Failure] = [:]

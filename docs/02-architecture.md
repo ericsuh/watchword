@@ -370,8 +370,9 @@ VK, so merge is deferred until unlock. The AutoFill extension works from the las
 suite "sync log" — runs under `swift test` on Linux. The production keyring, the persistent state store and the
 app's conflict UI are described in §7.6, the account's own objects and enrolment in §7.7, the device registry in
 §7.8 and automatic syncing in §7.9; the CloudKit and iCloud Drive transports are still to come
-(`03-implementation-plan.md`, milestone 3). One engine runs per vault; a vault's log carries its items and its
-description (`vaultMetadata`), each kind merged by its own merger (`KindRoutingMerger`).
+(`03-implementation-plan.md`, milestone 3). One engine runs per vault; a vault's log carries its items, its
+description (`vaultMetadata`) and its items' synced breach-check results (`scanStatus`, §13.9), each kind merged by
+its own merger (`KindRoutingMerger`).
 
 **Objects.** A transport holds `SignedObject`s: `"WWSO" ‖ version ‖ signature ‖ envelope`, where the envelope
 is of kind `logSegment` or `snapshot`, sealed under the vault key, with the object's location bound into its
@@ -1843,9 +1844,10 @@ future flow needs a generated password to outlive a single UI interaction.
 
 ## 13. Hygiene (`WatchwordHygiene`)
 
-The portable core is built (milestone 6), and so is its wiring into `VaultSession` (§13.8); the `URLSession`
+The portable core is built (milestone 6), and so is its wiring into `VaultSession` (§13.8), with results synced
+through the vault (§13.9); the `URLSession`
 adapter, the file adapter for the device-local store, the background-task glue and the report UI are not. The module depends on `WatchwordModel`,
-`SecureMemory` and `Crypto` (SHA-1 for the range API, HMAC-SHA-256 for reuse) and on nothing else: it does
+`SecureMemory` and `Crypto` (SHA-1 for the range API, HMAC-SHA-256 for reuse and for result bindings) and on nothing else: it does
 not know the session, the store or any Apple framework, takes the time as a parameter and randomness as a
 generator, and reaches the network only through the `HTTPClient` port. Everything below runs under
 `swift test` on Linux.
@@ -1956,11 +1958,18 @@ It owns no timer, thread or clock.
   A pass in progress whose start is ahead of the clock by any amount is taken to have begun now: left in the
   future, every scan would predate the pass and every item would be due again the moment it was scanned.
 
-`ScanLedger` records, per item, the version scanned, when, and the result per password field; per item whose
-last check failed, the version, when and how often in a row; and the pass times. It is `Codable` with
-explicit, bounded shapes (a ledger with no failures encodes without the key), and it is **derived from
-passwords** (a breach count all but names one): the session persists it only sealed, as a local record that
-is not synced. It holds no hash, prefix or token.
+`ScanLedger` records, per item, the version scanned, when, and the result and the binding (§13.9) per password
+field; per item whose last check failed, the version, when and how often in a row; the breaches other devices
+reported and when this device began letting synced checks stand in for its own (§13.9); and the pass times. It is
+`Codable` with explicit, bounded shapes (a ledger with no failures, reports or deferrals encodes without those keys),
+and it is **derived from passwords** (a breach count all but names one; a binding is a keyed digest of one): the
+session persists it only sealed, as a local record that is not synced. It holds no hash or prefix. A result counts for
+the password it judged, by binding, at whatever version the item is now; an entry from before bindings were kept
+counts for its version only.
+
+A candidate may carry `coveredAt`: when every password it holds now was last checked by anything besides the entry
+for this very version (the same passwords at an earlier version, or synced checks, as the engine bounds them). It
+counts for a weekly pass if it is from since the pass began or from within the last interval.
 
 ### 13.4 Strength (F9.3)
 
@@ -2062,9 +2071,10 @@ a summary, a plain-language explanation, and the facts behind it for a UI that w
 (one per kind at `low` or above), and a breach status (`notApplicable`, `notChecked`, `clear`, `breached`,
 `incomplete`, with the check time); and vault-wide totals, including how many items await a check and the
 oldest check, so stale results are visible (ADR 0005). Order is fixed: items worst first, then by
-lower-cased title bytes, then ID; findings by severity, kind, field. A breach result counts only for the
-item version it was made for. The report holds titles, so it is as private as the vault; it holds no
-password, hash or token.
+lower-cased title bytes, then ID; findings by severity, kind, field. A breach result counts for the password it
+judged (its binding), and synced results are weighed as §13.9 says; each item's `breachSource` says whether its status
+rests on this device's checks alone or on another device's too, and a breach found only elsewhere says so in its
+explanation. The report holds titles, so it is as private as the vault; it holds no password, hash or token.
 
 `clear` is a statement about every password in the item, and it is not made on less. An item with more
 passwords than are analysed in one item (16) is `incomplete` once the sixteen are checked, with a finding
@@ -2159,7 +2169,9 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   `next(now:)` with the session's clock, checks the item it names (fetched through `item(id:)`), and seals and
   stores `ledger()` after a check that completed **or failed** (§13.3), and returns when to call again. The
   stored ledger goes to the next `unlock`; a ledger that does not open is an empty one (everything is due).
-- **Persisted only sealed, per device, unsynced.** The ledger and the prefix cache are records in the
+- **Persisted only sealed, per device, unsynced.** (Breach results and scan times are *also* synced, as a record of
+  their own in each item's vault, §13.9; the ledger and the cache themselves never are.) The ledger and the prefix
+  cache are records in the
   `DeviceLocalStore` port, never in the record store the sync engine reads and never on a transport: sealed under
   the device-local key with a context binding the record's name and the account
   (`EnvelopeKind.accountHeader`, as for quick unlock's wrapped AUK), and named by
@@ -2173,7 +2185,9 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   keyset and this device's ID but not its secret), does not open and answers nothing. An older ledger of this
   device's own, put back by someone who can write the files (A8), does open: it is accepted as what it is, an
   authentic earlier reading, whose every check is older than the one it replaces, so nothing becomes due later than
-  it was (docs/06 L3). Deleting the account erases the store and the secret.
+  it was on this device's own checks (docs/06 L3). With synced results it can also drop a deferral mark or a reported
+  breach taken in since; a mark dropped starts the deferral limit again, so A8 together with a member reporting
+  "not found" (A4) can postpone this device's check further (docs/06 N6). Deleting the account erases the store and the secret.
 - **What the UI calls:** `hygieneReport()`, `itemsUsingPassword(_:)` for the editor's reuse warning, and
   `runHygieneStep()`. All throw `locked` while locked and `hygieneNotConfigured` without settings.
 
@@ -2188,6 +2202,72 @@ Still to come:
 - **Background glue**: `BGProcessingTask` (iOS) and `NSBackgroundActivityScheduler` (macOS) only wake the
   loop; whether anything runs is `next(now:)`'s decision, so a wake while locked does nothing.
 - **The report UI** and its snapshot tests, and the settings for the site directory and the API key.
+
+### 13.9 Synced results (owner decision 10; ADR 0005, amendment of 2026-11-16)
+
+"Store and sync them with the items, with scan times synced", with the rule that **a synced "clear" only postpones
+this device's next check, and never hides a breach this device has seen.** So that a household's devices do not each
+check every password every week, each completed check is written into the vault, and each device takes the others'
+into account. The prefix cache is not synced; nor is the ledger.
+
+- **The record.** `SyncedScanRecord`, sealed under the vault key as `EnvelopeKind.scanStatus` (10) with the item's
+  record ID, in the item's vault, with the context every record has (record, vault, schema, kind, key, version), and
+  checked against its row when opened (item, vault and version inside must equal the row's). It maps each device to
+  its latest observation: the revision at which it wrote it, the vault key its bindings are under, when it checked
+  (whole seconds, its clock), and per password binding the count found (zero is "not found"). At most 32 observations
+  of at most 16 results; one canonical binary encoding (`"WWSR"`), decoded exactly (ascending devices and bindings, no
+  observation above the record's version, nothing trailing). It is not an item version: no history entry, no
+  conflict, never `ItemMerge`. Sync carries it like any record (`SyncConfiguration.schemaVersions`), merged by
+  `ScanStatusMerger` through `KindRoutingMerger`.
+- **The merge is a join.** Per device the observation with the higher revision (then the later encoding); beyond 32
+  devices the highest (revision, device) are kept. Neither side → written by this device above both, as items are.
+  A deletion (the record goes with its item, explicitly: permanent deletion, purge, a move's original, a vault's
+  deletion) erases the observations at or below the tombstone and keeps later ones, so an item kept after a deletion
+  keeps what was checked since.
+- **Bindings.** `ScanBinding = HMAC-SHA-256(K, "WW-scan-binding-v1" ‖ 0x00 ‖ itemID ‖ password UTF-8)`. In a synced
+  record `K = HKDF-SHA256(vault key, salt: vaultID ‖ keyID, "WW-hygiene-scan-binding-v1")` (`HygieneKeys`,
+  `WatchwordCrypto`, `package`), under the key the observation names; a reader derives it from that key only if it
+  holds it for the item's own vault, so results survive a rotation's re-seal and say nothing to anyone without the
+  key. In this device's ledger `K = HMAC(reuse key, 0xFF ‖ "WW-ledger-binding-key-v1")`, which no vault rotation
+  changes; the `0xFF`, a byte no UTF-8 text holds, keeps `K` from being the reuse token of any password (N3). A
+  changed password has a new binding; an edit that leaves it leaves its result.
+- **Writing.** After a check completes (`runHygieneStep`), and only with sync configured, where this device may write
+  (`writableVaultKey`: not a read-only member, not a deleted vault), for the version checked and while unlocked, the
+  session writes this device's observation under the vault's current key, conditionally on the row it read.
+- **Reading.** At unlock, at every reconcile (a changed item or scan-status row) and after every save, the session
+  matches each other device's observation against the item's current passwords (`SyncedScanEvidence.matching`) and
+  hands the engine `SyncedScanEvidence` for that item version (`HygieneEngine.updateSynced`): in memory only, dropped
+  at lock. This device's own observations are never read back from the record: its results are its sealed ledger's.
+- **What it is worth** (`PasswordBreachEvidence`, the one place the report and the schedule read results from):
+  - a synced time more than `clockTolerance` (five minutes) ahead is ignored; the rest count as no later than now;
+  - a synced check counts as a check: an item whose passwords are all covered is not due, which postpones this
+    device's own check by at most an interval from the check; and synced checks stand in for its own check of an item
+    for at most `ScanPolicy.maximumSyncDeferral` (28 days) from the first time they did (`ScanLedger.deferred`; only
+    this device's own check ends it), then for the pass that ends in. So a member who reports "not found" every day
+    delays this device's own check by weeks, never for good;
+  - a breach is a breach if this device found it, or another device reported it and this device has no newer check
+    of its own that found the password clear. A reported breach is remembered in the ledger (`ScanLedger.reported`)
+    when taken in, so a later synced "not found", even from the device that reported it, does not remove it: only
+    this device's own later check of that password does. A synced "not found" never outweighs any breach;
+  - an item that leaves the candidates but still exists (trashed, or without a password) keeps its results, reports
+    and deferral mark (`ScanSchedule.setAside`): they are about its passwords, which a restore or an edit can bring
+    back. Only a permanent deletion forgets them, and an unlock prunes only items that no longer exist. Otherwise a
+    trash and restore, or a password taken out and put back, would erase a breach this device saw and restart the
+    deferral limit (N1). An item the ledger has no room to mark is not deferred at all (N2);
+  - the report labels each status's source (`ItemHygiene.breachSource`).
+- **Shared vaults.** The write judge attributes each observation to its device and revision
+  (`attributedValues`, one value per observation), so a removed member's late observation counts nowhere (S28) and
+  one forged in another device's name is held aside; a rotation re-seals the records (the observations keep their
+  devices, revisions and keys); a change of head takes out what no longer counts, records included.
+
+What this leaves (`06-adversarial-review.md` §N): a current member (A4) can make a breached password look clear on a
+device that has not checked it itself, for up to the deferral limit; they can read and change the password, so this is
+no new power, and they cannot hide a breach that device saw while the item holds that password. The ledger keeps one
+check per item, so a breach of a password the item no longer holds is forgotten once this device checks the new one; a
+member who changes the password back and reports it clear then has it shown clear for up to the limit again (N4).
+Two devices checking at once both write; the join keeps both, and a check that races the item's permanent deletion
+leaves a record with no item, which nothing collects (N5). A client that does not know the kind refuses every segment
+and snapshot that carries it and, merging each stream strictly in sequence, merges nothing more from that device (N7).
 
 ## 14. Import and export (`WatchwordInterchange`)
 

@@ -54,7 +54,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F5.2, F10.1, F10.2 enrolment and devices | `WatchwordKitTests`: "Vault session: enrolment from the transport (F5.2)" — a device joining from the transport, password and Secret Key alone; wrong credentials one failure, leaving nothing behind; an approved device; an account from before the registry; a store restored onto other hardware, and the edits and deletions its old device had not synced reaching the others. "Vault session: devices, revocation and password changes" — a password change reaching other devices (old password refused, quick unlock destroyed, nothing merged or published until the new one is entered); enrolling after a change; revocation with and without a password change; a password change the person did not make, undone; a registry rolled back in the local file. `WatchwordCryptoTests`: "Device keys and signatures", "Device registry", "Published account header". Section 6.9 |
 | F7.5 automatic sync | `WatchwordSyncTests`: "Automatic sync policy" — unlock, debounced saves and their cap, a save during a sync, coalesced hints, periodic intervals locked and unlocked, backoff and retry, spacing, a clock moved backwards — all with dates, no sleeping |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests (`WatchwordInterchangeTests`: "CSV reader and writer (RFC 4180)", "Password CSV import and export", "1PUX import and export", "Credential Exchange Format import and export", "ZIP reader and writer", "DEFLATE inflater and CRC-32" — against streams from Python's `zlib` and archives from Python's `zipfile` —, "Bounded JSON reader and writer", "Import mapping into the vault", "Duplicate detection", "Interchange instructions"; milestone 7). Through the session and the encrypted archive (`02-architecture.md` §14.1): "Vault session: import, export and the encrypted archive" (`WatchwordKitTests`; with `apexOfWWWHosts`: a `www` host gains its apex by default, each addition in the preview, and the opt-out), "Items from an encrypted Watchword archive" (`WatchwordInterchangeTests`), "Encrypted archive key derivation" and "Encrypted archive format" (`WatchwordCryptoTests`, a vector from Python `cryptography` and a whole archive written by an independent Python implementation), and the adversarial areas "encrypted Watchword archive" and "interchange through the session" (with `AdversarialSessionLockTests.swift`: a lock during each step the session runs off its actor, through the public call, wins and ends the call in `locked`), and "Forked generator" (`WatchwordCryptoTests`). Still to come: file protection (the app's) and the Credential Exchange calls |
-| F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent (`WatchwordHygieneTests`: "Pwned Passwords: digest and prefix", "…: range parser", "…: cache entries", "…: client", "Breach scan scheduling", "Scan ledger", "Strength estimator", "Password reuse", "Item checks", "Hygiene report", "Hygiene engine", "Breached-account lookup"; milestone 6) |
+| F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent (`WatchwordHygieneTests`: "Pwned Passwords: digest and prefix", "…: range parser", "…: cache entries", "…: client", "Breach scan scheduling", "Scan ledger", "Strength estimator", "Password reuse", "Item checks", "Hygiene report", "Hygiene engine", "Breached-account lookup", "Synced scan results"; `WatchwordKitTests`: "Vault session: synced hygiene"; milestone 6, synced results per owner decision 10, §6.6) |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
 | SEC1–SEC10 | Section 6 below |
 
@@ -657,6 +657,32 @@ ledger and out again, twenty scans each interrupted by a lock at one instant sen
 (whether the vault is unlocked again before or after the response), a `Retry-After` that arrives just after a
 lock still honoured, and an unlock over an unlocked engine locking first (and leaving the engine locked with
 an empty cache when it then fails).
+
+**Synced results** (`02-architecture.md` §13.9; ADR 0005, amendment of 2026-11-16; owner decision 10).
+Adversarial (`AdversarialSyncedHygieneTests`, suite "Adversarial: synced breach-check results", real sessions of two
+accounts sharing a vault): *a current member (A4)*, who can read the password, syncs a "not found" for a password the
+owner's device found breached, dated ten years ahead and then fresh every day for forty-five days: the owner's device
+shows the breach as its own finding throughout, checks again one pass after its own last check (the far-future time
+postponed nothing), and makes its own check within the deferral limit plus a pass; an observation the member forges in
+the owner's device's name is held aside by the write judge and changes nothing. *A former member (A5)* whose store
+withholds the removal reports a breach after it: the owner's report stays clear and the version is held aside (S28).
+*A4 again* trashes and restores the item, or takes its password out and puts it back, and then reports it clear: the
+owner's device still shows the breach as its own (review finding N1, `removalCannotEraseAnOwnBreach`).
+Functional: "Synced scan results" (`WatchwordHygieneTests`): the binding against Python's `hmac`, and bound to one
+item, one password and one key; the record's canonical encoding and every damage case (trailing or missing bytes,
+magic, devices out of order, a revision above the record's version, too many results); the join per device and its
+laws (commutative, associative, idempotent, bounded) over random records; erasure keeping only later observations;
+evidence matched by password, ignoring this device's own observations and keys it cannot derive; and the engine: a
+synced check standing in for this device's (nothing asked, the source labelled), a changed password rechecked, an edit
+that keeps the password keeping its result, this device's own breach never hidden, a reported breach outlasting a later
+synced "not found" until this device's own check, a report older than this device's own clear check not taken in,
+future times ignored or counted as now, postponement by at most an interval, the deferral limit under a daily
+"not found", that limit and this device's own breach kept through a trash and restore or a password taken out and put
+back (N1), no deferral for an item the ledger has no room to mark (N2), the ledger's binding key no reuse token (N3),
+and the ledger's new keys round-tripping. "Vault session: synced hygiene" (`WatchwordKitTests`, two
+devices of one account): B does not repeat A's check and labels it A's; a breach A found reaches B; a password changed
+after A's check is checked again on B and A then takes B's result; checks and their sync add no item version, history
+entry or conflict on either device over two passes; deleting an item deletes its results on every device.
 
 The regression tests added after the first review of this module for the scheduling, locking, staleness,
 report, parser and rating faults were each checked by putting the fault back and seeing the test fail; the

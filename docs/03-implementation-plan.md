@@ -397,8 +397,13 @@ down.
   a background task to drive. Tests: "Vault session: hygiene" and the adversarial suite "hygiene in the vault
   session". Still open: the file adapter for `DeviceLocalStore` (App Group, excluded from backup); until then the
   ledger and cache last as long as the process.
+- Breach results and scan times synced with the vault is **done** (Linux; owner decision 10, ADR 0005 amendment of
+  2026-11-16, `02-architecture.md` §13.9): a `scanStatus` record beside each item, a join per device, results bound to
+  each password under a vault-derived key, a synced "not found" only postponing this device's own check (within an
+  interval, and 28 days in all) and never hiding a breach it saw. Tests: "Synced scan results", "Vault session:
+  synced hygiene" and the adversarial suite "synced breach-check results". Not compiled or run on Apple platforms yet.
 - `BGProcessingTask` / `NSBackgroundActivityScheduler` glue that wakes the loop.
-- The report UI, per-item badges in the item list, settings for the site directory and the HIBP API key, and
+- The report UI (with the source of each breach status: `ItemHygiene.breachSource`), per-item badges in the item list, settings for the site directory and the HIBP API key, and
   the UI snapshot tests.
 - The embedded EFF list came from a mirror (eff.org was unreachable). **Verified** on 2026-11-16 against EFF's
   own file, https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt (downloaded that day; SHA-256

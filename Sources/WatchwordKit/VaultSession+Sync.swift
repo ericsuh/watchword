@@ -69,6 +69,7 @@ extension VaultSession {
         let merger = KindRoutingMerger([
             .item: ItemRecordMerger(sealer: adapter, deviceID: record.deviceID),
             .vaultMetadata: VaultMetadataMerger(sealer: adapter),
+            .scanStatus: ScanStatusMerger(sealer: adapter),
         ])
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record)

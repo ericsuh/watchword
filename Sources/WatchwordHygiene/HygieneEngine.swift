@@ -92,8 +92,15 @@ public actor HygieneEngine: SharesExecutor {
         /// Items that were trashed or deleted at the version above: a copy of that version that is not trashed is
         /// the item from before it went.
         var gone: Set<UUID> = []
+        /// Of those, the items permanently deleted (`remove`), whose results go with them.
+        var removed: Set<UUID> = []
         /// `unlock` has not finished analysing its items.
         var loading = true
+        /// What other devices of each item's vault reported, for the version the session matched it against.
+        var synced: [UUID: SyncedScanEvidence] = [:]
+        /// The ledger changed outside a scan (a report taken in, a deferral marked) and has not been handed out
+        /// since (`takeChangedLedger`).
+        var ledgerChanged = false
     }
 
     private enum Applied {
@@ -182,7 +189,11 @@ public actor HygieneEngine: SharesExecutor {
     /// - Throws: `ReuseKeyError` for a key that is not one; `HygieneEngineError.locked` if `lock()` (or another
     ///   `unlock`) ran before this one finished; `CancellationError` if the task was cancelled, in which case the
     ///   engine is left locked and the prefix cache empty.
-    public func unlock(reuseKey: SecureBytes, ledger: ScanLedger, items: [Item], now: Date) async throws {
+    ///   - synced: what other devices reported about the items' passwords (`SyncedScanEvidence`), each for the item
+    ///     version the session matched it against; taken in as `updateSynced` would, once the items are analysed.
+    public func unlock(
+        reuseKey: SecureBytes, ledger: ScanLedger, items: [Item], synced: [SyncedScanEvidence] = [], now: Date
+    ) async throws {
         let key = try ReuseKey(reuseKey)
         // `lock()` suspends on the cache, and another `unlock` can get in meanwhile; it is locked out in its turn.
         // When the loop ends nothing is resident and every state that was has had its cache emptied (or is having
@@ -215,8 +226,10 @@ public actor HygieneEngine: SharesExecutor {
             guard isCurrent(started) else { throw HygieneEngineError.locked }
         }
         withResident { state in
-            // Results for items that no longer exist, or no longer have a password, describe nothing.
-            state.schedule.prune(keeping: Set(state.analyses.values.filter { !$0.passwords.isEmpty }.map(\.id)))
+            // Results for items that no longer exist describe nothing. An item in the trash or without a password
+            // keeps them: they are about its passwords, which may come back (`ScanSchedule.setAside`).
+            state.schedule.prune(keeping: Set(items.map(\.id)).subtracting(state.removed))
+            for evidence in synced { _ = Self.takeIn(evidence, to: &state, now: now) }
             state.loading = false
         }
     }
@@ -272,15 +285,48 @@ public actor HygieneEngine: SharesExecutor {
             state.gone.insert(item.id)
             state.analyses[item.id] = nil
             state.reuse.remove(item.id)
-            state.schedule.forget(item.id)
+            state.schedule.setAside(item.id)
             return .removed
         }
         state.gone.remove(item.id)
+        state.removed.remove(item.id)
         let analysis = state.analyzer.analyse(item, reuseKey: state.reuseKey)
         state.analyses[item.id] = analysis
         state.reuse.set(analysis.reuseTokens, for: item.id)
-        if analysis.passwords.isEmpty { state.schedule.forget(item.id) }
+        // Evidence matched against another version says nothing about this one's passwords; the session matches
+        // again. Reports stay for the passwords the item still holds.
+        if state.synced[item.id]?.itemVersion != item.version { state.synced[item.id] = nil }
+        if analysis.passwords.isEmpty {
+            state.schedule.setAside(item.id)
+        } else if state.schedule.keepReports(of: item.id, for: Set(analysis.passwords.map(\.ledgerBinding))) {
+            state.ledgerChanged = true
+        }
         return .analysed
+    }
+
+    /// Takes in what other devices reported about `evidence.itemID`'s passwords, if it was matched against the
+    /// version the engine knows: kept for the schedule and the report, and every breach in it remembered in the
+    /// ledger (`ScanSchedule.recordReported`), where only this device's own later check removes it.
+    private static func takeIn(_ evidence: SyncedScanEvidence, to state: inout Resident, now: Date) -> Bool {
+        guard let analysis = state.analyses[evidence.itemID], analysis.version == evidence.itemVersion,
+            !state.gone.contains(evidence.itemID)
+        else { return false }
+        state.synced[evidence.itemID] = evidence
+        let tolerance = state.schedule.policy.clockTolerance
+        for password in analysis.passwords {
+            for observation in evidence.fields[password.fieldID] ?? [] {
+                guard let bounded = PasswordBreachEvidence.bounded(observation, now: now, tolerance: tolerance),
+                    case .found(let occurrences) = bounded.result
+                else { continue }
+                if state.schedule.recordReported(
+                    item: evidence.itemID, binding: password.ledgerBinding, occurrences: occurrences,
+                    at: bounded.scannedAt)
+                {
+                    state.ledgerChanged = true
+                }
+            }
+        }
+        return true
     }
 
     /// Runs `body` on the resident state, in place, or returns `nil` while locked. The state is taken out of the
@@ -294,9 +340,35 @@ public actor HygieneEngine: SharesExecutor {
         return body(&state)
     }
 
+    /// What other devices of the item's vault reported about its passwords (`SyncedScanEvidence.matching`), for the
+    /// version it was matched against.
+    ///
+    /// - Returns: `false` if the engine knows the item at another version, or not at all, and ignored it.
+    @discardableResult
+    public func updateSynced(_ evidence: SyncedScanEvidence, now: Date) throws -> Bool {
+        guard let taken = withResident({ Self.takeIn(evidence, to: &$0, now: now) }) else {
+            throw HygieneEngineError.locked
+        }
+        return taken
+    }
+
+    /// The ledger, if something other than a scan changed it since it was last handed out here (a breach another
+    /// device reported, a deferral to synced checks marked): for the session to seal and store, so that
+    /// what it says lasts across a restart. `nil` if nothing did.
+    public func takeChangedLedger() throws -> ScanLedger? {
+        guard let changed = resident?.ledgerChanged else { throw HygieneEngineError.locked }
+        guard changed else { return nil }
+        return withResident { state in
+            state.ledgerChanged = false
+            return state.schedule.ledger
+        }
+    }
+
     /// An item was permanently deleted. A copy of it from before the deletion is refused from now on.
     public func remove(_ id: UUID) {
         withResident { state in
+            state.synced[id] = nil
+            state.removed.insert(id)
             state.gone.insert(id)
             state.analyses[id] = nil
             state.reuse.remove(id)
@@ -321,10 +393,42 @@ public actor HygieneEngine: SharesExecutor {
         if loading { return .wait(until: now.addingTimeInterval(scanPolicy.requestSpacing), .analysing) }
         if scanning { return .wait(until: now.addingTimeInterval(scanPolicy.requestSpacing), .pacing) }
         let decision = withResident { state in
-            let candidates = state.analyses.values.filter { !$0.passwords.isEmpty }.map(\.candidate)
+            state.schedule.advance(now: now)
+            let candidates = state.analyses.values.filter { !$0.passwords.isEmpty }.map {
+                Self.candidate(for: $0, in: &state, now: now)
+            }
             return state.schedule.decide(candidates: candidates, keysResident: true, now: now)
         }
         return decision ?? .locked
+    }
+
+    /// The item as the schedule sees it: when its passwords were last checked, by this device or, for a bounded
+    /// time, by others (ADR 0005, amendment of 2026-11-16).
+    ///
+    /// This device's own checks count first. Synced checks count only where they would make the item not due when
+    /// this device's own would not, and then for at most `ScanPolicy.maximumSyncDeferral` in all
+    /// (`ScanSchedule.syncDeferral`); each is dated no later than now and none further ahead than the clock's
+    /// tolerance, so a far-future scan time postpones nothing past the next pass.
+    private static func candidate(for analysis: ItemAnalysis, in state: inout Resident, now: Date) -> ScanCandidate {
+        let evidence = ItemBreachEvidence(
+            analysis, ledger: state.schedule.ledger, synced: state.synced[analysis.id], now: now,
+            tolerance: state.schedule.policy.clockTolerance)
+        // This device's own check of this very version is the ledger entry the schedule reads itself, by the pass;
+        // one of the same passwords at another version is handed in.
+        let versionChecked = state.schedule.ledger.entries[analysis.id]?.itemVersion == analysis.version
+        let own = ScanCandidate(
+            id: analysis.id, version: analysis.version, coveredAt: versionChecked ? nil : evidence.ownCoveredAt)
+        // Not due on this device's own checks (or no pass is in progress): nothing synced is standing in. A deferral
+        // already marked stays marked; only this device's own check ends it, so the limit counts from the first
+        // time synced checks stood in, however many passes come and go meanwhile.
+        guard state.schedule.reason(for: own, now: now) != nil else { return own }
+        guard let covered = evidence.coveredAt else { return own }
+        let synced = ScanCandidate(id: analysis.id, version: analysis.version, coveredAt: covered)
+        guard state.schedule.reason(for: synced, now: now) == nil else { return own }
+        let marked = state.schedule.isDeferring(analysis.id)
+        let deferring = state.schedule.syncDeferral(of: analysis.id, now: now) != nil
+        if !marked { state.ledgerChanged = true }
+        return deferring ? synced : own
     }
 
     /// Checks every password in `item` against Pwned Passwords and records the answers.
@@ -349,7 +453,8 @@ public actor HygieneEngine: SharesExecutor {
             guard let analysis = state.analyses[item.id], !analysis.passwords.isEmpty else { return .nothingToCheck }
             if let until = state.schedule.earliestStart(for: item.id, now: now) { return .deferred(until) }
             // The weekly pass asks the server again: a cached range from before the pass began does not count.
-            let weekly = state.schedule.reason(for: analysis.candidate, now: now) == .weekly
+            let candidate = Self.candidate(for: analysis, in: &state, now: now)
+            let weekly = state.schedule.reason(for: candidate, now: now) == .weekly
             return .go(freshAfter: weekly ? state.schedule.passInProgressSince : nil)
         }
         let freshAfter: Date?
@@ -410,9 +515,14 @@ public actor HygieneEngine: SharesExecutor {
             resident?.schedule.recordRequests(requests, now: now, jitter: jitter())
             return .stale
         }
+        let bindings = withResident { state in
+            Dictionary(
+                (state.analyses[item.id]?.passwords ?? []).map { ($0.fieldID, $0.ledgerBinding) },
+                uniquingKeysWith: { first, _ in first })
+        }
         resident?.schedule.recordScan(
-            item: item.id, version: item.version, results: results, networkRequests: requests, now: now,
-            jitter: jitter())
+            item: item.id, version: item.version, results: results, bindings: bindings ?? [:],
+            networkRequests: requests, now: now, jitter: jitter())
         return .scanned(breachedPasswords: breached, networkRequests: requests)
     }
 
@@ -457,7 +567,8 @@ public actor HygieneEngine: SharesExecutor {
         guard let state = resident else { throw HygieneEngineError.locked }
         guard !state.loading else { throw HygieneEngineError.analysing }
         return HygieneReport.make(
-            analyses: Array(state.analyses.values), ledger: state.schedule.ledger, now: now, policy: policy)
+            analyses: Array(state.analyses.values), ledger: state.schedule.ledger, now: now, policy: policy,
+            synced: state.synced, clockTolerance: scanPolicy.clockTolerance)
     }
 
     /// The scan ledger, for the session to seal and store. Throws while locked: with keys absent there is nothing

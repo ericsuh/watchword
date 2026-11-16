@@ -59,6 +59,7 @@ public struct SyncSettings: Sendable {
         transport: any SyncTransport,
         configuration: SyncConfiguration = SyncConfiguration(schemaVersions: [
             .item: ItemCodec.schemaVersion, .vaultMetadata: VaultMetadataCodec.schemaVersion,
+            .scanStatus: ScanStatusCodec.schemaVersion,
         ])
     ) {
         self.state = state
@@ -1157,9 +1158,12 @@ public actor VaultSession: SharesExecutor {
         guard item.isTrashed else { throw VaultError.itemNotTrashed(id) }
         _ = try requireKeys()
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
-        // Conditional on the version just read, so a restore that lands in between is not silently undone.
+        // Conditional on the version just read, so a restore that lands in between is not silently undone. The item's
+        // synced scan results go with it (§13.9).
         try await writer(for: record).commit(
-            StoreChange(conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
+            StoreChange(
+                deletions: try await scanStatusKeys(of: [id]),
+                conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
     }
 
     /// Deletes items that have been in the trash for 30 days (PRD F1.5). Run after every password unlock. Not a
@@ -1175,6 +1179,7 @@ public actor VaultSession: SharesExecutor {
         guard !expired.isEmpty, let record = try await loadAccount() else { return }
         try await writer(for: record).commit(
             StoreChange(
+                deletions: try await scanStatusKeys(of: expired.map(\.id)),
                 conditionalDeletions: Dictionary(
                     uniqueKeysWithValues: expired.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
     }

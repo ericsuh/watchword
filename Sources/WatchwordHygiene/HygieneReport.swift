@@ -94,6 +94,8 @@ public struct ItemHygiene: Hashable, Sendable, Identifiable {
     /// Most severe first.
     public let badges: [HygieneBadge]
     public let breachStatus: BreachStatus
+    /// Whose checks the breach status rests on; `nil` while it is `notApplicable` or `notChecked`.
+    public let breachSource: BreachSource?
 
     /// The worst finding's severity, or `nil` if there is none.
     public var severity: HygieneSeverity? {
@@ -146,9 +148,14 @@ public struct HygieneReport: Hashable, Sendable {
     ///
     /// - Parameters:
     ///   - analyses: one per item (not trashed), in any order.
-    ///   - ledger: breach results; one counts only if it is for the item's current version.
+    ///   - ledger: this device's breach results; one counts for the password it judged (by binding), or, in an entry
+    ///     from before bindings were kept, for the item version it was made for.
+    ///   - synced: what other devices of each item's vault reported (`SyncedScanEvidence`), for the item version it
+    ///     was matched against. A synced "not found" counts as a check and never outweighs a breach.
+    ///   - clockTolerance: a synced check dated further ahead of `now` than this is ignored.
     public static func make(
-        analyses: [ItemAnalysis], ledger: ScanLedger, now: Date, policy: HygienePolicy = HygienePolicy()
+        analyses: [ItemAnalysis], ledger: ScanLedger, now: Date, policy: HygienePolicy = HygienePolicy(),
+        synced: [UUID: SyncedScanEvidence] = [:], clockTolerance: TimeInterval = ScanPolicy.standard.clockTolerance
     ) -> HygieneReport {
         var reuse = ReuseIndex()
         for analysis in analyses { reuse.set(analysis.reuseTokens, for: analysis.id) }
@@ -161,10 +168,14 @@ public struct HygieneReport: Hashable, Sendable {
         var passwords = 0
         for analysis in analyses {
             passwords += analysis.passwords.count
-            let entry = ledger.entries[analysis.id].flatMap { $0.itemVersion == analysis.version ? $0 : nil }
-            let item = itemHygiene(analysis, entry: entry, reuse: reuse, now: now, policy: policy)
-            if case .notChecked = item.breachStatus { awaiting += 1 }
-            if let entry, !analysis.passwords.isEmpty { oldest = min(oldest ?? entry.scannedAt, entry.scannedAt) }
+            let evidence = ItemBreachEvidence(
+                analysis, ledger: ledger, synced: synced[analysis.id], now: now, tolerance: clockTolerance)
+            let item = itemHygiene(analysis, evidence: evidence, reuse: reuse, now: now, policy: policy)
+            switch item.breachStatus {
+            case .notChecked: awaiting += 1
+            case .breached(let at), .clear(let at), .incomplete(let at): oldest = min(oldest ?? at, at)
+            case .notApplicable: break
+            }
             for kind in Set(item.findings.map(\.kind)) { byKind[kind, default: 0] += 1 }
             if let severity = item.severity { bySeverity[severity, default: 0] += 1 }
             items.append(item)
@@ -189,20 +200,18 @@ public struct HygieneReport: Hashable, Sendable {
     }
 
     private static func itemHygiene(
-        _ analysis: ItemAnalysis, entry: ScanLedger.Entry?, reuse: ReuseIndex, now: Date, policy: HygienePolicy
+        _ analysis: ItemAnalysis, evidence: ItemBreachEvidence, reuse: ReuseIndex, now: Date, policy: HygienePolicy
     ) -> ItemHygiene {
         var findings: [HygieneFinding] = []
-        var breached = false
-        var unchecked = false
-        for password in analysis.passwords {
-            switch entry?.results[password.fieldID] {
-            case .found(let occurrences):
-                breached = true
-                findings.append(.breached(field: password.fieldID, occurrences: occurrences))
-            case .notFound:
-                break
-            case nil:
-                unchecked = true
+        var breachedAt: Date?
+        var breachSeenHere = false
+        for (password, known) in zip(analysis.passwords, evidence.passwords) {
+            if let breach = known.breach {
+                breachedAt = max(breachedAt ?? breach.at, breach.at)
+                breachSeenHere = breachSeenHere || breach.ownFinding
+                findings.append(
+                    .breached(
+                        field: password.fieldID, occurrences: breach.occurrences, reportedBySync: !breach.ownFinding))
             }
             let others = reuse.items(sharing: password.reuseToken, besides: analysis.id)
             if !others.isEmpty { findings.append(.reused(field: password.fieldID, sharedWith: others)) }
@@ -244,27 +253,29 @@ public struct HygieneReport: Hashable, Sendable {
             return lhs.kind < rhs.kind
         }
         let status: BreachStatus
+        var source: BreachSource?
         if analysis.passwords.isEmpty {
             status = .notApplicable
-        } else if let entry, breached {
-            status = .breached(checkedAt: entry.scannedAt)
-        } else if let entry, !unchecked {
+        } else if let breachedAt {
+            status = .breached(checkedAt: breachedAt)
+            source = breachSeenHere ? .thisDevice : .anotherDevice
+        } else if let checkedAt = evidence.coveredAt {
             // "Clear" is a statement about every password in the item, so it is not made when some were never
-            // looked at.
+            // looked at, by this device or another.
             status =
-                analysis.passwordsNotAnalysed > 0
-                ? .incomplete(checkedAt: entry.scannedAt) : .clear(checkedAt: entry.scannedAt)
+                analysis.passwordsNotAnalysed > 0 ? .incomplete(checkedAt: checkedAt) : .clear(checkedAt: checkedAt)
+            source = evidence.ownCoveredAt == nil ? .anotherDevice : .thisDevice
         } else {
             status = .notChecked
         }
         return ItemHygiene(
             id: analysis.id, title: analysis.title, isArchived: analysis.isArchived, findings: findings,
-            badges: badges, breachStatus: status)
+            badges: badges, breachStatus: status, breachSource: source)
     }
 }
 
 extension HygieneFinding {
-    static func breached(field: UUID, occurrences: UInt32) -> HygieneFinding {
+    static func breached(field: UUID, occurrences: UInt32, reportedBySync: Bool = false) -> HygieneFinding {
         let times: String
         if occurrences == UInt32.max {
             times = "more than four billion times"
@@ -275,8 +286,10 @@ extension HygieneFinding {
         }
         return HygieneFinding(
             kind: .breachedPassword, severity: .critical, fieldID: field, summary: "Password found in a data breach",
-            explanation: "This password appears in known data breaches (\(times)), so it is on the lists attackers "
-                + "try first. Change it now, here and anywhere else it was used.",
+            explanation: (reportedBySync
+                ? "Another device that shares this vault found this password in known data breaches (\(times)), "
+                : "This password appears in known data breaches (\(times)), ")
+                + "so it is on the lists attackers try first. Change it now, here and anywhere else it was used.",
             detail: .breached(occurrences: occurrences))
     }
 
