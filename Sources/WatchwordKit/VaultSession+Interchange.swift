@@ -163,6 +163,18 @@ enum ArchivePayload {
     static let vault: UInt8 = 1
     static let item: UInt8 = 2
     static let maximumVaultNameBytes = 1024
+
+    /// `name`'s UTF-8, cut to at most `maximumVaultNameBytes` at a scalar boundary: a cut through a scalar would
+    /// leave bytes that do not decode, and the restore would then lose the whole name.
+    static func vaultName(_ name: String) -> [UInt8] {
+        var bytes: [UInt8] = []
+        for scalar in name.unicodeScalars {
+            let encoded = Array(String(scalar).utf8)
+            guard bytes.count + encoded.count <= maximumVaultNameBytes else { break }
+            bytes += encoded
+        }
+        return bytes
+    }
 }
 
 extension VaultSession {
@@ -395,7 +407,7 @@ extension VaultSession {
             payload: { index in
                 guard index >= vaults.count else {
                     let vault = vaults[index]
-                    let name = Array(vault.name.utf8.prefix(ArchivePayload.maximumVaultNameBytes))
+                    let name = ArchivePayload.vaultName(vault.name)
                     return SecureBytes(copying: [ArchivePayload.vault] + Self.bytes(vault.id) + name)
                 }
                 let encoded = try ItemCodec.encode(items[index - vaults.count])
@@ -576,9 +588,13 @@ extension VaultSession {
             case ArchivePayload.vault:
                 // A vault's ID and name: metadata, not key material.
                 let bytes = payload.unprotectedCopy()
+                // One that does not parse is listed as skipped (§14.1), never dropped in silence.
                 guard bytes.count >= 17, bytes.count - 17 <= ArchivePayload.maximumVaultNameBytes,
                     let name = String(bytes: bytes[17...], encoding: .utf8)
-                else { return }
+                else {
+                    entries.append(ArchivedEntry(.unreadable))
+                    return
+                }
                 names[Self.uuid(Array(bytes[1..<17]))] = name
             case ArchivePayload.item:
                 let encoded = payload.extracting(1..<payload.count)

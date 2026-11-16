@@ -150,4 +150,56 @@ struct InterchangeSessionReviewTests {
         let outcome = try await vault.session.commitImport(second.id, decisions: [:])
         #expect(outcome.created.count == 1)
     }
+
+    /// A vault name longer than an archive's vault entry holds is cut at a scalar boundary: cut through a scalar, the
+    /// entry's bytes would not decode and the restore would lose the name (every item's `container`).
+    @Test("a long vault name is cut at a scalar boundary and survives a restore")
+    func longVaultName() async throws {
+        let (vault, _) = try await InterchangeSessionTests.unlockedVault()
+        // 1 + 255 × 8 bytes: the 1,024-byte cut falls inside the skin-tone modifier of the 128th thumb.
+        let name = "a" + String(repeating: "\u{1F44D}\u{1F3FD}", count: 255)
+        #expect(name.count == 256 && name.utf8.count > ArchivePayload.maximumVaultNameBytes)
+        let long = try await vault.session.createVault(name: name)
+        try await vault.session.save(InterchangeSessionTests.bankItem(long.id))
+        let archive = try await vault.session.exportArchive(
+            vaults: [long.id], passphrase: Self.passphrase, password: TestVault.password)
+        let preview = try await vault.session.previewArchiveImport(
+            archive.bytes, passphrase: Self.passphrase, into: long.id)
+        let container = try #require(preview.entries.first?.reference.container)
+        #expect(name.unicodeScalars.starts(with: container.unicodeScalars))
+        // Everything up to the scalar the cut would have split: "a", 127 whole thumbs, and one without its modifier.
+        let kept = 1_021
+        #expect(container.utf8.count == kept)
+        #expect(ArchivePayload.vaultName("short") == Array("short".utf8))
+        await vault.session.discardImport()
+    }
+
+    /// An archive's vault entry that does not parse (too short, or a name that is not UTF-8) is listed in the report
+    /// as skipped (docs/02-architecture.md §14.1), never dropped in silence; the items beside it are imported.
+    @Test("a malformed vault entry in an archive is listed as skipped")
+    func malformedVaultEntry() async throws {
+        let (vault, personal) = try await InterchangeSessionTests.unlockedVault()
+        let key = SecretKey.generate()
+        var generator = SeededGenerator(seed: 31)
+        let item = try ItemCodec.encode(InterchangeSessionTests.bankItem(UUID()))
+        defer { item.zeroise() }
+        let payloads: [[UInt8]] = [
+            [ArchivePayload.vault, 1, 2, 3],
+            [ArchivePayload.vault] + [UInt8](repeating: 7, count: 16) + [0xFF, 0xFE],
+        ]
+        let archive = try AccountArchive.seal(
+            entryCount: 3,
+            payload: { index in
+                index < 2
+                    ? SecureBytes(copying: payloads[index])
+                    : SecureBytes.concatenating([SecureBytes(copying: [ArchivePayload.item]), item])
+            }, archiveID: UUID(), accountID: UUID(), createdAt: Date(timeIntervalSince1970: 1_800_000_000),
+            passphrase: Self.passphrase, secretKey: key, parameters: .baseline, using: &generator)
+        let preview = try await vault.session.previewArchiveImport(
+            archive, passphrase: Self.passphrase, secretKey: key.formatted, into: personal)
+        #expect(preview.report.skipped.count == 2)
+        #expect(preview.report.skipped.allSatisfy { if case .malformed = $0.reason { true } else { false } })
+        #expect(preview.entries.map(\.title) == ["Bank"])
+        await vault.session.discardImport()
+    }
 }

@@ -2476,7 +2476,8 @@ The price is that restoring an archive needs the Emergency Kit, which restoring 
 iterations are the session's (`KDFStrategy`: calibrated, at least the floor).
 
 Each entry's plaintext is a type byte and its content: `1` a vault (its ID and name, so an import can say which vault
-an item came from), `2` an item exactly as `ItemCodec` stores it, history, trash, archived mark and unresolved
+an item came from; the name's UTF-8 cut to 1,024 bytes at a scalar boundary, so it always decodes, and an entry
+that does not parse is listed as skipped), `2` an item exactly as `ItemCodec` stores it, history, trash, archived mark and unresolved
 values included. `exportArchive(vaults:passphrase:password:)` requires the account password like a plaintext export
 (someone holding an unlocked device must not be able to take the vault away under a passphrase of their own).
 
