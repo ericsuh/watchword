@@ -43,7 +43,7 @@ struct ConflictSection: View {
                                     Task { await model.resolveConflict(item, group: group, choosing: value) }
                                 }
                                 .buttonStyle(.borderless)
-                                .disabled(model.isWorking)
+                                .disabled(model.isWorking || model.readOnlyReason(item.vaultID) != nil)
                                 .accessibilityIdentifier("conflict.\(name).\(index)")
                             }
                         }

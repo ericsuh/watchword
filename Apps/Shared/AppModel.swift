@@ -3,10 +3,15 @@ import Observation
 import WatchwordCrypto
 import WatchwordKit
 import WatchwordModel
+import WatchwordPresentation
+import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
 
-/// UI state over a `VaultSession`. Holds decrypted items only while unlocked and drops them on every lock.
+/// UI state over a `VaultSession`. Holds decrypted items only while unlocked and drops them on every lock. The screens
+/// added after milestone 2 keep their state in `WatchwordPresentation`'s models, which get the session through
+/// `screenContext`; what lives here is what more than one screen needs: the phase, the items, the vaults and the last
+/// sync.
 @MainActor
 @Observable
 final class AppModel {
@@ -24,8 +29,17 @@ final class AppModel {
     private(set) var unreadableCount = 0
     private(set) var quickUnlockEnabled = false
     private(set) var quickUnlockAllowed = false
-    /// What the last sync did, in words, for Settings.
-    private(set) var syncStatus: String?
+    /// The account's vaults, with each shared vault's standing, for the list's filter and for read-only vaults.
+    private(set) var vaults: [VaultRow] = []
+    /// The vault the item list shows; `nil` for every vault.
+    var vaultFilter: UUID?
+    /// What the last sync did, for Settings.
+    private(set) var lastSync: SyncSummary?
+    /// The last unlock was refused because the account password was changed on another device (PRD F10.1). The unlock
+    /// screen then offers the way out for a person who did not make that change (docs/02-architecture.md §7.8).
+    private(set) var passwordChangedElsewhere = false
+    /// Whether this build checks passwords against Pwned Passwords (only UI-test builds, until the network adapter).
+    let breachChecksAvailable: Bool
     var errorMessage: String?
     var isWorking = false
 
@@ -33,19 +47,28 @@ final class AppModel {
     #if DEBUG
         private(set) var uiTestPeer: UITestPeer?
         private(set) var uiTestPeerStatus: String?
+        private var uiTestSharing: SharingSettings?
+        /// The last invitation the app issued, for the hook that has the other person accept it.
+        var uiTestInvitation: Invitation?
+        /// The last archive the app exported, for the restore screen's UI-test source.
+        var uiTestArchive: [UInt8]?
     #endif
 
     init(environment: AppEnvironment) {
         switch environment {
         case .ready(let session):
             self.session = session
+            breachChecksAvailable = false
         #if DEBUG
-            case .uiTest(let session, let peer):
+            case .uiTest(let session, let peer, let sharing):
                 self.session = session
                 uiTestPeer = peer
+                uiTestSharing = sharing
+                breachChecksAvailable = true
         #endif
         case .unavailable(let message):
             session = nil
+            breachChecksAvailable = false
             phase = .unavailable(message)
         }
     }
@@ -53,8 +76,21 @@ final class AppModel {
     var personalVaultID: UUID?
     private var monitoring = false
 
+    /// What the screen models are given: the session, activity for auto-lock, and a way to report a lock.
+    var screenContext: ScreenContext? {
+        guard let session else { return nil }
+        return ScreenContext(
+            session: session, recordActivity: { [weak self] in self?.recordActivity() },
+            didLock: { [weak self] in self?.didLock(.requested) })
+    }
+
+    var syncStatus: String? { lastSync?.headline }
+
     func start() async {
         guard let session else { return }
+        #if DEBUG
+            if let uiTestSharing { await session.configureSharing(uiTestSharing) }
+        #endif
         startMonitoring()
         do {
             let status = try await session.status()
@@ -126,9 +162,25 @@ final class AppModel {
     }
 
     func unlock(password: String) async {
+        await unlock(password: password, ignoringPasswordChange: false)
+    }
+
+    /// For the person who did not change the password elsewhere: unlocks with the password this device still has, so
+    /// they can remove the device that changed it and choose a password of their own (§7.8).
+    func unlockIgnoringPasswordChange(password: String) async {
+        await unlock(password: password, ignoringPasswordChange: true)
+    }
+
+    private func unlock(password: String, ignoringPasswordChange: Bool) async {
         guard let session else { return }
         await perform {
-            try await session.unlock(password: password)
+            do {
+                try await session.unlock(password: password, ignoringPasswordChange: ignoringPasswordChange)
+            } catch VaultError.passwordChangedOnAnotherDevice {
+                self.passwordChangedElsewhere = true
+                throw VaultError.passwordChangedOnAnotherDevice
+            }
+            self.passwordChangedElsewhere = false
             try await self.enterVault()
         }
     }
@@ -165,6 +217,7 @@ final class AppModel {
     /// to the app they are pasting into; the copy still expires after 60 s (F5.6).
     private func didLock(_ reason: LockReason) {
         items = []
+        vaults = []
         unreadableCount = 0
         switch phase {
         case .unlocked, .emergencyKit: phase = .locked
@@ -173,6 +226,9 @@ final class AppModel {
         if reason != .backgrounded {
             Clipboard.clearIfOurs()
         }
+        #if DEBUG
+            uiTestArchive = nil
+        #endif
         Task { await refreshStatus() }
     }
 
@@ -200,14 +256,49 @@ final class AppModel {
         }
     }
 
-    // MARK: Items
+    // MARK: Items and vaults
 
     func reload() async throws {
         guard let session else { return }
         let listing = try await session.items()
         items = listing.items.filter { !$0.isTrashed }
         unreadableCount = listing.unreadable.count
+        try await reloadVaults()
         phase = .unlocked
+    }
+
+    /// The vaults and each shared vault's standing (PRD F2.1, F4.5).
+    func reloadVaults() async throws {
+        guard let session else { return }
+        let infos = try await session.vaults()
+        var shared: [UUID: VaultSharing] = [:]
+        for id in (try? await session.sharedVaultIDs()) ?? [] {
+            if let status = try? await session.sharedVaultStatus(id) { shared[id] = VaultSharing(status) }
+        }
+        vaults = infos.map { VaultRow($0, sharing: shared[$0.id]) }
+        if let vaultFilter, !vaults.contains(where: { $0.id == vaultFilter }) { self.vaultFilter = nil }
+    }
+
+    /// The items the list shows: the chosen vault's, or every vault's.
+    var listedItems: [Item] {
+        guard let vaultFilter else { return items }
+        return items.filter { $0.vaultID == vaultFilter }
+    }
+
+    func vault(_ id: UUID) -> VaultRow? {
+        vaults.first { $0.id == id }
+    }
+
+    /// Why `vaultID` cannot be written to by this account now, or `nil` (PRD F4.5; §8.9). The session refuses such a
+    /// write whatever the screen offers; this is what the screen says instead of offering it.
+    func readOnlyReason(_ vaultID: UUID) -> String? {
+        vault(vaultID)?.sharing?.readOnlyReason
+    }
+
+    /// Where a new item goes: the vault the list shows, if this account may write to it, else Personal.
+    var newItemVaultID: UUID? {
+        if let vaultFilter, readOnlyReason(vaultFilter) == nil { return vaultFilter }
+        return personalVaultID
     }
 
     func save(_ item: Item) async -> Bool {
@@ -237,10 +328,13 @@ final class AppModel {
 
     func syncNow() async {
         guard let session, session.isSyncConfigured else { return }
-        syncStatus = nil
+        lastSync = nil
         await perform {
-            let report = try await session.sync()
-            self.syncStatus = Self.describe(report)
+            let report = try await session.syncAll()
+            let devices = (try? await session.devices()) ?? []
+            let names = Dictionary(
+                devices.map { ($0.id, DeviceRow.displayName($0)) }, uniquingKeysWith: { first, _ in first })
+            self.lastSync = SyncSummary(report, deviceNames: names)
             if self.phase == .unlocked { try await self.reload() }
         }
     }
@@ -255,35 +349,67 @@ final class AppModel {
     }
 
     #if DEBUG
-        /// UI tests only: the simulated other device renames every item, as if edited there.
+        // MARK: UI-test hooks (Debug builds launched with --uitest only)
+
+        /// The simulated other device renames every item, as if edited there.
         func renameOnOtherDevice() async {
+            await onOtherDevice("Renamed on the other device.") { peer, kit in
+                try await peer.renameItems(appending: " elsewhere", kit: kit)
+            }
+        }
+
+        /// The other device joins the account, so the Devices screen has one to remove.
+        func joinOtherDevice() async {
+            await onOtherDevice("The other device joined.") { peer, kit in try await peer.join(kit: kit) }
+        }
+
+        /// The other device changes the account password to `UITestPeer.changedPassword`.
+        func changePasswordOnOtherDevice() async {
+            await onOtherDevice("The password was changed on the other device.") { peer, kit in
+                try await peer.changePassword(kit: kit)
+            }
+        }
+
+        /// The other device writes a version this one holds aside.
+        func makeImplausibleEditOnOtherDevice() async {
+            await onOtherDevice("The other device made an implausible edit.") { peer, kit in
+                try await peer.makeImplausibleEdit(kit: kit)
+            }
+        }
+
+        private func onOtherDevice(
+            _ done: String, _ body: @escaping @Sendable (UITestPeer, EmergencyKit) async throws -> Void
+        ) async {
             guard let uiTestPeer, let session else { return }
             uiTestPeerStatus = nil
             await perform {
                 let kit = try await session.emergencyKit()
-                try await uiTestPeer.renameItems(appending: " elsewhere", kit: kit)
-                self.uiTestPeerStatus = "Renamed on the other device."
+                try await body(uiTestPeer, kit)
+                self.uiTestPeerStatus = done
+            }
+        }
+
+        /// The other person's account ID, for the invite screen to fill in.
+        func householdAccountID() async -> String? {
+            guard let uiTestPeer, let session else { return nil }
+            do {
+                return try await uiTestPeer.householdAccountID(publishing: session.publicKeyBundle()).uuidString
+            } catch {
+                show(error)
+                return nil
+            }
+        }
+
+        /// The other person accepts the last invitation the app issued.
+        func householdAcceptsInvitation() async {
+            guard let uiTestPeer, let invitation = uiTestInvitation else { return }
+            uiTestPeerStatus = nil
+            await perform {
+                try await uiTestPeer.acceptInvitation(invitation)
+                self.uiTestPeerStatus = "The other person accepted the invitation."
             }
         }
     #endif
-
-    static func describe(_ report: SyncReport) -> String {
-        if report.transportUnavailable { return "Sync storage could not be reached. Nothing was sent." }
-        if !report.rejected.isEmpty, report.rejected.allSatisfy({ $0.reason == .keyring(.trustedKeyUnavailable) }) {
-            return "Changes will be downloaded and checked after you unlock."
-        }
-        if report.deferredUntilUnlock { return "Changes were downloaded and will be applied when you unlock." }
-        var parts: [String] = []
-        if report.applied > 0 { parts.append("\(report.applied) change(s) received") }
-        if report.pushedEntries > 0 { parts.append("\(report.pushedEntries) change(s) sent") }
-        if !report.rejected.isEmpty {
-            parts.append("\(report.rejected.count) object(s) failed verification and were ignored")
-        }
-        if !report.quarantined.isEmpty {
-            parts.append("\(report.quarantined.count) implausible change(s) held for review")
-        }
-        return parts.isEmpty ? "Up to date." : parts.joined(separator: "; ") + "."
-    }
 
     func emergencyKit() async -> EmergencyKit? {
         guard let session else { return nil }
@@ -313,40 +439,6 @@ final class AppModel {
         if case VaultError.locked = error {
             didLock(.requested)
         }
-        errorMessage = Self.message(for: error)
-    }
-
-    static func message(for error: Error) -> String {
-        switch error {
-        case CryptoError.authenticationFailed:
-            return "Incorrect password."
-        case VaultError.passwordTooShort(let minimum):
-            return "Use at least \(minimum) characters."
-        case VaultError.secretKeyMissing:
-            return "This device does not have your Secret Key. Enter it from your Emergency Kit."
-        case VaultError.scopeRejected:
-            return "That website address is too broad. Enter the site's own domain, such as example.com."
-        case VaultError.quickUnlockRefused(let reason):
-            switch reason {
-            case .enrolmentChanged:
-                return "Biometric settings changed. Enter your password, then turn quick unlock on again."
-            case .biometryUnavailable:
-                return "Biometric unlock is not available on this device."
-            default:
-                return "Enter your account password."
-            }
-        case VaultError.biometricAuthenticationFailed:
-            return "Not recognised. Try again or enter your password."
-        case KeychainError.userCancelled:
-            return ""
-        case SyncError.syncInProgress:
-            return "A sync is already running."
-        case VaultError.conflictValueNotHeld:
-            return "That choice is no longer available. Review the item and try again."
-        case RecordStoreError.versionConflict:
-            return "This item changed while you were editing it. Review it and try again."
-        default:
-            return "Something went wrong. Your vault is unchanged."
-        }
+        errorMessage = ErrorWording.message(for: error)
     }
 }
