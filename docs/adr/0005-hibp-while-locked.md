@@ -55,3 +55,51 @@ the lock still backs the scanner off.
 Unchanged: scanning needs the plaintext, so it runs only while keys are resident; a scan a lock interrupts
 resumes at the next unlock; with keys absent nothing is hashed, and a response that arrives after a lock is
 discarded without being cached.
+
+## Amendment (owner decision 10, 2026-11-16): results are synced with the vault
+
+The owner's decision, verbatim: "Store and sync them with the items, with scan times synced. That way every client is
+not repeating the checks too much, except for races, which are fine." Confirmed follow-up rule: **a synced "clear" only
+postpones this device's next check, and never hides a breach this device has seen.**
+
+This replaces "per-device, unsynced" for breach results and scan times, and nothing else: scanning still needs the
+plaintext and runs only while keys are resident, the prefix cache stays in memory (or sealed on the device) and is
+never synced, and the ledger stays a sealed, per-device, unsynced record. Representation (`02-architecture.md` §13.9):
+
+- **A record kind of its own, beside the item.** `EnvelopeKind.scanStatus` (10; no raw value renumbered), record ID
+  the item's, in the item's own vault, sealed under that vault's key with the usual context (record, vault, kind,
+  key, version), so a record moved to another item or vault, or replayed at another version, does not open. It is
+  never an item version: a check adds no history entry (F1.4 keeps item history unpruned, so weekly results there
+  would grow without end), makes no conflict, and never reaches `ItemMerge`. It is deleted with its item (permanent
+  deletion, the trash purge, a move's original, a vault's deletion), explicitly, through the deletion-recording store.
+- **A join, per device.** The record (`SyncedScanRecord`) maps each device to its latest observation: when it checked,
+  and per password whether it was found and how often. Each device writes only its own; the merge keeps, per device,
+  the higher revision, and at most 32 devices (the highest revisions). Commutative, associative, idempotent.
+- **Bound to the password, under a vault-derived key.** Each result is under a `ScanBinding`,
+  `HMAC-SHA-256(K, "WW-scan-binding-v1" ‖ 0x00 ‖ itemID ‖ password)`, where `K` is derived from the vault key the
+  observation names (`HKDF(vault key, vaultID ‖ keyID, "WW-hygiene-scan-binding-v1")`). Never a bare hash: without
+  that vault key a binding confirms no guess. A changed password has a new binding, so no old result covers it; an
+  edit that leaves the password leaves its result standing. The observation names its key, so a rotation's re-seal
+  keeps results valid.
+- **What a synced result is worth.** A remote "not found" counts as a check and nothing more. Synced times further than
+  the clock tolerance (five minutes) ahead are ignored and the rest count as no later than now, so one check postpones
+  this device's own by at most an interval; and synced checks together stand in for this device's own check of an item
+  for at most `maximumSyncDeferral` (28 days, then the pass that ends it), however often a member reports "not found".
+  A remote "found" is shown, labelled as another device's (`BreachSource.anotherDevice`), and remembered in this
+  device's ledger (`ScanLedger.reported`), where only this device's own later check of the password removes it. This
+  device's own results are read only from its own sealed ledger, never back from the synced record, so no record
+  anyone else writes can remove a breach this device saw.
+- **The ledger gains keyed digests.** Entries keep the binding of each password checked (under a key derived from the
+  reuse key, which no vault rotation changes), plus the reports taken in and the deferral marks. The ledger is sealed
+  under the device-local key; whoever can open it holds the keyset and could decrypt the items, so this weakens
+  nothing. It still holds no hash or prefix.
+- **Shared vaults.** Results are records like any other: a read-only member writes none, the write judge attributes
+  each observation to its device and revision (S28: a removed member's late observation counts nowhere), and a
+  rotation re-seals them.
+
+Consequences: a household's devices check each password about once per interval between them, not once each; races
+(two devices checking at once) cost a duplicate request and nothing else. A vault member can make a breached password
+look clear on another device that has not checked it for at most the deferral limit, which is no worse than what a
+member who can read and change the password can already do, and cannot hide a breach that device saw. Results reach
+every member of the vault, who can read the passwords anyway. A client that does not know the kind refuses segments
+carrying it; the repository has no released clients, so no migration is provided.

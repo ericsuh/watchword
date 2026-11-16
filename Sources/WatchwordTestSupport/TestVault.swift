@@ -34,7 +34,8 @@ public struct TestVault: Sendable {
         sync: SyncSettings? = nil,
         seed: UInt64 = 7,
         deviceName: String = "",
-        deviceKeys: (any DeviceKeyStore)? = nil
+        deviceKeys: (any DeviceKeyStore)? = nil,
+        hygiene: HygieneSettings? = nil
     ) {
         // The nightly seed varies every vault's randomness without making them all the same: two devices built from
         // one seed would share a device key, which the registry refuses.
@@ -53,7 +54,7 @@ public struct TestVault: Sendable {
             biometrics: biometrics,
             clock: clock,
             configuration: VaultConfiguration(
-                appVersion: appVersion, kdf: .fixed(.baseline), deviceName: deviceName),
+                appVersion: appVersion, kdf: .fixed(.baseline), deviceName: deviceName, hygiene: hygiene),
             sync: sync,
             deviceKeys: deviceKeys,
             random: SeededGenerator(seed: seed)
@@ -62,11 +63,12 @@ public struct TestVault: Sendable {
 
     /// A session that syncs over `transport`, with in-memory sync state.
     public static func syncing(
-        over transport: any SyncTransport, clock: FakeClock = FakeClock(), seed: UInt64 = 7, name: String = ""
+        over transport: any SyncTransport, clock: FakeClock = FakeClock(), seed: UInt64 = 7, name: String = "",
+        hygiene: HygieneSettings? = nil
     ) -> TestVault {
         TestVault(
             clock: clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport), seed: seed,
-            deviceName: name)
+            deviceName: name, hygiene: hygiene)
     }
 
     /// Another device of this vault's account, enrolled the way a real one is (PRD F5.2): this device publishes the
@@ -75,7 +77,7 @@ public struct TestVault: Sendable {
     /// device, so a test can address its stream. Returned locked, as a device is until someone unlocks it.
     public func enrolledDevice(
         deviceID: UUID, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64? = nil,
-        password: String = TestVault.password, name: String = ""
+        password: String = TestVault.password, name: String = "", hygiene: HygieneSettings? = nil
     ) async throws -> TestVault {
         try await session.sync()
         let kit = try await session.emergencyKit()
@@ -84,7 +86,7 @@ public struct TestVault: Sendable {
             seed ?? deviceID.uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }
         let device = TestVault(
             clock: clock ?? self.clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport),
-            seed: ownSeed, deviceName: name)
+            seed: ownSeed, deviceName: name, hygiene: hygiene)
         try await device.session.enrol(
             password: password, secretKey: kit.secretKey, accountID: kit.accountID, assigningDeviceID: deviceID)
         await device.session.lock()

@@ -54,6 +54,37 @@ public struct HygieneSessionFixture: Sendable {
             biometrics: biometrics, seed: seed)
     }
 
+    /// Hygiene settings over a fresh `FakeHTTPClient` that answers as `SimulatedPwnedPasswords` would, and a fresh
+    /// device-local store: for a `TestVault` that should check passwords (one per device).
+    public static func settings(
+        breached: [String: UInt32] = ["password": 3_861_493, "123456": 37_359_195], scanPolicy: ScanPolicy = .standard
+    ) async -> (settings: HygieneSettings, http: FakeHTTPClient) {
+        let http = FakeHTTPClient()
+        let simulated = SimulatedPwnedPasswords(breached: breached)
+        await http.respond { simulated.reply(to: $0) }
+        let settings = HygieneSettings(
+            http: http, userAgent: HygieneUserAgent(version: "1.0")!, localStore: InMemoryDeviceLocalStore(),
+            scanPolicy: scanPolicy)
+        return (settings, http)
+    }
+
+    /// Runs `session`'s scheduled step until nothing is due now, advancing `clock` past each wait (at most `limit`
+    /// steps). Returns the outcomes of the scans it ran.
+    @discardableResult
+    public static func scanUntilIdle(_ session: VaultSession, clock: FakeClock, limit: Int = 64) async throws
+        -> [ScanOutcome]
+    {
+        var outcomes: [ScanOutcome] = []
+        for _ in 0..<limit {
+            switch try await session.runHygieneStep() {
+            case .scanned(_, let outcome): outcomes.append(outcome)
+            case .wait(let until, _): await clock.set(until.addingTimeInterval(1))
+            case .idle: return outcomes
+            }
+        }
+        return outcomes
+    }
+
     /// A login with one password, scoped to `host`.
     public static func login(_ vaultID: UUID, title: String, host: String, password: String) -> Item {
         Item(

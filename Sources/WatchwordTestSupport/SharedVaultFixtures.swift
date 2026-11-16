@@ -37,9 +37,10 @@ public struct SharingAccount: Sendable {
     }
 
     public static func make(
-        over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory, seed: UInt64
+        over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory, seed: UInt64,
+        hygiene: HygieneSettings? = nil
     ) async throws -> SharingAccount {
-        let vault = TestVault.syncing(over: transport, seed: seed)
+        let vault = TestVault.syncing(over: transport, seed: seed, hygiene: hygiene)
         try await vault.createAccount()
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
@@ -73,8 +74,8 @@ public struct SharedVaultHousehold: Sendable {
 
     public init() {}
 
-    public func account(seed: UInt64) async throws -> SharingAccount {
-        try await SharingAccount.make(over: transport, directory: directory, seed: seed)
+    public func account(seed: UInt64, hygiene: HygieneSettings? = nil) async throws -> SharingAccount {
+        try await SharingAccount.make(over: transport, directory: directory, seed: seed, hygiene: hygiene)
     }
 
     /// An owner with a new shared vault called `name`, and one member per role, each invited and joined.
@@ -140,8 +141,10 @@ public actor WithholdingTransport: SyncTransport {
 
 extension SharedVaultHousehold {
     /// An account whose view of the transport the store controls.
-    public func withheldAccount(seed: UInt64) async throws -> (account: SharingAccount, view: WithholdingTransport) {
+    public func withheldAccount(seed: UInt64, hygiene: HygieneSettings? = nil) async throws -> (
+        account: SharingAccount, view: WithholdingTransport
+    ) {
         let view = WithholdingTransport(base: transport)
-        return (try await SharingAccount.make(over: view, directory: directory, seed: seed), view)
+        return (try await SharingAccount.make(over: view, directory: directory, seed: seed, hygiene: hygiene), view)
     }
 }

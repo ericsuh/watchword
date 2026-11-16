@@ -442,9 +442,11 @@ extension VaultSession {
             deletion: SignedObject(signature: signature, envelope: Self.deletionMarker))
         tombstone.version = max(tombstone.version, (existing?.version ?? 0) + 1)
         // Conditional on every version just counted, so an edit that lands in between fails the whole deletion.
+        // The items' synced scan results go with them (§13.9).
+        let scanStatus = try await store.records(in: id, kind: .scanStatus).map(\.key)
         try await writer(for: account).commit(
             StoreChange(
-                upserts: [tombstone],
+                upserts: [tombstone], deletions: scanStatus,
                 conditionalDeletions: Dictionary(uniqueKeysWithValues: rows.map { ($0.key, $0.version) })))
     }
 
@@ -589,8 +591,9 @@ extension VaultSession {
             highestVersionSeen[trashedRow.vaultID] = max(
                 highestVersionSeen[trashedRow.vaultID] ?? 0, trashedRow.version)
             // The move is done and committed. This completes it; if it fails, the original is in the trash.
+            let scanStatus = (try? await scanStatusKeys(of: [trashedRow.recordID])) ?? []
             try? await writer(for: account).commit(
-                StoreChange(conditionalDeletions: [trashedRow.key: trashedRow.version]))
+                StoreChange(deletions: scanStatus, conditionalDeletions: [trashedRow.key: trashedRow.version]))
         }
         return created
     }

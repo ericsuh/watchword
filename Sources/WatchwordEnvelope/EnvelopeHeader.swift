@@ -23,6 +23,10 @@ public enum EnvelopeKind: UInt8, Sendable, Hashable, CaseIterable {
     /// key, the manifest and every entry. A kind of its own, so nothing from an archive file can be presented as a
     /// record of the vault, or the reverse.
     case archive = 9
+    /// A vault's synced breach-check results for one item (docs/02-architecture.md §13.9), sealed under the vault key
+    /// beside the item, under the item's record ID. A kind of its own, so a result can never be presented as an item
+    /// version, or the reverse, and an item's history never holds one.
+    case scanStatus = 10
 }
 
 public enum EnvelopeError: Error, Equatable, Sendable {

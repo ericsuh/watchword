@@ -21,3 +21,4 @@ hygiene in the vault session
 shared vaults through the session
 encrypted Watchword archive
 interchange through the session
+synced breach-check results

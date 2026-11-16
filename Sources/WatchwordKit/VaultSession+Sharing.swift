@@ -714,7 +714,7 @@ extension VaultSession {
     /// The vault's live records as rotation sees them: only what counts, since what does not was taken out.
     func sharedInventory(_ vaultID: UUID) async throws -> [SealedRecordReference] {
         var inventory: [SealedRecordReference] = []
-        for kind in [EnvelopeKind.item, .vaultMetadata] {
+        for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
             for row in try await store.records(in: vaultID, kind: kind) {
                 inventory.append(
                     SealedRecordReference(recordID: row.recordID, kind: kind, keyID: row.keyID, version: row.version))
@@ -757,6 +757,14 @@ extension VaultSession {
                 try await writer(for: account).commit(
                     StoreChange(upserts: [sealed], expectations: [sealed.key: .version(row.version)]))
                 highestVersionSeen[vaultID] = max(highestVersionSeen[vaultID] ?? 0, revision.version)
+            case .scanStatus:
+                // Sealed again, not written: every observation keeps its device, revision and the key its bindings
+                // are under, which this device still holds (§13.9).
+                guard var record = try? openScanStatus(row, keys: current) else { continue }
+                record.version = revision.version
+                let sealed = try sealScanStatus(record, vaultKey: vaultKey, account: account)
+                try await writer(for: account).commit(
+                    StoreChange(upserts: [sealed], expectations: [sealed.key: .version(row.version)]))
             default:
                 continue
             }

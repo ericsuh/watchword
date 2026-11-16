@@ -154,7 +154,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   fingerprints, record sealing; device keys and signatures (`DevicePublicKey`, `DeviceSignatures`,
   `SoftwareDeviceKey`, `EnrolmentKey`), the device registry (`RegistryEntry`, `DeviceRegistry.evaluate`), the
   published account header (`AccountHeaderObject`), `DeviceLocalKeys` (the hygiene reuse key and the key and
-  record names of a device's unsynced local records), and the encrypted Watchword archive (`AccountArchive`,
+  record names of a device's unsynced local records), `HygieneKeys` (the binding key of a vault's synced scan
+  results, from a vault key), and the encrypted Watchword archive (`AccountArchive`,
   `ArchiveKeyDerivation`; ADR 0008), and `ForkedGenerator` (IDs for work off an actor). Depends on `SecureMemory` and
   `WatchwordEnvelope`.
 - **`WatchwordStore`** — the `RecordStore` port, `InMemoryRecordStore` and `SQLiteRecordStore` (the App Group
@@ -180,7 +181,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
 - **`WatchwordHygiene`** — milestone 6's portable core: `PwnedPasswordsClient` (the k-anonymity range API) and
   `BreachedAccountClient` over the `HTTPClient` port, the `PwnedRangeCache` port, `ScanSchedule`/`ScanLedger` (when to
   check, as a value), `StrengthEstimator` (zxcvbn-class, with embedded word lists), `ReuseIndex`, `ItemAnalyzer`,
-  the `SiteDirectory` seam, `HygieneReport`, and `HygieneEngine`, the actor the session drives between unlock and
+  the `SiteDirectory` seam, `HygieneReport`, `ScanBinding` and `SyncedScanRecord`/`SyncedScanEvidence` (results
+  synced with the vault, §13.9), and `HygieneEngine`, the actor the session drives between unlock and
   lock (`VaultSession+Hygiene.swift`). Depends on `WatchwordModel`, `SecureMemory` and `Crypto`; knows nothing of the
   session or the store.
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
@@ -193,7 +195,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   (`VaultSession+Sync.swift`); the session's conformance to `WatchwordAutoFill`'s `CredentialVault`
   (`VaultSession+AutoFill.swift`); and hygiene (`VaultSession+Hygiene.swift`: `HygieneSettings`, the
   `DeviceLocalStore` port with `InMemoryDeviceLocalStore`, the sealed prefix cache, `runHygieneStep()`,
-  `hygieneReport()`);
+  `hygieneReport()`; `VaultSession+HygieneSync.swift`: the `scanStatus` record, `ScanStatusCodec`, `ScanStatusMerger`,
+  writing this device's observations and matching other devices' against the items);
   shared vaults in `VaultSession+Sharing.swift` (the API a UI calls: verify, share,
   invite, accept, leave, change role, remove, rotate, status) and `VaultSession+SharingSync.swift` (the sync pass of
   §8.8, `sharedVerify`, and the `WriteJudge` that applies write cuts), over the `SharingStateStore` port
@@ -270,8 +273,18 @@ lists what is open (file protection and the screens, Credential Exchange, restor
   scan whose item changed while its requests were in flight records nothing.
 - "Clear" is about every password in the item: more than 16 password fields is `incomplete`, and two password
   fields sharing an ID share the worse result. An unknown result is never "not breached".
-- The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts). They are persisted only
-  sealed, per device, unsynced. Nothing here writes to disk.
+- The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts; bindings). They are
+  persisted only sealed, per device, unsynced. Nothing here writes to disk.
+- **Synced results only postpone, never hide** (owner decision 10; ADR 0005, amendment of 2026-11-16; §13.9). Results
+  and scan times are also synced, as `SyncedScanRecord` (kind `scanStatus`, beside the item, never an item version or
+  history entry), a join of each device's latest observation. Every result is under a `ScanBinding` (a keyed digest of
+  item and password, never a bare hash), so a changed password is never covered by an old result. This device's own
+  results come only from its sealed ledger, never back from a synced record. A synced "not found" is a check and
+  nothing more: times beyond `clockTolerance` ahead are ignored and the rest count as no later than now, and synced
+  checks stand in for this device's own for at most `maximumSyncDeferral` (`ScanLedger.deferred`, ended only by an
+  own check). A breach found elsewhere is shown (`breachSource`) and remembered (`ScanLedger.reported`) until this
+  device's own later check. `PasswordBreachEvidence` is the one place the report and the schedule weigh results:
+  don't read results anywhere else.
 - Nothing password-derived or identifying prints: digests, tokens, prefixes (`hex` is the accessor), assessments
   (the exact estimate is internal; a rank names a common password), analyses, ledgers, addresses, URLs
   (`absoluteString`) and header values (`HTTPHeaders.fields`) all have redacting descriptions and mirrors. A new
@@ -404,8 +417,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - A revoked device (`SyncKeyring.retiredAuthors`) is not read, not waited for by garbage collection or snapshot
   election (Y6), and what a device had merged from it is handed on in a snapshot of that device's own. Snapshot
   entries are always merged, stale coverage or not: merging is idempotent, and that snapshot may be the only carrier.
-- One engine per vault; a vault's log carries items and the vault's description, each merged by its own merger
-  (`KindRoutingMerger`). Never let a record of one kind reach another kind's merger.
+- One engine per vault; a vault's log carries items, the vault's description and the items' synced scan results
+  (`scanStatus`), each merged by its own merger (`KindRoutingMerger`). Never let a record of one kind reach another
+  kind's merger. A new kind needs a line in `SyncSettings`' default `schemaVersions`, the merger table, the shared
+  vault's `attributedValues`, `takeOutWhatNoLongerCounts`, `sharedInventory` and `resealSharedVault`.
 - Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
   `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
 
@@ -747,7 +762,8 @@ directions are tested; keep both when adjusting constants.
   `"local vault store"`, `"Keychain item protection"`, `"sync log"`, `"sync log, item metadata"`, `"sync with real keys"`,
   `"hygiene and breach checks"`, `"sharing and membership"`, `"import parsers"`,
   `"account enrolment and device registry"`, `"hygiene in the vault session"`,
-  `"shared vaults through the session"`, `"encrypted Watchword archive"`, `"interchange through the session"`), so **renaming a suite breaks CI deliberately** — update
+  `"shared vaults through the session"`, `"encrypted Watchword archive"`, `"interchange through the session"`,
+  `"synced breach-check results"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication

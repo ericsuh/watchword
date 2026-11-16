@@ -65,6 +65,8 @@ struct HygieneRuntime {
     struct Known: Hashable {
         var version: UInt64
         var inDeletedVault: Bool
+        /// The version of the item's scan-status row the engine's evidence was matched from (§13.9); `nil` for none.
+        var scanVersion: UInt64? = nil
     }
 
     let engine: HygieneEngine
@@ -237,27 +239,46 @@ extension VaultSession {
         let ledger = await loadScanLedger(since: epoch) ?? ScanLedger()
         let listing: ItemListing
         let deleted: Set<UUID>
+        let evidence: [SyncedScanEvidence]
+        var scanRows: [UUID: StoredRecord] = [:]
         do {
             listing = try await items()
             guard let account = try await loadAccount() else { throw VaultError.noAccount }
-            deleted = Set(try await vaultDirectory(account).filter { $0.value.isDeleted }.keys)
-            _ = try requireKeys(since: epoch)
+            let directory = try await vaultDirectory(account)
+            deleted = Set(directory.filter { $0.value.isDeleted }.keys)
+            for vaultID in directory.keys {
+                for row in try await store.records(in: vaultID, kind: .scanStatus) { scanRows[row.recordID] = row }
+            }
+            let keys = try requireKeys(since: epoch)
+            evidence = listing.items.compactMap { item in
+                scanRows[item.id].map { scanEvidence(for: item, row: $0, keys: keys, deviceID: account.deviceID) }
+            }
         } catch {
             reuseKey.zeroise()
             return
         }
         hygieneRuntime?.known = Dictionary(
             listing.items.map {
-                ($0.id, HygieneRuntime.Known(version: $0.version, inDeletedVault: deleted.contains($0.vaultID)))
+                (
+                    $0.id,
+                    HygieneRuntime.Known(
+                        version: $0.version, inDeletedVault: deleted.contains($0.vaultID),
+                        scanVersion: scanRows[$0.id].flatMap { [vaultID = $0.vaultID] in
+                            $0.vaultID == vaultID ? $0.version : nil
+                        })
+                )
             }, uniquingKeysWith: { first, _ in first })
         do {
-            try await engine.unlock(reuseKey: reuseKey, ledger: ledger, items: listing.items, now: await clock.now())
+            try await engine.unlock(
+                reuseKey: reuseKey, ledger: ledger, items: listing.items, synced: evidence, now: await clock.now())
         } catch {
             reuseKey.zeroise()
             return
         }
         guard epoch == lockEpoch, keys != nil else { return }
         hygieneRuntime?.readyEpoch = epoch
+        // Reports taken in from synced results are this device's to remember from now on (§13.9).
+        await storeChangedScanLedger(since: epoch)
     }
 
     /// Derives the device-local key from the keyset and this device's secret, which it reads from the Keychain
@@ -318,19 +339,27 @@ extension VaultSession {
         guard let account = try await loadAccount() else { return }
         let directory = try await vaultDirectory(account)
         var rows: [StoredRecord] = []
+        var scanRows: [UUID: StoredRecord] = [:]
         for vaultID in directory.keys {
             rows += try await store.records(in: vaultID, kind: .item)
+            for row in try await store.records(in: vaultID, kind: .scanStatus) { scanRows[row.recordID] = row }
         }
         let keys = try requireKeys(since: epoch)
         guard let known = hygieneRuntime?.known else { return }
+        let deviceID = account.deviceID
         var seen: Set<UUID> = []
-        var changed: [(Item, HygieneRuntime.Known)] = []
+        var changed: [(Item, HygieneRuntime.Known, SyncedScanEvidence)] = []
         for row in rows {
             seen.insert(row.recordID)
+            let scanRow = scanRows[row.recordID].flatMap { $0.vaultID == row.vaultID ? $0 : nil }
             let now = HygieneRuntime.Known(
-                version: row.version, inDeletedVault: directory[row.vaultID]?.isDeleted ?? false)
+                version: row.version, inDeletedVault: directory[row.vaultID]?.isDeleted ?? false,
+                scanVersion: scanRow?.version)
             guard known[row.recordID] != now, let item = try? openItem(row, keys: keys) else { continue }
-            changed.append((Self.presented(item, inDeletedVault: now.inDeletedVault), now))
+            // Only the results changed: the engine keeps its analysis and takes the new evidence.
+            let presented = Self.presented(item, inDeletedVault: now.inDeletedVault)
+            changed.append(
+                (presented, now, scanEvidence(for: presented, row: scanRow, keys: keys, deviceID: deviceID)))
         }
         let gone = Set(known.keys).subtracting(seen)
         for id in gone {
@@ -338,18 +367,33 @@ extension VaultSession {
             guard epoch == lockEpoch else { return }
             hygieneRuntime?.known[id] = nil
         }
-        for (item, state) in changed {
-            guard (try? await engine.update(item)) != nil, epoch == lockEpoch else { return }
+        let now = await clock.now()
+        guard epoch == lockEpoch else { return }
+        for (item, state, evidence) in changed {
+            let previous = hygieneRuntime?.known[item.id]
+            if previous?.version != state.version || previous?.inDeletedVault != state.inDeletedVault {
+                guard (try? await engine.update(item)) != nil, epoch == lockEpoch else { return }
+            }
+            guard (try? await engine.updateSynced(evidence, now: now)) != nil, epoch == lockEpoch else { return }
             hygieneRuntime?.known[item.id] = state
         }
+        if !changed.isEmpty { await storeChangedScanLedger(since: epoch) }
     }
 
-    /// After a commit of `item`: the engine sees the new version at once (an edit is due for a check).
+    /// After a commit of `item`: the engine sees the new version at once (an edit of a password is due for a check),
+    /// with what other devices reported about the passwords it holds now.
     func noteHygieneWrite(_ item: Item) async {
         let epoch = lockEpoch
         guard let engine = hygieneRuntime?.engine, hygieneRuntime?.readyEpoch == epoch else { return }
         guard (try? await engine.update(item)) != nil, epoch == lockEpoch else { return }
         hygieneRuntime?.known[item.id] = HygieneRuntime.Known(version: item.version, inDeletedVault: false)
+        guard let scanRow = try? await scanStatusRow(for: item), let account = try? await loadAccount() else { return }
+        let now = await clock.now()
+        guard epoch == lockEpoch, let keys else { return }
+        let evidence = scanEvidence(for: item, row: scanRow, keys: keys, deviceID: account.deviceID)
+        guard (try? await engine.updateSynced(evidence, now: now)) == true, epoch == lockEpoch else { return }
+        hygieneRuntime?.known[item.id]?.scanVersion = scanRow.version
+        await storeChangedScanLedger(since: epoch)
     }
 
     /// Erases the sealed ledger and cache: the account is being deleted.
@@ -390,7 +434,10 @@ extension VaultSession {
         let (engine, epoch) = try await readyHygiene()
         let now = await clock.now()
         _ = try requireKeys(since: epoch)
-        switch await engine.next(now: now) {
+        let decision = await engine.next(now: now)
+        // Deciding may have marked a deferral to synced checks (§13.9), which must last across a restart.
+        await storeChangedScanLedger(since: epoch)
+        switch decision {
         case .locked:
             throw VaultError.locked
         case .wait(let until, let reason):
@@ -409,7 +456,11 @@ extension VaultSession {
             _ = try requireKeys(since: epoch)
             let outcome = await engine.scan(item, now: now)
             switch outcome {
-            case .scanned, .failed:
+            case .scanned:
+                await storeScanLedger(since: epoch)
+                // The vault's other devices need not repeat it (§13.9).
+                await publishScanObservation(of: item, since: epoch)
+            case .failed:
                 // Failed checks too: the failure in the ledger keeps one refused range from being asked for first at
                 // every unlock and every launch (§13.3).
                 await storeScanLedger(since: epoch)
@@ -482,8 +533,22 @@ extension VaultSession {
         return try? JSONDecoder().decode(ScanLedger.self, from: Data(plaintext.unprotectedCopy()))
     }
 
+    /// Stores the ledger if something other than a scan changed it (`HygieneEngine.takeChangedLedger`).
+    private func storeChangedScanLedger(since epoch: UInt64) async {
+        guard let engine = hygieneRuntime?.engine, case .some(.some(let ledger)) = try? await engine.takeChangedLedger()
+        else { return }
+        await storeScanLedger(ledger, since: epoch)
+    }
+
     private func storeScanLedger(since epoch: UInt64) async {
-        guard let engine = hygieneRuntime?.engine, let ledger = try? await engine.ledger(),
+        guard let engine = hygieneRuntime?.engine else { return }
+        _ = try? await engine.takeChangedLedger()
+        guard let ledger = try? await engine.ledger() else { return }
+        await storeScanLedger(ledger, since: epoch)
+    }
+
+    private func storeScanLedger(_ ledger: ScanLedger, since epoch: UInt64) async {
+        guard
             let name = localName("scan-ledger", since: epoch), var encoded = try? Array(JSONEncoder().encode(ledger))
         else { return }
         let plaintext = SecureBytes(wiping: &encoded)

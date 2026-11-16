@@ -25,6 +25,9 @@ public struct PasswordFact: Hashable, Sendable {
     public let strength: StrengthAssessment
     /// For the reuse index. In memory only (`ReuseToken`).
     let reuseToken: ReuseToken
+    /// The password's binding under this device's own binding key (`ReuseKey.scanBinding`): what ties the ledger's
+    /// results, and reports from other devices, to this password and no other. In memory only.
+    let ledgerBinding: ScanBinding
     /// When this value became the field's value, from the item's history; `nil` if the item carries no usable
     /// timestamps.
     public let currentSince: Date?
@@ -118,6 +121,7 @@ public struct ItemAnalyzer: Sendable {
                 fieldID: field.id,
                 strength: estimator.assess(field.value, personalInputs: personal),
                 reuseToken: reuseKey.token(forUTF8Of: field.value),
+                ledgerBinding: reuseKey.scanBinding(item: item.id, utf8Of: field.value),
                 currentSince: Self.currentSince(field, in: item))
         }
         var capabilities: SiteCapabilities = []
