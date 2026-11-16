@@ -15,11 +15,15 @@
     /// line in `adversarial-suites.txt` (docs/04-test-plan.md §6.6).
     @Suite("Adversarial: Apple adapters: HTTP client", .tags(.adversarial))
     struct AdversarialURLSessionHTTPClientTests {
-        static let fast = URLSessionHTTPClient.Limits(idleTimeout: 0.5, totalTimeout: 1)
-
-        static func client(limits: URLSessionHTTPClient.Limits = .standard) -> URLSessionHTTPClient {
-            URLSessionHTTPClient(limits: limits, protocolClasses: [StubURLProtocol.self])
+        static func client(
+            deadline: @escaping URLSessionHTTPClient.Deadline = URLSessionHTTPClient.standardDeadline
+        ) -> URLSessionHTTPClient {
+            URLSessionHTTPClient(limits: .standard, protocolClasses: [StubURLProtocol.self], deadline: deadline)
         }
+
+        /// A deadline that has already passed: the exchange is given up as soon as it has started, whatever the
+        /// clock says, so a test of a server that never answers waits for nothing.
+        static let passed: URLSessionHTTPClient.Deadline = { _ in }
 
         static func request(_ prefix: String, maximumResponseBytes: Int = 64 << 10) -> HTTPRequest {
             HTTPRequest(
@@ -43,16 +47,29 @@
         }
 
         /// A1 accepts the connection and never answers, or sends the headers and a few bytes and then nothing: the
-        /// client gives up within its limits rather than holding the scan open.
+        /// client gives up at its deadline rather than holding the scan open, and the exchange is cancelled. The
+        /// deadline is injected (already passed), so no test waits on a clock.
         @Test("a server that never answers, or answers and stalls, is given up on", arguments: ["F0001", "F0002"])
         func slow(_ prefix: String) async {
             StubURLProtocol.registry.set(
                 prefix == "F0001" ? .stall : .drip(prefix: Array("00000".utf8)), forPath: Self.path(prefix))
-            let started = ContinuousClock.now
-            await #expect(throws: (any Error).self) {
-                try await Self.client(limits: Self.fast).send(Self.request(prefix))
+            await #expect(throws: URLSessionHTTPClientError.timedOut) {
+                try await Self.client(deadline: Self.passed).send(Self.request(prefix))
             }
-            #expect(ContinuousClock.now - started < .seconds(10))
+        }
+
+        /// A limit of infinity, NaN or a negative number (from a corrupted setting) must neither trap the conversion
+        /// to nanoseconds nor switch the deadline off.
+        @Test("time limits are held to their range, whatever is asked")
+        func clampedLimits() {
+            for (asked, held) in zip(
+                [Double.infinity, -.infinity, .nan, -5, 0, 1e300, 30], [600.0, 0.001, 600, 0.001, 0.001, 600, 30])
+            {
+                let limits = URLSessionHTTPClient.Limits(idleTimeout: asked, totalTimeout: asked)
+                #expect(limits.totalTimeout == held)
+                #expect(limits.idleTimeout == held)
+                #expect(limits.totalNanoseconds <= 600_000_000_000)
+            }
         }
 
         /// A1 redirects the range request to a host of its choosing, or to plain HTTP on the same host: the request
@@ -85,7 +102,7 @@
             let prefix = "D1001"
             StubURLProtocol.registry.set(.drip(prefix: Array(repeating: 0x31, count: 2048)), forPath: Self.path(prefix))
             await #expect(throws: URLSessionHTTPClientError.responseTooLarge) {
-                try await Self.client(limits: Self.fast).send(Self.request(prefix, maximumResponseBytes: 1024))
+                try await Self.client().send(Self.request(prefix, maximumResponseBytes: 1024))
             }
         }
     }
