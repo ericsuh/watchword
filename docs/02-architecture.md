@@ -539,7 +539,12 @@ the original at worst still in the trash (where the 30-day purge finds it): neve
 only seems to have happened. Other devices see nothing special — a new item in one vault's log, an item trashed
 and then deleted in the other's — so the existing merge rules decide every race: an edit made elsewhere that the
 move had not seen is kept, in the trash of the vault it was made in (the deletion removes only what its author had
-seen, §7.5), and two devices moving the same version to the same vault create the same item. An item that holds
+seen, §7.5), and two devices moving the same version to the same vault create the same item. The two halves are
+in two logs, so "never neither" must also hold on the transport: `syncAll` publishes every vault with this
+device's deletions held back (`SyncEngine.sync(deferringDeletions:)`; they stay pending and count as erasures
+here), and publishes them only once every vault's push in that sync succeeded. A sync that reaches one vault's log
+and not another's (offline, locked midway, `ownStreamConflict`) leaves the other devices with the original where it
+was until a later sync publishes the copy and then the deletion. An item that holds
 values kept for the person to choose between is not moved until they have chosen (`itemHasUnresolvedValues`): the
 copy would not carry them and the deletion would discard them, which only the person may do (F7.7).
 

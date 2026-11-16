@@ -121,6 +121,29 @@ struct SyncEngineTests {
         #expect(try await b.items().isEmpty)
     }
 
+    /// The session publishes a deletion only once everything else it wrote is out (a move's copy first, §7.7).
+    @Test("a deferred deletion stays pending and counts here; the next sync publishes it")
+    func deferredDeletion() async throws {
+        let home = await Household.make()
+        let (a, b) = (home.devices[0], home.devices[1])
+        let item = try await b.save(Household.login())
+        try await home.settle()
+        try await a.delete(item.id)
+        let held = try await a.engine.sync(deferringDeletions: true)
+        #expect(held.deletionsDeferred == 1 && held.pushedEntries == 0)
+        #expect(try await a.items().isEmpty, "deleted here")
+        try await b.sync()
+        #expect(Array(try await b.items().keys) == [item.id], "not published yet")
+        // Merged again with the deletion still held back: it is still an erasure here.
+        _ = try await a.engine.sync(reconcile: true, deferringDeletions: true)
+        #expect(try await a.items().isEmpty)
+
+        let published = try await a.sync()
+        #expect(published.deletionsDeferred == 0 && published.pushedEntries == 1)
+        try await b.sync()
+        #expect(try await b.items().isEmpty)
+    }
+
     @Test("while locked a device downloads and checks; it merges on unlock with no network (§7.4)")
     func lockedDownload() async throws {
         let server = SimulatedServer(seed: 3, maximumVisibilityDelay: 0, duplicateListings: false)

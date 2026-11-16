@@ -483,6 +483,45 @@ struct VaultsSyncTests {
         try await fleet.expectConverged()
     }
 
+    /// PRD F7.6, F7.7 across two logs: a move's copy and its original's deletion are in different vaults' logs, so
+    /// the deletion is published only once the copy is on the transport. A sync that reaches one log and not the
+    /// other leaves the other devices with the item where it was, never with neither.
+    @Test("a move whose copy could not be published leaves the original on the other devices, not neither")
+    func interruptedMovePublication() async throws {
+        let transport = InMemorySyncTransport()
+        let hook = FailingCreateTransport(base: transport)
+        let first = TestVault.syncing(over: hook, name: "Device 0")
+        try await first.createAccount()
+        let second = try await first.enrolledDevice(deviceID: Fleet.deviceID(1), over: transport)
+        try await second.session.unlock(password: TestVault.password)
+        let (a, b) = (first.session, second.session)
+        let personal = try #require(await a.personalVaultID)
+        let work = try await a.createVault(name: "Work")
+        let item = try await a.save(login(personal, title: "Printer"))
+        try await a.sync()
+        try await b.sync()
+        #expect(try await b.items().items.map(\.id) == [item.id])
+
+        let moved = try await a.move(itemID: item.id, to: work.id)
+        await hook.failCreates(under: SyncObjectLocation.vaultPrefix(work.id) + "log/")
+        let interrupted = try await a.syncAll()
+        #expect(interrupted.vaults[work.id]?.transportUnavailable == true)
+        #expect(interrupted.vaults[personal]?.deletionsDeferred == 1, "the original's deletion waits for the copy")
+        try await b.sync()
+        let held = try await b.items().items
+        #expect(held.map(\.id) == [item.id], "the item is still where it was")
+        #expect(held.first.map { !$0.isTrashed } == true)
+
+        await hook.failCreates(under: nil)
+        let resumed = try await a.syncAll()
+        #expect(resumed.combined.deletionsDeferred == 0)
+        try await b.sync()
+        for session in [a, b] {
+            #expect(try await session.items().items.map(\.id) == [moved.id])
+            #expect(try await session.item(id: moved.id).vaultID == work.id)
+        }
+    }
+
     /// PRD F7.6, F7.7: the move deletes only what its author had seen.
     @Test("an edit made elsewhere that the move had not seen is kept, in the trash of the vault it was made in")
     func moveAgainstConcurrentEdit() async throws {
@@ -674,4 +713,32 @@ struct VaultsSyncTests {
         try await a.session.discardQuarantined([entry])
         #expect(try await a.session.quarantinedVersions().isEmpty)
     }
+}
+
+/// A transport whose `create` fails as unreachable for names under one prefix: one vault's log out of reach while
+/// the others are written.
+actor FailingCreateTransport: SyncTransport {
+    let base: any SyncTransport
+    private var failing: String?
+
+    init(base: any SyncTransport) {
+        self.base = base
+    }
+
+    func failCreates(under prefix: String?) {
+        failing = prefix
+    }
+
+    func list(prefix: String) async throws -> [String] { try await base.list(prefix: prefix) }
+
+    func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
+        try await base.fetch(name, maximumLength: maximumLength)
+    }
+
+    func create(_ name: String, contents: [UInt8]) async throws {
+        if let failing, name.hasPrefix(failing) { throw SyncTransportError.unavailable }
+        try await base.create(name, contents: contents)
+    }
+
+    func delete(_ name: String) async throws { try await base.delete(name) }
 }

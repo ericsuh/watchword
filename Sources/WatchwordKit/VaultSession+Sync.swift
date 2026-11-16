@@ -70,16 +70,29 @@ extension VaultSession {
             .item: ItemRecordMerger(sealer: adapter, deviceID: record.deviceID),
             .vaultMetadata: VaultMetadataMerger(sealer: adapter),
         ])
-        for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
-            let engine = SyncEngine(
+        func engine(_ vaultID: UUID) -> SyncEngine {
+            SyncEngine(
                 vaultID: vaultID, deviceID: record.deviceID, store: store, syncState: syncState,
                 transport: syncSettings.transport, keyring: adapter, merger: merger,
                 configuration: syncSettings.configuration)
+        }
+        // Deletions go out last, and only once everything else this device wrote is on the transport, in every
+        // vault: a move is a copy in one vault's log and a deletion in another's, and the deletion must never reach
+        // other devices without the copy (PRD F7.6, F7.7; docs/02-architecture.md §7.7).
+        var deferred: [UUID] = []
+        var restPublished = true
+        for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
-                vaultReport = try await engine.sync(reconcile: reconcile)
+                vaultReport = try await engine(vaultID).sync(reconcile: reconcile, deferringDeletions: true)
+                if vaultReport.deletionsDeferred > 0 { deferred.append(vaultID) }
+                if vaultReport.transportUnavailable || vaultReport.deferredUntilUnlock
+                    || vaultReport.ownStreamConflict != nil
+                {
+                    restPublished = false
+                }
             } else {
-                vaultReport = try await engine.download()
+                vaultReport = try await engine(vaultID).download()
                 vaultReport.deferredUntilUnlock = true
             }
             vaultReport.deviceRevoked = standing == .revoked
@@ -87,7 +100,33 @@ extension VaultSession {
             vaultReport.awaitingNewPassword = report.awaitingNewPassword
             report.vaults[vaultID] = vaultReport
         }
+        if restPublished {
+            for vaultID in deferred {
+                guard let first = report.vaults[vaultID] else { continue }
+                report.vaults[vaultID] = Self.report(first, followedBy: try await engine(vaultID).sync())
+            }
+        }
         return report
+    }
+
+    /// One vault's report for two engine runs in one sync: counts added up, state as the second left it.
+    static func report(_ first: SyncReport, followedBy second: SyncReport) -> SyncReport {
+        var total = second
+        total.fetched += first.fetched
+        total.applied += first.applied
+        total.pushedEntries += first.pushedEntries
+        total.segmentsWritten += first.segmentsWritten
+        total.snapshotsWritten += first.snapshotsWritten
+        total.collected += first.collected
+        total.rejected = first.rejected + second.rejected
+        total.quarantined = first.quarantined + second.quarantined
+        total.staleSnapshots += first.staleSnapshots
+        total.ignoredNames = max(first.ignoredNames, second.ignoredNames)
+        total.retiredObjects = max(first.retiredObjects, second.retiredObjects)
+        total.deviceRevoked = first.deviceRevoked
+        total.deviceNotRegistered = first.deviceNotRegistered
+        total.awaitingNewPassword = first.awaitingNewPassword
+        return total
     }
 
     // MARK: - Conflicts and the quarantine (PRD F7.6, F7.7)
@@ -466,6 +505,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.staleSnapshots += report.staleSnapshots
             total.ignoredNames += report.ignoredNames
             total.retiredObjects += report.retiredObjects
+            total.deletionsDeferred += report.deletionsDeferred
             total.deferredUntilUnlock = total.deferredUntilUnlock || report.deferredUntilUnlock
             total.transportUnavailable = total.transportUnavailable || report.transportUnavailable
             total.ownStreamConflict = total.ownStreamConflict ?? report.ownStreamConflict

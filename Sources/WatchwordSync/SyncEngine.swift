@@ -117,6 +117,9 @@ public struct SyncReport: Sendable, Equatable {
     /// The account password was changed on another device and has not been entered on this one yet. Until it is,
     /// this device downloads but neither merges nor publishes (docs/02-architecture.md §7.8).
     public var awaitingNewPassword = false
+    /// Deletions made on this device that were held back (`sync(deferringDeletions: true)`): still pending, still
+    /// counted as erasures here, published by a later sync.
+    public var deletionsDeferred = 0
 
     public init() {}
 }
@@ -177,7 +180,12 @@ public actor SyncEngine {
     // MARK: - Entry points
 
     /// Downloads, merges, publishes and maintains. While locked, only the download happens and the report says so.
-    public func sync(reconcile: Bool = false) async throws -> SyncReport {
+    ///
+    /// `deferringDeletions` publishes everything but this device's pending deletions, and any version written after
+    /// one of them (which must follow its deletion): they stay pending, count as erasures here as before, and go out
+    /// at a later sync. The session uses it so that a deletion in one vault is never on the transport before what
+    /// this device wrote in another — a move's copy before its original's deletion (docs/02-architecture.md §7.7).
+    public func sync(reconcile: Bool = false, deferringDeletions: Bool = false) async throws -> SyncReport {
         guard !running else { throw SyncError.syncInProgress }
         running = true
         defer { running = false }
@@ -216,7 +224,8 @@ public actor SyncEngine {
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             try await syncState.saveState(state)
             if !report.transportUnavailable {
-                try await push(state: &state, retired: retired, report: &report)
+                try await push(
+                    state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
                 if report.ownStreamConflict == nil {
                     try await maintain(state: &state, listing: listing, retired: retired, report: &report)
                 }
@@ -636,7 +645,9 @@ public actor SyncEngine {
 
     // MARK: - Publish
 
-    private func push(state: inout SyncState, retired: Set<UUID>, report: inout SyncReport) async throws {
+    private func push(
+        state: inout SyncState, retired: Set<UUID>, deferringDeletions: Bool, report: inout SyncReport
+    ) async throws {
         try await settlePendingDeletions(state: state)
         var entries: [RecordKey: SyncEntry] = [:]
         for kind in configuration.schemaVersions.keys {
@@ -653,6 +664,12 @@ public actor SyncEngine {
         for (key, deletion) in pending {
             if try await isPublished(deletion, key: key, state: state) {
                 obsolete[key] = deletion.stamp
+                continue
+            }
+            if deferringDeletions {
+                // Neither the deletion nor a version written after it: that one must follow the deletion.
+                entries.removeValue(forKey: key)
+                report.deletionsDeferred += 1
                 continue
             }
             if let row = entries.removeValue(forKey: key) { later.append(row) }
