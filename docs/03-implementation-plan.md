@@ -23,11 +23,11 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
 | 1 — cryptographic core (done) | Yes since ADR 0006: every crypto suite runs, against swift-crypto's BoringSSL | The implementation that ships (CryptoKit, CommonCrypto), Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
-| 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port; multiple vaults, the device registry, enrolment over the transport and the automatic sync policy — done, portable, against swift-crypto | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; drafted, not yet compiled on a Mac: `CloudKitTransport`, the coordinated iCloud Drive transport and the sync driver; open: a macOS run of those and of everything the sync-core work added, `CKSyncEngine`, sync in production builds, the manual CloudKit workflow, the Secure Enclave device-key adapter |
-| 4 — sharing (protocol core done) | The protocol core — membership chain, verified contacts, invitations, key grants, rotation plans — with real Ed25519 and HPKE through swift-crypto (ADR 0006), and its adversarial suite | the implementation that ships (CryptoKit); wiring into `VaultSession` and sync; `CKShare`, `UICloudSharingController`/`NSSharingService`, the folder-share flow; the sharing UI |
+| 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port; multiple vaults, the device registry, enrolment over the transport and the automatic sync policy — done, portable, against swift-crypto; the account screens' models (`WatchwordPresentation`) | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; drafted, not yet compiled on a Mac: `CloudKitTransport`, the coordinated iCloud Drive transport, the sync driver, and the vault, device and quarantine screens with their XCUITests; open: a macOS run of those and of everything the sync-core work added, `CKSyncEngine`, sync in production builds, the manual CloudKit workflow, the Secure Enclave device-key adapter |
+| 4 — sharing (protocol core done) | The protocol core — membership chain, verified contacts, invitations, key grants, rotation plans — with real Ed25519 and HPKE through swift-crypto (ADR 0006), and its adversarial suite | the implementation that ships (CryptoKit); wiring into `VaultSession` and sync; `CKShare`, `UICloudSharingController`/`NSSharingService`, the folder-share flow; a macOS build of the sharing UI (written) |
 | 5 — AutoFill (portable core done) | The request model, TOTP, the passkey authenticator and identity planning — done, behind a vault port with fakes | AuthenticationServices, app-extension targets, `VaultSession`'s conformance, simulator and device QA |
-| 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done; the device-local file store, tested here too | drafted, not yet compiled on a Mac: the `URLSession` adapter; open: a macOS run of it, configuring hygiene in the app, background-task glue, the Watchtower-style report UI and its snapshot tests |
-| 7 — interchange (parsers, exporters, fuzz targets, session wiring and the encrypted archive done) | Parsers, adversarial parser tests, and the fuzz targets — a better host for them; the session wiring and the encrypted archive, portable through swift-crypto; done | open: Credential Exchange on iOS 26/macOS 26, file protection and the screens, and a macOS run of the archive against CryptoKit and CommonCrypto |
+| 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done; the device-local file store, tested here too | drafted, not yet compiled on a Mac: the `URLSession` adapter and the report UI; open: a macOS run of them, configuring hygiene in the app, background-task glue, the report's snapshot tests |
+| 7 — interchange (parsers, exporters, fuzz targets, session wiring and the encrypted archive done) | Parsers, adversarial parser tests, and the fuzz targets — a better host for them; the session wiring and the encrypted archive, portable through swift-crypto; done | open: Credential Exchange on iOS 26/macOS 26, a macOS build of the screens (written) and a device check of their file protection, and a macOS run of the archive against CryptoKit and CommonCrypto |
 | 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
 
 Four rules this split implies, all of which outlive the milestones they came from:
@@ -217,8 +217,7 @@ half delivered** on a Mac; the transports are open.
     now hold new record kinds. Dispatch `mac-run.yml` before relying on it.
   - **`Apps/`:** `UITestPeer` now joins as any new device does, `VaultSession.enrol` with the Emergency Kit's setup
     code over the shared in-memory transport, after the app's session has synced once (`SyncConflictTests` does).
-    The app still needs UI for vaults, devices, a changed password (`passwordChangedOnAnotherDevice`,
-    `ignoringPasswordChange`) and revocation.
+    The screens for vaults, devices, a changed password and revocation are below ("The account screens").
 - **Transports and the sync driver, drafted (remote session; `WatchwordPlatform`, architecture §7.2, §7.3, §7.9).**
   Written on Linux, where only the portable parts compile: **none of the Apple code has been compiled or run yet.**
   - Portable, run on Linux: `SyncTransportError` gained `rateLimited(retryAfter:)`, `quotaExceeded`,
@@ -239,12 +238,26 @@ half delivered** on a Mac; the transports are open.
     run the CloudKit test from a signed host against a development container (its schema needs `WWObject.name`
     queryable) and the coordinated transport in a real ubiquity container (downloads and evictions by iCloud itself
     are not exercised by any test).
+- **The account screens, written (not yet built on a Mac):** the remaining UI of this milestone and of milestones 4,
+  6 and 7, over portable view models in a new target, `WatchwordPresentation` (`02-architecture.md` §15), whose
+  logic `WatchwordPresentationTests` runs on Linux against real sessions. Settings opens each screen in a sheet of
+  its own: **Vaults** (list, create, rename, a vault filter in the item list, and for a shared vault its role and a
+  read-only banner, including "update Watchword" for one gone on in a later format); **Devices** (the list,
+  removal with a new password by default or, with both statements confirmed, keeping it; a sync status with
+  `requiresNewerVersion` as "update the app" and `snapshotWithheldBy` naming the devices); a password changed on
+  another device is a notice after sync, and the unlock screen explains `passwordChangedOnAnotherDevice` and offers
+  `ignoringPasswordChange` for the person who did not make the change; **Held-Aside Changes**, the quarantine
+  (`VaultSession.quarantine()`, new: each version with its vault, so shared vaults' held-aside writes are listed
+  first, as review finding S49 requires), discarded only through a confirmation. XCUITests: `DeviceRevocationTests`
+  and `QuarantineTests` (`04-test-plan.md` §5), with `UITestPeer` able to join, change the password and write a
+  version past the UI-test launch's version-jump ceiling of 16.
 - **Still open (Mac):** sync in production builds (choosing a transport, enrolment and settings; until then the app is
   built without `SyncSettings`), with the app creating an `AutoSyncDriver` and registering for CloudKit pushes;
   `CKSyncEngine`, if its scheduling is wanted over the driver; re-uploading after a CloudKit reset (`storeReset` stops
   sync today); keeping the copy that verifies when iCloud Drive holds conflict versions (refused today); the manual
-  CloudKit workflow; the Secure Enclave `DeviceKeyStore` adapter; a quarantine list in the UI; and item history in
-  records of its own, so the never-pruned history (F1.4) no longer counts against an item's 1 MiB payload.
+  CloudKit workflow; the Secure Enclave `DeviceKeyStore` adapter; a macOS build and run of the account screens and
+  their XCUITests; and item history in records of its own, so the never-pruned history (F1.4) no longer counts
+  against an item's 1 MiB payload.
 - **Still open (design):** an account re-key — new keyset and Secret Key, vault keys rotated — which is what ends a
   revoked device's reading if it held the keyset (architecture §7.8, §16); it belongs with vault-key rotation in
   milestone 4. Collecting a deleted vault's objects from the transport.
@@ -320,13 +333,19 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
 - The transports' own sharing: `CKShare` with `UICloudSharingController`/`NSSharingService`, the folder-share flow
   for the file transport (the `ShareAccessControl` port is the seam), and the key directory's adapter (the account
   record; `KeyBundleDirectory` is the port, `VaultSession.publicKeyBundle` what it publishes).
-- The sharing UI: invitation and fingerprint screens (safety number, QR display and scan), the member list with
-  unverified members shown as such (D17), "pending rotation" (F4.3), held-aside writes, and the wording F4.3 and F4.5
-  require.
+- The sharing UI is **written, not yet built on a Mac** (milestone 3's account screens above): share a vault,
+  invite (name the account by ID or fingerprint code, compare the safety number by typing it, by the code, or by
+  eye, choose a role, send the invitation as text), accept (paste, compare the owner's number, join), the member list
+  with unverified members and changed keys shown as such (D17), roles changed and members removed as the rules
+  allow, leave, rotate, "pending rotation" (F4.3), the held-aside count linking to the quarantine, and this
+  account's own safety number with a QR code. A demotion to read-only is followed by a rotation (S42's way out).
+  `VaultSharingTests` invites `UITestPeer`'s second account. Still open: scanning a QR code (camera), and the
+  transports' own share sheets.
 - The manual CloudKit run of S3 and S4.
-- The screen that tells the person to update when a shared vault has gone on in a later format
-  (`SharedVaultStatus.requiresNewerVersion`; the session's side, the vault read-only, is delivered, `02-architecture.md`
-  §8.10).
+- The screen that tells the person to update when a shared vault has gone on in a later format is **written**
+  (the vault's banner and row, the item detail's read-only banner with Edit and Move to Trash disabled, and "update
+  the app" in the sync status; `SharedVaultStatus.requiresNewerVersion`, `02-architecture.md` §8.10); not in the
+  screenshot tour, since no session API makes a later-format record.
 
 ## Milestone 5 — AutoFill
 
@@ -434,8 +453,13 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   interval, and 28 days in all) and never hiding a breach it saw. Tests: "Synced scan results", "Vault session:
   synced hygiene" and the adversarial suite "synced breach-check results". Not compiled or run on Apple platforms yet.
 - `BGProcessingTask` / `NSBackgroundActivityScheduler` glue that wakes the loop.
-- The report UI (with the source of each breach status: `ItemHygiene.breachSource`), per-item badges in the item list, settings for the site directory and the HIBP API key, and
-  the UI snapshot tests.
+- The report UI is **written, not yet built on a Mac**: breached, reused, weak and other findings in sections, a
+  breach another device of the vault reported named as such (`ItemHygiene.breachSource`), and Check Now driving
+  `runHygieneStep()` until the schedule is idle or asks for a wait longer than ten seconds. Production builds show
+  it as not available until `URLSessionHTTPClient` and the file `DeviceLocalStore` exist; `--uitest` launches check
+  against `UITestPwnedPasswords`, in process. Still open: per-item badges in the item list, settings for the site
+  directory and the HIBP API key, and the UI snapshot tests (the screenshot tour's `security-report` is the
+  picture for now).
 - The embedded EFF list came from a mirror (eff.org was unreachable). **Verified** on 2026-11-16 against EFF's
   own file, https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt (downloaded that day; SHA-256
   `addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`, identical to the mirror's; all 7,776 words
@@ -497,14 +521,18 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   the session's actor (`awayFromSession`), so a lock never waits for one: a plaintext file's parse, an archive's
   parse, derivation and decoding, and an export's password check and archive derivation. Not run on a Mac yet:
   the archive's PBKDF2 there is CommonCrypto's and its AES-GCM CryptoKit's.
-- Open, all of it integration and most of it Mac-only: `completeUnlessOpen` file protection and the standing
-  warning on screen (the session documents both; the app does them); restoring an archive's vaults as vaults
-  (today every archived item goes into the one vault the person chooses, naming the vault it came from); the restore
-  screen showing `ImportPreview.archiveCreatedAt`; the OS
-  Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
-  and their XCUITests, including a duplicate screen that names each host a merge would add and asks about it
-  (`DuplicateMatch.newHosts`, `MergeChoices`), shows each URL and sign-in field before adding it
-  (`MergeAdditions.urlFields`, `signInFields`), and an export screen that shows the `ExportReport`. Before shipping: a check of the CXF and 1PUX field names against the published
+- The import, export and restore screens are **written, not yet built on a Mac** (milestone 3's account screens):
+  import as choose, review, commit, with a duplicate screen that needs a choice for every duplicate and, for a
+  merge, names each host it would add (`DuplicateMatch.newHosts`) and shows each sign-in field (secrets hidden until
+  shown) and URL with its own switch, all off (`MergeAdditions`, `MergeChoices`); export with the standing warning on
+  screen for as long as it is open, the password asked for every time, and the `ExportReport` shown before the file
+  is saved; the CSV exactly as stored; the restore screen showing `ImportPreview.archiveCreatedAt` first. The file
+  is handed to the system's exporter with `completeUnlessOpen` set on iOS (not yet checked on a device).
+  `ImportExportTests` covers both. Open: restoring an archive's vaults as vaults (today every archived item goes
+  into the one vault the person chooses, naming the vault it came from); the OS Credential Exchange calls and the
+  extension's Info.plist keys; the instruction screens; a CXF file export (the format names the exporting app's
+  relying-party ID, its associated domain, which the app does not have yet). Before shipping: a check of the CXF and
+  1PUX field names against the published
   formats and real exports from 1Password and Apple Passwords (the specifications were unreachable from the
   session that wrote the parsers), and of the 1PUX export against 1Password's importer. The nightly `fuzz`
   job runs on the macOS runner, whose toolchain may lack the libFuzzer runtime; the task then replays the

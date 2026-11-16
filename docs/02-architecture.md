@@ -2748,6 +2748,10 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
                                 CloudKitTransport, CoordinatedFileSyncTransport,
                                 AutoSyncDriver                                      [milestone 3; not run on a Mac]
                                 URLSessionHTTPClient, FileDeviceLocalStore          [milestone 6; not run on a Mac]
+  Sources/WatchwordPresentation the apps' screen models over VaultSession: vaults,
+                                sharing, devices, quarantine, security report,
+                                import, export, wording (portable)                  [milestones 3-7; written,
+                                                                                    views unbuilt on a Mac]
   Sources/WatchwordTestSupport  seeded/broken generators (milestone 1); fakes for every port and
                                 scenario builders as the ports arrive
 Apps/ (Xcode project generated with XcodeGen from project.yml)
@@ -2767,7 +2771,11 @@ with `InMemorySyncTransport`, `FileSyncTransport` and `InMemorySyncStateStore` i
 production keyring is `VaultSession` (an `ItemSealer` for the shared `ItemRecordMerger`) and the production state
 store `SQLiteSyncStateStore`. Production adapters live in the package (`WatchwordPlatform`,
 `SQLiteRecordStore`) rather than `Apps/`, so the strict-memory-safety job, the unsafe tripwire,
-lint and `swift test` cover them; `Apps/` holds only UI and OS glue. Fakes live in
+lint and `swift test` cover them; `Apps/` holds only UI and OS glue. The screens' logic lives in the package too:
+`WatchwordPresentation` holds a main-actor, `@Observable` model per account screen, over `VaultSession` and portable
+modules only, so `swift test` runs it on Linux against real sessions; the SwiftUI views in `Apps/Shared` lay a model
+out and pass taps on. A model decides nothing about security: every refusal is the session's, and the model words it
+(`ErrorWording`, `SyncSummary`). Fakes live in
 `WatchwordTestSupport` (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`). Milestone 5 adds
 `CredentialVault`, `CredentialIdentityPublisher` and `AutoFillClock` in `WatchwordAutoFill`, with `FakeCredentialVault`
 and `FakeCredentialIdentityPublisher` beside them.

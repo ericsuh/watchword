@@ -1,5 +1,6 @@
 import SwiftUI
 import WatchwordModel
+import WatchwordPresentation
 
 struct ItemListView: View {
     @Environment(AppModel.self) private var model
@@ -9,8 +10,19 @@ struct ItemListView: View {
     @State private var search = ""
 
     var body: some View {
+        @Bindable var model = model
         NavigationSplitView {
             List(selection: $selection) {
+                if model.vaults.count > 1 {
+                    // Which vault the list shows (PRD F2.3: one vault or every vault).
+                    Picker("Vault", selection: $model.vaultFilter) {
+                        Text("All Vaults").tag(UUID?.none)
+                        ForEach(model.vaults) { vault in
+                            Text(vault.name).tag(Optional(vault.id))
+                        }
+                    }
+                    .accessibilityIdentifier("items.vaultFilter")
+                }
                 if model.unreadableCount > 0 {
                     Label(
                         "\(model.unreadableCount) item(s) could not be read and were left untouched.",
@@ -24,6 +36,9 @@ struct ItemListView: View {
                             Text(item.title.isEmpty ? "Untitled" : item.title)
                             if let host = item.scopes.first?.host {
                                 Text(host).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if model.vaultFilter == nil, model.vaults.count > 1, let vault = model.vault(item.vaultID) {
+                                Text(vault.name).font(.caption2).foregroundStyle(.secondary)
                             }
                         }
                         if item.hasConflicts {
@@ -43,7 +58,7 @@ struct ItemListView: View {
             .toolbar {
                 ToolbarItem {
                     Button {
-                        if let vaultID = model.personalVaultID {
+                        if let vaultID = model.newItemVaultID {
                             editing = Item(vaultID: vaultID, title: "", scopes: [], fields: [])
                         }
                     } label: {
@@ -72,6 +87,7 @@ struct ItemListView: View {
         }
         .onChange(of: selection) { model.recordActivity() }
         .onChange(of: search) { model.recordActivity() }
+        .onChange(of: model.vaultFilter) { model.recordActivity() }
         .onChange(of: editing) { model.recordActivity() }
         .sheet(item: $editing) { item in
             ItemEditView(item: item)
@@ -104,8 +120,8 @@ struct ItemListView: View {
     /// Search over title, hosts, usernames, tags and notes (PRD F2.3); secrets are not searched.
     private var filtered: [Item] {
         let query = search.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return model.items }
-        return model.items.filter { item in
+        guard !query.isEmpty else { return model.listedItems }
+        return model.listedItems.filter { item in
             let haystack = [item.title, item.notes] + item.scopes.map(\.host) + item.loginNames + Array(item.tags)
             return haystack.contains { $0.localizedCaseInsensitiveContains(query) }
         }

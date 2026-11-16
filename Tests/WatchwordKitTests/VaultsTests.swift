@@ -713,6 +713,30 @@ struct VaultsSyncTests {
         try await a.session.discardQuarantined([entry])
         #expect(try await a.session.quarantinedVersions().isEmpty)
     }
+
+    @Test("the quarantine names the vault each version is kept in, and discards from that vault only")
+    func quarantineByVault() async throws {
+        let fleet = try await Fleet.make(1)
+        let a = fleet.devices[0]
+        let work = try await a.session.createVault(name: "Work")
+        let home = try await a.session.createVault(name: "Home")
+        let state = try #require(a.sync?.state)
+        let entry = SyncEntry(
+            recordID: UUID(), kind: .item, keyID: UUID(), version: 1 << 61, device: UUID(), envelope: [1, 2, 3])
+        try await state.quarantine(entry, vaultID: work.id)
+        try await state.quarantine(entry, vaultID: home.id)
+        let kept = try await a.session.quarantine()
+        #expect(Set(kept.map(\.vaultID)) == [work.id, home.id])
+        #expect(kept.allSatisfy { $0.entry == entry })
+        #expect(Set(kept.map(\.id)).count == 2)
+        try await a.session.discardQuarantined(kept.filter { $0.vaultID == work.id })
+        #expect(try await a.session.quarantine() == [QuarantinedVersion(vaultID: home.id, entry: entry)])
+        await a.session.lock()
+        await #expect(throws: VaultError.locked) {
+            try await a.session.discardQuarantined([QuarantinedVersion(vaultID: home.id, entry: entry)])
+        }
+        #expect(try await a.session.quarantine().count == 1, "listing needs no keys; discarding does")
+    }
 }
 
 /// A transport whose `create` fails as unreachable for names under one prefix: one vault's log out of reach while

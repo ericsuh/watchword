@@ -100,6 +100,28 @@ with password re-entry, import of 1PUX/CSV fixtures.
   clears the conflict and is published like any edit. `AutoFillSettingsTests` skips
   itself until the extension answers requests (milestone 5). The accessibility audit is not wired
   in yet.
+- The account screens (vaults and sharing, devices, the quarantine, the security report, import, export and
+  restore) add, on both platforms: `VaultSharingTests` (a vault created, renamed and shared; the other person's
+  safety number shown and confirmed before a role is offered; the invitation issued, accepted by `UITestPeer`'s
+  second account and the member listed with the role given), `DeviceRevocationTests` (the other device listed and
+  removed with a new password, which then unlocks; a password changed on the other device announced after a sync,
+  the old one refused with the way out shown, the new one accepted), `QuarantineTests` (a version jumping past the
+  launch's ceiling held aside, listed by item and discarded only through the confirmation) and `ImportExportTests`
+  (an import whose duplicate must be decided first, a merge naming the `www` host it would add, off until accepted,
+  with the password hidden; a CSV export's report and the standing warning; a backup restored with its date shown).
+  `--uitest` gives them what a release build lacks: sync and sharing over in-memory ports shared with `UITestPeer`
+  (another device of the account and another person's account, in the app's process), a version-jump ceiling of 16
+  so the peer can produce a quarantined version through the real sync path, breach checks answered by
+  `UITestPwnedPasswords` (only SHA-1("password") is breached; nothing reaches the network), a sample CSV and the
+  last exported archive in place of the system's file picker, and Settings' Debug-only section to drive the peer.
+  Elements are found by `AccessibilityID` (`Apps/Shared/AccessibilityID.swift`), compiled into the UI-test bundles
+  as well, so the identifiers are one list both sides share; they are stable, and a rename changes every test that
+  uses it.
+- Their logic is tested on Linux without a simulator: every account screen's state and decisions are a model in
+  `WatchwordPresentation` (`02-architecture.md` §15), and `WatchwordPresentationTests` drives those models over real
+  `VaultSession`s ("Screen models: vaults", "… devices", "… a password changed by someone else", "… held-aside
+  changes", "… sharing", "… security report", "… import, export and restore", and the wording suites). What only an
+  XCUITest checks is that the views lay the models out and pass the taps on.
 - Accessibility audit (`XCUIApplication.performAccessibilityAudit()`) runs on every screen.
 
 ### 5.1 The screenshot tour
@@ -110,18 +132,29 @@ the UI can carry fresh ones. It is an end-to-end test in its own right: `app:tes
 job, runs it with the other UI tests, and a flow that breaks fails it there.
 
 - **What is on screen.** The app is launched with `--uitest`: in-memory ports, an account the test creates, and
-  `UITestPeer` as the other device. `Screens.capture` refuses any other launch. The Secret Key and the generated
+  `UITestPeer` as the other device and the other person. `Screens.capture` refuses any other launch. The Secret Key and the generated
   password in the pictures belong to that throwaway account and differ on every run; no real vault, Keychain item
   or secret can appear. The Settings picture includes the Debug-only "UI test: another device" section, which no
   release build has.
 - **The screens today**, in flow order: `onboarding`, `emergency-kit`, `item-list-empty`, `item-edit` (a new item,
   its password filled in by the generator), `item-list`, `item-detail` (password hidden), `item-detail-revealed`,
   `trash-confirmation`, `locked`, `unlock-failed`, `settings`, `item-list-conflict` (the badge after a concurrent
-  rename) and `conflict-resolution`. Files are numbered in that order (`01-onboarding.png`).
+  rename), `conflict-resolution`; then the account screens: `vault-list`, `vault-new`, `vault-detail` (not shared
+  yet), `invite-fingerprint` (the other person's safety number, before anything can be sent), `invite-code`,
+  `vault-members` (owner and member after the acceptance), `own-safety-number` (the number and the QR code),
+  `accept-invitation`, `quarantine` (a held-aside version with its item, vault and device), `security-report` (a
+  breached password reused by two items, after Check Now), `import`, `import-review` (a duplicate waiting for a
+  choice), `import-merge` (the `www` host and the sign-in details a merge would add, none accepted, the password
+  hidden), `import-done`, `export` (the standing plaintext warning), `export-report`, `restore-review` (the date the
+  backup was made, first), `sync-password-changed`, `unlock-password-changed` (the old password refused and the way
+  out), `devices`, `device-revoke` and `devices-after-revoke`. Files are numbered in that order
+  (`01-onboarding.png`). Not in the tour: a shared vault gone on in a later format (read-only, "update Watchword"),
+  which needs a later version's membership record that no session API can make; its wording is tested in
+  `WatchwordPresentationTests`.
 - **Adding a screen** is one line where the tour reaches it: `Screens.capture("vault-list", in: app, showing:
   "…")`. Names are lower-case words joined by hyphens and unique; the number comes from the order of capture, so a
   screen added in the middle renumbers the later ones. Every milestone that adds a screen adds it to the tour
-  (vault list, sharing, AutoFill settings, the hygiene report, import and export are still to come).
+  (AutoFill settings is still to come).
 - **No sleeping.** A capture follows a tap or keystroke (XCUITest waits for the app to be idle around those, which
   covers a sheet or a push animating in) or a wait for the element that proves the screen is complete (the editor's
   title field gone after Save, the error text after a wrong password). Where only the keyboard is moving, the tour

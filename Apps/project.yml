@@ -51,6 +51,14 @@ targetTemplates:
         product: WatchwordMatching
       - package: Watchword
         product: WatchwordGenerator
+      - package: Watchword
+        product: WatchwordPresentation
+      - package: Watchword
+        product: WatchwordSharing
+      - package: Watchword
+        product: WatchwordHygiene
+      - package: Watchword
+        product: WatchwordInterchange
     settings:
       base:
         PRODUCT_NAME: Watchword
@@ -175,7 +183,8 @@ targets:
   WatchwordUITests:
     type: bundle.ui-testing
     platform: iOS
-    sources: [UITests/Shared, UITests/iOS]
+    # The app's accessibility identifiers, compiled into the tests too so both sides name elements alike.
+    sources: [UITests/Shared, UITests/iOS, Shared/AccessibilityID.swift]
     dependencies:
       - target: Watchword-iOS
     settings:
@@ -187,7 +196,7 @@ targets:
   WatchwordMacUITests:
     type: bundle.ui-testing
     platform: macOS
-    sources: [UITests/Shared, UITests/macOS]
+    sources: [UITests/Shared, UITests/macOS, Shared/AccessibilityID.swift]
     dependencies:
       - target: Watchword-macOS
     settings:

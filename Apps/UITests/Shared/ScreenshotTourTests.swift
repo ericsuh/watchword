@@ -5,8 +5,11 @@ import XCTest
 /// pictures to `Screenshots/<platform>/`; `app:test` runs it too, as one more end-to-end test, so a change that
 /// breaks a flow breaks the tour in the ordinary CI job.
 ///
-/// The app is launched with `--uitest` (in-memory ports, an account this test creates), and the other device in the
-/// conflict flow is the in-process `UITestPeer`, as in `SyncConflictTests`. Nothing real is ever on screen.
+/// The app is launched with `--uitest` (in-memory ports, an account this test creates), and the other device and the
+/// other person are the in-process `UITestPeer`, as in `SyncConflictTests` and the account-screen tests. Nothing real
+/// is ever on screen. After the item flows and the conflict come vaults and sharing, the quarantine, the security
+/// report, import, export and restore, and last a password changed elsewhere and the device removed for it, which
+/// ends the other device's part (so it goes last).
 ///
 /// To add a screen, drive the app to it here and add one `Screens.capture` line. Capture right after a tap or a
 /// keystroke where there is one, because XCUITest waits for animations to finish around those; after something that
@@ -154,8 +157,202 @@ final class ScreenshotTourTests: XCTestCase {
             app.debugDescription)
         XCTAssertTrue(app.buttons["conflict.Title.1"].firstMatch.waitForExistence(timeout: 10), app.debugDescription)
         Screens.capture("conflict-resolution", in: app, showing: "The item offering both names, one to keep")
+        app.buttons["conflict.Title.1"].firstMatch.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["detail.conflicts"].firstMatch.waitForNonExistence(timeout: 10),
+            "the conflict is still shown")
+
+        tourVaultsAndSharing(app)
+        tourQuarantine(app)
+        tourSecurityReport(app)
+        tourImportExportAndRestore(app)
+        tourPasswordChangeAndDevices(app, password: password)
 
         Screens.attachIndex()
+    }
+
+    /// Vaults, sharing one and inviting the other person, who accepts (PRD F2.1, F4.1, F4.2).
+    @MainActor
+    private func tourVaultsAndSharing(_ app: XCUIApplication) {
+        app.backToList()
+        app.openScreen(AccessibilityID.Settings.vaults)
+        XCTAssertTrue(app.element(AccessibilityID.Vaults.row("Personal")).waitForExistence(timeout: 10))
+        Screens.capture("vault-list", in: app, showing: "The vaults: Personal only, before any is created")
+        app.tap(AccessibilityID.Vaults.add)
+        app.enter("Household", into: AccessibilityID.Vaults.newName)
+        Screens.capture("vault-new", in: app, showing: "Naming a new vault")
+        app.tap(AccessibilityID.Vaults.create)
+        app.tap(AccessibilityID.Vaults.row("Household"))
+        XCTAssertTrue(app.element(AccessibilityID.Vault.share).waitForExistence(timeout: 10), app.debugDescription)
+        Screens.capture("vault-detail", in: app, showing: "A vault of one's own, not shared yet")
+        app.tap(AccessibilityID.Vault.share)
+        app.confirm("Share")
+        app.tap(AccessibilityID.Vault.invite)
+        app.tap(AccessibilityID.Invite.uiTestFill)
+        app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).waitForExistence(timeout: 30))
+        app.element(AccessibilityID.Invite.safetyNumber).click()
+        Screens.capture(
+            "invite-fingerprint", in: app, showing: "Inviting: the other person's safety number, to compare first")
+        app.reveal(AccessibilityID.Invite.comparedByEye)
+        app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
+        app.tap(AccessibilityID.Invite.confirm)
+        app.tap(AccessibilityID.Invite.send)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.code).waitForExistence(timeout: 30), app.debugDescription)
+        app.element(AccessibilityID.Invite.code).click()
+        Screens.capture("invite-code", in: app, showing: "The invitation to send, once the numbers were compared")
+        app.tap(AccessibilityID.Invite.done)
+        app.closeScreen()
+
+        app.runPeerHook(AccessibilityID.Debug.householdAccept, expecting: "accepted the invitation")
+        app.syncNow(expecting: ".")
+        app.openScreen(AccessibilityID.Settings.vaults)
+        app.tap(AccessibilityID.Vaults.row("Household"))
+        let member = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@ AND NOT identifier ENDSWITH %@", "vault.member.Member ", ".role")
+        ).firstMatch
+        XCTAssertTrue(member.waitForExistence(timeout: 30), app.debugDescription)
+        Screens.capture(
+            "vault-members", in: app, showing: "The shared vault's members: the owner and the person invited")
+        app.closeScreen()
+
+        app.openScreen(AccessibilityID.Settings.vaults)
+        app.tap(AccessibilityID.Vault.ownSafetyNumber)
+        XCTAssertTrue(app.element(AccessibilityID.Vault.fingerprint).waitForExistence(timeout: 10))
+        app.element(AccessibilityID.Vault.fingerprint).click()
+        Screens.capture("own-safety-number", in: app, showing: "This account's own safety number and QR code")
+        app.closeScreen()
+
+        app.openScreen(AccessibilityID.Settings.vaults)
+        app.tap(AccessibilityID.Vaults.accept)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.code).waitForExistence(timeout: 10), app.debugDescription)
+        app.element(AccessibilityID.Accept.code).click()
+        Screens.capture("accept-invitation", in: app, showing: "Accepting an invitation: pasting it comes first")
+        app.closeScreen()
+    }
+
+    /// A version the other device wrote far above anything seen, held aside and listed (PRD F7.7; U5).
+    @MainActor
+    private func tourQuarantine(_ app: XCUIApplication) {
+        app.runPeerHook(AccessibilityID.Debug.peerImplausible, expecting: "implausible edit")
+        app.syncNow(expecting: "held for review")
+        app.openScreen(AccessibilityID.Settings.quarantine)
+        XCTAssertTrue(
+            app.element(AccessibilityID.Quarantine.row(0)).waitForExistence(timeout: 30), app.debugDescription)
+        Screens.capture("quarantine", in: app, showing: "A change held aside, with its item, vault and device")
+        app.tap(AccessibilityID.Quarantine.discard(0))
+        app.confirm("Discard")
+        XCTAssertTrue(app.element(AccessibilityID.Quarantine.empty).waitForExistence(timeout: 30), app.debugDescription)
+        app.closeScreen()
+    }
+
+    /// Two items sharing a breached password, and the report after a check (PRD F9.1–F9.3).
+    @MainActor
+    private func tourSecurityReport(_ app: XCUIApplication) {
+        app.closeSettings()
+        app.backToList()
+        app.addLogin(title: "Forum", host: "forum.example", username: "pat", password: "password")
+        app.addLogin(title: "Shop", host: "shop.example", username: "pat", password: "password")
+        app.openScreen(AccessibilityID.Settings.hygiene)
+        app.tap(AccessibilityID.Hygiene.checkNow)
+        app.waitForText("checked", in: AccessibilityID.Hygiene.status, timeout: 60)
+        XCTAssertTrue(app.element(AccessibilityID.Hygiene.section("breached")).waitForExistence(timeout: 10))
+        Screens.capture(
+            "security-report", in: app, showing: "The security report: a breached password, reused by two items")
+        app.closeScreen()
+    }
+
+    /// An import with a duplicate, a plaintext export's report, a backup, and its restore (PRD F8.1–F8.5).
+    @MainActor
+    private func tourImportExportAndRestore(_ app: XCUIApplication) {
+        app.openScreen(AccessibilityID.Settings.importItems)
+        XCTAssertTrue(app.element(AccessibilityID.Import.vault).waitForExistence(timeout: 10))
+        Screens.capture("import", in: app, showing: "Importing: the vault and the other app's format")
+        app.tap(AccessibilityID.Import.uiTestSample)
+        XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).waitForExistence(timeout: 30))
+        app.element(AccessibilityID.Import.duplicate("Library")).click()
+        Screens.capture("import-review", in: app, showing: "The import's review: a duplicate waiting for a choice")
+        app.tap(AccessibilityID.Import.choice("Library") + ".merge")
+        app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
+        let host = app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch
+        XCTAssertTrue(host.waitForExistence(timeout: 30), app.debugDescription)
+        Screens.capture(
+            "import-merge", in: app,
+            showing: "A merge naming the website and sign-in details it would add, none accepted, the password hidden")
+        host.toggleOn()
+        app.tapWhenEnabled(AccessibilityID.Import.commit)
+        app.waitForText("merged", in: AccessibilityID.Import.summary)
+        Screens.capture("import-done", in: app, showing: "What the import did")
+        app.tap(AccessibilityID.Import.done)
+
+        app.openScreen(AccessibilityID.Settings.export)
+        XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 10))
+        Screens.capture("export", in: app, showing: "Export and backup, with the standing plaintext warning")
+        app.tap(AccessibilityID.Export.kind + ".applePasswordsCSV")
+        app.enter(OnboardingAndUnlockTests.password, into: AccessibilityID.Export.password)
+        app.tap(AccessibilityID.Export.run)
+        app.waitForText("item(s) in the file", in: AccessibilityID.Export.count)
+        app.element(AccessibilityID.Export.count).click()
+        Screens.capture(
+            "export-report", in: app, showing: "A plaintext export's report, shown before the file is saved")
+        app.tap(AccessibilityID.Export.kind + ".archive")
+        app.enter(OnboardingAndUnlockTests.password, into: AccessibilityID.Export.password)
+        app.enter("garden shed padlock", into: AccessibilityID.Export.passphrase)
+        app.enter("garden shed padlock", into: AccessibilityID.Export.passphraseConfirmation)
+        app.tap(AccessibilityID.Export.run)
+        app.waitForText("item(s) in the file", in: AccessibilityID.Export.count)
+        app.closeScreen()
+
+        app.openScreen(AccessibilityID.Settings.restore)
+        app.enter("garden shed padlock", into: AccessibilityID.Import.passphrase)
+        app.tap(AccessibilityID.Import.uiTestArchive)
+        XCTAssertTrue(
+            app.element(AccessibilityID.Import.archiveDate).waitForExistence(timeout: 60), app.debugDescription)
+        app.element(AccessibilityID.Import.archiveDate).click()
+        Screens.capture("restore-review", in: app, showing: "Restoring a backup: the date it was made, first")
+        app.closeScreen()
+    }
+
+    /// The other device changes the password; this one is told, takes the account back with the password it has,
+    /// and removes that device with a new password (PRD F10.1, F10.2; docs/02-architecture.md §7.8).
+    @MainActor
+    private func tourPasswordChangeAndDevices(_ app: XCUIApplication, password: String) {
+        app.runPeerHook(AccessibilityID.Debug.peerPassword, expecting: "password was changed")
+        app.syncNow(expecting: "new account password")
+        app.waitForText("changed on another device", in: AccessibilityID.Settings.syncNotice)
+        Screens.capture("sync-password-changed", in: app, showing: "Settings after a password change on another device")
+        app.closeSettings()
+
+        app.backToList()
+        app.buttons["items.lock"].firstMatch.click()
+        let unlock = app.secureTextFields["unlock.password"]
+        XCTAssertTrue(unlock.waitForExistence(timeout: 10), app.debugDescription)
+        unlock.click()
+        unlock.typeText(password + "\n")
+        XCTAssertTrue(app.element(AccessibilityID.Unlock.passwordChanged).waitForExistence(timeout: 30))
+        unlock.click()
+        Screens.capture(
+            "unlock-password-changed", in: app, showing: "The old password refused, and the way out if that was not you"
+        )
+        unlock.typeText(password)
+        app.tapWhenEnabled(AccessibilityID.Unlock.ignoreChange)
+        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 30), app.debugDescription)
+
+        app.openScreen(AccessibilityID.Settings.devices)
+        let other = UITestNames.otherDevice
+        XCTAssertTrue(
+            app.element(AccessibilityID.Devices.row(other)).waitForExistence(timeout: 30), app.debugDescription)
+        Screens.capture("devices", in: app, showing: "The account's devices, with the other one's password change")
+        app.tap(AccessibilityID.Devices.revoke(other))
+        app.enter(password, into: AccessibilityID.Devices.current)
+        app.enter(DeviceRevocationTests.newPassword, into: AccessibilityID.Devices.new)
+        app.enter(DeviceRevocationTests.newPassword, into: AccessibilityID.Devices.confirmation)
+        Screens.capture("device-revoke", in: app, showing: "Removing a device, changing the password in the same step")
+        app.tap(AccessibilityID.Devices.confirm)
+        app.waitForText("was removed", in: AccessibilityID.Devices.notice)
+        Screens.capture("devices-after-revoke", in: app, showing: "The other device removed")
+        app.closeScreen()
     }
 }
 
