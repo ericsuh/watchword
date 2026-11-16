@@ -17,7 +17,8 @@ struct WatchwordApp: App {
                 #endif
         }
         #if os(macOS)
-            .defaultSize(width: 820, height: 560)
+            // Tall enough for Settings and the account screens' sheets, which sit inside the window's frame.
+            .defaultSize(width: 900, height: 780)
         #endif
     }
 }

@@ -7,11 +7,17 @@ import WatchwordPresentation
 /// asked for every time and checked by the session in the same call; the report is shown before the file is saved,
 /// since it is what the person reads before deleting anything; and the bytes are dropped once saved. The CSV holds
 /// every value exactly as stored (owner decision, 2026-11-16).
+///
+/// The file is written by the app itself, into a folder of its own in the temporary directory, with
+/// `completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves it where the person
+/// chooses; whatever is left of it is removed when the mover is done, when the screen closes and at every lock. On
+/// macOS there is no protection class: the file is as safe as the folder the person picks (docs/02-architecture.md
+/// §14.1).
 struct ExportView: View {
     @Environment(AppModel.self) private var app
     @State private var model: ExportModel
-    @State private var saving = false
-    @State private var document: ExportDocument?
+    @State private var moving = false
+    @State private var staged: URL?
 
     init(context: ScreenContext) {
         _model = State(initialValue: ExportModel(context: context))
@@ -42,7 +48,7 @@ struct ExportView: View {
             }
             Section("Vaults") {
                 ForEach(model.vaults) { vault in
-                    Toggle(vault.name, isOn: vaultBinding(vault.id))
+                    Toggle(vault.label, isOn: vaultBinding(vault.id))
                         .accessibilityIdentifier(AccessibilityID.Export.vault(vault.name))
                 }
             }
@@ -84,11 +90,14 @@ struct ExportView: View {
                     ForEach(Array(file.lines.enumerated()), id: \.offset) { _, line in
                         Text(line).font(.footnote)
                     }
-                    Button("Save File…") {
-                        document = ExportDocument(bytes: file.bytes, kind: file.kind)
-                        saving = true
-                    }
-                    .accessibilityIdentifier(AccessibilityID.Export.save)
+                    Button("Save File…") { stageAndMove() }
+                        .accessibilityIdentifier(AccessibilityID.Export.save)
+                    #if DEBUG
+                        if app.uiTestPeer != nil {
+                            Button("Lock now (UI test)") { Task { await app.lock() } }
+                                .accessibilityIdentifier(AccessibilityID.Debug.lockNow)
+                        }
+                    #endif
                 }
                 .accessibilityIdentifier(AccessibilityID.Export.report)
             }
@@ -99,21 +108,46 @@ struct ExportView: View {
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
         .task { await model.load() }
-        .onChange(of: model.file) { _, file in
+        .onChange(of: model.file) {
             #if DEBUG
-                if let file, file.kind == .archive, app.uiTestPeer != nil { app.uiTestArchive = file.bytes }
+                if app.uiTestPeer != nil, let archive = model.archiveBytes { app.uiTestArchive = archive }
             #endif
         }
-        .fileExporter(
-            isPresented: $saving, document: document, contentType: document?.contentType ?? .data,
-            defaultFilename: model.file?.filename
-        ) { result in
-            document = nil
-            if case .success = result { model.discardFile() }
+        .fileMover(isPresented: $moving, file: staged) { result in
+            staged = nil
+            switch result {
+            case .success: model.finishSaving(saved: true)
+            case .failure: model.finishSaving(saved: false)
+            }
+        }
+        .onChange(of: moving) { _, presented in
+            // A mover dismissed without an answer leaves nothing behind either.
+            guard !presented else { return }
+            Task {
+                await Task.yield()
+                if staged != nil {
+                    staged = nil
+                    model.finishSaving(saved: false)
+                }
+            }
         }
         .onDisappear {
             model.discardFile()
-            document = nil
+            staged = nil
+        }
+    }
+
+    private func stageAndMove() {
+        #if os(iOS)
+            let options: Data.WritingOptions = [.completeFileProtectionUnlessOpen]
+        #else
+            let options: Data.WritingOptions = []
+        #endif
+        do {
+            staged = try model.stage(in: FileManager.default.temporaryDirectory, options: options)
+            moving = true
+        } catch {
+            model.errorMessage = "The file could not be prepared. Nothing was saved."
         }
     }
 
@@ -123,34 +157,5 @@ struct ExportView: View {
             set: { selected in
                 if selected { model.selectedVaults.insert(id) } else { model.selectedVaults.remove(id) }
             })
-    }
-}
-
-/// An export's bytes for the system file exporter. On iOS the file is written with `completeUnlessOpen` protection
-/// (`VaultSession.exportPlaintext`'s contract); the app writes it nowhere else.
-struct ExportDocument: FileDocument {
-    static let readableContentTypes: [UTType] = [.data]
-    static let writableContentTypes: [UTType] = [.commaSeparatedText, .data]
-
-    let bytes: [UInt8]
-    let contentType: UTType
-
-    init(bytes: [UInt8], kind: ExportKind) {
-        self.bytes = bytes
-        contentType = kind == .applePasswordsCSV ? .commaSeparatedText : .data
-    }
-
-    init(configuration: ReadConfiguration) throws {
-        bytes = [UInt8](configuration.file.regularFileContents ?? Data())
-        contentType = .data
-    }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        let wrapper = FileWrapper(regularFileWithContents: Data(bytes))
-        #if os(iOS)
-            wrapper.fileAttributes[FileAttributeKey.protectionKey.rawValue] =
-                FileProtectionType.completeUnlessOpen.rawValue
-        #endif
-        return wrapper
     }
 }

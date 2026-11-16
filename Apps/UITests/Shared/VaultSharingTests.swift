@@ -43,9 +43,11 @@ final class VaultSharingTests: XCTestCase {
         app.reveal(AccessibilityID.Invite.comparedByEye)
         app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
         app.tap(AccessibilityID.Invite.confirm)
+        // The role step names who is invited, and claims no comparison beyond the one made.
+        app.waitForText("Inviting the account", in: AccessibilityID.Invite.invitee, timeout: 10)
         app.tap(AccessibilityID.Invite.send)
         XCTAssertTrue(app.element(AccessibilityID.Invite.code).waitForExistence(timeout: 30))
-        app.tap(AccessibilityID.Invite.done)
+        // Done closes the whole screen from here; the invitation screen's own Done only goes back a step.
         app.closeScreen()
 
         // The other person accepts; after a sync the owner lists them, verified, with the role they were given.

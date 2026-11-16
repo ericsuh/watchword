@@ -9,7 +9,7 @@ extension XCUIApplication {
     }
 
     /// The element with `identifier`, scrolled to if it is not on screen yet: a form's rows below the fold are not in
-    /// the hierarchy until they have been shown.
+    /// the hierarchy until they have been shown, and on macOS a row that is in the hierarchy may still be clipped.
     @discardableResult
     func reveal(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         let target = element(identifier)
@@ -17,38 +17,82 @@ extension XCUIApplication {
             // Down the form first, then back up past where it started.
             for towardsEnd in [true, true, true, true, false, false, false, false, false, false, false, false]
             where !(target.exists && target.isHittable) {
-                scroll(towardsEnd: towardsEnd)
+                scroll(towardsEnd: towardsEnd, to: identifier)
             }
         }
-        XCTAssertTrue(target.waitForExistence(timeout: 10), debugDescription, file: file, line: line)
+        if !target.waitForExistence(timeout: 10) {
+            attachTree("reveal \(identifier)")
+            XCTFail("\(identifier) was not found", file: file, line: line)
+        }
         return target
     }
 
-    private func scroll(towardsEnd: Bool) {
+    /// One step of scrolling the frontmost form. On iOS a swipe, which lands on whatever is on top (a sheet included).
+    /// On macOS a scroll-wheel event, which needs a scroll view the pointer can reach: the one holding the target if it
+    /// is in the hierarchy, else the frontmost sheet's (sheets nest, so the last one listed is on top), never one a
+    /// sheet covers. Nothing is scrolled when there is no such view, so the caller's own check reports what is missing.
+    private func scroll(towardsEnd: Bool, to identifier: String) {
         #if os(iOS)
             if towardsEnd { swipeUp() } else { swipeDown() }
         #else
-            scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: towardsEnd ? -240 : 240)
+            let holding = scrollViews.containing(.any, identifier: identifier).allElementsBoundByIndex.last
+            let frontmost = sheets.allElementsBoundByIndex.last?.scrollViews.firstMatch
+            for candidate in [holding, frontmost, windows.firstMatch.scrollViews.firstMatch].compactMap({ $0 })
+            where candidate.exists && candidate.isHittable {
+                candidate.scroll(byDeltaX: 0, deltaY: towardsEnd ? -240 : 240)
+                return
+            }
         #endif
     }
 
-    /// Opens Settings and, from it, the account screen whose row has `identifier`, which opens in a sheet of its own.
-    func openScreen(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
-        if !buttons["settings.done"].exists { openSettings() }
-        reveal(identifier, file: file, line: line).click()
-        XCTAssertTrue(
-            buttons[AccessibilityID.screenDone].firstMatch.waitForExistence(timeout: 10), debugDescription,
-            file: file, line: line)
+    /// Attaches the whole element tree to the running test, kept whether or not it passes, for a failure that the
+    /// assertion's own message cannot explain (which window or sheet an element is in, and whether it is hittable).
+    func attachTree(_ reason: String) {
+        let attachment = XCTAttachment(string: debugDescription)
+        attachment.name = "element tree: \(reason)"
+        attachment.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Element tree (\(reason))") { $0.add(attachment) }
     }
 
-    /// Closes the account screen's sheet, from whatever is pushed on it, back to Settings.
+    /// Waits until `element` can be clicked: it exists and nothing (a sheet still closing, say) covers it.
+    @discardableResult
+    func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+        let hittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
+        return XCTWaiter().wait(for: [hittable], timeout: timeout) == .completed
+    }
+
+    /// Opens Settings and, from it, the account screen whose row has `identifier`, which opens in a sheet of its own.
+    /// A click that did not open it (one made while Settings was still settling) is made once more.
+    func openScreen(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
+        if !buttons["settings.done"].exists { openSettings() }
+        let done = buttons[AccessibilityID.screenDone].firstMatch
+        for _ in 0..<2 {
+            let row = reveal(identifier, file: file, line: line)
+            waitUntilHittable(row)
+            row.click()
+            if done.waitForExistence(timeout: 10) { return }
+        }
+        attachTree("open \(identifier)")
+        XCTFail("\(identifier) did not open its screen", file: file, line: line)
+    }
+
+    /// Closes the account screen's sheet, from whatever is pushed on it, back to Settings. Waits for anything above it
+    /// (a sheet of its own closing) to have gone first, and clicks again if the first click did not take.
     func closeScreen(file: StaticString = #filePath, line: UInt = #line) {
         let done = buttons[AccessibilityID.screenDone].firstMatch
-        XCTAssertTrue(done.waitForExistence(timeout: 10), debugDescription, file: file, line: line)
-        done.click()
-        XCTAssertTrue(
-            buttons[AccessibilityID.screenDone].firstMatch.waitForNonExistence(timeout: 10), "the screen is still open",
-            file: file, line: line)
+        guard done.waitForExistence(timeout: 10) else {
+            attachTree("close the screen")
+            XCTFail("no screen is open", file: file, line: line)
+            return
+        }
+        for _ in 0..<3 {
+            waitUntilHittable(done)
+            done.click()
+            if done.waitForNonExistence(timeout: 10) { return }
+        }
+        attachTree("close the screen")
+        XCTFail("the screen is still open", file: file, line: line)
     }
 
     /// Clicks the element with `identifier`, scrolling to it first.

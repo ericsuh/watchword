@@ -106,12 +106,12 @@ struct SettingsView: View {
             }
             .sheet(item: $screen) { screen in
                 if let context = model.screenContext {
-                    ScreenSheet { destination(screen, context: context) }
+                    ScreenSheet(close: { self.screen = nil }) { destination(screen, context: context) }
                 }
             }
         }
         #if os(macOS)
-            .frame(minWidth: 560, minHeight: 560)
+            .frame(minWidth: 560, minHeight: 700)
         #endif
     }
 

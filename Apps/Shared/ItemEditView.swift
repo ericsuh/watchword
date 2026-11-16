@@ -1,6 +1,7 @@
 import SwiftUI
 import WatchwordGenerator
 import WatchwordModel
+import WatchwordPresentation
 
 /// Create or edit an item. Scopes are checked by the vault when saving (PRD F11.2); an over-broad host is refused
 /// there, not here, so no UI path can skip the check.
@@ -22,6 +23,21 @@ struct ItemEditView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let vault = model.vault(draft.vaultID) {
+                    // Where the item goes, by ownership and role, not by name alone: a member who may write can call
+                    // a shared vault "Personal" (review of the account screens, finding 4).
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Saving to \(vault.name)")
+                            Text(vault.isShared ? "\(vault.badge). Everyone in this vault can see it." : vault.badge)
+                                .font(.caption).foregroundStyle(vault.isShared ? Color.orange : Color.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: vault.isShared ? "person.2.fill" : "lock.fill")
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("edit.vault")
+                }
                 TextField("Title", text: $draft.title).accessibilityIdentifier("edit.title")
                 TextField("Websites (comma-separated)", text: $hosts)
                     .autocorrectionDisabled()

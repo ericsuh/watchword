@@ -201,7 +201,7 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.element(AccessibilityID.Invite.code).waitForExistence(timeout: 30), app.debugDescription)
         app.element(AccessibilityID.Invite.code).click()
         Screens.capture("invite-code", in: app, showing: "The invitation to send, once the numbers were compared")
-        app.tap(AccessibilityID.Invite.done)
+        // Done closes the whole screen from here; the invitation screen's own Done only goes back a step.
         app.closeScreen()
 
         app.runPeerHook(AccessibilityID.Debug.householdAccept, expecting: "accepted the invitation")

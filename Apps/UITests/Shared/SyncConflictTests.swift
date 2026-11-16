@@ -105,7 +105,8 @@ extension XCUIApplication {
 
     /// Taps Sync Now and waits for a status that mentions `expecting`.
     func syncNow(expecting: String = "sent") {
-        buttons["settings.syncNow"].click()
+        // Settings may be scrolled down from an account screen's row, and its top rows are then out of the hierarchy.
+        reveal("settings.syncNow").click()
         let status = staticTexts.matching(identifier: "settings.syncStatus").matching(
             NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", expecting, expecting)
         ).firstMatch

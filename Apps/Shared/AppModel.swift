@@ -44,6 +44,9 @@ final class AppModel {
     var isWorking = false
 
     let session: VaultSession?
+    /// Every lock of the session, for the screen models to drop what they hold (`LockSensitive`), whether or not
+    /// their views are still on screen.
+    let lockSignal: LockSignal
     #if DEBUG
         private(set) var uiTestPeer: UITestPeer?
         private(set) var uiTestPeerStatus: String?
@@ -55,6 +58,7 @@ final class AppModel {
     #endif
 
     init(environment: AppEnvironment) {
+        lockSignal = LockSignal()
         switch environment {
         case .ready(let session):
             self.session = session
@@ -81,13 +85,14 @@ final class AppModel {
         guard let session else { return nil }
         return ScreenContext(
             session: session, recordActivity: { [weak self] in self?.recordActivity() },
-            didLock: { [weak self] in self?.didLock(.requested) })
+            didLock: { [weak self] in self?.didLock(.requested) }, locks: lockSignal)
     }
 
     var syncStatus: String? { lastSync?.headline }
 
     func start() async {
         guard let session else { return }
+        await lockSignal.watch(session)
         #if DEBUG
             if let uiTestSharing { await session.configureSharing(uiTestSharing) }
         #endif
@@ -216,6 +221,7 @@ final class AppModel {
     /// Secret Key. The clipboard is cleared on every lock except backgrounding, which on iOS is how a person switches
     /// to the app they are pasting into; the copy still expires after 60 s (F5.6).
     private func didLock(_ reason: LockReason) {
+        lockSignal.fire()
         items = []
         vaults = []
         unreadableCount = 0
@@ -270,12 +276,7 @@ final class AppModel {
     /// The vaults and each shared vault's standing (PRD F2.1, F4.5).
     func reloadVaults() async throws {
         guard let session else { return }
-        let infos = try await session.vaults()
-        var shared: [UUID: VaultSharing] = [:]
-        for id in (try? await session.sharedVaultIDs()) ?? [] {
-            if let status = try? await session.sharedVaultStatus(id) { shared[id] = VaultSharing(status) }
-        }
-        vaults = infos.map { VaultRow($0, sharing: shared[$0.id]) }
+        vaults = try await VaultRow.load(from: session)
         if let vaultFilter, !vaults.contains(where: { $0.id == vaultFilter }) { self.vaultFilter = nil }
     }
 
@@ -333,7 +334,7 @@ final class AppModel {
             let report = try await session.syncAll()
             let devices = (try? await session.devices()) ?? []
             let names = Dictionary(
-                devices.map { ($0.id, DeviceRow.displayName($0)) }, uniquingKeysWith: { first, _ in first })
+                devices.map { ($0.id, DeviceRow.reference($0)) }, uniquingKeysWith: { first, _ in first })
             self.lastSync = SyncSummary(report, deviceNames: names)
             if self.phase == .unlocked { try await self.reload() }
         }
