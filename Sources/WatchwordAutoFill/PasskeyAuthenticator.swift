@@ -96,8 +96,10 @@ public enum PasskeyAuthenticator {
     /// COSE algorithm identifier for ECDSA P-256 with SHA-256, the one algorithm implemented.
     public static let es256: Int = -7
 
-    /// Identifies Watchword as the authenticator model in attested credential data. The same for every installation,
-    /// so it says which app holds the passkey and nothing about the person.
+    /// Identifies Watchword as the authenticator model in attested credential data, so a relying party can label
+    /// which provider holds a passkey. The same for every installation: not a secret, not per user, and it says
+    /// nothing about the person. With "none" attestation the platform may replace it with zeros. Not registered in
+    /// the community list of authenticator AAGUIDs as of 2026-11-16 (README.md, "Passkey AAGUID").
     public static let aaguid = UUID(uuidString: "5B0C7A3E-9D41-4F6C-A2B8-3E1F7C0D9A54")!
 
     static var aaguidBytes: [UInt8] {
