@@ -81,12 +81,13 @@ let package = Package(
         .target(name: "WatchwordHygiene", dependencies: ["WatchwordModel", "SecureMemory", crypto]),
 
         // VaultSession façade, unlock and auto-lock policies, and the ports the UI and adapters plug into (§10, §15). Also
-        // the production SyncKeyring and ItemSealer, since they need the keys VaultSession holds (§7; milestone 3).
+        // the production SyncKeyring and ItemSealer, since they need the keys VaultSession holds (§7; milestone 3), and
+        // import, export and the encrypted archive through the session (§14.1; milestone 7).
         .target(
             name: "WatchwordKit",
             dependencies: [
                 "WatchwordModel", "WatchwordMatching", "WatchwordEnvelope", "WatchwordCrypto", "WatchwordStore",
-                "WatchwordSync", "SecureMemory",
+                "WatchwordSync", "SecureMemory", "WatchwordInterchange",
             ]
         ),
 
@@ -149,7 +150,7 @@ let package = Package(
             name: "WatchwordKitTests",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordMatching", "WatchwordStore", "WatchwordCrypto",
-                "WatchwordEnvelope", "WatchwordSync", "SecureMemory", "WatchwordTestSupport",
+                "WatchwordEnvelope", "WatchwordSync", "SecureMemory", "WatchwordInterchange", "WatchwordTestSupport",
             ]
         ),
         .testTarget(

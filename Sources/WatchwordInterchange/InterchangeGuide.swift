@@ -102,6 +102,14 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
                 + "folder on this device that is not synced or shared, and delete it as soon as the import is done.")
     }
 
+    /// The standing warning the export screen shows, beside the choice of format and for as long as the screen is
+    /// open, before a plaintext file exists (PRD F8.4). The same caveat as every route that writes a file.
+    public static let plaintextExportWarning = Caveat(
+        .plaintextFile,
+        "An exported file is not encrypted: anyone who can read it can read every password in it. Save it to a "
+            + "folder on this device that is not synced or shared, import it where it is going, and then delete it. "
+            + "To keep a backup, export an encrypted Watchword archive instead.")
+
     private static let credentialExchangeRequirement =
         "iOS 26, iPadOS 26 or macOS 26 or later, and a version of the other app that supports exporting to another app."
     private static let nothingOnDisk = "Nothing is written to a file: the data passes directly between the two apps."

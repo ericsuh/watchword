@@ -566,6 +566,8 @@ struct InterchangeGuideTests {
                     #expect(kinds.contains(.passkeysNotIn1PUX), "\(route.id)")
                 case .credentialExchange:
                     #expect(kinds.contains(.transferMayDeliverNothing), "\(route.id)")
+                case .watchwordArchive:
+                    Issue.record("no route moves data through a Watchword archive: \(route.id)")
                 }
             }
         }

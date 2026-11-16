@@ -14,6 +14,9 @@ public enum InterchangeFormat: String, Hashable, Sendable, CaseIterable {
     case onePUX
     /// FIDO Credential Exchange Format 1.0 JSON.
     case credentialExchange
+    /// The encrypted Watchword archive (docs/02-architecture.md §14.1). Read and written by the session, which holds
+    /// the keys; this module turns the items an archive held into drafts (`ArchivedItems`).
+    case watchwordArchive
 }
 
 /// What an imported entry is, for the report's counts. Watchword items have no category of their own: the kind
@@ -106,6 +109,12 @@ public enum ImportWarning: Equatable, Sendable {
     case possiblyNeutralisedFormula(column: String)
     /// The entry carried no title; one was derived from its first URL or login name.
     case titleDerived
+    /// Values sync was keeping for the person to choose between (`Item.conflicts`, `Item.retainedValues`) were kept
+    /// as `count` concealed fields labelled "(unresolved value)": an import starts the item afresh, with no sync
+    /// history to hold them as alternatives.
+    case unresolvedValuesKept(count: Int)
+    /// `count` unresolved values of something other than a field's text (a title, a scope, a passkey) were left out.
+    case unresolvedValuesOmitted(count: Int)
 }
 
 /// Why an entry was not imported.

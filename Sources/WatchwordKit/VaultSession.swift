@@ -145,6 +145,8 @@ public actor VaultSession {
     /// parent that is not there), not fetched again by this session until a sync keeps something new: a revoked
     /// device that floods the transport costs each of them one fetch (docs/02-architecture.md §7.8).
     var skippedRegistryEntries: Set<ObjectDigest> = []
+    /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
+    var pendingImport: PendingImport?
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(
@@ -637,7 +639,7 @@ public actor VaultSession {
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).
-    private func deriveUnlockKey(password: String, secretKey: SecretKey, account: AccountRecord) throws
+    func deriveUnlockKey(password: String, secretKey: SecretKey, account: AccountRecord) throws
         -> EncryptionKey
     {
         try TwoSecretKeyDerivation.accountUnlockKey(
@@ -707,6 +709,7 @@ public actor VaultSession {
         lockEpoch &+= 1
         keys?.zeroise()
         keys = nil
+        pendingImport = nil
         backgroundedAt = nil
     }
 
@@ -1017,7 +1020,7 @@ public actor VaultSession {
         if !leftovers.isEmpty { throw VaultError.keychainCleanupIncomplete(leftovers.count) }
     }
 
-    private func storedSecretKey(accountID: UUID) async throws -> SecretKey {
+    func storedSecretKey(accountID: UUID) async throws -> SecretKey {
         guard let bytes = try await keychain.read(.secretKey(accountID: accountID), prompt: "") else {
             throw VaultError.secretKeyMissing
         }
@@ -1267,7 +1270,7 @@ public actor VaultSession {
         )
     }
 
-    private func kdfParameters() throws -> KDFParameters {
+    func kdfParameters() throws -> KDFParameters {
         let parameters: KDFParameters
         switch configuration.kdf {
         case .calibrate: parameters = try KDFCalibration.calibrate(clock: ContinuousClock())

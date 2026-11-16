@@ -17,3 +17,5 @@ hygiene and breach checks
 sharing and membership
 import parsers
 account enrolment and device registry
+encrypted Watchword archive
+interchange through the session

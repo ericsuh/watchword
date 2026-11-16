@@ -27,7 +27,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 4 — sharing (protocol core done) | The protocol core — membership chain, verified contacts, invitations, key grants, rotation plans — with real Ed25519 and HPKE through swift-crypto (ADR 0006), and its adversarial suite | the implementation that ships (CryptoKit); wiring into `VaultSession` and sync; `CKShare`, `UICloudSharingController`/`NSSharingService`, the folder-share flow; the sharing UI |
 | 5 — AutoFill (portable core done) | The request model, TOTP, the passkey authenticator and identity planning — done, behind a vault port with fakes | AuthenticationServices, app-extension targets, `VaultSession`'s conformance, simulator and device QA |
 | 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done | open: the `URLSession` adapter, the wiring into `VaultSession`, background-task glue, the Watchtower-style report UI and its snapshot tests |
-| 7 — interchange (parsers, exporters and fuzz targets done) | Parsers, adversarial parser tests, and the fuzz targets — a better host for them; done | open: Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive, the session wiring and the screens |
+| 7 — interchange (parsers, exporters, fuzz targets, session wiring and the encrypted archive done) | Parsers, adversarial parser tests, and the fuzz targets — a better host for them; the session wiring and the encrypted archive, portable through swift-crypto; done | open: Credential Exchange on iOS 26/macOS 26, file protection and the screens, and a macOS run of the archive against CryptoKit and CommonCrypto |
 | 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
 
 Four rules this split implies, all of which outlive the milestones they came from:
@@ -397,7 +397,8 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
   scopes only through the normaliser and the policy, one-time passwords through `OTPParameters`, passkeys
   through `PasskeyCredential`) with its report; duplicate detection; the instructions as data. Tests: fixtures
   and round trips for each format, DEFLATE vectors from Python's `zlib`, archives from Python's `zipfile`, the
-  `import parsers` adversarial area, and the `Fuzz/` package with fourteen libFuzzer targets and a seed
+  `import parsers` adversarial area, and the `Fuzz/` package with fourteen libFuzzer targets (fifteen with the
+  archive's) and a seed
   corpus, run by `mise run fuzz` and the nightly workflow.
 - Done after the first security review of the module (`02-architecture.md` §14): a merge never widens an
   existing item's scopes or adds to its sign-in fields without a per-host, per-field choice (`MergeChoices`);
@@ -415,9 +416,21 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
   (`ExportWarning.websiteNotScoped`), and the CSV export no longer puts an arbitrary `url` field in its URL
   column. The `1pux`, `cxf` and `password-csv` fuzz targets check that an export, read back, names no host
   the items were not scoped to.
-- Open, all of it integration and most of it Mac-only: the session wiring (password re-entry before a
-  plaintext export, `completeUnlessOpen` file protection, the standing warning, an import path through
-  `VaultSession` that keeps imported history and timestamps); the encrypted Watchword archive; the OS
+- Done, on Linux, with the session wiring (`02-architecture.md` §14.1): import as preview then commit through
+  `VaultSession` (drafts held inside the actor and dropped by `lock()`; every decision checked before anything is
+  written; new items through `ItemMerge.stamped`, `ScopePolicy` and `commitItem`, keeping imported history and
+  timestamps and none of a file's sync metadata; merges over the item as the write reads it, with only the
+  person's `MergeChoices`); plaintext export (CSV, 1PUX, CXF) only with the account password re-verified in the
+  same call, and the standing warning from `InterchangeGuide`; the encrypted Watchword archive (`AccountArchive`,
+  envelope kind 9, wrapped under the archive passphrase and the Secret Key, ADR 0008), its export and import
+  through the same preview and commit, `ArchivedItems` for its items, a known-answer vector and a whole archive
+  from an independent Python implementation, the "encrypted Watchword archive" and "interchange through the
+  session" adversarial areas, and an `archive` fuzz target with that archive as its seed. Not run on a Mac yet:
+  the archive's PBKDF2 there is CommonCrypto's and its AES-GCM CryptoKit's.
+- Open, all of it integration and most of it Mac-only: `completeUnlessOpen` file protection and the standing
+  warning on screen (the session documents both; the app does them); restoring an archive's vaults as vaults
+  (today every archived item goes into the one vault the person chooses, naming the vault it came from); parsing
+  off the session actor, so that a lock does not wait for a large file's parse; the OS
   Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
   and their XCUITests, including a duplicate screen that names each host a merge would add and asks about it
   (`DuplicateMatch.newHosts`, `MergeChoices`), shows each URL and sign-in field before adding it
