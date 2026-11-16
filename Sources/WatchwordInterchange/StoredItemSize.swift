@@ -23,8 +23,9 @@ public enum StoredItemSize {
     static let noteLineOverhead = 272
     /// `{"excludedHosts":[],"host":,"includeSubdomains":false}` and its comma.
     static let scopeOverhead = 64
-    /// `{"fields":[],"replacedAt":<25>,"version":<20>}` and its comma.
-    static let historyEntryOverhead = 80
+    /// `{"fields":[],"replacedAt":<25>,"version":<20>,"writtenBy":[{"device":"<36>","version":<20>}]}` and its comma:
+    /// the vault names the save that recorded each entry (`ItemHistoryEntry.writtenBy`).
+    static let historyEntryOverhead = 176
     /// The item's own keys, identifiers, dates, flags and clock, and the stamps of its eight attributes.
     static let itemOverhead = 1_024 + 8 * stampOverhead
 

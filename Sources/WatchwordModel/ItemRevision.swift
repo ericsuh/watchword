@@ -306,12 +306,59 @@ public struct NoteLine: Hashable, Sendable, Codable {
     /// Empty once removed: the person removed it, so its text is not kept, only its place.
     public var text: String
     public var removed: Bool
+    /// The edits that removed the line, in order: a removal is a write like any other, and names its writer so that
+    /// a shared vault's judge can tell whose it is (docs/02-architecture.md §8.10, review finding S32). Concurrent
+    /// removals of one line are all kept. Empty on a line that is not removed, and on lines removed in a record from
+    /// before removals named a writer, which the merge reads as removed by the record's own write.
+    public var removedBy: [Revision]
 
-    public init(id: ID, after: ID?, text: String, removed: Bool = false) {
+    public init(id: ID, after: ID?, text: String, removed: Bool = false, removedBy: [Revision] = []) {
         self.id = id
         self.after = after
         self.text = text
         self.removed = removed
+        self.removedBy = removedBy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, after, text, removed, removedBy
+    }
+
+    /// Synthesised decoding, except that `removedBy` may be absent: lines written before it existed still open.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(ID.self, forKey: .id)
+        after = try container.decodeIfPresent(ID.self, forKey: .after)
+        text = try container.decode(String.self, forKey: .text)
+        removed = try container.decode(Bool.self, forKey: .removed)
+        removedBy = try container.decodeIfPresent([Revision].self, forKey: .removedBy) ?? []
+    }
+
+    /// Synthesised encoding, except that an empty `removedBy` is left out: a line that is shown carries no more bytes
+    /// than before.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(after, forKey: .after)
+        try container.encode(text, forKey: .text)
+        try container.encode(removed, forKey: .removed)
+        if !removedBy.isEmpty { try container.encode(removedBy, forKey: .removedBy) }
+    }
+}
+
+/// What one resolution discarded of a group's retained values (`ItemMerge.resolve`, PRD F7.7): the values written by a
+/// revision `seen` contains. A discard is a write, and names its writer, so that a shared vault's judge can tell whose
+/// it is (docs/02-architecture.md §8.10, review finding S43).
+public struct ItemDiscard: Hashable, Sendable, Codable {
+    /// The resolution that discarded. `nil` in a record from before discards named a writer: the merge reads it as
+    /// the record's own write.
+    public var revision: Revision?
+    /// What the person had before them when they chose (not the choice itself, which a later edit may yet retain).
+    public var seen: VersionVector
+
+    public init(revision: Revision?, seen: VersionVector) {
+        self.revision = revision
+        self.seen = seen
     }
 }
 

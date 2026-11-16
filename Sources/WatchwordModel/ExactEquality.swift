@@ -56,7 +56,8 @@ extension ServiceScope {
 
 extension NoteLine {
     public static func == (lhs: NoteLine, rhs: NoteLine) -> Bool {
-        lhs.id == rhs.id && lhs.after == rhs.after && lhs.removed == rhs.removed && ExactText.equal(lhs.text, rhs.text)
+        lhs.id == rhs.id && lhs.after == rhs.after && lhs.removed == rhs.removed && lhs.removedBy == rhs.removedBy
+            && ExactText.equal(lhs.text, rhs.text)
     }
 }
 

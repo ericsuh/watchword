@@ -77,6 +77,8 @@ public enum ItemMerge {
             fresh.noteLines = []
             fresh.fieldOrder = nil
             fresh.discards = [:]
+            // Every entry of a new item is its creator's, whatever a copied entry named before (S43).
+            fresh.history = fresh.history.map(ItemState.content(of:))
             return ItemState(fresh, origin: revision).item
         }
         let nonce: UInt64 = generator.next()
@@ -109,7 +111,7 @@ public enum ItemMerge {
             state.order = ItemState.FieldOrder(stamp: stamp, ids: fieldIDs)
         }
         state.lines = NoteText.edit(state.lines, to: edited.notes, revision: revision, nonce: nonce)
-        state.history.formUnion(edited.history)
+        for entry in edited.history { state.record(entry, by: revision) }
         state.clock = clock
         state.base = edited
         state.base.createdAt = min(edited.createdAt, previous.createdAt)
@@ -145,7 +147,7 @@ public enum ItemMerge {
         state.registers[group] = [ConflictingValue(stamp: GroupStamp(revision: revision, seen: clock), value: value)]
         // What the person had before them: everything the item held when they chose, not the choice itself, which a
         // later edit may yet retain.
-        if !seen.isEmpty { state.discards[group] = (state.discards[group] ?? VersionVector()).merging(seen) }
+        if !seen.isEmpty { state.discards[group, default: []].insert(ItemDiscard(revision: revision, seen: seen)) }
         state.retained = state.retained.filter { Self.group(of: $0.value) != group }
         state.clock = clock
         return written(state.item, as: revision)

@@ -6,8 +6,9 @@ import WatchwordModel
 ///
 /// Every line has a unique ID (the revision that inserted it, its index in that edit, and a nonce drawn for the edit
 /// so that no other writer can name the line before seeing it) and names the line it was inserted after. Lines are
-/// never changed in place: an edit removes the old line and inserts the new text. The replicated state is the set of
-/// lines by ID; merging is the union, joined line by line (`join`: removal wins), and the document order is a function
+/// never changed in place: an edit removes the old line and inserts the new text, and the removal names the edit that
+/// made it (`NoteLine.removedBy`, review finding S32). The replicated state is the set of lines by ID; merging is the
+/// union, joined line by line (`join`: removal wins, and every removal is kept), and the document order is a function
 /// of that set alone — children of a line, newest first, depth first — so devices that have seen the same edits show
 /// the same notes, and concurrent edits to different lines all survive. Two devices that change the same line
 /// concurrently both keep their version, one after the other; nothing either of them typed is lost.
@@ -52,7 +53,7 @@ public enum NoteText {
         var copies: [NoteLine.ID: [NoteLine]] = [:]
         for line in lines {
             if byID[line.id] == nil {
-                byID[line.id] = line.removed ? removed(line) : line
+                byID[line.id] = line.removed || !line.removedBy.isEmpty ? removed(line, by: nil) : line
             } else {
                 copies[line.id, default: []].append(line)
             }
@@ -97,11 +98,15 @@ public enum NoteText {
     }
 
     /// `lines` as read from a record written at version `limit`: no line may claim a newer revision than the record
-    /// that carries it, so IDs and anchors above it are lowered to it (docs/10-sync-correctness.md §6). This bounds
-    /// what a record can claim; the nonce in every ID is what keeps a writer from naming lines it has not seen
+    /// that carries it, so IDs, anchors and removals above it are lowered to it (docs/10-sync-correctness.md §6). This
+    /// bounds what a record can claim; the nonce in every ID is what keeps a writer from naming lines it has not seen
     /// (`NoteLine.ID`).
     public static func clamped(_ lines: [NoteLine], to limit: UInt64) -> [NoteLine] {
-        guard lines.contains(where: { $0.id.revision.version > limit || ($0.after?.revision.version ?? 0) > limit })
+        guard
+            lines.contains(where: {
+                $0.id.revision.version > limit || ($0.after?.revision.version ?? 0) > limit
+                    || $0.removedBy.contains { $0.version > limit }
+            })
         else { return lines }
         return lines.map { line in
             var line = line
@@ -111,6 +116,20 @@ public enum NoteText {
                 after.revision = after.revision.clamped(to: limit)
                 line.after = after
             }
+            line.removedBy = line.removedBy.map { $0.clamped(to: limit) }
+            return line
+        }
+    }
+
+    /// `lines` as read from a record written as `origin` (`ItemState.init`): clamped to its version, and every
+    /// removal that names no writer — a record from before removals did, or one whose writer left it out — read as
+    /// the record's own write (review finding S32). So every removal the merge holds names a writer, and one a record
+    /// carries without naming it is the work of whoever wrote that record.
+    public static func read(_ lines: [NoteLine], origin: Revision) -> [NoteLine] {
+        clamped(lines, to: origin.version).map { line in
+            guard line.removed, line.removedBy.isEmpty else { return line }
+            var line = line
+            line.removedBy = [origin]
             return line
         }
     }
@@ -158,14 +177,15 @@ public enum NoteText {
                 previous = id
             }
         }
-        let kept = document.map { removedIDs.contains($0.id) ? removed($0) : $0 }
+        let kept = document.map { removedIDs.contains($0.id) ? removed($0, by: revision) : $0 }
         return ordered(kept + inserted)
     }
 
-    /// The join of two copies of one line (same ID). Between honest devices the copies differ only in `removed`, and
-    /// removal wins. Where a writer reused an ID with another anchor or text, the anchor is the greater of the two and
-    /// the text keeps *both* texts, one per line, so whichever copy an honest device wrote is still there. Each part is
-    /// a join in its own right (a maximum, an "or", a set union), so this is commutative, associative and idempotent.
+    /// The join of two copies of one line (same ID). Between honest devices the copies differ only in `removed` and
+    /// `removedBy`: removal wins, and the removals are the union of both, so each keeps naming its writer. Where a
+    /// writer reused an ID with another anchor or text, the anchor is the greater of the two and the text keeps *both*
+    /// texts, one per line, so whichever copy an honest device wrote is still there. Each part is a join in its own
+    /// right (a maximum, an "or", set unions), so this is commutative, associative and idempotent.
     static func join(_ x: NoteLine, _ y: NoteLine) -> NoteLine {
         join([x, y])
     }
@@ -176,12 +196,15 @@ public enum NoteText {
         guard var line = copies.first else { preconditionFailure("joining no lines") }
         var isRemoved = false
         var differ = false
+        var removals: Set<Revision> = []
         for copy in copies {
             line.after = later(line.after, copy.after)
-            isRemoved = isRemoved || copy.removed
+            isRemoved = isRemoved || copy.removed || !copy.removedBy.isEmpty
+            removals.formUnion(copy.removedBy)
             differ = differ || !copy.text.utf8.elementsEqual(line.text.utf8)
         }
         line.removed = isRemoved
+        line.removedBy = removals.sorted()
         if isRemoved {
             line.text = ""
         } else if differ {
@@ -197,10 +220,14 @@ public enum NoteText {
         return line
     }
 
-    static func removed(_ line: NoteLine) -> NoteLine {
+    /// The line removed, by `revision` as well as whoever had removed it already; the removals in a fixed order.
+    static func removed(_ line: NoteLine, by revision: Revision?) -> NoteLine {
         var line = line
         line.removed = true
         line.text = ""
+        var removals = Set(line.removedBy)
+        if let revision { removals.insert(revision) }
+        line.removedBy = removals.sorted()
         return line
     }
 

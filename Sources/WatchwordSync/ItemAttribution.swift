@@ -16,13 +16,16 @@ public struct AttributedValue: Hashable, Sendable {
 
 extension ItemMerge {
     /// Every attributable value `item` holds, read from a row written as `origin` (through `ItemState.init`, so with
-    /// the bounds every merge applies): each group's values, conflicts and retained values, the field order, and each
+    /// the bounds every merge applies): each group's values, conflicts and retained values, the field order, each
     /// note line — once with its text, and once as the bare line ID, which is what a removed copy of the line still
-    /// shows (a removal carries no revision of its own, review finding S32). A value with no stamp is attributed to
-    /// version 0 of an all-zero device, which no stream carries.
+    /// shows — each removal of a line (review finding S32), each resolution's discard, and each history entry once
+    /// for every write that recorded it (S43). A group value with no stamp is attributed to version 0 of an all-zero
+    /// device, which no stream carries; a removal, discard or history entry that names no writer is read as the
+    /// work of `origin`, the row that carries it (`ItemState.init`).
     ///
-    /// Not covered, because nothing in them names a writer: `history` (it only grows, so a value there destroys
-    /// nothing) and `discards` (review finding S43).
+    /// Nothing the merge keeps is left out, and none of these parts is ever dropped by a merge (removals, discards and
+    /// history only grow): so a version that holds anything a write made, or the effect of one, holds a value
+    /// attributed to that write, and is judged by it (docs/10-sync-correctness.md §9).
     public static func attributedValues(_ item: Item, origin: Revision) -> [AttributedValue] {
         let state = ItemState(item, origin: origin)
         var values: [AttributedValue] = []
@@ -44,12 +47,47 @@ extension ItemMerge {
             bare.append(UInt64(5))
             bare.append(line.id)
             values.append(AttributedValue(revision: line.id.revision, bytes: bare.bytes))
+            for removal in line.removedBy {
+                var removed = CanonicalWriter()
+                removed.append(UInt64(7))
+                removed.append(line.id)
+                removed.append(removal.version)
+                removed.append(removal.device)
+                values.append(AttributedValue(revision: removal, bytes: removed.bytes))
+            }
             guard !line.removed else { continue }
             var text = CanonicalWriter()
             text.append(UInt64(4))
             text.append(line.id)
             text.append(line.text)
             values.append(AttributedValue(revision: line.id.revision, bytes: text.bytes))
+        }
+        for (group, discards) in state.discards {
+            for discard in discards {
+                guard let revision = discard.revision else { continue }
+                var writer = CanonicalWriter()
+                writer.append(UInt64(8))
+                writer.append(group.rawValue)
+                writer.append(revision.version)
+                writer.append(revision.device)
+                writer.append(discard.seen)
+                values.append(AttributedValue(revision: revision, bytes: writer.bytes))
+            }
+        }
+        for (entry, writers) in state.history {
+            var content = CanonicalWriter()
+            content.append(entry.replacedAt)
+            content.append(entry.version)
+            content.append(UInt64(entry.fields.count))
+            for field in entry.fields { content.append(field) }
+            for revision in writers {
+                var writer = CanonicalWriter()
+                writer.append(UInt64(9))
+                writer.append(revision.version)
+                writer.append(revision.device)
+                writer.append(UInt64(content.bytes.count))
+                values.append(AttributedValue(revision: revision, bytes: writer.bytes + content.bytes))
+            }
         }
         return values
     }
