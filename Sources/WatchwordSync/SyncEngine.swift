@@ -25,6 +25,12 @@ public struct SyncConfiguration: Sendable {
     /// judged against the departing account's own segments, so they must stay on the transport for every device
     /// that has yet to judge it (docs/02-architecture.md §8.8, "a departed account's log").
     public var maintainsLog = true
+    /// Entries of ignorable record kinds this version does not carry that one vault keeps aside (ADR 0009), and
+    /// their bytes. Past either, an entry is not kept (`SyncReport.unknownEntriesDropped`, `SyncState.stashOverflow`):
+    /// the stream still merges, the device writes no snapshot, and the version that learns the kind replays the log.
+    /// Generous: one per record, writing device and deletion, a few hundred bytes each.
+    public var maximumStashedEntries = 4096
+    public var maximumStashedBytes = 4 << 20
 
     public init(schemaVersions: [EnvelopeKind: UInt64]) {
         self.schemaVersions = schemaVersions
@@ -127,6 +133,23 @@ public struct SyncReport: Sendable, Equatable {
     /// Deletions made on this device that were held back (`sync(deferringDeletions: true)`): still pending, still
     /// counted as erasures here, published by a later sync.
     public var deletionsDeferred = 0
+    /// A stream stopped at an object that carries an entry of a critical record kind this version does not know
+    /// (`SyncFormatError.unsupportedRecordKind`, ADR 0009). Nothing past it is merged and nothing in it is skipped;
+    /// the object stays staged, and the app must be updated to go on. Shown as "update the app".
+    public var requiresNewerVersion = false
+    /// Entries of ignorable record kinds this version does not know, newly kept aside (ADR 0009); the streams
+    /// carrying them were merged.
+    public var unknownEntriesKept = 0
+    /// Such entries not kept, the stash being full. Nothing is lost for other devices; this one replays the log once
+    /// it learns the kind.
+    public var unknownEntriesDropped = 0
+    /// Entries kept aside by an earlier version and processed now that this one carries their kind.
+    public var unknownEntriesProcessed = 0
+    /// This device was due to write a snapshot and did not, because it holds entries it cannot read (ADR 0009).
+    public var snapshotWithheld = false
+    /// Entries of a kind this version carries were dropped by an earlier one, and this vault's log must be replayed
+    /// to bring them back. The engine does it itself unless the vault has a judge, whose session replays it.
+    public var replayNeeded = false
 
     public init() {}
 }
@@ -211,6 +234,12 @@ public actor SyncEngine {
             return report
         }
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
+        var reconcile = reconcile
+        if !state.stashOverflow.isDisjoint(with: carriedRawKinds) {
+            // An earlier version dropped entries of a kind this one carries, the stash being full (ADR 0009): the log
+            // still holds them, in their segments or in a snapshot by a device that read them.
+            if judge == nil { reconcile = true } else { report.replayNeeded = true }
+        }
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
             // are facts the log also holds, and keeping them stops a replay from putting an erased record back. Not
@@ -314,6 +343,12 @@ public actor SyncEngine {
         }
 
         let alreadyStaged = Set(try await syncState.staged(vaultID: vaultID).map(\.location))
+        // A staged snapshot no longer listed was collected by its author, who does so only once another listed
+        // snapshot covers it. Mostly these are snapshots kept for a version that can read them (ADR 0009); dropping
+        // them keeps what waits staged no larger than what the transport lists.
+        let listedSnapshots = Set(listing.snapshots)
+        let collected = alreadyStaged.filter { $0.kind == .snapshot && !listedSnapshots.contains($0) }
+        if !collected.isEmpty { try await syncState.unstage(Array(collected)) }
         for location in wanted where !alreadyStaged.contains(location) {
             do {
                 guard
@@ -338,6 +373,11 @@ public actor SyncEngine {
 
     // MARK: - Merge
 
+    /// The raw values of the record kinds this engine carries; every other kind is unknown to it (ADR 0009).
+    private var carriedRawKinds: Set<UInt8> {
+        Set(configuration.schemaVersions.keys.map(\.rawValue))
+    }
+
     private func mergeStaged(
         state: inout SyncState, retired: Set<UUID>, reconciling: Bool, report: inout SyncReport
     ) async throws {
@@ -348,17 +388,30 @@ public actor SyncEngine {
             try await syncState.unstage(fromRetired.map(\.location))
             staged.removeAll { retired.contains($0.location.author) }
         }
-        guard !staged.isEmpty else { return }
+        // Kept aside by an earlier version that did not know their kind, and readable now (ADR 0009). A vault with a
+        // judge replays its whole log instead, so the judge sees every segment that carried them (§8.8).
+        var ready = state.stashed.filter { carriedRawKinds.contains($0.rawKind) }
+        if !ready.isEmpty, judge != nil {
+            report.replayNeeded = true
+            ready = []
+        }
+        guard !staged.isEmpty || !ready.isEmpty else { return }
         var highWater = try await vaultHighWater(state)
         // A deletion made here but not yet published is as much an erasure as a published one: without it, a
         // snapshot or segment written before the deletion would put the record back on this device only.
         let pending = try await syncState.pendingDeletions(vaultID: vaultID)
+        if !ready.isEmpty {
+            try await processStashed(
+                ready, pending: pending, reconciling: reconciling, state: &state, highWater: &highWater,
+                report: &report)
+        }
         let segments = Dictionary(grouping: staged.filter { $0.location.kind == .segment }, by: \.location.author)
 
         // Snapshots first: they bootstrap a new device and fill gaps left by garbage collection.
         let snapshots = staged.filter { $0.location.kind == .snapshot }.sorted {
             Self.snapshotOrder($0.location, $1.location)
         }
+        var waitingForNewerVersion: Set<SyncObjectLocation> = []
         for snapshot in snapshots {
             do {
                 let payload = try await open(snapshot)
@@ -372,15 +425,22 @@ public actor SyncEngine {
                         entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
                         highWater: &highWater, report: &report)
                 }
+                keep(payload.unknownEntries, fromSegment: false, state: &state, report: &report)
                 state.snapshots[snapshot.location] = payload.vector
                 state.snapshotCoverage.merge(payload.vector, uniquingKeysWith: max)
             } catch let error where Self.isFatal(error) {
                 throw error
             } catch {
                 report.rejected.append(SyncRejection(name: snapshot.location.name, reason: Self.reason(error)))
+                if Self.requiresNewerVersion(error) {
+                    // Complete and authentic, and unreadable by this version: kept staged, so the version that can
+                    // read it merges it without downloading it again.
+                    report.requiresNewerVersion = true
+                    waitingForNewerVersion.insert(snapshot.location)
+                }
             }
         }
-        try await syncState.unstage(snapshots.map(\.location))
+        try await syncState.unstage(snapshots.map(\.location).filter { !waitingForNewerVersion.contains($0) })
 
         // A stream whose next segment is not here continues from what the snapshots cover: their effects are in
         // the store. One whose next segment is here is merged from its own segments.
@@ -454,6 +514,8 @@ public actor SyncEngine {
                             entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
                             highWater: &highWater, report: &report)
                     }
+                    // Kept aside, and the stream goes on: an ignorable kind this version does not know (ADR 0009).
+                    keep(payload.unknownEntries, fromSegment: true, state: &state, report: &report)
                     acknowledgement = payload.vector
                 } catch let error where Self.isFatal(error) {
                     throw error
@@ -471,8 +533,16 @@ public actor SyncEngine {
                         continue
                     }
                     report.rejected.append(SyncRejection(name: object.location.name, reason: Self.reason(error)))
-                    // Unstaged, so the next sync fetches it again: a partially visible file may since have completed.
-                    try await syncState.unstage([object.location])
+                    if Self.requiresNewerVersion(error) {
+                        // A critical kind this version does not know (ADR 0009): the stream stops here and skips
+                        // nothing. The segment is complete and authentic, so it stays staged for the version that
+                        // can read it.
+                        report.requiresNewerVersion = true
+                    } else {
+                        // Unstaged, so the next sync fetches it again: a partially visible file may since have
+                        // completed.
+                        try await syncState.unstage([object.location])
+                    }
                     if sequence <= (state.snapshotCoverage[author] ?? 0) {
                         // Its effects are in a merged snapshot already: continue past it rather than stall.
                         state.merged[author] = state.snapshotCoverage[author]!
@@ -533,6 +603,99 @@ public actor SyncEngine {
                 throw Rejection(reason: .recordContextMismatch(entry.recordID))
             }
         }
+        // Entries of a kind this version does not know get every check it can make without knowing the kind: their
+        // record's schema version is unknown here, so the rest of the context is checked when they are processed.
+        for entry in payload.unknownEntries {
+            if location.kind == .segment, entry.device != location.author {
+                throw Rejection(reason: .entryFromAnotherDevice(entry.recordID))
+            }
+            guard entry.version > 0 else { throw SyncFormatError.malformedEntry }
+            guard let envelope = entry.envelope else { continue }
+            // The record's own header must name the kind and key the entry does, so a record of a known kind cannot
+            // be filed under an ignorable label and passed over here.
+            guard envelope.count >= EnvelopeHeader.fixedPrefixLength,
+                Array(envelope[0..<4]) == EnvelopeHeader.magic,
+                UInt16(envelope[4]) | UInt16(envelope[5]) << 8 == EnvelopeHeader.currentVersion,
+                envelope[6] == entry.rawKind, Array(envelope[7..<23]) == SyncPayload.bytes(entry.keyID)
+            else { throw Rejection(reason: .recordContextMismatch(entry.recordID)) }
+        }
+    }
+
+    /// Keeps entries of ignorable kinds this version does not know (ADR 0009), within the stash's caps. An entry from
+    /// a segment is its author's own (`validate`), and a version a device writes contains its earlier ones, so it
+    /// replaces that device's lower versions of the record (a deletion only a deletion); one from a snapshot replaces
+    /// nothing, because a snapshot may attribute a version to any device. Past a cap the entry is not kept and the
+    /// kind is recorded in `stashOverflow`: the stream still merges, this device writes no snapshot, and the version
+    /// that learns the kind replays the log, which still holds the entry.
+    private func keep(
+        _ entries: [UnknownSyncEntry], fromSegment: Bool, state: inout SyncState, report: inout SyncReport
+    ) {
+        guard !entries.isEmpty else { return }
+        var bytes = state.stashed.reduce(0) { $0 + $1.length }
+        for entry in entries where !state.stashed.contains(entry) {
+            if fromSegment {
+                let superseded = state.stashed.filter {
+                    $0.recordID == entry.recordID && $0.rawKind == entry.rawKind && $0.device == entry.device
+                        && $0.isDeletion == entry.isDeletion && $0.version < entry.version
+                }
+                for old in superseded {
+                    state.stashed.remove(old)
+                    bytes -= old.length
+                }
+            }
+            guard state.stashed.count < configuration.maximumStashedEntries,
+                bytes + entry.length <= configuration.maximumStashedBytes
+            else {
+                state.stashOverflow.insert(entry.rawKind)
+                report.unknownEntriesDropped += 1
+                continue
+            }
+            state.stashed.insert(entry)
+            bytes += entry.length
+            report.unknownEntriesKept += 1
+        }
+    }
+
+    /// Processes kept entries whose kind this version carries, as if they had just arrived: every context check, then
+    /// the merger. One that does not check or merge is kept for the person in the quarantine (PRD F7.7) rather than
+    /// stopping a stream that has long moved on.
+    private func processStashed(
+        _ ready: Set<UnknownSyncEntry>, pending: [RecordKey: PendingDeletion], reconciling: Bool,
+        state: inout SyncState, highWater: inout UInt64, report: inout SyncReport
+    ) async throws {
+        let order = ready.sorted {
+            ($0.version, $0.device.uuidString, $0.recordID.uuidString, $0.rawKind, $0.isDeletion ? 1 : 0)
+                < ($1.version, $1.device.uuidString, $1.recordID.uuidString, $1.rawKind, $1.isDeletion ? 1 : 0)
+        }
+        for stashed in order {
+            guard let kind = EnvelopeKind(rawValue: stashed.rawKind), let schema = configuration.schemaVersions[kind]
+            else { continue }
+            let entry = stashed.known(as: kind)
+            do {
+                if let envelope = entry.envelope {
+                    let context = EnvelopeContext(
+                        recordID: entry.recordID, vaultID: vaultID, schemaVersion: schema, kind: kind,
+                        keyID: entry.keyID, recordVersion: entry.version)
+                    do {
+                        _ = try Envelope.parse(
+                            envelope, expecting: context, maximumLength: SyncPayload.maximumEntryEnvelopeLength)
+                    } catch {
+                        throw Rejection(reason: .recordContextMismatch(entry.recordID))
+                    }
+                }
+                try await apply(
+                    entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                    highWater: &highWater, report: &report)
+            } catch let error where Self.isFatal(error) {
+                throw error
+            } catch {
+                report.quarantined.append(entry.key)
+                try await syncState.quarantine(entry, vaultID: vaultID)
+            }
+            state.stashed.remove(stashed)
+            report.unknownEntriesProcessed += 1
+        }
+        try await syncState.saveState(state)
     }
 
     private func apply(
@@ -922,6 +1085,15 @@ public actor SyncEngine {
                 active.min(by: { $0.precedes($1) }) == deviceID || uncovered >= 4 * configuration.snapshotThreshold
             else { return }
         }
+        // A device holding entries it cannot read writes no snapshot (ADR 0009): its snapshot would cover their
+        // segments without carrying them, and once those segments were collected, a device that reads the kind and
+        // has not merged them yet would never see them. Snapshots come only from devices that read everything they
+        // merged, so whatever covers a segment carries what it said. Nothing is lost by waiting: what this device
+        // holds is in its store, and the others step in at four times the threshold.
+        guard state.stashed.isEmpty, state.stashOverflow.isEmpty else {
+            report.snapshotWithheld = true
+            return
+        }
 
         var entries: [SyncEntry] = []
         var present: Set<RecordKey> = []
@@ -1018,6 +1190,12 @@ public actor SyncEngine {
         case is RecordStoreError: return true
         default: return false
         }
+    }
+
+    /// Whether an object was refused only because it carries a critical record kind this version does not know.
+    static func requiresNewerVersion(_ error: any Error) -> Bool {
+        if case SyncFormatError.unsupportedRecordKind = error { return true }
+        return false
     }
 
     static func reason(_ error: any Error) -> SyncRejectionReason {

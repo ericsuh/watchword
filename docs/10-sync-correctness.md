@@ -361,6 +361,14 @@ failed each time.
   quarantine: the local version stays, the remote entry is kept for the person (PRD F7.7), and the stream carries on,
   so unrelated items keep arriving (`mergeOverThePayloadLimit`). On that device the item no longer converges with
   the others until a person resolves it: the price of a bound on record size.
+- **Kinds a device does not know** (ADR 0009, N7). The argument above is about items, on devices that read every kind
+  in the log. A device of an earlier version keeps the entries of an ignorable kind it cannot read aside, unmerged,
+  and merges everything else, so its items converge with everyone's; its state of that kind is simply behind, and
+  catches up when it is updated and processes what it kept (or replays the log, if it had to drop some). What makes
+  that safe for the *other* devices is that it writes no snapshot while it holds such entries: every snapshot is then
+  the state of a device that merged everything it covers, which is all §7.5's collection rule relies on. A critical
+  kind it cannot read stops that stream at the object, as a gap does; nothing past it is applied, so nothing is merged
+  out of order, and the stream converges once the device is updated.
 - **Growth.** History, note-line tombstones, removed fields' stamps and retained values only grow. An item at the
   payload limit refuses further edits until history moves to records of its own (already tracked), and merges as
   above.

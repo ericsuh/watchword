@@ -42,3 +42,32 @@ struct KDFParametersTests {
         #expect(decoded == params)
     }
 }
+
+/// ADR 0009: a kind's raw value says what a sync reader that does not know the kind does with its records.
+@Suite("Record kind criticality")
+struct RecordCriticalityTests {
+    /// Exhaustive on purpose: a new kind does not compile here until someone decides its criticality, and the test
+    /// then fails unless its raw value was chosen in the matching range.
+    static func intended(_ kind: EnvelopeKind) -> RecordCriticality {
+        switch kind {
+        case .item, .vaultKeyWrap, .membership, .accountHeader, .logSegment, .snapshot, .vaultMetadata,
+            .vaultDirectory, .deviceRegistry, .archive:
+            return .critical
+        case .scanStatus:
+            return .ignorable
+        }
+    }
+
+    @Test("every kind's raw value lies in the range of its intended criticality", arguments: EnvelopeKind.allCases)
+    func everyKind(_ kind: EnvelopeKind) {
+        #expect(kind.criticality == Self.intended(kind))
+    }
+
+    @Test("10 through 127 are ignorable, every other raw value critical, known or not")
+    func ranges() {
+        for raw in 0...255 {
+            let byte = UInt8(raw)
+            #expect(EnvelopeKind.criticality(ofRawValue: byte) == ((10...127).contains(raw) ? .ignorable : .critical))
+        }
+    }
+}

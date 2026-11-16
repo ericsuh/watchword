@@ -233,6 +233,36 @@ public actor FakeSyncKeyring: SyncKeyring {
         return row
     }
 
+    /// Seals `plaintext` as a row of `kind` written by this device: a record the fakes carry without reading it (scan
+    /// results, a vault's description, a kind a later version adds), for `OpaqueRecordMerger`.
+    public func sealRecord(
+        _ plaintext: [UInt8], recordID: UUID, kind: EnvelopeKind, schemaVersion: UInt64, vaultID: UUID,
+        version: UInt64
+    ) async throws -> StoredRecord {
+        guard !isLocked else { throw SyncKeyringError.locked }
+        guard let (keyID, key) = await keys.current(vaultID: vaultID) else {
+            throw SyncKeyringError.unknownKey(vaultID)
+        }
+        var row = StoredRecord(
+            recordID: recordID, kind: kind, vaultID: vaultID, keyID: keyID, version: version, deviceID: deviceID,
+            envelope: [])
+        row.envelope = try FakeCipher.seal(
+            plaintext, context: Self.recordContext(row, schemaVersion: schemaVersion), key: key,
+            nonce: await keys.nonce())
+        return row
+    }
+
+    /// Opens a row sealed by `sealRecord`.
+    public func openRecord(_ row: StoredRecord, schemaVersion: UInt64) async throws -> [UInt8] {
+        try await open(row.envelope, context: Self.recordContext(row, schemaVersion: schemaVersion))
+    }
+
+    public static func recordContext(_ row: StoredRecord, schemaVersion: UInt64) -> EnvelopeContext {
+        EnvelopeContext(
+            recordID: row.recordID, vaultID: row.vaultID, schemaVersion: schemaVersion, kind: row.kind,
+            keyID: row.keyID, recordVersion: row.version)
+    }
+
     /// Opens an item row, with `VaultSession`'s identity check against the row.
     public func openItem(_ row: StoredRecord) async throws -> Item {
         guard !isLocked else { throw SyncKeyringError.locked }
@@ -280,3 +310,35 @@ public struct FakeItemMerger: RecordMerger {
 }
 
 extension FakeSyncKeyring: ItemSealer {}
+
+/// A merger for records the fakes do not read (`FakeSyncKeyring.sealRecord`): the remote version must open, and the
+/// higher (version, device) stamp stands, a last-writer-wins register. A deletion erases a version at or below its
+/// stamp and keeps a later one; two erasure summaries join to the larger, so the join is commutative.
+public struct OpaqueRecordMerger: RecordMerger {
+    public let keyring: FakeSyncKeyring
+    public let schemaVersion: UInt64
+
+    public init(keyring: FakeSyncKeyring, schemaVersion: UInt64) {
+        self.keyring = keyring
+        self.schemaVersion = schemaVersion
+    }
+
+    public func merge(local: StoredRecord, remote: StoredRecord) async throws -> MergeDecision {
+        _ = try await keyring.openRecord(remote, schemaVersion: schemaVersion)
+        return RecordStamp(remote) > RecordStamp(local) && remote.version > local.version ? .adoptRemote : .keepLocal
+    }
+
+    public func erasureSummary(of record: StoredRecord) async throws -> [UInt8] {
+        []
+    }
+
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above version: UInt64) async throws
+        -> ErasureDecision
+    {
+        record.version <= version ? .erase : .keep
+    }
+
+    public func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8] {
+        first.lexicographicallyPrecedes(second) ? second : first
+    }
+}

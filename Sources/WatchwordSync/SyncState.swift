@@ -65,6 +65,14 @@ public struct SyncState: Sendable, Hashable {
     /// For each stream, the most any merged snapshot covers. The effects of those segments are in the local store,
     /// so a stream whose next segment is missing (collected, or never visible) continues from here.
     public var snapshotCoverage: [UUID: UInt64] = [:]
+    /// Entries of ignorable record kinds this version does not carry, from segments and snapshots it has merged
+    /// (ADR 0009): kept byte for byte, within `SyncConfiguration.maximumStashedEntries` and `maximumStashedBytes`, and
+    /// processed by the first sync that carries their kind. While this or `stashOverflow` is not empty, the device writes
+    /// no snapshot, so no snapshot can cover a segment without carrying what the segment said.
+    public var stashed: Set<UnknownSyncEntry> = []
+    /// The raw kinds of which an entry was not kept, the stash being full. When a version that carries one of them
+    /// syncs, it replays the log (a reconciling sync) to bring the entries back.
+    public var stashOverflow: Set<UInt8> = []
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID

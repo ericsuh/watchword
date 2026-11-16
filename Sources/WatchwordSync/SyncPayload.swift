@@ -7,7 +7,9 @@ public enum SyncFormatError: Error, Equatable, Sendable {
     case badMagic
     case unsupportedFormatVersion(UInt8)
     case unknownObjectKind(UInt8)
-    /// An entry of a record kind sync does not carry.
+    /// An entry of a critical record kind this reader does not carry (`RecordCriticality.critical`, ADR 0009): the
+    /// object is refused whole and its stream waits for a version that knows the kind (`SyncReport.requiresNewerVersion`).
+    /// A kind this version knows but never syncs is refused the same way: a later version might sync it.
     case unsupportedRecordKind(UInt8)
     case unknownFlags(UInt8)
     /// Entries or vector elements out of order or repeated: one canonical encoding per payload.
@@ -85,6 +87,57 @@ public struct SyncEntry: Sendable, Hashable {
     }
 }
 
+/// An entry of an ignorable record kind this reader does not know (ADR 0009), kept byte for byte: it is never stored,
+/// merged or handed to a merger, only kept aside (`SyncState.stashed`) until a version that knows the kind processes it.
+public struct UnknownSyncEntry: Sendable, Hashable {
+    public var recordID: UUID
+    public var rawKind: UInt8
+    public var keyID: UUID
+    public var version: UInt64
+    public var device: UUID
+    /// The record's envelope, or `nil` for a deletion.
+    public var envelope: [UInt8]?
+    public var erasure: [UInt8]
+
+    public init(
+        recordID: UUID, rawKind: UInt8, keyID: UUID, version: UInt64, device: UUID, envelope: [UInt8]?,
+        erasure: [UInt8] = []
+    ) {
+        self.recordID = recordID
+        self.rawKind = rawKind
+        self.keyID = keyID
+        self.version = version
+        self.device = device
+        self.envelope = envelope
+        self.erasure = envelope == nil ? erasure : []
+    }
+
+    public var isDeletion: Bool {
+        envelope == nil
+    }
+
+    /// What it counts for against the stash's byte cap (`SyncConfiguration.maximumStashedBytes`).
+    public var length: Int {
+        SyncPayload.minimumEntryLength + (envelope?.count ?? erasure.count)
+    }
+
+    /// The entry as a known one, once this reader carries `kind` (its raw value must be this entry's).
+    public func known(as kind: EnvelopeKind) -> SyncEntry {
+        precondition(kind.rawValue == rawKind)
+        return SyncEntry(
+            recordID: recordID, kind: kind, keyID: keyID, version: version, device: device, envelope: envelope,
+            erasure: erasure)
+    }
+
+    /// The same entry seen by a reader that does not carry its kind (tests, and a snapshot written by a later
+    /// version).
+    public init(_ entry: SyncEntry) {
+        self.init(
+            recordID: entry.recordID, rawKind: entry.kind.rawValue, keyID: entry.keyID, version: entry.version,
+            device: entry.device, envelope: entry.envelope, erasure: entry.erasure)
+    }
+}
+
 /// The plaintext of a log segment or a snapshot (docs/02-architecture.md §7.1). It travels sealed under the vault key
 /// in an envelope of kind `.logSegment` or `.snapshot`, which travels inside a `SignedObject`.
 ///
@@ -99,6 +152,12 @@ public struct SyncEntry: Sendable, Hashable {
 ///   live entries: envelopeLength u32, envelope; deletions: erasureLength u32, erasure summary
 /// (entries strictly ascending by record ID, then kind; nothing after the last)
 /// ```
+///
+/// An entry's kind byte also says what a reader that does not carry the kind does with it (ADR 0009,
+/// `EnvelopeKind.criticality(ofRawValue:)`): an ignorable one is parsed into `unknownEntries`, kept byte for byte, and
+/// the rest of the payload is merged; a critical one refuses the payload. The kind byte is inside the sealed, signed
+/// payload and inside each record envelope's own context, so the storage provider cannot change it, and with it the
+/// criticality, without failing authentication.
 ///
 /// `vector` is, for a segment, the author's acknowledgement: for every stream, the highest sequence number it had
 /// merged when it wrote the segment (garbage collection waits for every device's). For a snapshot it is the coverage:
@@ -126,10 +185,13 @@ public struct SyncPayload: Sendable, Hashable {
     public var number: UInt64
     public var vector: [UUID: UInt64]
     public var entries: [SyncEntry]
+    /// Entries of ignorable kinds the reader does not carry (ADR 0009). Empty in everything this version writes: a
+    /// device holding such entries writes no snapshot (`SyncEngine`), and it never writes a kind it does not know.
+    public var unknownEntries: [UnknownSyncEntry]
 
     public init(
         kind: SyncObjectLocation.Kind, vaultID: UUID, author: UUID, number: UInt64, vector: [UUID: UInt64],
-        entries: [SyncEntry]
+        entries: [SyncEntry], unknownEntries: [UnknownSyncEntry] = []
     ) {
         self.kind = kind
         self.vaultID = vaultID
@@ -137,6 +199,7 @@ public struct SyncPayload: Sendable, Hashable {
         self.number = number
         self.vector = vector
         self.entries = entries
+        self.unknownEntries = unknownEntries
     }
 
     public var location: SyncObjectLocation {
@@ -155,11 +218,11 @@ public struct SyncPayload: Sendable, Hashable {
         for (device, sequence) in vectorElements {
             out += Self.bytes(device) + Self.littleEndian(sequence)
         }
-        let sortedEntries = entries.sorted(by: Self.entryOrder)
+        let sortedEntries = (entries.map(UnknownSyncEntry.init) + unknownEntries).sorted(by: Self.rawEntryOrder)
         out += Self.littleEndian(UInt32(sortedEntries.count))
         for entry in sortedEntries {
             out += Self.bytes(entry.recordID)
-            out.append(entry.kind.rawValue)
+            out.append(entry.rawKind)
             out += Self.bytes(entry.keyID) + Self.littleEndian(entry.version) + Self.bytes(entry.device)
             if let envelope = entry.envelope {
                 out.append(0)
@@ -179,10 +242,16 @@ public struct SyncPayload: Sendable, Hashable {
         return a.kind.rawValue < b.kind.rawValue
     }
 
+    static func rawEntryOrder(_ a: UnknownSyncEntry, _ b: UnknownSyncEntry) -> Bool {
+        if a.recordID != b.recordID { return a.recordID.precedes(b.recordID) }
+        return a.rawKind < b.rawKind
+    }
+
     // MARK: - Parsing
 
-    /// Parses a payload. `allowedKinds` are the record kinds sync carries; any other is refused here, before the entry
-    /// reaches the store or a merger.
+    /// Parses a payload. `allowedKinds` are the record kinds this reader carries. An entry of any other kind never
+    /// reaches the store or a merger: an ignorable one (ADR 0009) goes to `unknownEntries`, and a critical one refuses
+    /// the payload (`unsupportedRecordKind`).
     public static func parse(
         _ bytes: [UInt8],
         allowedKinds: Set<EnvelopeKind>,
@@ -216,13 +285,23 @@ public struct SyncPayload: Sendable, Hashable {
         let entryCount = Int(try reader.uint32())
         guard entryCount <= reader.remaining / minimumEntryLength else { throw SyncFormatError.countTooLarge }
         var entries: [SyncEntry] = []
+        var unknownEntries: [UnknownSyncEntry] = []
         entries.reserveCapacity(entryCount)
+        var previous: (recordID: UUID, rawKind: UInt8)?
         for _ in 0..<entryCount {
             let recordID = try reader.uuid()
             let rawKind = try reader.byte()
-            guard let kind = EnvelopeKind(rawValue: rawKind), allowedKinds.contains(kind) else {
+            let kind = EnvelopeKind(rawValue: rawKind).flatMap { allowedKinds.contains($0) ? $0 : nil }
+            guard kind != nil || EnvelopeKind.criticality(ofRawValue: rawKind) == .ignorable else {
                 throw SyncFormatError.unsupportedRecordKind(rawKind)
             }
+            if let previous,
+                !(previous.recordID == recordID
+                    ? previous.rawKind < rawKind : previous.recordID.precedes(recordID))
+            {
+                throw SyncFormatError.notCanonical
+            }
+            previous = (recordID, rawKind)
             let keyID = try reader.uuid()
             let recordVersion = try reader.uint64()
             let device = try reader.uuid()
@@ -243,15 +322,22 @@ public struct SyncPayload: Sendable, Hashable {
             default:
                 throw SyncFormatError.unknownFlags(flags)
             }
-            let entry = SyncEntry(
-                recordID: recordID, kind: kind, keyID: keyID, version: recordVersion, device: device,
-                envelope: envelope, erasure: erasure)
-            if let last = entries.last, !entryOrder(last, entry) { throw SyncFormatError.notCanonical }
-            entries.append(entry)
+            if let kind {
+                entries.append(
+                    SyncEntry(
+                        recordID: recordID, kind: kind, keyID: keyID, version: recordVersion, device: device,
+                        envelope: envelope, erasure: erasure))
+            } else {
+                unknownEntries.append(
+                    UnknownSyncEntry(
+                        recordID: recordID, rawKind: rawKind, keyID: keyID, version: recordVersion, device: device,
+                        envelope: envelope, erasure: erasure))
+            }
         }
         guard reader.remaining == 0 else { throw SyncFormatError.trailingBytes }
         return SyncPayload(
-            kind: objectKind, vaultID: vaultID, author: author, number: number, vector: vector, entries: entries)
+            kind: objectKind, vaultID: vaultID, author: author, number: number, vector: vector, entries: entries,
+            unknownEntries: unknownEntries)
     }
 
     // MARK: - Helpers

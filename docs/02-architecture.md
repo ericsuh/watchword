@@ -466,6 +466,19 @@ propagated as a deletion. A row that came back while its deletion was being made
 before publishing. Objects are created, never overwritten, and the next sequence number is never below anything the
 stream has on the transport, so a device whose state was rolled back never reuses a collected number.
 
+**Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
+value (`EnvelopeKind.criticality(ofRawValue:)`: 10 to 127 ignorable, everything else critical; `scanStatus` is the first
+ignorable kind), so the kind byte, bound by the payload's AEAD and signature and by each record envelope's own context,
+is also its criticality and cannot be flipped alone. An entry of a critical kind the engine does not carry refuses the
+object: the stream stops there and skips nothing, the object stays staged, and `SyncReport.requiresNewerVersion` asks
+for an update. An entry of an ignorable kind it does not carry is checked as far as it can be without the kind (its
+author's, a positive version, its envelope's header naming the same kind and key), kept byte for byte in
+`SyncState.stashed`, and the stream merges on; the first engine that carries the kind processes what was kept,
+through every context check and the kind's merger, without downloading it again (a shared vault replays its log, for
+its judge). A device holding such entries writes no snapshot (below). The stash holds at most 4,096 entries and
+4 MiB per vault; past that an entry is dropped and its kind recorded (`SyncState.stashOverflow`), the stream still
+merges, and the version that learns the kind replays the log, which still holds it.
+
 **Snapshots and garbage collection.** Once the segments not covered by a snapshot reach a threshold (never less
 than twice the number of streams, so the acknowledgements a snapshot causes cannot trigger the next), the lowest
 active device writes one; any device steps in once four times the threshold is reached. A failure elsewhere in the
@@ -476,6 +489,9 @@ the highest coverage any of them has when its next segment is missing. A device 
 other known stream has acknowledged merging it and some listed snapshot covers it, always keeping its newest; it
 deletes one of its own snapshots only when another listed snapshot covers everything it does. A snapshot's contents
 are trusted only as far as their signature: existing devices never delete anything because a snapshot omits it.
+Only a device that read everything it merged writes one (`SyncReport.snapshotWithheld` otherwise, ADR 0009): a
+snapshot from one that kept entries aside would cover their segments without being able to carry concurrent versions
+of one record, and once those segments were collected a device that reads the kind would never see what it left out.
 
 **Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and the erasures it has merged,
 and replays the log. On a healthy device it changes nothing; on one whose file was rolled back it restores the newest

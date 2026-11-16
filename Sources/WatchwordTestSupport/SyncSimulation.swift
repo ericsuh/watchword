@@ -8,7 +8,9 @@ import WatchwordSync
 /// One simulated device of an account: its own store and sync state, a fake keyring, the fake merger, and the engine
 /// (docs/04-test-plan.md §2). `save`, `edit` and `delete` do what `VaultSession` does to the store — version above
 /// everything seen, revisions stamped, sealed, committed through the deletion-recording store — so the simulation
-/// exercises the engine with the same record traffic the app will produce.
+/// exercises the engine with the same record traffic the app will produce. `opaqueKinds` (kind to schema version) are
+/// further kinds it carries without reading them, merged by `OpaqueRecordMerger` and written with `saveRecord`; give
+/// them to `configuration` as well.
 public actor SyncTestClient {
     public static let configuration = SyncConfiguration(schemaVersions: [.item: ItemCodec.schemaVersion])
 
@@ -26,7 +28,9 @@ public actor SyncTestClient {
     public init(
         deviceID: UUID, vaultID: UUID, keys: FakeAccountKeys, transport: any SyncTransport,
         configuration: SyncConfiguration = SyncTestClient.configuration,
-        store: InMemoryRecordStore = InMemoryRecordStore(), syncState: InMemorySyncStateStore = InMemorySyncStateStore()
+        store: InMemoryRecordStore = InMemoryRecordStore(),
+        syncState: InMemorySyncStateStore = InMemorySyncStateStore(),
+        opaqueKinds: [EnvelopeKind: UInt64] = [:]
     ) {
         self.deviceID = deviceID
         self.vaultID = vaultID
@@ -35,9 +39,17 @@ public actor SyncTestClient {
         self.syncState = syncState
         sessionStore = DeletionRecordingStore(base: store, syncState: syncState, deviceID: deviceID)
         keyring = FakeSyncKeyring(deviceID: deviceID, keys: keys)
+        var merger: any RecordMerger = FakeItemMerger(keyring: keyring)
+        if !opaqueKinds.isEmpty {
+            var mergers: [EnvelopeKind: any RecordMerger] = [.item: merger]
+            for (kind, schema) in opaqueKinds {
+                mergers[kind] = OpaqueRecordMerger(keyring: keyring, schemaVersion: schema)
+            }
+            merger = KindRoutingMerger(mergers)
+        }
         engine = SyncEngine(
             vaultID: vaultID, deviceID: deviceID, store: store, syncState: syncState, transport: transport,
-            keyring: keyring, merger: FakeItemMerger(keyring: keyring), configuration: configuration)
+            keyring: keyring, merger: merger, configuration: configuration)
     }
 
     @discardableResult
@@ -78,6 +90,24 @@ public actor SyncTestClient {
         change.expectations[row.key] = existingRow.map { .version($0.version) } ?? .absent
         try await sessionStore.commit(change)
         return item
+    }
+
+    /// Writes a new version of a record of a kind carried opaquely (`opaqueKinds`), above every version of that kind
+    /// this device holds, as the session writes scan results beside an item.
+    @discardableResult
+    public func saveRecord(
+        _ plaintext: [UInt8], recordID: UUID, kind: EnvelopeKind, schemaVersion: UInt64
+    ) async throws -> StoredRecord {
+        let key = RecordKey(recordID: recordID, kind: kind)
+        let existing = try await sessionStore.record(key)
+        let highest = try await sessionStore.records(in: vaultID, kind: kind).map(\.version).max() ?? 0
+        let row = try await keyring.sealRecord(
+            plaintext, recordID: recordID, kind: kind, schemaVersion: schemaVersion, vaultID: vaultID,
+            version: max(highest, existing?.version ?? 0) + 1)
+        var change = StoreChange(upserts: [row])
+        change.expectations[key] = existing.map { .version($0.version) } ?? .absent
+        try await sessionStore.commit(change)
+        return row
     }
 
     /// Stores an item the caller built as a new version (a conflict resolution from `ItemMerge.resolve`), as the

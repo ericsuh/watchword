@@ -72,7 +72,57 @@ enum StateStoreFixtures {
             vaultID: SyncFixtures.vault, author: SyncFixtures.deviceB, lamport: 12)
         state.snapshots = [snapshot: [SyncFixtures.deviceA: 5, SyncFixtures.deviceB: 2]]
         state.snapshotCoverage = [SyncFixtures.deviceA: 5, SyncFixtures.deviceB: 2]
+        state.stashed = [
+            UnknownSyncEntry(
+                recordID: key.recordID, rawKind: 77, keyID: record(1).keyID, version: 5, device: SyncFixtures.deviceB,
+                envelope: [4, 5, 6]),
+            UnknownSyncEntry(
+                recordID: key.recordID, rawKind: 10, keyID: SyncPayload.zeroUUID, version: 6,
+                device: SyncFixtures.deviceB, envelope: nil, erasure: [8]),
+        ]
+        state.stashOverflow = [12]
         return state
+    }
+}
+
+/// The encoding `SQLiteSyncStateStore` writes, which is portable and so checked here on every platform.
+@Suite("Sync state encoding")
+struct SyncStateEncodingTests {
+    @Test("every field, entries kept for a later version included, survives the encoding")
+    func roundTrip() throws {
+        let state = StateStoreFixtures.state()
+        let bytes = try JSONEncoder().encode(EncodedState(state))
+        #expect(try JSONDecoder().decode(EncodedState.self, from: bytes).state == state)
+    }
+
+    @Test("a row written before entries were kept aside decodes with none kept")
+    func olderRow() throws {
+        var state = StateStoreFixtures.state()
+        var encoded = EncodedState(state)
+        encoded.stashed = nil
+        encoded.stashOverflow = nil
+        state.stashed = []
+        state.stashOverflow = []
+        let bytes = try JSONEncoder().encode(encoded)
+        #expect(try JSONDecoder().decode(EncodedState.self, from: bytes).state == state)
+    }
+
+    @Test("a kept deletion that names a key, or an empty kept envelope, is no state at all")
+    func malformedKeptEntries() throws {
+        var keyed = EncodedState(StateStoreFixtures.state())
+        keyed.stashed = [
+            .init(
+                record: UUID(), kind: 10, key: UUID(), version: 1, device: SyncFixtures.deviceA, envelope: nil,
+                erasure: Data())
+        ]
+        #expect(keyed.state == nil)
+        var empty = keyed
+        empty.stashed = [
+            .init(
+                record: UUID(), kind: 10, key: UUID(), version: 1, device: SyncFixtures.deviceA, envelope: Data(),
+                erasure: Data())
+        ]
+        #expect(empty.state == nil)
     }
 }
 

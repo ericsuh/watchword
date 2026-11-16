@@ -92,6 +92,9 @@ extension VaultSession {
                 vaultReport = try await engine(vaultID).sync(
                     reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing)
                 sharedEngineDidRun(vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport)
+                // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
+                // in this sync (ADR 0009), as its log is whole.
+                if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
                 if vaultReport.deletionsDeferred > 0 { deferred.append(vaultID) }
                 if vaultReport.transportUnavailable || vaultReport.deferredUntilUnlock
                     || vaultReport.ownStreamConflict != nil
@@ -148,6 +151,10 @@ extension VaultSession {
         total.deviceRevoked = first.deviceRevoked
         total.deviceNotRegistered = first.deviceNotRegistered
         total.awaitingNewPassword = first.awaitingNewPassword
+        total.unknownEntriesKept += first.unknownEntriesKept
+        total.unknownEntriesDropped += first.unknownEntriesDropped
+        total.unknownEntriesProcessed += first.unknownEntriesProcessed
+        total.snapshotWithheld = total.snapshotWithheld || first.snapshotWithheld
         return total
     }
 
@@ -538,6 +545,12 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.deferredUntilUnlock = total.deferredUntilUnlock || report.deferredUntilUnlock
             total.transportUnavailable = total.transportUnavailable || report.transportUnavailable
             total.ownStreamConflict = total.ownStreamConflict ?? report.ownStreamConflict
+            total.requiresNewerVersion = total.requiresNewerVersion || report.requiresNewerVersion
+            total.unknownEntriesKept += report.unknownEntriesKept
+            total.unknownEntriesDropped += report.unknownEntriesDropped
+            total.unknownEntriesProcessed += report.unknownEntriesProcessed
+            total.snapshotWithheld = total.snapshotWithheld || report.snapshotWithheld
+            total.replayNeeded = total.replayNeeded || report.replayNeeded
         }
         return total
     }
