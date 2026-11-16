@@ -136,7 +136,7 @@ struct SharingScenarioTests {
 
     @Test("a rotation interrupted at any step resumes from the saved plan and completes")
     func interruptedRotation() async throws {
-        for interruptAfter in 0...7 {
+        for interruptAfter in 0...6 {
             let world = SharingWorld()
             var (vault, owner, members) = try await world.household(roles: [.readWrite, .readOnly], seed: 300)
             var partner = members[0]
@@ -145,9 +145,9 @@ struct SharingScenarioTests {
             try await partner.write("two", to: vault, recordID: UUID(), version: 1)
 
             let plan = try await owner.planRotation(.removal(removed.accountID), in: vault)
-            #expect(plan.steps(in: try owner.ledger(vault)).count == 6)
+            #expect(plan.steps(in: try owner.ledger(vault)).count == 5)
             let status = try await owner.resumeRotation(in: vault, limit: interruptAfter)
-            if interruptAfter < 5 {
+            if interruptAfter < 4 {
                 #expect(status == .awaitingPublication, "interrupted after \(interruptAfter) steps")
                 #expect(try owner.ledger(vault).state.member(removed.accountID) != nil)
             }
@@ -270,7 +270,7 @@ struct SharingScenarioTests {
         #expect(ledger.state.epoch == 5)
     }
 
-    @Test("what a member wrote before being made read-only reaches a member invited afterwards")
+    @Test("what a member wrote before being made read-only counts for everyone, a member invited afterwards included")
     func demotedMembersData() async throws {
         let world = SharingWorld()
         var (vault, owner, members) = try await world.household(roles: [.readWrite])
@@ -279,10 +279,13 @@ struct SharingScenarioTests {
         let login = UUID()
         try await member.write("login", to: vault, recordID: login, version: 1)
 
+        // The owner's device fetches what the member has written, and the record says that it counts.
         try await owner.changeRole(of: member.accountID, to: .readOnly, in: vault)
+        let record = try #require(try owner.ledger(vault).chain.last?.record)
+        #expect(record.writeCut.bytes == member.streams[vault]?.last, "the cut is the member's last object")
         #expect(
             try owner.ledger(vault).recordsToReseal(in: await owner.inventory(of: vault)).isEmpty,
-            "the owner's device had merged it, and has published it again under its own name")
+            "a change of role rotates nothing, and nothing has to be sealed again for it to count")
 
         var newcomer = try await world.member("newcomer", seed: 900)
         let invitation = try await owner.invite(
@@ -290,17 +293,20 @@ struct SharingScenarioTests {
         try await newcomer.accept(invitation, ownerSafetyNumber: owner.safetyNumber)
         try await newcomer.sync(vault)
         #expect(try await newcomer.readable(in: vault) == [login: "login"])
-        let seen = try await newcomer.items(in: vault)
-        #expect(seen.first { $0.author == member.accountID }?.outcome == .refused(.readOnly))
-        #expect(seen.first { $0.author == owner.accountID }?.outcome == .read("login"))
+        #expect(try await newcomer.items(in: vault).map(\.outcome) == [.read("login")], "inside the cut")
 
-        // A device that had merged nothing of it and may write does nothing; one that may not write cannot.
+        // What the member writes now is outside it, for the newcomer and for the owner alike.
+        try await member.write("later", to: vault, recordID: login, version: 2, under: member.currentKey(vault))
+        for reader in [owner, newcomer] {
+            #expect(try await reader.readable(in: vault) == [login: "login"], "\(reader.name)")
+            #expect(try await reader.items(in: vault).last?.outcome == .refused(.readOnly))
+        }
         try await member.sync(vault)
-        #expect(try await member.reseal(vault) == 0)
+        #expect(try await member.reseal(vault) == 0, "a member who may not write seals nothing again")
         #expect(try await newcomer.reseal(vault) == 0)
     }
 
-    @Test("a demotion made by one administrator is followed through by any device that had merged the member's work")
+    @Test("an administrator who demotes without having fetched the member's work leaves it set aside, not lost")
     func demotionSeenLater() async throws {
         let world = SharingWorld()
         var (vault, owner, members) = try await world.household(roles: [.administrator, .readWrite])
@@ -311,24 +317,30 @@ struct SharingScenarioTests {
         let note = UUID()
         try await member.write("note", to: vault, recordID: note, version: 1)
         try await owner.sync(vault)
-        #expect(try await owner.readable(in: vault) == [note: "note"], "the owner's device merged it in time")
+        #expect(try await owner.readable(in: vault) == [note: "note"], "the owner's device had it")
 
-        // The administrator demotes the member without ever having merged the note.
+        // The administrator's device signs the demotion with a cut taken before it ever fetched the note: the cut
+        // holds nothing, and that is what every device goes by.
         let record = try admin.ledger(vault).proposeRoleChange(
-            of: member.accountID, to: .readOnly, signedBy: admin.keyset)
+            of: member.accountID, to: .readOnly, writeCut: try admin.writeCut(for: member.accountID, in: vault),
+            signedBy: admin.keyset)
+        #expect(record.writeCut == .nothing)
         try await world.store.create(SharingObject(record).name, contents: record.encoded(), by: admin.accountID)
         try await admin.sync(vault)
-        #expect(try await admin.readable(in: vault).isEmpty)
-
-        // The owner's device learns of the demotion, sees what it owes, and publishes the note again.
         try await owner.sync(vault)
-        let ledger = try owner.ledger(vault)
+        for reader in [admin, owner] {
+            #expect(try await reader.readable(in: vault).isEmpty, "\(reader.name): the same answer on every device")
+        }
+        #expect(try await owner.reseal(vault) == 0, "and nobody publishes it again on their own")
+
+        // It is not destroyed: both devices hold it aside, and a person who may write can make it their own.
+        let aside = try await owner.setAside(in: vault)
         #expect(
-            ledger.pendingRotation(
-                plan: nil, leaveRequests: [], inventory: try await owner.inventory(of: vault),
-                heldKeyIDs: [ledger.state.vaultKeyID]) == [.resealing(remaining: 1)])
-        #expect(try await owner.reseal(vault) == 1)
-        try await admin.sync(vault)
+            aside == [
+                SetAsideItem(recordID: note, version: 1, origin: member.accountID, text: "note", refusal: .readOnly)
+            ])
+        #expect(try await admin.setAside(in: vault) == aside)
+        try await owner.write(aside[0].text, to: vault, recordID: note, version: 2)
         #expect(try await admin.readable(in: vault) == [note: "note"])
     }
 
@@ -342,24 +354,28 @@ struct SharingScenarioTests {
         let login = UUID()
         try await leaver.write("login", to: vault, recordID: login, version: 1)
 
-        // The removing device merges the member's outstanding writes before the record that ends them (§8.6).
+        // The removing device fetches the member's writes before it signs the record that ends them (§8.6), and
+        // seals them again under the new key, saying whose work they are.
         #expect(try await owner.remove(leaver.accountID, from: vault) == .complete)
+        #expect(try owner.ledger(vault).chain.last?.record.writeCut.bytes == leaver.streams[vault]?.last)
         #expect(try await owner.readable(in: vault) == [login: "login"])
         let current = try owner.ledger(vault).state.vaultKeyID
         #expect(
             try await owner.inventory(of: vault)
-                == [
-                    SealedRecordReference(
-                        recordID: login, kind: .item, keyID: current, version: 2, author: owner.accountID)
-                ])
+                == [SealedRecordReference(recordID: login, kind: .item, keyID: current, version: 2)])
+        #expect(try await owner.view(of: vault)[login]?.origin == leaver.accountID)
 
         try await stays.sync(vault)
-        #expect(try await stays.readable(in: vault) == [login: "login"], "never merged the original, reads the re-seal")
+        #expect(try await stays.readable(in: vault) == [login: "login"])
         var newcomer = try await world.member("newcomer", seed: 901)
         let invitation = try await owner.invite(
             newcomer.accountID, to: vault, as: .readOnly, safetyNumber: newcomer.safetyNumber)
         try await newcomer.accept(invitation, ownerSafetyNumber: owner.safetyNumber)
-        #expect(try await newcomer.readable(in: vault) == [login: "login"])
+        #expect(try await newcomer.readable(in: vault) == [login: "login"], "holds no old key: reads the re-seal")
+        #expect(
+            try await newcomer.items(in: vault).map(\.outcome) == [
+                .undecryptable(keyID: leaver.currentKey(vault).key.keyID), .read("login"),
+            ])
 
         // What the removed member writes afterwards, dated as they please, is nobody's.
         let oldKey = try #require(leaver.keys[vault]?.values.first)

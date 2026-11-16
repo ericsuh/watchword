@@ -82,7 +82,8 @@ public actor HostileSharingStore {
 /// What a simulated member made of one item object on the store.
 public enum SimulatedItemOutcome: Sendable, Hashable {
     case read(String)
-    /// The author may not write: `MembershipLedger.writePermission` said no (PRD F4.5).
+    /// The write does not count: `MembershipLedger.writeStanding` said so of its author, or of the account whose
+    /// work it carries (PRD F4.5).
     case refused(WriteRefusal)
     /// Not signed by the author's key in the verified chain.
     case forged
@@ -94,31 +95,80 @@ public enum SimulatedItemOutcome: Sendable, Hashable {
 public struct SimulatedItem: Sendable, Hashable {
     public let recordID: UUID
     public let version: UInt64
+    /// The account that signed the object.
     public let author: UUID
+    /// The account whose work the object carries: the author, unless it is another member's write sealed again.
+    /// `nil` when the object was refused before it was opened.
+    public let origin: UUID?
     public let keyID: UUID?
     public let outcome: SimulatedItemOutcome
 }
 
-/// A record as a simulated member's device holds it once merged: the newest version it accepted, and from whom.
+/// A record as a simulated member's device holds it: the newest version that counts, who signed it and whose work
+/// it is.
 public struct MergedItem: Sendable, Hashable {
     public let version: UInt64
     public let author: UUID
     public let keyID: UUID
     public let text: String
+    /// The account whose work this is, and the digest of the object they wrote it in.
+    public let origin: UUID
+    public let originDigest: [UInt8]
+}
+
+/// Where an account's stream of item objects stands in one vault.
+public struct ItemStreamPosition: Sendable, Hashable {
+    /// How many objects the account has written.
+    public let count: UInt64
+    /// The digest of the last one; all zeros before the first.
+    public let last: [UInt8]
+
+    public init(count: UInt64, last: [UInt8]) {
+        self.count = count
+        self.last = last
+    }
+}
+
+/// A write a device holds and does not count: made by an account that could write once, outside the cut of the record
+/// that ended that (docs/02-architecture.md §8.7). Kept for the person to look at, never merged and never published
+/// again by the device on its own.
+public struct SetAsideItem: Sendable, Hashable {
+    public let recordID: UUID
+    public let version: UInt64
+    /// The account whose work it is.
+    public let origin: UUID
+    public let text: String
+    public let refusal: WriteRefusal
+
+    public init(recordID: UUID, version: UInt64, origin: UUID, text: String, refusal: WriteRefusal) {
+        self.recordID = recordID
+        self.version = version
+        self.origin = origin
+        self.text = text
+        self.refusal = refusal
+    }
 }
 
 /// One account with real keys taking part in shared vaults: the code an integrator will write around
 /// `WatchwordSharing`, kept as small as it can be while still exercising every step (create, invite, verify, accept,
 /// write, read, change a role, remove with rotation, leave, re-seal) against a `HostileSharingStore`.
 ///
-/// Item writes stand in for sync's log segments: an item envelope sealed with `RecordCipher` under the vault key and
-/// signed by its author over `name ‖ 0x00 ‖ envelope`, as `SyncEngine`'s objects are. A reader applies the three checks
-/// the integration must make, in this order: may the author write (the ledger, now), is the signature the author's
-/// (the key the chain lists), does it open under a key this member holds. What passes is **merged** into the device's
-/// own record store (`merged`) and stays there whatever happens to its author's standing afterwards; what the device
-/// has merged and its author may no longer write, the device publishes again under its own name
-/// (`MembershipLedger.recordsToReseal`), which is how a demoted or removed member's data reaches members who had not
-/// merged it (docs/02-architecture.md §8.7).
+/// Item writes stand in for sync's log segments. Each account's writes to a vault are a hash-linked stream: an
+/// object is `signature ‖ sequence ‖ digest of the account's previous object ‖ envelope`, the envelope sealed with
+/// `RecordCipher` under the vault key, the signature the author's over `name ‖ 0x00 ‖` the rest, as `SyncEngine`'s
+/// objects are signed. Inside the envelope, before the text, is whose work it is: the author's own, or another
+/// account's and the digest of the object they wrote it in, when a member seals someone else's write again.
+///
+/// A reader keeps a copy of every object it has fetched (`staged`) and judges all of them afresh on every pass, in
+/// this order: does the author's write count (`MembershipLedger.writeStanding`), is the signature the author's (the
+/// key the chain lists, or listed), does it open under a key this member holds, and does the work it carries count.
+/// A device's record store is therefore a function of its ledger, its keys and the objects it has seen. For an
+/// account that may write, every signed object counts. For one that could and no longer may, exactly the objects
+/// inside the **write cut** of the record that ended it count: the cut is the digest of the last object of theirs the
+/// signing device had merged, and an object is inside it if walking back from that digest along the stream reaches
+/// it. So a write the account makes afterwards counts on no device, including one that merged it before it had seen
+/// the record: that device takes it out again and holds it aside (`setAside`), and it cannot come back inside a
+/// version another member seals, because that version says whose work it carries (docs/02-architecture.md §8.7).
 ///
 /// The order of a sync pass is the one §8.8 prescribes: membership first, then keys, then this device's own
 /// proposals, then items.
@@ -137,8 +187,11 @@ public struct SimulatedMember: Sendable {
     public var savedPlans: [UUID: [UInt8]] = [:]
     /// Records this device proposed and has not yet seen adopted, as they would be on disk, by vault.
     public var proposals: [UUID: [[UInt8]]] = [:]
-    /// The device's own record store: what it has merged, by vault and record.
-    public var merged: [UUID: [UUID: MergedItem]] = [:]
+    /// The item objects this device has fetched, by vault and name: what its record store is computed from. Only
+    /// ever added to, so a store that stops listing an object takes nothing back.
+    public var staged: [UUID: [String: [UInt8]]] = [:]
+    /// Where this account's own stream of writes stands, by vault: how many objects, and the digest of the last.
+    public var streams: [UUID: ItemStreamPosition] = [:]
     /// Membership objects found permanently unacceptable, so that a flood is paid for once.
     public var refusedNames: Set<String> = []
     /// What the last comparison of member keys with this device's pins found, by vault (for the UI).
@@ -244,15 +297,15 @@ public struct SimulatedMember: Sendable {
         ledgers[vault] = joined.ledger
         keys[vault, default: [:]][joined.vaultKey.key.keyID] = joined.vaultKey
         keyChecks[vault] = try await joined.ledger.checkMemberKeys(against: contacts)
-        merged[vault] = try await view(of: vault)
+        try await mergeItems(in: vault)
     }
 
     // MARK: - Syncing
 
     /// One sync pass over a vault's sharing objects: ingests the membership objects this device does not hold,
     /// compares the members' keys with its pins, fetches the current key if it is entitled to it and does not hold
-    /// it, settles its own pending proposals, and merges the items it now accepts. Returns what the first ingest
-    /// did.
+    /// it, settles its own pending proposals, and fetches the item objects, which are judged against the ledger as
+    /// it now stands. Returns what the first ingest did.
     @discardableResult
     public mutating func sync(_ vault: UUID) async throws -> MembershipLedger.IngestReport {
         let report = try await ingest(vault)
@@ -270,7 +323,7 @@ public struct SimulatedMember: Sendable {
                 keys[vault, default: [:]][state.vaultKeyID] = key
             }
         }
-        merged[vault] = try await view(of: vault)
+        try await mergeItems(in: vault)
         return report
     }
 
@@ -341,7 +394,10 @@ public struct SimulatedMember: Sendable {
         let ledger = try ledger(vault)
         switch operation {
         case .changeRole(let account, let role):
-            return try? ledger.proposeRoleChange(of: account, to: role, signedBy: keyset)
+            // On the new head, with a cut taken now.
+            let cut =
+                ledger.requiresWriteCut(changingRoleOf: account, to: role) ? try writeCut(for: account, in: vault) : nil
+            return try? ledger.proposeRoleChange(of: account, to: role, writeCut: cut, signedBy: keyset)
         case .addMember(let account, let role):
             // The invitation over again, from the pin: the key may have changed on the winning branch, so the grant
             // is made again too.
@@ -363,6 +419,7 @@ public struct SimulatedMember: Sendable {
     // MARK: - Items
 
     static let itemSchemaVersion: UInt64 = 1
+    static let noDigest = [UInt8](repeating: 0, count: 32)
 
     static func itemPrefix(_ vault: UUID) -> String {
         "items/\(vault.uuidString)/"
@@ -380,95 +437,238 @@ public struct SimulatedMember: Sendable {
             recordVersion: version)
     }
 
-    /// Seals and signs an item under `key` and puts it on the store, whatever this member's role: the store, not
-    /// this method, is where a hostile member's write lands, and the readers are who must refuse it.
+    /// The digest that identifies an item object: of its name and its bytes.
+    public static func itemDigest(name: String, contents: [UInt8]) -> [UInt8] {
+        SharingObjectLocation.digest(of: Array(name.utf8) + [0] + contents)
+    }
+
+    /// An item object as it is stored, for a test that builds one by hand: `signature ‖ sequence ‖ previous ‖
+    /// envelope`, signed by `keyset` over `name ‖ 0x00 ‖` everything after the signature.
+    public static func itemObject(
+        name: String, sequence: UInt64, previous: [UInt8], envelope: [UInt8], signedBy keyset: Keyset
+    ) throws -> [UInt8] {
+        let body = ForgedRecord.littleEndian(sequence) + previous + envelope
+        return try keyset.sign(Array(name.utf8) + [0] + body, domain: .logSegment) + body
+    }
+
+    /// Seals and signs an item under `key` as the next object of this account's stream and puts it on the store,
+    /// whatever this member's role: the store, not this method, is where a hostile member's write lands, and the
+    /// readers are who must refuse it. `carrying` says whose work it is when it is not this account's own.
     public mutating func write(
-        _ text: String, to vault: UUID, recordID: UUID, version: UInt64, under key: VaultKey
+        _ text: String, to vault: UUID, recordID: UUID, version: UInt64, under key: VaultKey,
+        carrying origin: (account: UUID, digest: [UInt8])? = nil
     ) async throws {
+        let whose = origin ?? (account: accountID, digest: SimulatedMember.noDigest)
         let envelope = try RecordCipher.seal(
-            Array(text.utf8),
+            ForgedRecord.bytes(whose.account) + whose.digest + Array(text.utf8),
             context: SimulatedMember.itemContext(
                 vault: vault, recordID: recordID, keyID: key.key.keyID, version: version),
             key: key.key, using: &generator)
         let name = SimulatedMember.itemName(vault: vault, recordID: recordID, version: version, author: accountID)
-        let signature = try keyset.sign(Array(name.utf8) + [0] + envelope, domain: .logSegment)
-        try await store.create(name, contents: signature + envelope, by: accountID)
+        let position = streams[vault] ?? ItemStreamPosition(count: 0, last: SimulatedMember.noDigest)
+        let contents = try SimulatedMember.itemObject(
+            name: name, sequence: position.count + 1, previous: position.last, envelope: envelope, signedBy: keyset)
+        try await store.create(name, contents: contents, by: accountID)
+        streams[vault] = ItemStreamPosition(
+            count: position.count + 1, last: SimulatedMember.itemDigest(name: name, contents: contents))
+        if staged[vault]?[name] == nil { staged[vault, default: [:]][name] = contents }
     }
 
     /// An honest write: refused locally unless the ledger allows it (the client's half of F4.5), under the current key.
     public mutating func write(_ text: String, to vault: UUID, recordID: UUID, version: UInt64) async throws {
         let ledger = try ledger(vault)
         if case .refused = ledger.writePermission(for: accountID) { throw SharingError.notPermitted }
-        let key = try currentKey(vault)
-        try await write(text, to: vault, recordID: recordID, version: version, under: key)
-        merged[vault, default: [:]][recordID] = MergedItem(
-            version: version, author: accountID, keyID: key.key.keyID, text: text)
+        try await write(text, to: vault, recordID: recordID, version: version, under: try currentKey(vault))
     }
 
-    /// Every item object on the store as this member judges it now, in name order.
-    public func items(in vault: UUID) async throws -> [SimulatedItem] {
-        let ledger = try ledger(vault)
-        var result: [SimulatedItem] = []
-        for object in await store.list(prefix: SimulatedMember.itemPrefix(vault), viewer: accountID) {
-            let parts = object.name.split(separator: "/").map(String.init)
+    /// One item object, taken apart. Nothing in it is believed yet.
+    struct ItemObject {
+        let name: String
+        let recordID: UUID
+        let version: UInt64
+        let author: UUID
+        let signature: [UInt8]
+        let sequence: UInt64
+        let previous: [UInt8]
+        let envelope: [UInt8]
+        let digest: [UInt8]
+
+        init?(name: String, contents: [UInt8]) {
+            let parts = name.split(separator: "/").map(String.init)
             let tail = parts.count == 4 ? parts[3].split(separator: "-", maxSplits: 1).map(String.init) : []
             guard tail.count == 2, let recordID = UUID(uuidString: parts[2]), let version = UInt64(tail[0]),
-                let author = UUID(uuidString: tail[1]), object.contents.count > 64
-            else { continue }
-            let signature = Array(object.contents[..<64])
-            let envelope = Array(object.contents[64...])
-            let keyID = (try? EnvelopeHeader.parse(envelope, expecting: .item))?.header.keyID
-            func item(_ outcome: SimulatedItemOutcome) -> SimulatedItem {
-                SimulatedItem(recordID: recordID, version: version, author: author, keyID: keyID, outcome: outcome)
-            }
-            if case .refused(let refusal) = ledger.writePermission(for: author) {
-                result.append(item(.refused(refusal)))
-                continue
-            }
-            guard let member = ledger.state.member(author),
-                (try? Signatures.verify(
-                    signature, for: Array(object.name.utf8) + [0] + envelope, domain: .logSegment,
-                    signingKey: member.bundle.signingKey)) != nil
-            else {
-                result.append(item(.forged))
-                continue
-            }
-            guard let keyID else {
-                result.append(item(.malformed))
-                continue
-            }
-            guard let key = keys[vault]?[keyID],
-                let plaintext = try? RecordCipher.open(
-                    envelope,
-                    context: SimulatedMember.itemContext(
-                        vault: vault, recordID: recordID, keyID: keyID, version: version),
-                    key: key.key)
-            else {
-                result.append(item(.undecryptable(keyID: keyID)))
-                continue
-            }
-            result.append(item(.read(String(decoding: plaintext.unprotectedCopy(), as: UTF8.self))))
+                let author = UUID(uuidString: tail[1]), contents.count > 64 + 8 + 32
+            else { return nil }
+            self.name = name
+            self.recordID = recordID
+            self.version = version
+            self.author = author
+            signature = Array(contents[..<64])
+            sequence = contents[64..<72].enumerated().reduce(0) { $0 | UInt64($1.element) << (8 * UInt64($1.offset)) }
+            previous = Array(contents[72..<104])
+            envelope = Array(contents[104...])
+            digest = SimulatedMember.itemDigest(name: name, contents: contents)
         }
-        return result
+
+        var signedBytes: [UInt8] {
+            Array(name.utf8) + [0] + ForgedRecord.littleEndian(sequence) + previous + envelope
+        }
     }
 
-    /// The device's record store as it would be after merging now: what it has merged already, overlaid with the
-    /// newer versions it accepts at this moment. What was merged earlier is never taken out again.
-    public func view(of vault: UUID) async throws -> [UUID: MergedItem] {
-        var newest = merged[vault] ?? [:]
-        for item in try await items(in: vault) {
-            guard case .read(let text) = item.outcome, let keyID = item.keyID,
-                (newest[item.recordID]?.version ?? 0) < item.version
+    /// One object and what this device makes of it.
+    struct JudgedItem {
+        let object: ItemObject
+        let item: SimulatedItem
+        /// The text, whenever the object verified and opened, whether or not it counts.
+        let text: String?
+        let originDigest: [UInt8]
+    }
+
+    /// Which of the objects in a write cut's stream this device holds: walking back from the cut's digest, each
+    /// object must be the author's, one earlier in sequence than the one that named it. Every object reached is
+    /// inside the cut by the hash alone, so holding only part of the stream gives part of the answer, never a wrong
+    /// one. The simulation's cut is the 32-byte digest of the last object; anything else holds nothing.
+    static func objects(inside cut: WriteCut, of account: UUID, among objects: [ItemObject]) -> Set<[UInt8]> {
+        guard cut.bytes.count == 32 else { return [] }
+        let byDigest = Dictionary(
+            objects.filter { $0.author == account }.map { ($0.digest, $0) }, uniquingKeysWith: { first, _ in first })
+        var inside: Set<[UInt8]> = []
+        var cursor = cut.bytes
+        var expected: UInt64?
+        while let object = byDigest[cursor], expected == nil || object.sequence == expected, object.sequence > 0 {
+            inside.insert(cursor)
+            expected = object.sequence - 1
+            cursor = object.previous
+        }
+        return inside
+    }
+
+    /// Judges `objects` against the ledger as it stands now.
+    func judge(_ objects: [String: [UInt8]], in vault: UUID) throws -> [JudgedItem] {
+        let ledger = try ledger(vault)
+        let parsed = objects.sorted { $0.key < $1.key }.compactMap { ItemObject(name: $0.key, contents: $0.value) }
+        var standings: [UUID: WriteStanding] = [:]
+        var cuts: [UUID: Set<[UInt8]>] = [:]
+        func standing(of account: UUID) -> WriteStanding {
+            if let known = standings[account] { return known }
+            let standing = ledger.writeStanding(of: account)
+            standings[account] = standing
+            if case .ended(let cut, _, _) = standing {
+                cuts[account] = SimulatedMember.objects(inside: cut, of: account, among: parsed)
+            }
+            return standing
+        }
+        // Why the write in the object with this digest does not count for `account`; `nil` if it does.
+        func refusal(of account: UUID, digest: [UInt8]) -> WriteRefusal? {
+            switch standing(of: account) {
+            case .mayWrite: return nil
+            case .ended(_, _, let refusal): return cuts[account]?.contains(digest) == true ? nil : refusal
+            case .nothingCounts(let refusal): return refusal
+            }
+        }
+        func signingKey(of account: UUID) -> [UInt8]? {
+            switch standing(of: account) {
+            case .mayWrite: return ledger.state.member(account)?.bundle.signingKey
+            case .ended(_, let author, _): return author.bundle.signingKey
+            case .nothingCounts: return nil
+            }
+        }
+
+        return parsed.map { object in
+            let keyID = (try? EnvelopeHeader.parse(object.envelope, expecting: .item))?.header.keyID
+            var origin: UUID?
+            var originDigest = object.digest
+            var text: String?
+            func judged(_ outcome: SimulatedItemOutcome) -> JudgedItem {
+                JudgedItem(
+                    object: object,
+                    item: SimulatedItem(
+                        recordID: object.recordID, version: object.version, author: object.author, origin: origin,
+                        keyID: keyID, outcome: outcome),
+                    text: text, originDigest: originDigest)
+            }
+            let authorRefusal = refusal(of: object.author, digest: object.digest)
+            let signed =
+                signingKey(of: object.author).map { key in
+                    (try? Signatures.verify(
+                        object.signature, for: object.signedBytes, domain: .logSegment, signingKey: key)) != nil
+                } ?? false
+            // Opened even when it does not count, so that what is set aside can be shown; never when not signed.
+            var opened: SimulatedItemOutcome?
+            if signed {
+                if let keyID {
+                    if let key = keys[vault]?[keyID],
+                        let plaintext = try? RecordCipher.open(
+                            object.envelope,
+                            context: SimulatedMember.itemContext(
+                                vault: vault, recordID: object.recordID, keyID: keyID, version: object.version),
+                            key: key.key
+                        ).unprotectedCopy(), plaintext.count >= 48
+                    {
+                        let whose = ForgedRecord.uuid(Array(plaintext[..<16]))
+                        let digest = Array(plaintext[16..<48])
+                        if whose == object.author, digest != SimulatedMember.noDigest {
+                            opened = .malformed
+                        } else {
+                            origin = whose
+                            if whose != object.author { originDigest = digest }
+                            text = String(decoding: plaintext[48...], as: UTF8.self)
+                        }
+                    } else {
+                        opened = .undecryptable(keyID: keyID)
+                    }
+                } else {
+                    opened = .malformed
+                }
+            }
+            if let authorRefusal { return judged(.refused(authorRefusal)) }
+            guard signed else { return judged(.forged) }
+            if let opened { return judged(opened) }
+            if let whose = origin, whose != object.author, let refusal = refusal(of: whose, digest: originDigest) {
+                return judged(.refused(refusal))
+            }
+            return judged(text.map(SimulatedItemOutcome.read) ?? .malformed)
+        }
+    }
+
+    /// The objects this device has fetched, with whatever the store lists now that it has not.
+    private func visibleObjects(in vault: UUID) async -> [String: [UInt8]] {
+        var objects = staged[vault] ?? [:]
+        for object in await store.list(prefix: SimulatedMember.itemPrefix(vault), viewer: accountID)
+        where objects[object.name] == nil {
+            objects[object.name] = object.contents
+        }
+        return objects
+    }
+
+    /// Every item object this member can see, as it judges it now, in name order.
+    public func items(in vault: UUID) async throws -> [SimulatedItem] {
+        try judge(await visibleObjects(in: vault), in: vault).map(\.item)
+    }
+
+    private static func newest(_ judged: [JudgedItem]) -> [UUID: MergedItem] {
+        var newest: [UUID: MergedItem] = [:]
+        for entry in judged {
+            guard case .read(let text) = entry.item.outcome, let keyID = entry.item.keyID,
+                let origin = entry.item.origin, (newest[entry.item.recordID]?.version ?? 0) < entry.item.version
             else { continue }
-            newest[item.recordID] = MergedItem(version: item.version, author: item.author, keyID: keyID, text: text)
+            newest[entry.item.recordID] = MergedItem(
+                version: entry.item.version, author: entry.item.author, keyID: keyID, text: text, origin: origin,
+                originDigest: entry.originDigest)
         }
         return newest
     }
 
-    /// Merges what this device accepts now into its record store, without a membership pass: a rotation's
-    /// `mergeOutstandingWrites` step.
+    /// The device's record store as it would be after fetching now: of each record, the newest version that
+    /// counts. A function of the ledger, the keys held and the objects seen, so a version that stops counting is
+    /// out of it and the newest one that still counts takes its place.
+    public func view(of vault: UUID) async throws -> [UUID: MergedItem] {
+        SimulatedMember.newest(try judge(await visibleObjects(in: vault), in: vault))
+    }
+
+    /// Fetches the item objects the store lists, without a membership pass.
     public mutating func mergeItems(in vault: UUID) async throws {
-        merged[vault] = try await view(of: vault)
+        staged[vault] = await visibleObjects(in: vault)
     }
 
     /// The newest text this device holds of each record.
@@ -476,27 +676,68 @@ public struct SimulatedMember: Sendable {
         try await view(of: vault).mapValues(\.text)
     }
 
-    /// The vault's live records as rotation sees them.
-    public func inventory(of vault: UUID) async throws -> [SealedRecordReference] {
-        try await view(of: vault).map { recordID, item in
-            SealedRecordReference(
-                recordID: recordID, kind: .item, keyID: item.keyID, version: item.version, author: item.author)
+    /// The writes this device holds and does not count because their author, who could write once, made them outside
+    /// the cut of the record that ended that: for the person to look at, and to write again as their own if they
+    /// choose. In name order.
+    public func setAside(in vault: UUID) async throws -> [SetAsideItem] {
+        let ledger = try ledger(vault)
+        return try judge(await visibleObjects(in: vault), in: vault).compactMap { entry in
+            guard case .refused(let refusal) = entry.item.outcome, let text = entry.text,
+                let origin = entry.item.origin,
+                case .ended = ledger.writeStanding(of: origin)
+            else { return nil }
+            return SetAsideItem(
+                recordID: entry.item.recordID, version: entry.item.version, origin: origin, text: text,
+                refusal: refusal)
         }
     }
 
-    /// The re-seal step: writes again, under the current key and this member's name, every record the ledger lists
-    /// (sealed under an earlier key, or last written by an account that may no longer write). Skipped by a member
-    /// who may not write or does not hold the current key. Returns how many were written.
+    /// The write cut for `account`, taken now from what this device has fetched: the digest of the furthest object
+    /// of their stream that counts and whose every predecessor this device holds, or the cut that holds nothing.
+    ///
+    /// The whole stream up to it, as a log is merged in sequence and never past a gap: the cut is a digest, and a
+    /// digest commits to objects the device may never have seen. A member who published only the last object of a
+    /// stream they had prepared could otherwise bring the rest out after their removal, inside the cut.
+    public func writeCut(for account: UUID, in vault: UUID) throws -> WriteCut {
+        let counted = try judge(staged[vault] ?? [:], in: vault).filter { entry in
+            guard entry.object.author == account else { return false }
+            switch entry.item.outcome {
+            case .read, .undecryptable: return true
+            case .refused, .forged, .malformed: return false
+            }
+        }.map(\.object)
+        let whole = try counted.filter { object in
+            let inside = SimulatedMember.objects(inside: try WriteCut(object.digest), of: account, among: counted)
+            return UInt64(inside.count) == object.sequence
+        }
+        let tip = whole.max {
+            $0.sequence == $1.sequence ? $1.digest.lexicographicallyPrecedes($0.digest) : $0.sequence < $1.sequence
+        }
+        return try tip.map { try WriteCut($0.digest) } ?? .nothing
+    }
+
+    /// The vault's live records as rotation sees them.
+    public func inventory(of vault: UUID) async throws -> [SealedRecordReference] {
+        try await view(of: vault).map { recordID, item in
+            SealedRecordReference(recordID: recordID, kind: .item, keyID: item.keyID, version: item.version)
+        }
+    }
+
+    /// The re-seal step: writes again, under the current key, every record the ledger lists (sealed under an earlier
+    /// key), saying whose work each one is. Only what counts is in the inventory, so nothing set aside is sealed
+    /// again. Skipped by a member who may not write or does not hold the current key. Returns how many were written.
     @discardableResult
     public mutating func reseal(_ vault: UUID) async throws -> Int {
         let ledger = try ledger(vault)
-        guard ledger.writePermission(for: accountID).isAllowed, (try? currentKey(vault)) != nil else { return 0 }
+        guard ledger.writePermission(for: accountID).isAllowed, let key = try? currentKey(vault) else { return 0 }
         try await mergeItems(in: vault)
-        let texts = merged[vault] ?? [:]
+        let held = try await view(of: vault)
         let stale = ledger.recordsToReseal(in: try await inventory(of: vault))
         for reference in stale {
-            guard let item = texts[reference.recordID] else { continue }
-            try await write(item.text, to: vault, recordID: reference.recordID, version: reference.version + 1)
+            guard let item = held[reference.recordID] else { continue }
+            try await write(
+                item.text, to: vault, recordID: reference.recordID, version: reference.version + 1, under: key,
+                carrying: item.origin == accountID ? nil : (account: item.origin, digest: item.originDigest))
         }
         return stale.count
     }
@@ -504,21 +745,29 @@ public struct SimulatedMember: Sendable {
     // MARK: - Role changes, removal, leaving, rotation
 
     /// Changes a member's role: a sync pass first (so the record is built on the newest head, and what the member
-    /// wrote so far is merged while they may still write), then the record, then the re-seal step, which publishes
-    /// again whatever a member who is now read-only had written.
+    /// wrote so far has been fetched), then, if the change makes them read-only, the cut that says which of their
+    /// writes count, then the record.
     public mutating func changeRole(of account: UUID, to role: MemberRole, in vault: UUID) async throws {
         try await sync(vault)
-        let record = try ledger(vault).proposeRoleChange(of: account, to: role, signedBy: keyset)
+        let ledger = try ledger(vault)
+        let cut =
+            ledger.requiresWriteCut(changingRoleOf: account, to: role) ? try writeCut(for: account, in: vault) : nil
+        let record = try ledger.proposeRoleChange(of: account, to: role, writeCut: cut, signedBy: keyset)
         try await propose(record, in: vault)
-        try await reseal(vault)
     }
 
-    /// Plans a rotation and saves the plan, as an interrupted device would have it. Nothing is published.
+    /// Plans a rotation and saves the plan, as an interrupted device would have it: fetches what the departing
+    /// member has written, takes the cut, and signs. Nothing is published.
     @discardableResult
     public mutating func planRotation(_ reason: RotationReason, in vault: UUID) async throws -> RotationPlan {
+        try await mergeItems(in: vault)
         let ledger = try ledger(vault)
+        var cut: WriteCut?
+        if let account = reason.departingAccount, ledger.requiresWriteCut(removing: account) {
+            cut = try writeCut(for: account, in: vault)
+        }
         let plan = try RotationPlanner.plan(
-            reason, ledger: ledger, memberKeys: try await ledger.checkMemberKeys(against: contacts),
+            reason, ledger: ledger, memberKeys: try await ledger.checkMemberKeys(against: contacts), writeCut: cut,
             signedBy: keyset, using: &generator)
         savedPlans[vault] = plan.encoded()
         return plan
@@ -557,8 +806,6 @@ public struct SimulatedMember: Sendable {
             switch step {
             case .revokeTransportAccess(let account):
                 await store.revokeShare(account)
-            case .mergeOutstandingWrites:
-                try await mergeItems(in: vault)
             case .publish(let object):
                 if object == plan.record {
                     // Never publish a record that can no longer be adopted: look at the store once more first.
@@ -576,9 +823,14 @@ public struct SimulatedMember: Sendable {
         return try plan.status(in: ledger(vault), inventory: await inventory(of: vault))
     }
 
-    /// Removes a member: plan, then carry it out.
+    /// Removes a member: off the transport's share at once (if this account may remove them at all), so that a store
+    /// which honours it takes nothing more from them; then a sync pass, the plan with its cut, and the plan carried
+    /// out.
     @discardableResult
     public mutating func remove(_ account: UUID, from vault: UUID) async throws -> RotationStatus {
+        try await sync(vault)
+        guard try ledger(vault).mayRemove(account, signer: accountID) else { throw SharingError.notPermitted }
+        await store.revokeShare(account)
         try await sync(vault)
         try await planRotation(.removal(account), in: vault)
         return try await resumeRotation(in: vault)

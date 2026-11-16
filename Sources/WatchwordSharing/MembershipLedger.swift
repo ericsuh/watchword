@@ -43,10 +43,10 @@ import WatchwordCrypto
 /// **Removal wins.** A reorganisation can still drop a record that removed a member (two paths of equal standing, or
 /// an isolated device of the owner's). The ledger keeps that record, and while its signer may still remove that
 /// member in the accepted state the removal is *owed*: `owedRemovals` lists it, `writePermission` refuses the
-/// member's writes, `recordsToReseal` re-seals nothing towards a key the member holds, and the next device that may
-/// sign the removal plans it again. A former administrator's records on dead branches owe nothing: their signer has
-/// no standing in the accepted state. Nor does a removal that its own branch went on to take back by adding the
-/// member again.
+/// member's writes and `writeStanding` counts only those the losing record's cut holds, `recordsToReseal` re-seals
+/// nothing towards a key the member holds, and the next device that may sign the removal plans it again. A former
+/// administrator's records on dead branches owe nothing: their signer has no standing in the accepted state. Nor
+/// does a removal that its own branch went on to take back by adding the member again.
 public struct MembershipLedger: Sendable {
     /// One valid record with the state it produced.
     public struct Link: Sendable, Hashable {
@@ -63,6 +63,13 @@ public struct MembershipLedger: Sendable {
         public let reason: RotationReason
         /// The record that carried it out on the losing branch.
         public let record: MembershipRecord
+        /// Which of the member's writes count while the removal is owed, if they may write in the accepted state:
+        /// as that record's own branch left it, its cut included, so that a device which learns of the removal this
+        /// way treats what the member wrote after it exactly as a device that saw it adopted would (§8.7).
+        /// `.mayWrite` when the record, or the one that holds the cut, was signed by an account that could not sign
+        /// it on the accepted head (a former administrator carrying out a departure on a dead branch): the removal
+        /// is still owed, and its cut is the one in the record that carries it out again.
+        public let standing: WriteStanding
     }
 
     public let vaultID: UUID
@@ -118,14 +125,9 @@ public struct MembershipLedger: Sendable {
     }
 
     /// Whether `accountID` may write to the vault now (PRD F4.5): the question to ask before this device's own
-    /// writes and before merging anyone else's. `MembershipState.writePermission` for the current state, except that
-    /// a member whose removal is owed is refused (`WriteRefusal.removalPending`).
-    ///
-    /// It is asked about *now*, not about the time a write claims: a former member holds the keys of their time and
-    /// can date a write as they please, so only the newest membership this device knows can refuse them. The other
-    /// half of that rule is that what a device has already merged stays merged, and is published again by a member
-    /// who may write when its author no longer may (`recordsToReseal`), so nothing a member wrote while entitled is
-    /// stranded by their demotion or removal (§8.7; review finding S25). Not cryptographic; see
+    /// writes. `MembershipState.writePermission` for the current state, except that a member whose removal is owed is
+    /// refused (`WriteRefusal.removalPending`). For what another account wrote, ask `writeStanding(of:)`, which says
+    /// what counts of the work of an account that may no longer write. Not cryptographic; see
     /// `MembershipState.writePermission(for:)`.
     public func writePermission(for accountID: UUID) -> WritePermission {
         let permission = state.writePermission(for: accountID)
@@ -135,8 +137,44 @@ public struct MembershipLedger: Sendable {
         return .refused(.removalPending)
     }
 
+    /// Which of `accountID`'s writes count in this vault, as far as this device knows (PRD F4.5; §8.7): the question
+    /// to ask before merging anything another account wrote, and again about everything already merged whenever
+    /// the head has changed.
+    ///
+    /// - An account that may write now: everything it signed. This is asked about *now*, not about the time a write
+    ///   claims: a former member holds the keys of their time and can date a write as they please.
+    /// - An account that could write once and may not now: exactly what is inside the `WriteCut` of the record that
+    ///   ended it (the latest such record of the accepted chain; while a removal is owed, `OwedRemoval.standing`).
+    ///   The administrator's device that signed that record put there what it had merged of the account's work, so
+    ///   the answer is the same on every device and does not depend on when a device heard of the record. A device
+    ///   that merged a write outside the cut, because it had not yet seen the record, takes it out again and keeps
+    ///   it aside; it never publishes it again, alone or inside a version of its own (review finding S28).
+    /// - An account that never could write here, and everyone in a deleted vault: nothing.
+    ///
+    /// The author of a write is the account whose work it is, not only the account that signed the object it
+    /// arrived in: a member's version of a record that carries another account's edits is judged for both (§8.8).
+    public func writeStanding(of accountID: UUID) -> WriteStanding {
+        let state = self.state
+        guard !state.isDeleted else { return .nothingCounts(.vaultDeleted) }
+        switch state.writePermission(for: accountID) {
+        case .allowed:
+            return owedRemovals.first { $0.accountID == accountID }?.standing ?? .mayWrite
+        case .refused(let refusal):
+            for epoch in chain.indices.dropFirst().reversed() {
+                let before = chain[epoch - 1].state
+                let record = chain[epoch].record
+                if MembershipRules.accountLosingWritePermission(by: record.operation, in: before) == accountID,
+                    let author = before.member(accountID)
+                {
+                    return .ended(cut: record.writeCut, author: author, refusal: refusal)
+                }
+            }
+            return .nothingCounts(refusal)
+        }
+    }
+
     /// Whether `accountID` could write to the vault as of `epoch` of the accepted chain: for showing history, never
-    /// for deciding whether to merge a write (`writePermission(for:)`, which the current epoch gives here too).
+    /// for deciding whether to merge a write (`writeStanding(of:)`). The current epoch gives `writePermission(for:)`.
     public func writePermission(for accountID: UUID, atEpoch epoch: UInt64) -> WritePermission {
         guard let state = state(atEpoch: epoch) else { return .refused(.unknownEpoch) }
         return epoch == self.state.epoch ? writePermission(for: accountID) : state.writePermission(for: accountID)
@@ -257,6 +295,13 @@ public struct MembershipLedger: Sendable {
         var forkEpoch: UInt64?
         /// This record, or one built on it, is an owed removal.
         var isProtected = false
+    }
+
+    /// A record on a losing branch that is an owed removal, before it is known which one stands for its member.
+    private struct Carrier {
+        let accountID: UUID
+        let reason: RotationReason
+        let record: MembershipRecord
     }
 
     private struct Pending {
@@ -430,7 +475,7 @@ public struct MembershipLedger: Sendable {
 
         // Removal wins: which records on losing branches still have to happen. Not one that its own branch went
         // on to take back by adding the member again: what that branch last meant is that they are a member.
-        var carriers: [Int: OwedRemoval] = [:]
+        var carriers: [Int: Carrier] = [:]
         for index in nodes.indices where !nodes[index].isOnChain {
             guard let owed = owedRemoval(of: nodes[index], parent: nodes[index].parent.map { nodes[$0] }, in: head)
             else { continue }
@@ -471,7 +516,7 @@ public struct MembershipLedger: Sendable {
         let branches = side.map { nodes[$0].link }.sorted {
             ($0.state.epoch, $0.state.hash) < ($1.state.epoch, $1.state.hash)
         }
-        var owedByAccount: [UUID: OwedRemoval] = [:]
+        var owedByAccount: [UUID: (carrier: Carrier, index: Int)] = [:]
         for index in side.sorted(by: {
             (nodes[$0].link.state.epoch, nodes[$0].link.state.hash)
                 < (nodes[$1].link.state.epoch, nodes[$1].link.state.hash)
@@ -479,14 +524,51 @@ public struct MembershipLedger: Sendable {
             guard let owed = carriers[index] else { continue }
             if let existing = owedByAccount[owed.accountID] {
                 // The member's own request says more than an administrator's removal.
-                if case .removal = existing.reason, case .departure = owed.reason {
-                    owedByAccount[owed.accountID] = owed
+                if case .removal = existing.carrier.reason, case .departure = owed.reason {
+                    owedByAccount[owed.accountID] = (owed, index)
                 }
             } else {
-                owedByAccount[owed.accountID] = owed
+                owedByAccount[owed.accountID] = (owed, index)
             }
         }
-        let owed = owedByAccount.values.sorted { $0.accountID.sharingPrecedes($1.accountID) }
+        // What counts of the member's writes meanwhile is what the owed record's own path says: the cut of the
+        // nearest record on it that ended their permission to write, which is the owed record itself unless that
+        // branch had made them read-only first. One walk per member owed, over that record's path only.
+        //
+        // But the branch is believed only as far as accounts with standing signed it: the owed record itself, and
+        // the record that holds the cut, must each be in the accepted chain or signed by an account that could sign
+        // the same thing on the accepted head. A departure is owed whoever carried it out, because the member's own
+        // signature asked for it, so a former administrator can sign one on a dead branch from any pending leave
+        // request; if what their branch says counted, they could have every device set the leaving member's work
+        // aside. Without a branch to believe, the member's writes go on counting until the removal is carried out
+        // again, with a cut, by an account that may.
+        func hasStanding(_ index: Int) -> Bool {
+            if nodes[index].isOnChain { return true }
+            let record = nodes[index].link.record
+            guard let signer = head.member(record.signer), signer.role.isAdministrator else { return false }
+            return (try? MembershipRules.authorise(record.operation, by: signer, in: head)) != nil
+        }
+        func standing(of accountID: UUID, onPathTo index: Int) -> WriteStanding {
+            guard hasStanding(index) else { return .mayWrite }
+            var cursor = index
+            while let parent = nodes[cursor].parent {
+                let before = nodes[parent].link.state
+                let record = nodes[cursor].link.record
+                if MembershipRules.accountLosingWritePermission(by: record.operation, in: before) == accountID,
+                    let author = before.member(accountID)
+                {
+                    guard hasStanding(cursor) else { return .mayWrite }
+                    return .ended(cut: record.writeCut, author: author, refusal: .removalPending)
+                }
+                cursor = parent
+            }
+            return .nothingCounts(.removalPending)
+        }
+        let owed = owedByAccount.values.map { entry in
+            OwedRemoval(
+                accountID: entry.carrier.accountID, reason: entry.carrier.reason, record: entry.carrier.record,
+                standing: standing(of: entry.carrier.accountID, onPathTo: entry.index))
+        }.sorted { $0.accountID.sharingPrecedes($1.accountID) }
 
         var shared = 0
         while shared < accepted.count, shared < chain.count, accepted[shared].state.hash == chain[shared].state.hash {
@@ -503,7 +585,7 @@ public struct MembershipLedger: Sendable {
     /// member who is still in `head` in the same stint of membership (added by a record both paths share), and for a
     /// removal by an administrator, its signer may still remove that member in `head`. A departure needs no such
     /// standing: the member's own signature asked for it.
-    private static func owedRemoval(of node: Node, parent: Node?, in head: MembershipState) -> OwedRemoval? {
+    private static func owedRemoval(of node: Node, parent: Node?, in head: MembershipState) -> Carrier? {
         guard !head.isDeleted, let parent, let forkEpoch = node.forkEpoch else { return nil }
         let record = node.link.record
         func sameStint(_ accountID: UUID) -> Member? {
@@ -518,13 +600,13 @@ public struct MembershipLedger: Sendable {
                 signer.role.isAdministrator,
                 (try? MembershipRules.authorise(record.operation, by: signer, in: head)) != nil
             else { return nil }
-            return OwedRemoval(accountID: accountID, reason: .removal(accountID), record: record)
+            return Carrier(accountID: accountID, reason: .removal(accountID), record: record)
         case .memberLeft(let accountID, let requestSignature):
             guard let member = sameStint(accountID) else { return nil }
             let request = LeaveRequest(
                 vaultID: head.vaultID, accountID: accountID, memberSince: member.since,
                 signature: requestSignature)
-            return OwedRemoval(accountID: accountID, reason: .departure(request), record: record)
+            return Carrier(accountID: accountID, reason: .departure(request), record: record)
         case .createVault, .addMember, .changeRole, .rotateKey, .deleteVault:
             return nil
         }

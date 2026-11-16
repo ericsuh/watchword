@@ -486,12 +486,12 @@ table carry the rest of the design:
 
 Every format is binary, little-endian, with one canonical encoding, a four-byte magic and a version byte, and a
 bounded parser: a size is checked before anything is copied, a count before anything is allocated, and bytes that
-would not re-encode to themselves are refused (SEC9). Sizes: at most 64 members; epochs up to 65,535; a record is at
-most 10,040 bytes.
+would not re-encode to themselves are refused (SEC9). Sizes: at most 64 members; epochs up to 65,535; a write cut of
+at most 2,048 bytes; a record is at most 12,090 bytes.
 
 | Object | Magic | Contents | Signed by |
 | --- | --- | --- | --- |
-| Membership record | `WWMR` | vault ID, epoch, previous hash, signer, operation (`createVault`, `addMember`, `removeMember`, `memberLeft`, `changeRole`, `rotateKey`, `deleteVault`) with operands, vault key ID and the epoch that introduced it, the resulting members (account ID, role, epoch added, X25519 and Ed25519 keys, bundle self-signature) in account order | the signer |
+| Membership record | `WWMR` | vault ID, epoch, previous hash, signer, operation (`createVault`, `addMember`, `removeMember`, `memberLeft`, `changeRole`, `rotateKey`, `deleteVault`) with operands, vault key ID and the epoch that introduced it, a write cut (opaque bytes; empty unless the operation ends an account's permission to write, §8.7), the resulting members (account ID, role, epoch added, X25519 and Ed25519 keys, bundle self-signature) in account order | the signer |
 | Key grant | `WWKG` | a `VaultKeyGrant`: vault, key ID, sender, recipient, recipient's X25519 key, HPKE encapsulated key, ciphertext (§4) | the sender (`.vaultKeyGrant`) |
 | Leave request | `WWLR` | vault, account, the epoch the member was added | the member |
 | Published key bundle | `WWKB` | account ID, X25519 key, Ed25519 key | self-signature (`.publicKeyBundle`) |
@@ -543,7 +543,8 @@ device has already seen, which the ledger holds. Everything the store offers is 
 **Verifying a record** against the state before it, cheapest first: the vault, the epoch (exactly the next), the
 previous hash; the signer is a member and an administrator of the previous state; the operation is one that signer
 may perform (§8.1); the shape of the key change (a removal, a departure and `rotateKey` name a new key, nothing else
-changes it); the signature, under the key the *previous state* lists for the signer; and only then what costs work or
+changes it); a write cut only where the operation ends an account's permission to write (§8.7), so that a record has
+one encoding; the signature, under the key the *previous state* lists for the signer; and only then what costs work or
 came with the record: the new key ID must not have been used on this record's own path, a new member's key bundle is
 validated, a departure's embedded leave request is checked, and the member list must be exactly the previous list
 with the operation applied. Unsigned junk costs exactly one signature check; the key-history check walks the
@@ -597,12 +598,19 @@ the next two paragraphs.
 (the narrowest timing the store has), or a device of the owner's that signed twice while isolated. The displaced
 record is kept, and while its signer may still remove that member in the accepted state (for a departure: while the
 member is still in the same stint) the removal is **owed** (`MembershipLedger.owedRemovals`). Until it is carried out
-again: `writePermission` refuses the member's writes (`removalPending`); `recordsToReseal` is empty, so nothing
-written under the newer key is sealed again under one the member holds; `pendingRotation` reports it; and the next
-device whose account may sign the removal plans it again, whichever device signed the first. This is a function of
+again: `writePermission` refuses the member's writes (`removalPending`), and of what they have written
+`writeStanding` counts what the displaced record's own branch said counts, its write cut included (§8.7), so a
+device that learns of a removal this way treats the member's later writes as a device that saw it adopted does;
+`recordsToReseal` is empty, so nothing written under the newer key is sealed again under one the member holds;
+`pendingRotation` reports it; and the next device whose account may sign the removal plans it again, whichever
+device signed the first. This is a function of
 the records held, like the chain itself. A former administrator's removals on a dead branch owe nothing: their signer
 has no standing in the accepted state. Nor does a removal that its own branch went on to take back by adding the
-member again.
+member again. A *departure* is owed whoever carried it out, because the member's own signature asked for it; but
+what such a branch says about the member's writes is believed only if the owed record, and the record that holds the
+cut, were each signed by an account that could sign the same on the accepted head. Otherwise the member's writes go
+on counting until the departure is carried out again with a cut by an account that may: a former administrator cannot
+turn a pending leave request into "set this member's work aside" (S29).
 
 **Everything else that loses is proposed again by its author.** `MembershipLedger.status(of:)` says whether a record
 this device proposed is `awaitingPublication`, `adopted` or `superseded`. A device keeps what it proposed until it is
@@ -696,15 +704,20 @@ names first; there is no bound on how many, because a bound is something junk fi
 ### 8.6 Removal, leaving and rotation (F4.3, F4.4)
 
 Removing a member or carrying out a departure **always rotates** (the verifier refuses a removal that keeps the
-key). `RotationPlanner.plan` produces a `RotationPlan`, pure data the integrator executes, in this order:
+key). Before planning, the device checks that its account may remove the member (`mayRemove`), takes them off the
+transport's share (F4.3a: at once, so that a store which honours its share list holds nothing more of theirs
+afterwards), syncs, merges what the account has written, and takes the **write cut** (§8.7): the record that ends a member's permission to write says which of their
+writes count, and the cut is signed into the record when the plan is made. `RotationPlanner.plan` then produces a
+`RotationPlan`, pure data the integrator executes, in this order:
 
-1. **Revoke transport access** for the departing account. First, because it takes effect at once on the server.
-2. **Merge the departing account's outstanding writes**, while this device's ledger still lets it write (§8.7).
-3. **Publish the grants**: the new key wrapped to every remaining member, the planner's own account included.
-4. **Publish the membership record** that removes the member and names the new key, after one more look at the
-   store: a record that can no longer be adopted is not published, the plan is superseded, and it is planned again.
-5. **Re-seal** every record `MembershipLedger.recordsToReseal(in:)` lists, as new versions through the ordinary
-   save path, repeating until the list is empty.
+1. **Revoke transport access** for the departing account, again: a resumed plan starts here, and it is the signed
+   plan that says whom.
+2. **Publish the grants**: the new key wrapped to every remaining member, the planner's own account included.
+3. **Publish the membership record** that removes the member, names the new key and carries the cut, after one more
+   look at the store: a record that can no longer be adopted is not published, the plan is superseded, and it is
+   planned again, with a cut taken again.
+4. **Re-seal** every record `MembershipLedger.recordsToReseal(in:)` lists, as new versions through the ordinary
+   save path, repeating until the list is empty. A re-sealed version still says whose work it carries.
 
 The plan holds no key in the clear: the new key exists only inside the grants, and the planning device obtains it
 like everyone else, by opening its own grant once the record is in its chain. So the plan can be saved and resumed
@@ -737,33 +750,53 @@ request, and so cannot keep a departing member's key current unnoticed (S24).
 
 ### 8.7 Permissions (F4.5)
 
-One question, `MembershipLedger.writePermission(for:)` (over `MembershipState.writePermission(for:)`): may this
-account write to the vault now? Allowed for the owner, administrators and read-write members of a vault that has not
-been deleted, unless their removal is owed (§8.3). The client asks it before its own writes and before merging anyone
-else's. (`writePermission(for:atEpoch:)` answers for an earlier epoch of the accepted chain; that is for showing
-history, never for deciding whether to merge.)
+Two questions, both answered from a verified ledger.
+
+**May this account write now?** `MembershipLedger.writePermission(for:)` (over
+`MembershipState.writePermission(for:)`): allowed for the owner, administrators and read-write members of a vault
+that has not been deleted, unless their removal is owed (§8.3). The client asks it before its own writes.
+(`writePermission(for:atEpoch:)` answers for an earlier epoch of the accepted chain; that is for showing history.)
+
+**Which of this account's writes count?** `MembershipLedger.writeStanding(of:)`, asked before merging anything
+another account wrote, and again about everything already merged whenever the ledger's head has changed:
+
+| Standing | What counts |
+| --- | --- |
+| `mayWrite` | everything the account signed. Judged *now*, not at the time a write claims: a former member holds the keys of their time and can date a write as they please. So a write made while read-only counts once its author is made read-write. |
+| `ended(cut:author:refusal:)`: could write once, may not now | exactly the writes inside the **write cut** of the record that ended it (the latest such record of the accepted chain; for an owed removal, §8.3). `author` is the member as the chain listed them then, for checking signatures. |
+| `nothingCounts` | nothing: the account never could write here, or the vault was deleted |
 
 It is **not cryptographic**: a read-only member holds the vault key, and a former member holds every key of their
 time, so either can produce a ciphertext that decrypts. What stops it counting is every remaining member's client
 asking, and the transport's own permission where it has one (CloudKit's read-only participant).
 
-**Judged now, merged for good, sealed again.** A write is judged against the membership the device knows *when it
-merges it*, not against the time the write claims: a former member can date a write as they please, so only the
-newest membership a device knows can refuse them. Two rules keep that from stranding what a member wrote while they
-were entitled to (S25):
+**The write cut.** A record that ends an account's permission to write (the removal or departure of a member who
+could write, a change of role to read-only) carries a `WriteCut`: the signing administrator's device, after one more
+sync pass, commits to what it has merged of that account's work. The verifier refuses a cut on any other record. To
+this module the cut is at most 2,048 opaque bytes, signed with the rest of the record and therefore the same on every
+device; what it must let the integrator do is decide, from the cut and a write alone, whether the write is inside,
+with the same answer everywhere and no way for the account to add to the set afterwards (§8.8 says what that means
+for sync's logs). Then:
 
-- What a device has merged stays merged, whatever happens to its author's standing afterwards.
-- A record whose stored version was written by an account that may no longer write is **sealed again by a member who
-  may**, as a new version under their own name. `recordsToReseal` lists those records beside the ones under an
-  earlier key (`SealedRecordReference.author`), and `pendingRotation` counts them. So after a demotion to read-only,
-  which rotates nothing, every device that had merged the member's records and may write publishes them again; a
-  member invited later, or a device that was offline, refuses the original and reads the copy. After a removal the
-  same happens in the rotation's re-seal step, which is why the plan merges the departing account's outstanding
-  writes *before* publishing the record that ends them.
+- **A write inside the cut counts on every device, whenever it meets it.** A member invited later, or a device
+  that was offline, accepts it directly. Nothing has to be published again for a demotion, which rotates nothing; a
+  removal re-seals for the key's sake (§8.6), and a re-sealed version says whose work it carries.
+- **A write outside the cut counts on no device, including one that merged it before it had seen the record.**
+  That device takes it out again and holds it aside for its person (never destroyed, never merged, never published
+  again by the device on its own, alone or inside a version of its own). The person may write it again as their own;
+  that is then their write.
 
-What is still lost: a write by a member whose removal or demotion every device learned of before any device that may
-write had merged it. That is the price of F4.5 being a rule the clients keep (S12). The reverse also holds: a write
-made while read-only counts once its author has been made read-write.
+The second rule is what a per-device rule cannot give. Judging a write only against the membership a device knows
+*when it merges it*, and keeping what was merged, lets a former member with a store that still takes their writes
+(or a demoted member, for whom there is no transport step at all) aim one write at a device that has not yet been
+shown the record: that device merges it, later seals it again under its own name, and everyone accepts it (review
+finding S28). With the cut, when a device hears of the record changes nothing about which writes count.
+
+What is still lost, in the sense of set aside on the devices that hold it rather than merged: whatever the account
+wrote that the signing device had not merged when it took the cut. That is the price of F4.5 being a rule the
+clients keep (S12), and why the device syncs first and, for a removal, takes the member off the transport before
+anything else. An administrator chooses the cut they sign; one who signs less than they hold sets a member's work
+aside for everyone, which is within what an administrator who can remove the member can already do.
 
 ### 8.8 What integration calls, and what is not solved
 
@@ -782,16 +815,47 @@ written out against a hostile store. One sync pass, in this order:
    A record of this account's in `IngestReport.superseded` is a proposal again.
 4. **Key.** Fetch the grant of the current key if it is not held (`openGrant(of:from:as:)`) and store the key
    wrapped under Ksym.
-5. **Items.** Merge other members' writes, judging each author with `writePermission(for:)` (§8.7).
-   `SyncKeyring.verify` is where that plugs in, with the author's signing key taken from the ledger's state.
+5. **Items.** Judge every account whose work the device holds or is offered with `writeStanding(of:)` (§8.7):
+   merge what counts, and take out and hold aside what was merged and no longer counts (after any change of head, not
+   only for new objects). `SyncKeyring.verify` is where the author's signing key plugs in, from the ledger's state
+   or from the standing. The account judged is the one whose *work* it is: a member's version of an item that
+   carries another account's edits is judged for both (below).
 6. **Rotation.** Continue any saved plan (`RotationPlan.parse(_:account:)`, `steps(in:)`); a superseded removal or
    departure is planned again. Plan each of `owedRemovals` this account may sign. As an administrator, plan a
-   rotation for each of `pendingLeaveRequests`. Then, as a member who may write, seal again whatever
-   `recordsToReseal` lists; a re-seal is the same item state at a higher version (`ItemMerge.written`), not an edit,
-   so two devices doing it at once converge.
+   rotation for each of `pendingLeaveRequests`. Every plan that removes a member who can write, and every change of
+   role to read-only, needs a write cut (`requiresWriteCut`), taken after step 5 of the same pass. Then, as a member
+   who may write, seal again whatever `recordsToReseal` lists, from an inventory that holds only what counts; a
+   re-seal is the same item state at a higher version (`ItemMerge.written`), not an edit, so two devices doing it at
+   once converge, and it keeps every value's own author.
 
 Accepting an invitation passes the ledger the device already holds for that vault ID, if it ever held one
 (`continuing:`), and the owner it knows for it (`knownOwner:`).
+
+**What a write cut must be for sync's logs.** `SimulatedMember` shows one that works for its model, and the
+integration has to give the same three properties over `SyncEngine`'s objects and `ItemMerge`'s values:
+
+- *Bound to objects, not to positions.* The simulation's cut is the digest of the last object of the account's
+  hash-linked stream that the signing device held with every predecessor; an object is inside it if walking back
+  from that digest reaches it. A count per device log would not do: a former member with a helpful store can still
+  create an object at a position some device has not filled (`forkedStream`). Nor would the digest of the last
+  object *seen*: it commits to predecessors the device never held, which could be brought out later
+  (`preparedStream`). `SyncEngine` merges a log strictly in sequence, so "how far this device has merged each of the
+  account's device logs, and a digest binding those segments" is the natural cut; 2,048 bytes is room for 32 devices.
+- *Applied to work, not to envelopes.* A device that merged a late write before it knew publishes that write on in
+  its own next version of the item, signed by a member in good standing. In the simulation a version sealed again
+  names the account and the object its text came from, and every reader judges that too
+  (`lateWriteSealedAgainByAnother`). In `ItemMerge` every value already carries the revision that wrote it
+  (`GroupStamp`, device and counter): the integration maps devices to accounts (the device registry) and drops, on
+  every device, values whose revision is outside their account's cut, wherever they arrive from.
+- *Taken out, not only kept out.* A device recomputes what counts when its head changes. The simulation keeps
+  every object it has fetched and derives its record store from them; `SyncEngine` keeps item history and
+  quarantines rather than deletes (§7.5), and needs the equivalent: the item as it was without the values that no
+  longer count, and those values held aside for the person.
+
+These are conditions of wiring sharing into sync, not refinements of it. The module signs the cut, gives every
+device the same one and says whose writes it governs; the reference loop shows the rest for its own item model. Over
+`SyncEngine` and `ItemMerge` the rest is integration work, and until it is done S28 is closed here and open in the
+product.
 
 Not solved here, and to be decided with integration:
 
@@ -806,7 +870,12 @@ Not solved here, and to be decided with integration:
   the owner's device proposes it again (step 3).
 - **Forks cost work.** Whatever lost a fork is done again: removals by any device that may, everything else by its
   author's device when it next syncs. Until then an invitee waits, a role change is not in effect, and a removed
-  member is listed (with their writes refused).
+  member is listed (with their writes counted only as far as the displaced record's cut). A displaced *demotion* is
+  not owed, so until its author proposes it again the member's writes count in full, the later ones included; the
+  new record's cut then decides.
+- **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
+  departed account's segments must not be collected while a device may still need them to judge a cut, or the cut
+  must carry what is needed to judge without them.
 - **A former administrator who can still write to the store** can publish valid records on dead branches without
   limit. They change nothing and owe nothing, but a device keeps only 1,024 of them, and each one beyond that costs
   it a signature check on every sync. Taking them off the transport's share (step 1 of a removal) is what stops it.

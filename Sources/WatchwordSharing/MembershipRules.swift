@@ -27,7 +27,7 @@ enum MembershipRules {
             throw MembershipError.wrongVault(expected: vaultID, actual: record.vaultID)
         }
         guard record.epoch == 0, record.previousHash == .none, record.operation == .createVault,
-            record.keyEpoch == 0, record.vaultKeyID != .sharingZero
+            record.keyEpoch == 0, record.vaultKeyID != .sharingZero, record.writeCut == .nothing
         else { throw MembershipError.malformedGenesis }
         // The keys are compared, not the bundle's self-signature: Ed25519 signing may be randomised, so the bundle the
         // owner's device put in the record and the one this device pinned can be two signatures over the same keys.
@@ -52,10 +52,10 @@ enum MembershipRules {
     /// Verifies `record` as the successor of `previous` and returns the state it produces.
     ///
     /// Order: the checks that cost nothing (position in the chain, the signer's standing, what the operation is
-    /// allowed to do, the shape of the key change), then the record's signature, and only then anything that costs
-    /// work or validates material the record brought with it (whether its branch used the key before, a new member's
-    /// key bundle, a leave request). Unsigned junk therefore costs exactly one signature check and nothing more
-    /// (review finding S22); `signatureChecks` counts them.
+    /// allowed to do, the shape of the key change, a write cut only where a permission to write ends), then the
+    /// record's signature, and only then anything that costs work or validates material the record brought with it
+    /// (whether its branch used the key before, a new member's key bundle, a leave request). Unsigned junk therefore
+    /// costs exactly one signature check and nothing more (review finding S22); `signatureChecks` counts them.
     static func nextState(
         _ record: MembershipRecord, hash: MembershipHash, after previous: MembershipState,
         keyUsedBefore: (UUID) -> Bool, signatureChecks: inout Int
@@ -78,6 +78,8 @@ enum MembershipRules {
         }
         try authorise(record.operation, by: signer, in: previous)
         try checkKeyChange(of: record, after: previous)
+        guard accountLosingWritePermission(by: record.operation, in: previous) != nil || record.writeCut == .nothing
+        else { throw MembershipError.unexpectedWriteCut }
         signatureChecks += 1
         try verifySignature(of: record, signingKey: signer.bundle.signingKey)
 
@@ -133,6 +135,25 @@ enum MembershipRules {
         case .deleteVault:
             guard isOwner else { throw MembershipError.ownerOnly }
         }
+    }
+
+    /// The account whose permission to write ends when `operation` is applied to `previous`, if it ends anyone's: a
+    /// member who could write and is removed, leaves, or is made read-only. That record, and no other, carries a
+    /// `WriteCut` (§8.7).
+    static func accountLosingWritePermission(by operation: MembershipRecord.Operation, in previous: MembershipState)
+        -> UUID?
+    {
+        let account: UUID
+        switch operation {
+        case .removeMember(let removed), .memberLeft(let removed, _):
+            account = removed
+        case .changeRole(let changed, let role):
+            guard !role.mayWrite else { return nil }
+            account = changed
+        case .createVault, .addMember, .rotateKey, .deleteVault:
+            return nil
+        }
+        return previous.member(account)?.role.mayWrite == true ? account : nil
     }
 
     /// Principle 5: a removal or departure always introduces a key the departed member never held, and nothing else

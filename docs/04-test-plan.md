@@ -262,8 +262,16 @@ membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):
 - *After revocation*: the old vault key against records sealed since, also relabelled with the new key ID; an old
   grant replayed under the new key's name; a fresh grant of a planted key from a former administrator, from an
   administrator demoted since, and from an administrator of another vault; a former member asking for the new key;
-  writes by a former member and by a read-only member reaching the store and being refused by every remaining
-  member; a write in another member's name.
+  writes by a former member and by a read-only member reaching the store and counting for no remaining member; a
+  write in another member's name.
+- *Writes around a revocation* (the write cut, §8.7): a former member's write, and a demoted member's, aimed at a
+  device the store has not yet shown the record (merged there, taken out again and held aside once the record
+  arrives, never published by that device, read by nobody else); the same write sealed again by that device as a
+  version of its own before it knew (refused everywhere for the work it carries); objects claiming places in the
+  former member's own stream that the cut covers; a stream prepared in advance of which the removing device was
+  shown only the end; part of a stream withheld from a member who joins later (delays, never widens); a cut on a
+  record that ends no permission, a cut altered or over its bound; a removal displaced by a fork, whose cut still
+  governs while it is owed; a former administrator's cut on a dead branch built from a genuine leave request.
 - *Fork and rollback*: a store serving an older chain; a saved ledger truncated, spliced, altered byte by byte or
   planted; a store showing two halves of a household different branches; a former administrator's rewrite fed a
   page, or an object, at a time in any order; a record signed on a stale head and released after the chain was built

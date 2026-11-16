@@ -8,7 +8,7 @@ import WatchwordCrypto
 /// Binary, little-endian, one canonical encoding:
 ///
 /// ```
-/// magic "WWMR"  formatVersion u8 = 1
+/// magic "WWMR"  formatVersion u8 = 2
 /// vaultID 16  epoch u64  previousHash 32  signer 16
 /// operation u8, then its operands:
 ///   0 createVault   —
@@ -19,6 +19,7 @@ import WatchwordCrypto
 ///   5 rotateKey     —
 ///   6 deleteVault   —
 /// vaultKeyID 16  keyEpoch u64
+/// writeCutLength u16 (0...2048), write cut       (empty unless the operation ends an account's permission to write)
 /// memberCount u16 (1...64), then per member, strictly ascending by account ID:
 ///   account 16  role u8  since u64  X25519 key 32  Ed25519 key 32  bundle self-signature 64
 /// signature 64                                   (nothing after)
@@ -36,14 +37,15 @@ import WatchwordCrypto
 /// the state before it.
 public struct MembershipRecord: Sendable, Hashable {
     static let magic: [UInt8] = Array("WWMR".utf8)
-    static let formatVersion: UInt8 = 1
+    static let formatVersion: UInt8 = 2
     static let signatureLength = 64
     static let entryLength = 16 + 1 + 8 + 32 + 32 + 64
-    static let fixedLength = 4 + 1 + 16 + 8 + 32 + 16 + 1 + 16 + 8 + 2 + signatureLength
+    static let fixedLength = 4 + 1 + 16 + 8 + 32 + 16 + 1 + 16 + 8 + 2 + 2 + signatureLength
     static let longestOperandLength = 16 + 64
     /// The most a record can encode to; anything longer is refused before it is parsed (SEC9).
     public static let maximumLength =
-        fixedLength + longestOperandLength + MembershipLimits.maximumMembers * entryLength
+        fixedLength + longestOperandLength + MembershipLimits.maximumWriteCutLength
+        + MembershipLimits.maximumMembers * entryLength
 
     public enum Operation: Sendable, Hashable {
         /// Epoch 0: the owner creates the vault with themselves as its only member.
@@ -137,13 +139,17 @@ public struct MembershipRecord: Sendable, Hashable {
     public let operation: Operation
     public let vaultKeyID: UUID
     public let keyEpoch: UInt64
+    /// Which of an account's writes still count, when the operation ends that account's permission to write: a
+    /// removal or departure of a member who could write, or a change of role to read-only (§8.7). `WriteCut.nothing`
+    /// on every other record. Being signed with the rest, it is the same on every device that accepts the record.
+    public let writeCut: WriteCut
     /// The member list after the operation, in ascending order of account ID.
     public let entries: [Entry]
     public let signature: [UInt8]
 
     init(
         vaultID: UUID, epoch: UInt64, previousHash: MembershipHash, signer: UUID, operation: Operation,
-        vaultKeyID: UUID, keyEpoch: UInt64, entries: [Entry], signature: [UInt8]
+        vaultKeyID: UUID, keyEpoch: UInt64, writeCut: WriteCut, entries: [Entry], signature: [UInt8]
     ) {
         self.vaultID = vaultID
         self.epoch = epoch
@@ -152,6 +158,7 @@ public struct MembershipRecord: Sendable, Hashable {
         self.operation = operation
         self.vaultKeyID = vaultKeyID
         self.keyEpoch = keyEpoch
+        self.writeCut = writeCut
         self.entries = entries.sorted { $0.accountID.sharingPrecedes($1.accountID) }
         self.signature = signature
     }
@@ -159,15 +166,16 @@ public struct MembershipRecord: Sendable, Hashable {
     /// Builds and signs a record as `keyset`'s account.
     static func signed(
         vaultID: UUID, epoch: UInt64, previousHash: MembershipHash, operation: Operation, vaultKeyID: UUID,
-        keyEpoch: UInt64, entries: [Entry], by keyset: Keyset
+        keyEpoch: UInt64, writeCut: WriteCut = .nothing, entries: [Entry], by keyset: Keyset
     ) throws -> MembershipRecord {
         let unsigned = MembershipRecord(
             vaultID: vaultID, epoch: epoch, previousHash: previousHash, signer: keyset.accountID,
-            operation: operation, vaultKeyID: vaultKeyID, keyEpoch: keyEpoch, entries: entries, signature: [])
+            operation: operation, vaultKeyID: vaultKeyID, keyEpoch: keyEpoch, writeCut: writeCut, entries: entries,
+            signature: [])
         return MembershipRecord(
             vaultID: vaultID, epoch: epoch, previousHash: previousHash, signer: keyset.accountID,
-            operation: operation, vaultKeyID: vaultKeyID, keyEpoch: keyEpoch, entries: unsigned.entries,
-            signature: try keyset.sign(unsigned.signedContent, domain: .membership))
+            operation: operation, vaultKeyID: vaultKeyID, keyEpoch: keyEpoch, writeCut: writeCut,
+            entries: unsigned.entries, signature: try keyset.sign(unsigned.signedContent, domain: .membership))
     }
 
     /// Every byte before the signature: what the signature covers and what the record's hash is taken over.
@@ -188,6 +196,7 @@ public struct MembershipRecord: Sendable, Hashable {
             out += account.sharingBytes + requestSignature
         }
         out += vaultKeyID.sharingBytes + SharingBytes.littleEndian(keyEpoch)
+        out += SharingBytes.littleEndian(UInt16(truncatingIfNeeded: writeCut.bytes.count)) + writeCut.bytes
         out += SharingBytes.littleEndian(UInt16(truncatingIfNeeded: entries.count))
         for entry in entries {
             out += entry.accountID.sharingBytes
@@ -234,6 +243,12 @@ public struct MembershipRecord: Sendable, Hashable {
         let vaultKeyID = try reader.uuid()
         let keyEpoch = try reader.uint64()
         guard keyEpoch <= epoch else { throw SharingFormatError.epochOutOfRange(keyEpoch) }
+        // The length is bounded before the bytes are read, and `WriteCut.init` holds the same bound.
+        let cutLength = Int(try reader.uint16())
+        guard cutLength <= MembershipLimits.maximumWriteCutLength else {
+            throw SharingFormatError.tooLarge(cutLength)
+        }
+        let writeCut = try WriteCut(reader.read(cutLength))
 
         let count = Int(try reader.uint16())
         guard (1...MembershipLimits.maximumMembers).contains(count) else {
@@ -261,7 +276,7 @@ public struct MembershipRecord: Sendable, Hashable {
         try reader.finish()
         return MembershipRecord(
             vaultID: vaultID, epoch: epoch, previousHash: previousHash, signer: signer, operation: operation,
-            vaultKeyID: vaultKeyID, keyEpoch: keyEpoch, entries: entries, signature: signature)
+            vaultKeyID: vaultKeyID, keyEpoch: keyEpoch, writeCut: writeCut, entries: entries, signature: signature)
     }
 
     private static func role(_ raw: UInt8) throws -> MemberRole {

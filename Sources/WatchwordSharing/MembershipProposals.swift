@@ -47,10 +47,38 @@ extension MembershipLedger {
 
     /// Signs the record that changes a member's role. Granting or revoking the administrator role is the owner's
     /// alone ("admin succession", §8.3).
-    public func proposeRoleChange(of accountID: UUID, to role: MemberRole, signedBy keyset: Keyset) throws
-        -> MembershipRecord
-    {
-        try propose(.changeRole(accountID, to: role), newKeyID: nil, adding: nil, signedBy: keyset).record
+    ///
+    /// - Parameter writeCut: which of the member's writes count from now on, when the change makes a member who
+    ///   could write read-only (`requiresWriteCut(changingRoleOf:to:)`): what this device has merged of theirs, taken
+    ///   after one more sync pass. `nil` for every other change of role.
+    /// - Throws: `SharingError.writeCutRequired` or `writeCutNotExpected` if `writeCut` is not what the change needs.
+    public func proposeRoleChange(
+        of accountID: UUID, to role: MemberRole, writeCut: WriteCut?, signedBy keyset: Keyset
+    ) throws -> MembershipRecord {
+        try propose(.changeRole(accountID, to: role), newKeyID: nil, adding: nil, writeCut: writeCut, signedBy: keyset)
+            .record
+    }
+
+    /// Whether the record that gives `accountID` the role `role` must carry a `WriteCut`: it makes a member who can
+    /// write read-only (§8.7).
+    public func requiresWriteCut(changingRoleOf accountID: UUID, to role: MemberRole) -> Bool {
+        MembershipRules.accountLosingWritePermission(by: .changeRole(accountID, to: role), in: state) != nil
+    }
+
+    /// Whether the record that removes `accountID`, or carries out their departure, must carry a `WriteCut`: they
+    /// can write now (§8.7). A read-only member's writes were settled when they became read-only, or never counted.
+    public func requiresWriteCut(removing accountID: UUID) -> Bool {
+        MembershipRules.accountLosingWritePermission(by: .removeMember(accountID), in: state) != nil
+    }
+
+    /// Whether `signer` may remove `accountID`, or carry out their departure, on the current head: an administrator,
+    /// and the owner if the member is one. For the UI, and for a device about to take the member off the transport's
+    /// share before it plans the removal (§8.6): that step is not signed by anything, so it is not taken for a removal
+    /// this account could not sign.
+    public func mayRemove(_ accountID: UUID, signer: UUID) -> Bool {
+        let state = self.state
+        guard !state.isDeleted, let member = state.member(signer), member.role.isAdministrator else { return false }
+        return (try? MembershipRules.authorise(.removeMember(accountID), by: member, in: state)) != nil
     }
 
     /// Signs the record that deletes the vault. Owner only; nothing can follow it.
@@ -62,7 +90,7 @@ extension MembershipLedger {
     /// this device never publishes a record that others would refuse.
     func propose(
         _ operation: MembershipRecord.Operation, newKeyID: UUID?, adding entry: MembershipRecord.Entry?,
-        signedBy keyset: Keyset
+        writeCut: WriteCut? = nil, signedBy keyset: Keyset
     ) throws -> (record: MembershipRecord, state: MembershipState) {
         let state = self.state
         guard !state.isDeleted else { throw SharingError.vaultDeleted }
@@ -73,6 +101,11 @@ extension MembershipLedger {
         guard epoch <= MembershipLimits.maximumEpoch else { throw SharingFormatError.epochOutOfRange(epoch) }
         // Before signing anything: nothing this account is not allowed to do gets its signature.
         try MembershipRules.authorise(operation, by: signer, in: state)
+        // A cut exactly where a permission to write ends: an integrator that forgot one is told, not given an
+        // empty one that would count nothing of the member's work.
+        let endsPermission = MembershipRules.accountLosingWritePermission(by: operation, in: state) != nil
+        guard endsPermission || writeCut == nil else { throw SharingError.writeCutNotExpected }
+        guard !endsPermission || writeCut != nil else { throw SharingError.writeCutRequired }
 
         var entries = state.members.map(MembershipRecord.Entry.init)
         switch operation {
@@ -93,7 +126,7 @@ extension MembershipLedger {
         let record = try MembershipRecord.signed(
             vaultID: vaultID, epoch: epoch, previousHash: state.hash, operation: operation,
             vaultKeyID: newKeyID ?? state.vaultKeyID, keyEpoch: newKeyID == nil ? state.keyEpoch : epoch,
-            entries: entries, by: keyset)
+            writeCut: writeCut ?? .nothing, entries: entries, by: keyset)
         let next = try MembershipRules.nextState(
             record, hash: record.hash, after: state,
             keyUsedBefore: { keyID in chain.contains { $0.state.vaultKeyID == keyID } })

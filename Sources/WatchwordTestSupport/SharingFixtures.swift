@@ -31,7 +31,7 @@ public struct ForgedEntry: Sendable, Hashable {
 /// it also checks the module's encoder: an unaltered forgery must be accepted.
 public struct ForgedRecord: Sendable {
     public var magic: [UInt8] = Array("WWMR".utf8)
-    public var formatVersion: UInt8 = 1
+    public var formatVersion: UInt8 = 2
     public var vaultID: UUID
     public var epoch: UInt64
     public var previousHash: [UInt8]
@@ -40,6 +40,9 @@ public struct ForgedRecord: Sendable {
     public var operation: [UInt8]
     public var vaultKeyID: UUID
     public var keyEpoch: UInt64
+    /// The write cut, as bytes. Empty is what an honest record carries where no permission to write ends, and a
+    /// legitimate cut ("nothing") where one does.
+    public var writeCut: [UInt8] = []
     public var entries: [ForgedEntry]
     /// Whether to put the entries in canonical order when encoding.
     public var sortsEntries = true
@@ -101,6 +104,14 @@ public struct ForgedRecord: Sendable {
         return [u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7, u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15]
     }
 
+    /// Sixteen bytes as a UUID.
+    static func uuid(_ b: [UInt8]) -> UUID {
+        precondition(b.count == 16)
+        return UUID(
+            uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+        )
+    }
+
     static func littleEndian<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
         (0..<(T.bitWidth / 8)).map { UInt8(truncatingIfNeeded: value >> (8 * $0)) }
     }
@@ -111,6 +122,7 @@ public struct ForgedRecord: Sendable {
         out += ForgedRecord.bytes(vaultID) + ForgedRecord.littleEndian(epoch) + previousHash
         out += ForgedRecord.bytes(signer) + operation
         out += ForgedRecord.bytes(vaultKeyID) + ForgedRecord.littleEndian(keyEpoch)
+        out += ForgedRecord.littleEndian(UInt16(truncatingIfNeeded: writeCut.count)) + writeCut
         out += ForgedRecord.littleEndian(UInt16(truncatingIfNeeded: entries.count))
         let ordered =
             sortsEntries
@@ -233,22 +245,51 @@ extension MemberKeyCheck {
 }
 
 extension RotationPlanner {
-    /// Plans with a member-key comparison that found nothing (`MemberKeyCheck.findingNothing`).
+    /// Plans with a member-key comparison that found nothing (`MemberKeyCheck.findingNothing`) and, where the
+    /// rotation needs a write cut, the cut that holds nothing: for tests that are not about pins or about writes.
     public static func plan<R: RandomNumberGenerator>(
         _ reason: RotationReason, ledger: MembershipLedger, signedBy keyset: Keyset, using generator: inout R
     ) throws -> RotationPlan {
         try plan(
-            reason, ledger: ledger, memberKeys: .findingNothing(in: ledger), signedBy: keyset, using: &generator)
+            reason, ledger: ledger, memberKeys: .findingNothing(in: ledger),
+            writeCut: ledger.cutOfNothing(for: reason), signedBy: keyset, using: &generator)
     }
 
     public static func plan(_ reason: RotationReason, ledger: MembershipLedger, signedBy keyset: Keyset) throws
         -> RotationPlan
     {
-        try plan(reason, ledger: ledger, memberKeys: .findingNothing(in: ledger), signedBy: keyset)
+        try plan(
+            reason, ledger: ledger, memberKeys: .findingNothing(in: ledger),
+            writeCut: ledger.cutOfNothing(for: reason), signedBy: keyset)
+    }
+
+    /// Plans with a given member-key comparison and the cut that holds nothing where one is needed.
+    public static func plan<R: RandomNumberGenerator>(
+        _ reason: RotationReason, ledger: MembershipLedger, memberKeys: MemberKeyCheck, signedBy keyset: Keyset,
+        using generator: inout R
+    ) throws -> RotationPlan {
+        try plan(
+            reason, ledger: ledger, memberKeys: memberKeys, writeCut: ledger.cutOfNothing(for: reason),
+            signedBy: keyset, using: &generator)
     }
 }
 
 extension MembershipLedger {
+    /// `WriteCut.nothing` if a rotation for `reason` on this head needs a cut, `nil` if it must not carry one.
+    public func cutOfNothing(for reason: RotationReason) -> WriteCut? {
+        guard let account = reason.departingAccount, requiresWriteCut(removing: account) else { return nil }
+        return .nothing
+    }
+
+    /// Changes a role with the cut that holds nothing where one is needed: for tests that are not about writes.
+    public func proposeRoleChange(of accountID: UUID, to role: MemberRole, signedBy keyset: Keyset) throws
+        -> MembershipRecord
+    {
+        try proposeRoleChange(
+            of: accountID, to: role,
+            writeCut: requiresWriteCut(changingRoleOf: accountID, to: role) ? .nothing : nil, signedBy: keyset)
+    }
+
     /// Wraps a key to a member with a member-key comparison that found nothing.
     public func makeGrant(of vaultKey: VaultKey, to recipient: UUID, from keyset: Keyset) throws
         -> VaultKeyGrantRecord

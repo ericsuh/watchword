@@ -96,6 +96,12 @@ public struct SharingObjectLocation: Hashable, Sendable {
         }
     }
 
+    /// SHA-256 of an object: the digest every sharing object's name ends in, and what an integrator's `WriteCut`
+    /// can use to bind the objects it speaks of.
+    public static func digest(of contents: [UInt8]) -> [UInt8] {
+        SharingBytes.sha256(contents)
+    }
+
     /// The longest a sharing object's name can be; longer names are not looked at.
     static let maximumNameLength = 256
 

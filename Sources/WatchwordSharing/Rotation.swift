@@ -2,24 +2,20 @@ import Foundation
 import WatchwordCrypto
 import WatchwordEnvelope
 
-/// A stored record as rotation needs to know it: which record, which key it is sealed under, and which account
-/// wrote the stored version. The integrator builds these from its record store's rows; this module never sees a
-/// ciphertext.
+/// A stored record as rotation needs to know it: which record, and which key it is sealed under. The integrator
+/// builds these from its record store's rows, after it has taken out whatever no longer counts
+/// (`MembershipLedger.writeStanding(of:)`); this module never sees a ciphertext.
 public struct SealedRecordReference: Sendable, Hashable {
     public let recordID: UUID
     public let kind: EnvelopeKind
     public let keyID: UUID
     public let version: UInt64
-    /// The account whose write the stored version is: the signer of the sync object that carried it, or this
-    /// device's own account for a local save.
-    public let author: UUID
 
-    public init(recordID: UUID, kind: EnvelopeKind, keyID: UUID, version: UInt64, author: UUID) {
+    public init(recordID: UUID, kind: EnvelopeKind, keyID: UUID, version: UInt64) {
         self.recordID = recordID
         self.kind = kind
         self.keyID = keyID
         self.version = version
-        self.author = author
     }
 }
 
@@ -45,17 +41,16 @@ public enum RotationReason: Sendable, Hashable {
 /// One thing the integrator does to carry out a rotation. Every step is safe to repeat.
 public enum RotationStep: Sendable, Hashable {
     /// Remove the account from the transport's share (the CloudKit share's participants, the shared folder). First,
-    /// because it takes effect at once on the server, whenever the rest completes (PRD F4.3a).
+    /// because it takes effect at once on the server, whenever the rest completes (PRD F4.3a). A device removing a
+    /// member does this once already before it plans, so that the cut it takes covers all an honest store will ever
+    /// hold of the member's writes; here it is repeated, from the signed plan, for a plan that is resumed.
     case revokeTransportAccess(UUID)
-    /// Merge everything the account has published so far, now, while this device's ledger still lets it write.
-    /// Once the record below is in the ledger the account's writes are refused, and what this device has not merged
-    /// by then it never will (§8.7); what it has merged is re-sealed by the last step and so survives the removal.
-    case mergeOutstandingWrites(UUID)
     /// Create the object on the transport. An object that already exists with these contents counts as created.
     case publish(SharingObject)
     /// Re-seal every record `MembershipLedger.recordsToReseal(in:)` lists, under the vault's current key, as new
     /// versions through the vault's ordinary save path. Repeat until the list is empty: other devices may still be
-    /// writing under the old key until they have seen the new record.
+    /// writing under the old key until they have seen the new record. A re-sealed version still says whose work it
+    /// carries, so that what counts of it does not change by being sealed again (§8.7).
     case resealRecords
 }
 
@@ -74,7 +69,8 @@ public enum RotationStatus: Sendable, Hashable {
 }
 
 /// A vault-key rotation as data (docs/02-architecture.md §8.6; PRD F4.3, F4.4): the new key ID, the key wrapped to
-/// every remaining member, and the signed membership record that removes the departing member and names the new key.
+/// every remaining member, and the signed membership record that removes the departing member, names the new key
+/// and says which of the departing member's writes count (its `WriteCut`, fixed when the plan is made).
 /// Which records to re-seal is `MembershipLedger.recordsToReseal(in:)`, asked afresh each time because the set
 /// changes while other devices catch up.
 ///
@@ -122,8 +118,8 @@ public struct RotationPlan: Sendable, Hashable {
     public let grants: [SharingObject]
     let signature: [UInt8]
 
-    /// What is left to do on this device, in order: revoke the transport share, merge what the departing account
-    /// has written, publish the grants, publish the record, re-seal. Empty for a plan that was superseded.
+    /// What is left to do on this device, in order: revoke the transport share, publish the grants, publish the
+    /// record, re-seal. Empty for a plan that was superseded.
     ///
     /// Asked of the ledger rather than fixed, so that carrying out a plan found on disk does only what is still
     /// right: once the record is in the chain nothing is published again, and the share is revoked again only
@@ -135,7 +131,7 @@ public struct RotationPlan: Sendable, Hashable {
         case .awaitingPublication:
             var steps: [RotationStep] = []
             if let account = reason.departingAccount {
-                steps += [.revokeTransportAccess(account), .mergeOutstandingWrites(account)]
+                steps.append(.revokeTransportAccess(account))
             }
             steps += grants.map(RotationStep.publish)
             steps.append(.publish(record))
@@ -305,17 +301,24 @@ public enum RotationPlanner {
     /// Generates the new vault key, wraps it to every member who remains, signs the membership record, and forgets
     /// the key. Needs an unlocked administrator: the owner for anything that removes an administrator.
     ///
-    /// - Parameter memberKeys: this device's comparison of the chain's member keys with its verified contacts, made
-    ///   on the ledger's current head (`MembershipLedger.checkMemberKeys`). The new key is wrapped to the keys the
-    ///   chain lists, so a member whose listed keys are not the ones this account's person verified must not be
-    ///   among the recipients: planning then throws `keySubstituted`, unless that member is the one being removed.
+    /// - Parameters:
+    ///   - memberKeys: this device's comparison of the chain's member keys with its verified contacts, made on the
+    ///     ledger's current head (`MembershipLedger.checkMemberKeys`). The new key is wrapped to the keys the chain
+    ///     lists, so a member whose listed keys are not the ones this account's person verified must not be among
+    ///     the recipients: planning then throws `keySubstituted`, unless that member is the one being removed.
+    ///   - writeCut: which of the departing member's writes count from now on, when they can write
+    ///     (`MembershipLedger.requiresWriteCut(removing:)`): what this device has merged of theirs. Take the member
+    ///     off the transport's share, sync and merge, then take the cut, then plan: the cut is signed into the
+    ///     record here, and what the member wrote that is not inside it counts for nobody afterwards (§8.7). `nil`
+    ///     for a routine rotation and for a member who is read-only.
     /// - Throws: `SharingError.nothingToDo` if the member is already gone (a concurrent administrator got there
     ///   first); `SharingError.notPermitted` or a `MembershipError` if this account may not do it;
     ///   `SharingError.memberKeysNotChecked` if `memberKeys` is for another vault or another head;
-    ///   `SharingError.keySubstituted` as above.
+    ///   `SharingError.keySubstituted` as above; `SharingError.writeCutRequired` or `writeCutNotExpected` if
+    ///   `writeCut` is not what the change needs.
     public static func plan<R: RandomNumberGenerator>(
-        _ reason: RotationReason, ledger: MembershipLedger, memberKeys: MemberKeyCheck, signedBy keyset: Keyset,
-        using generator: inout R
+        _ reason: RotationReason, ledger: MembershipLedger, memberKeys: MemberKeyCheck, writeCut: WriteCut?,
+        signedBy keyset: Keyset, using generator: inout R
     ) throws -> RotationPlan {
         let state = ledger.state
         guard !state.isDeleted else { throw SharingError.vaultDeleted }
@@ -336,7 +339,7 @@ public enum RotationPlanner {
         let newKey = VaultKey.generate(vaultID: ledger.vaultID, using: &generator)
         defer { newKey.zeroise() }
         let (record, next) = try ledger.propose(
-            operation, newKeyID: newKey.key.keyID, adding: nil, signedBy: keyset)
+            operation, newKeyID: newKey.key.keyID, adding: nil, writeCut: writeCut, signedBy: keyset)
         try memberKeys.requireVerifiedKeys(of: next.members, in: ledger)
         let grants = try next.members.map { member in
             SharingObject(try VaultKeyGrantRecord(VaultKeyGrant.seal(newKey, to: member.bundle, from: keyset)))
@@ -347,10 +350,12 @@ public enum RotationPlanner {
     }
 
     public static func plan(
-        _ reason: RotationReason, ledger: MembershipLedger, memberKeys: MemberKeyCheck, signedBy keyset: Keyset
+        _ reason: RotationReason, ledger: MembershipLedger, memberKeys: MemberKeyCheck, writeCut: WriteCut?,
+        signedBy keyset: Keyset
     ) throws -> RotationPlan {
         var generator = SystemRandomNumberGenerator()
-        return try plan(reason, ledger: ledger, memberKeys: memberKeys, signedBy: keyset, using: &generator)
+        return try plan(
+            reason, ledger: ledger, memberKeys: memberKeys, writeCut: writeCut, signedBy: keyset, using: &generator)
     }
 }
 
@@ -361,12 +366,12 @@ public enum PendingRotation: Sendable, Hashable {
     case departureRequested(UUID)
     /// A record that removed this member lost a fork, and the removal has not been planned again yet
     /// (`MembershipLedger.owedRemovals`). Until it is, the member is listed again and holds the current key; their
-    /// writes are refused and nothing is re-sealed.
+    /// writes count only as far as that record's cut, and nothing is re-sealed.
     case removalOwed(UUID)
     /// This device planned a rotation whose record is not yet in the chain it sees.
     case awaitingPublication(RotationReason)
-    /// This many records are still sealed under an earlier key, or were last written by an account that may no
-    /// longer write, and wait to be sealed again by a member who may.
+    /// This many records are still sealed under an earlier key and wait to be sealed again by a member who may
+    /// write.
     case resealing(remaining: Int)
     /// This device does not hold the vault's current key yet (its grant has not arrived or does not open).
     case awaitingKey(UUID)
@@ -399,14 +404,13 @@ extension MembershipLedger {
     }
 
     /// The records a member who may write must seal again, as new versions through the ordinary save path
-    /// (principle 5; ADR 0007; §8.7): every one that is not under the vault's current key, and every one whose stored
-    /// version was written by an account that may not write now (removed, or made read-only). In a stable order, so
-    /// that an interrupted pass resumes where it stopped.
+    /// (principle 5; ADR 0007): every one that is not under the vault's current key. In a stable order, so that an
+    /// interrupted pass resumes where it stopped. A device whose own account may not write skips this.
     ///
-    /// The second kind is what keeps a demotion or a removal from stranding data. Another member's write is merged
-    /// only while its author may write (`writePermission(for:)`), so a device that meets a since-demoted member's
-    /// record for the first time refuses it; a device that merged it in time publishes it again under its own name,
-    /// and that version everyone accepts (review finding S25). A device whose own account may not write skips this.
+    /// `inventory` is what the device's record store holds *after* it has taken out every write that no longer
+    /// counts (`writeStanding(of:)`): a version written outside its author's cut is set aside, not sealed again,
+    /// or sealing it again under this member's name would make it count for everyone (review finding S28). And a
+    /// version sealed again still says whose work it carries (§8.7).
     ///
     /// Empty while a removal is owed (`owedRemovals`): the current key is then one that the member to be removed
     /// holds, the removal is about to rotate it, and sealing anything again towards it would hand that member what
@@ -414,9 +418,7 @@ extension MembershipLedger {
     public func recordsToReseal(in inventory: [SealedRecordReference]) -> [SealedRecordReference] {
         let state = self.state
         guard !state.isDeleted, owedRemovals.isEmpty else { return [] }
-        return inventory.filter {
-            $0.keyID != state.vaultKeyID || !state.writePermission(for: $0.author).isAllowed
-        }.sorted {
+        return inventory.filter { $0.keyID != state.vaultKeyID }.sorted {
             $0.recordID == $1.recordID
                 ? $0.kind.rawValue < $1.kind.rawValue : $0.recordID.sharingPrecedes($1.recordID)
         }

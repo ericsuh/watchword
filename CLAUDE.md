@@ -143,7 +143,8 @@ Eleven shipped modules, dependency-ordered, plus test support:
   `DeletionRecordingStore`, and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
 - **`WatchwordSharing`** — milestone 4's protocol core for shared vaults: the signed membership chain
-  (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `writePermission`, `status(of:)`), fingerprint
+  (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `writePermission`, `writeStanding` and the
+  `WriteCut`, `status(of:)`), fingerprint
   verification (`FingerprintCode`, `VerifiedContacts` and its `VerifiedContact` token, `MemberKeyCheck`), both sides
   of an invitation, key grants (`KeyGrantCodec`, `grantSender`/`openGrant`), `LeaveRequest`, and rotation as data
   (`RotationPlanner`, `RotationPlan`, `PendingRotation`, `recordsToReseal`). Ports: `KeyBundleDirectory`,
@@ -223,7 +224,8 @@ built; milestone 4 lists what is open there (wiring into `VaultSession` and sync
   from before their removal (S1); length before hash, so a record signed on a stale head and released late displaces
   nothing built since (S18, S19).
 - **Removal wins**: a removal on a losing branch whose signer may still remove that member is owed
-  (`owedRemovals`): the member's writes are refused, `recordsToReseal` is empty, and any device that may sign it
+  (`owedRemovals`): the member's writes count only as far as that record's cut, `recordsToReseal` is empty, and
+  any device that may sign it
   plans it again. Everything else that loses is proposed again by its author (`status(of:)`); a device ingests
   before it proposes and never publishes a record that is not `awaitingPublication`.
 - A record's hash covers its signed content, not its signature; candidates sharing a hash are each examined until
@@ -240,9 +242,17 @@ built; milestone 4 lists what is open there (wiring into `VaultSession` and sync
   gives a different self-signature each time. A Linux pass cannot show a mistake here.
 - A grant's vault, key ID and recipient come from its storage location, and its sender must be the one account
   `grantSender` names: the signer of the record that entitled the recipient to that key. Not "any administrator".
-- Read-only and "former member" are client rules, not cryptography (F4.5): `writePermission(for:)`, asked about
-  *now* when merging someone else's write. What is merged stays merged, and `recordsToReseal` lists records whose
-  stored author may no longer write, so a demotion or removal strands nothing (S25).
+- Read-only and "former member" are client rules, not cryptography (F4.5). `writePermission(for:)` is for a
+  device's own writes; for anyone else's, `writeStanding(of:)`: everything an account signed while it may write
+  *now*, and once it may not, exactly what is inside the `WriteCut` of the record that ended it. That record (a
+  removal or departure of a member who could write, a change to read-only) and no other carries a cut, signed, so
+  every device applies the same one **whenever it heard of the record**: a write outside it is taken out again by a
+  device that had merged it, held aside, and never published on (S28). "Judged when merged, merged for good" is the
+  rule this replaced; do not bring it back, and do not judge a version only by who signed its envelope (it may
+  carry another account's work). The cut's bytes are the integrator's (§8.8 says what they must bind).
+- While a removal is owed, the displaced record's cut is believed only if that record and the one holding the cut
+  were signed by accounts that could sign them on the accepted head; a former administrator's dead branch decides
+  nothing about a member's writes (S29).
 - An invitation to a vault the device ever held continues that ledger (`accept(…, continuing:)`); it is never
   rebuilt from the store (S26).
 - Local state is signed by the account's own key and re-verified on load (pins, the saved ledger, a rotation plan);

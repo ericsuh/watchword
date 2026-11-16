@@ -46,6 +46,13 @@ struct MembershipRecordTests {
         let honest = try household.ledger.proposeRoleChange(
             of: household.writer.accountID, to: .readOnly, signedBy: household.owner.keyset)
         #expect(forged.content == honest.signedContent)
+        var withCut = forged
+        withCut.writeCut = [4, 5, 6]
+        let honestWithCut = try household.ledger.proposeRoleChange(
+            of: household.writer.accountID, to: .readOnly, writeCut: try WriteCut([4, 5, 6]),
+            signedBy: household.owner.keyset)
+        #expect(withCut.content == honestWithCut.signedContent)
+        #expect(honestWithCut.hash != honest.hash, "the cut is part of what is signed and hashed")
         try household.adopt(forged.signed(by: household.owner.keyset))
         #expect(household.state.member(household.writer.accountID)?.role == .readOnly)
     }
@@ -81,6 +88,7 @@ struct MembershipRecordTests {
         forged.keyEpoch = 9
         forged.operation = ForgedRecord.bytes(
             of: .memberLeft(UUID(), requestSignature: [UInt8](repeating: 1, count: 64)))
+        forged.writeCut = [UInt8](repeating: 7, count: MembershipLimits.maximumWriteCutLength)
         forged.entries = (0..<MembershipLimits.maximumMembers).map { index in
             var entry = ForgedEntry(bundle: owner.bundle, role: .readWrite, since: 1)
             entry.accountID = UUID(
@@ -90,6 +98,9 @@ struct MembershipRecordTests {
         let bytes = try forged.signed(by: owner.keyset)
         #expect(bytes.count == MembershipRecord.maximumLength)
         #expect(try MembershipRecord.parse(bytes).entries.count == MembershipLimits.maximumMembers)
+        #expect(try MembershipRecord.parse(bytes).writeCut.bytes == forged.writeCut)
+        #expect(MembershipRecord.maximumLength == 12_090)
+        #expect(MembershipRecord.maximumLength <= Int(UInt16.max), "a plan and a saved ledger give a record 16 bits")
     }
 
     @Test("fields out of range are refused with the reason")
@@ -103,7 +114,8 @@ struct MembershipRecordTests {
         }
 
         #expect(throws: SharingFormatError.badMagic) { _ = try parse { $0.magic = Array("WWMX".utf8) } }
-        #expect(throws: SharingFormatError.unsupportedFormatVersion(2)) { _ = try parse { $0.formatVersion = 2 } }
+        #expect(throws: SharingFormatError.unsupportedFormatVersion(1)) { _ = try parse { $0.formatVersion = 1 } }
+        #expect(throws: SharingFormatError.unsupportedFormatVersion(3)) { _ = try parse { $0.formatVersion = 3 } }
         #expect(throws: SharingFormatError.unsupportedFormatVersion(0)) { _ = try parse { $0.formatVersion = 0 } }
         #expect(throws: SharingFormatError.unknownOperation(7)) { _ = try parse { $0.operation = [7] } }
         #expect(throws: SharingFormatError.unknownOperation(255)) { _ = try parse { $0.operation = [255] } }
@@ -116,6 +128,11 @@ struct MembershipRecordTests {
         #expect(throws: SharingFormatError.epochOutOfRange(.max)) { _ = try parse { $0.epoch = .max } }
         #expect(throws: SharingFormatError.epochOutOfRange(5)) { _ = try parse { $0.keyEpoch = 5 } }
         #expect(throws: SharingFormatError.epochOutOfRange(5)) { _ = try parse { $0.entries[1].since = 5 } }
+        #expect(throws: SharingFormatError.tooLarge(2_049), "a write cut longer than the bound, before it is read") {
+            _ = try parse { $0.writeCut = [UInt8](repeating: 1, count: MembershipLimits.maximumWriteCutLength + 1) }
+        }
+        #expect(
+            try parse { $0.writeCut = [1, 2, 3] }.writeCut.bytes == [1, 2, 3], "well-formed; the ledger refuses it")
         #expect(throws: SharingFormatError.memberCountOutOfRange(0)) { _ = try parse { $0.entries = [] } }
         #expect(throws: SharingFormatError.self, "sixty-five members are already more bytes than a record may be") {
             _ = try parse { $0.entries = Array(repeating: $0.entries[0], count: 65) }
@@ -142,8 +159,18 @@ struct MembershipRecordTests {
         let household = try await SharingHousehold.make()
         let bytes = try household.forgery(.rotateKey, signer: household.owner, newKeyID: UUID())
             .signed(by: household.owner.keyset)
-        // The count field follows the fixed prefix (no operands for rotateKey): 4+1+16+8+32+16+1+16+8 bytes in.
-        let countOffset = 102
+        // The count field follows the fixed prefix (no operands for rotateKey) and the empty write cut's length:
+        // 4+1+16+8+32+16+1+16+8+2 bytes in.
+        let countOffset = 104
+        #expect(bytes[102] == 0 && bytes[103] == 0)
+        for length: UInt16 in [1, 2_048, 2_049, 0xFFFF] {
+            var mutated = bytes
+            mutated[102] = UInt8(length & 0xFF)
+            mutated[103] = UInt8(length >> 8)
+            #expect(throws: SharingFormatError.self, "a write cut length of \(length) with no such bytes") {
+                _ = try MembershipRecord.parse(mutated)
+            }
+        }
         #expect(bytes[countOffset] == 4 && bytes[countOffset + 1] == 0)
         for count: UInt16 in [0, 1, 3, 5, 64, 65, 0xFFFF] {
             var mutated = bytes

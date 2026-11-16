@@ -34,9 +34,9 @@ Options considered:
 
 - A rotation is a `RotationPlan` (`WatchwordSharing`): the new key ID, the key wrapped to every remaining member, and
   the signed membership record. Its last step is "re-seal": `MembershipLedger.recordsToReseal(in:)` lists every record
-  not under the current key (and, since review finding S25, every record whose stored version was written by an
-  account that may no longer write, which re-sealing under a remaining member's name also settles), and the
-  integrator re-seals each as a new version. The list is asked for again until it
+  not under the current key, and the integrator re-seals each as a new version that still says whose work it
+  carries (which of a departed member's writes count is the record's write cut, `02-architecture.md` §8.7, not who
+  last sealed them). The list is asked for again until it
   is empty, because other devices may still write under the old key until they have seen the new record. Any member
   who may write and holds both keys may do it; the rotating administrator's device does it eagerly, and the first
   writer to touch a stale record does it anyway (§4, "Records").

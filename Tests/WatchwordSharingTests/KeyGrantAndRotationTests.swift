@@ -230,8 +230,8 @@ struct KeyGrantAndRotationTests {
         let reader = household.reader.accountID
         #expect(
             plan.steps(in: household.ledger)
-                == [.revokeTransportAccess(reader), .mergeOutstandingWrites(reader)]
-                + plan.grants.map(RotationStep.publish) + [.publish(plan.record), .resealRecords])
+                == [.revokeTransportAccess(reader)] + plan.grants.map(RotationStep.publish)
+                + [.publish(plan.record), .resealRecords])
         let record = try MembershipRecord.parse(plan.record.contents)
         #expect(record.operation == .removeMember(household.reader.accountID))
         #expect(record.vaultKeyID == plan.newKeyID && record.hash == plan.recordHash)
@@ -303,9 +303,8 @@ struct KeyGrantAndRotationTests {
         let plan = try RotationPlanner.plan(
             .removal(household.reader.accountID), ledger: household.ledger, signedBy: household.owner.keyset,
             using: &generator)
-        let author = household.owner.accountID
-        let a = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 4, author: author)
-        let b = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1, author: author)
+        let a = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 4)
+        let b = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1)
         #expect(plan.status(in: household.ledger, inventory: [a, b]) == .awaitingPublication)
         #expect(household.ledger.recordsToReseal(in: [a, b]).isEmpty, "nothing to re-seal before the key changes")
 
@@ -317,53 +316,154 @@ struct KeyGrantAndRotationTests {
             "a stable order, so an interrupted pass resumes")
 
         let resealed = SealedRecordReference(
-            recordID: a.recordID, kind: .item, keyID: plan.newKeyID, version: 5, author: author)
+            recordID: a.recordID, kind: .item, keyID: plan.newKeyID, version: 5)
         #expect(plan.status(in: household.ledger, inventory: [resealed, b]) == .resealing(remaining: 1))
         #expect(plan.status(in: household.ledger, inventory: [resealed]) == .complete)
         #expect(plan.status(in: household.ledger, inventory: []) == .complete)
     }
 
-    @Test("records last written by an account that may no longer write are listed for sealing again by one who may")
-    func resealAfterLosingWritePermission() async throws {
+    @Test("which of an account's writes count follows the chain: all, the cut of the record that ended it, or none")
+    func writeStanding() async throws {
+        var household = try await SharingHousehold.make()
+        let writer = household.writer.accountID
+        let listed = try #require(household.state.member(writer))
+        #expect(household.ledger.writeStanding(of: household.owner.accountID) == .mayWrite)
+        #expect(household.ledger.writeStanding(of: writer) == .mayWrite)
+        #expect(
+            household.ledger.writeStanding(of: household.reader.accountID) == .nothingCounts(.readOnly),
+            "read-only since they were added")
+        #expect(household.ledger.writeStanding(of: household.outsider.accountID) == .nothingCounts(.notAMember))
+
+        // Made read-only: the record says what counts of their work, and every device reads the same bytes.
+        let first = try WriteCut([1, 2, 3])
+        #expect(household.ledger.requiresWriteCut(changingRoleOf: writer, to: .readOnly))
+        try household.adopt(
+            household.ledger.proposeRoleChange(
+                of: writer, to: .readOnly, writeCut: first, signedBy: household.administrator.keyset
+            ).encoded())
+        #expect(household.ledger.chain.last?.record.writeCut == first)
+        #expect(household.ledger.writeStanding(of: writer) == .ended(cut: first, author: listed, refusal: .readOnly))
+        #expect(household.ledger.writePermission(for: writer) == .refused(.readOnly))
+        #expect(try Self.restored(household).writeStanding(of: writer) == household.ledger.writeStanding(of: writer))
+
+        // Removed while read-only: no permission ends, so the record carries no cut and the earlier one stands.
+        #expect(!household.ledger.requiresWriteCut(removing: writer))
+        var removed = household
+        try removed.rotate(.removal(writer), by: removed.owner)
+        #expect(removed.ledger.chain.last?.record.writeCut == .nothing)
+        #expect(removed.ledger.writeStanding(of: writer) == .ended(cut: first, author: listed, refusal: .notAMember))
+
+        // Read-write again: everything they sign counts, whatever the earlier cut said.
+        try household.adopt(
+            household.ledger.proposeRoleChange(of: writer, to: .readWrite, signedBy: household.administrator.keyset)
+                .encoded())
+        #expect(household.ledger.writeStanding(of: writer) == .mayWrite)
+
+        // Removed while able to write: the removal's own cut is the one that counts from then on.
+        let second = try WriteCut([9])
+        #expect(household.ledger.requiresWriteCut(removing: writer))
+        var generator = SeededGenerator(seed: 12)
+        let plan = try RotationPlanner.plan(
+            .removal(writer), ledger: household.ledger, memberKeys: .findingNothing(in: household.ledger),
+            writeCut: second, signedBy: household.owner.keyset, using: &generator)
+        try household.adopt(plan.record.contents)
+        #expect(household.ledger.writeStanding(of: writer) == .ended(cut: second, author: listed, refusal: .notAMember))
+        #expect(household.ledger.writeStanding(of: writer).refusal == .notAMember)
+
+        // A deleted vault merges nothing.
+        try household.adopt(household.ledger.proposeDeletion(signedBy: household.owner.keyset).encoded())
+        #expect(household.ledger.writeStanding(of: household.owner.accountID) == .nothingCounts(.vaultDeleted))
+        #expect(household.ledger.writeStanding(of: writer) == .nothingCounts(.vaultDeleted))
+    }
+
+    static func restored(_ household: SharingHousehold) throws -> MembershipLedger {
+        try MembershipLedger.restore(
+            household.ledger.persisted(signedBy: household.owner.keyset), vaultID: household.vaultID,
+            owner: VerifiedContact(bundle: household.owner.bundle, method: .comparedByEye, verifiedAt: nil),
+            account: household.owner.bundle)
+    }
+
+    @Test("a change that ends a permission to write needs a cut, and no other change may carry one")
+    func writeCutRequired() async throws {
+        let household = try await SharingHousehold.make()
+        let ledger = household.ledger
+        let owner = household.owner.keyset
+        let cut = try WriteCut([7])
+        var generator = SeededGenerator(seed: 13)
+        func plan(_ reason: RotationReason, _ cut: WriteCut?) throws -> RotationPlan {
+            try RotationPlanner.plan(
+                reason, ledger: ledger, memberKeys: .findingNothing(in: ledger), writeCut: cut, signedBy: owner,
+                using: &generator)
+        }
+        let request = try LeaveRequest.make(leaving: household.state, as: household.writer.keyset)
+
+        // Ends a permission: removing or releasing a member who can write, making one read-only.
+        #expect(throws: SharingError.writeCutRequired) { _ = try plan(.removal(household.writer.accountID), nil) }
+        #expect(throws: SharingError.writeCutRequired) { _ = try plan(.departure(request), nil) }
+        #expect(throws: SharingError.writeCutRequired) {
+            _ = try ledger.proposeRoleChange(
+                of: household.administrator.accountID, to: .readOnly, writeCut: nil, signedBy: owner)
+        }
+        #expect(try plan(.removal(household.writer.accountID), cut).proposal.writeCut == cut)
+        #expect(try plan(.departure(request), .nothing).proposal.writeCut == .nothing, "an empty cut is a cut")
+
+        // Ends none: a routine rotation, a read-only member's removal, a change between roles that may write.
+        #expect(throws: SharingError.writeCutNotExpected) { _ = try plan(.routine, cut) }
+        #expect(throws: SharingError.writeCutNotExpected) { _ = try plan(.removal(household.reader.accountID), cut) }
+        #expect(throws: SharingError.writeCutNotExpected) {
+            _ = try ledger.proposeRoleChange(
+                of: household.writer.accountID, to: .administrator, writeCut: cut, signedBy: owner)
+        }
+        #expect(throws: SharingError.writeCutNotExpected) {
+            _ = try ledger.proposeRoleChange(
+                of: household.reader.accountID, to: .readWrite, writeCut: .nothing, signedBy: owner)
+        }
+        #expect(try plan(.routine, nil).proposal.writeCut == .nothing)
+
+        // Who may remove whom, for the step taken before a plan exists.
+        let (admin, writer, reader) = (
+            household.administrator.accountID, household.writer.accountID, household.reader.accountID
+        )
+        #expect(ledger.mayRemove(writer, signer: admin) && ledger.mayRemove(reader, signer: household.owner.accountID))
+        #expect(ledger.mayRemove(admin, signer: household.owner.accountID), "an administrator, by the owner")
+        #expect(!ledger.mayRemove(admin, signer: admin) && !ledger.mayRemove(household.owner.accountID, signer: admin))
+        #expect(
+            !ledger.mayRemove(reader, signer: writer) && !ledger.mayRemove(household.outsider.accountID, signer: admin))
+
+        // The bound (SEC9).
+        #expect(try WriteCut([UInt8](repeating: 1, count: MembershipLimits.maximumWriteCutLength)).bytes.count == 2_048)
+        #expect(throws: SharingFormatError.tooLarge(2_049)) {
+            _ = try WriteCut([UInt8](repeating: 1, count: MembershipLimits.maximumWriteCutLength + 1))
+        }
+    }
+
+    @Test("records under an earlier key are listed for sealing again, in a stable order; none in a deleted vault")
+    func recordsUnderEarlierKeys() async throws {
         var household = try await SharingHousehold.make()
         let key = household.state.vaultKeyID
-        func reference(by author: SharingParty, under keyID: UUID) -> SealedRecordReference {
-            SealedRecordReference(recordID: UUID(), kind: .item, keyID: keyID, version: 1, author: author.accountID)
+        func reference(under keyID: UUID) -> SealedRecordReference {
+            SealedRecordReference(recordID: UUID(), kind: .item, keyID: keyID, version: 1)
         }
-        let owners = reference(by: household.owner, under: key)
-        let writers = reference(by: household.writer, under: key)
-        let admins = reference(by: household.administrator, under: key)
-        #expect(household.ledger.recordsToReseal(in: [owners, writers, admins]).isEmpty)
+        let one = reference(under: key)
+        let two = reference(under: key)
+        #expect(household.ledger.recordsToReseal(in: [one, two]).isEmpty)
 
-        // Made read-only: nothing rotates, and what the member wrote is published again by someone who may write.
+        // A change of role rotates nothing, so nothing is sealed again: what counts of the member's work is in the
+        // record's cut, not in who last sealed it.
         try household.adopt(
             household.ledger.proposeRoleChange(
                 of: household.writer.accountID, to: .readOnly, signedBy: household.administrator.keyset
             ).encoded())
-        #expect(household.ledger.recordsToReseal(in: [owners, writers, admins]) == [writers])
-        #expect(
-            household.ledger.pendingRotation(
-                plan: nil, leaveRequests: [], inventory: [owners, writers, admins], heldKeyIDs: [key])
-                == [.resealing(remaining: 1)])
-        // Read-write again: their own version stands.
-        try household.adopt(
-            household.ledger.proposeRoleChange(
-                of: household.writer.accountID, to: .readWrite, signedBy: household.administrator.keyset
-            ).encoded())
-        #expect(household.ledger.recordsToReseal(in: [owners, writers, admins]).isEmpty)
+        #expect(household.ledger.recordsToReseal(in: [one, two]).isEmpty)
 
-        // Removed: everything is under an earlier key anyway; afterwards, a version of theirs under the new key
-        // (which they never held, so it is not theirs) and one by a stranger are listed as well.
         let plan = try household.rotate(.removal(household.administrator.accountID), by: household.owner)
-        #expect(Set(household.ledger.recordsToReseal(in: [owners, writers, admins])) == [owners, writers, admins])
-        let current = reference(by: household.owner, under: plan.newKeyID)
-        let claimed = reference(by: household.administrator, under: plan.newKeyID)
-        let strangers = reference(by: household.outsider, under: plan.newKeyID)
-        #expect(Set(household.ledger.recordsToReseal(in: [current, claimed, strangers])) == [claimed, strangers])
+        #expect(Set(household.ledger.recordsToReseal(in: [one, two])) == [one, two])
+        let current = reference(under: plan.newKeyID)
+        #expect(household.ledger.recordsToReseal(in: [current, one]) == [one])
 
         // A deleted vault takes no writes, so nothing is listed.
         try household.adopt(household.ledger.proposeDeletion(signedBy: household.owner.keyset).encoded())
-        #expect(household.ledger.recordsToReseal(in: [owners, claimed]).isEmpty)
+        #expect(household.ledger.recordsToReseal(in: [one, two]).isEmpty)
     }
 
     @Test("a plan that lost its place in the chain is superseded, and planning again knows when nothing is left to do")
@@ -396,8 +496,7 @@ struct KeyGrantAndRotationTests {
     func pendingRotation() async throws {
         var household = try await SharingHousehold.make()
         let oldKey = household.state.vaultKeyID
-        let author = household.owner.accountID
-        let record = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1, author: author)
+        let record = SealedRecordReference(recordID: UUID(), kind: .item, keyID: oldKey, version: 1)
         let listed = { (request: LeaveRequest) in [(name: SharingObject(request).name, contents: request.encoded())] }
         #expect(
             household.ledger.pendingRotation(plan: nil, leaveRequests: [], inventory: [record], heldKeyIDs: [oldKey])
@@ -427,7 +526,7 @@ struct KeyGrantAndRotationTests {
                 plan: plan, leaveRequests: [],
                 inventory: [
                     SealedRecordReference(
-                        recordID: record.recordID, kind: .item, keyID: plan.newKeyID, version: 2, author: author)
+                        recordID: record.recordID, kind: .item, keyID: plan.newKeyID, version: 2)
                 ],
                 heldKeyIDs: [oldKey, plan.newKeyID]
             ).isEmpty)

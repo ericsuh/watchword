@@ -68,6 +68,8 @@ public enum MembershipError: Error, Hashable, Sendable {
     case leaveRequestInvalid
     /// The vault was deleted; nothing may follow.
     case vaultDeleted
+    /// A write cut on a record that ends nobody's permission to write (§8.7): one canonical form per record.
+    case unexpectedWriteCut
     /// Past `MembershipLimits.maximumAdministratorEpoch`: the last epochs are the owner's, so an administrator cannot
     /// use up the chain and leave the owner unable to remove them.
     case epochReservedForOwner
@@ -133,4 +135,8 @@ public enum SharingError: Error, Hashable, Sendable {
     case memberKeysNotChecked
     /// A rotation plan read from local storage was not signed by this account: it was altered or planted (§8.6).
     case savedPlanInvalid
+    /// The change ends an account's permission to write, and no `WriteCut` was given for it (§8.7).
+    case writeCutRequired
+    /// A `WriteCut` was given for a change that ends nobody's permission to write.
+    case writeCutNotExpected
 }

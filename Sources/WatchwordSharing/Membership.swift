@@ -40,6 +40,8 @@ public enum MembershipLimits {
     /// lost a fork). Only an account that is or was an administrator can sign one, and a household produces a handful
     /// in years; past this the ledger keeps the best-ranked and says so (`IngestReport.forgotten`).
     public static let maximumRetainedBranchRecords = 1_024
+    /// The most bytes a `WriteCut` may hold: room for a position and a digest per device of one account.
+    public static let maximumWriteCutLength = 2_048
 }
 
 /// One member of a vault, as a verified chain lists it.
@@ -85,8 +87,62 @@ public enum WriteRefusal: Sendable, Hashable {
     case unknownEpoch
     /// A record that removes the member, signed by an account that may still remove them, is on a branch that lost a
     /// fork (`MembershipLedger.owedRemovals`). The removal is about to be planned again; until it is, the member's
-    /// writes are not merged.
+    /// writes count as that record left them (`MembershipLedger.OwedRemoval.standing`).
     case removalPending
+}
+
+/// Which of an account's writes count once it may no longer write: the commitment an administrator's device puts in
+/// the record that removes a member who could write, carries out their departure, or makes them read-only
+/// (docs/02-architecture.md §8.7).
+///
+/// The bytes are the integrator's: this module signs them, bounds them, and gives every device the same ones. What
+/// they must do is let any device decide, from the cut and a write alone, whether that write is inside it, with the
+/// same answer everywhere and no way for the account to add to the set afterwards. For sync's per-device logs that is,
+/// for each of the account's devices, how far into its log the signing device had merged and a digest that binds
+/// which objects those were; a bare count is not enough, because a former member with a helpful store can still
+/// create an object at a position nobody has filled on some device (§8.8).
+///
+/// Empty bytes are a cut like any other, and the integrator's reading of them must be "nothing": no write of the
+/// account's counts by itself.
+public struct WriteCut: Sendable, Hashable {
+    /// The cut that holds nothing.
+    public static let nothing = WriteCut(unchecked: [])
+
+    public let bytes: [UInt8]
+
+    init(unchecked bytes: [UInt8]) {
+        self.bytes = bytes
+    }
+
+    /// Refuses more than `MembershipLimits.maximumWriteCutLength` bytes (PRD SEC9).
+    public init(_ bytes: [UInt8]) throws {
+        guard bytes.count <= MembershipLimits.maximumWriteCutLength else {
+            throw SharingFormatError.tooLarge(bytes.count)
+        }
+        self.bytes = bytes
+    }
+}
+
+/// Which of an account's writes count in a vault, as one device's ledger knows it: the question to ask before
+/// merging anything another account wrote, and again about everything already merged whenever the ledger's head
+/// changes (docs/02-architecture.md §8.7, PRD F4.5).
+public enum WriteStanding: Sendable, Hashable {
+    /// The account may write now. Every write that carries its signature counts.
+    case mayWrite
+    /// The account could write once and may not now. Exactly the writes inside `cut` count: on every device,
+    /// whenever it meets them, and never one more. `author` is the member as the chain listed them when that ended,
+    /// for checking the signature on what they wrote. `refusal` says why they may not write now.
+    case ended(cut: WriteCut, author: Member, refusal: WriteRefusal)
+    /// Nothing the account wrote counts: it never could write here, or the vault was deleted.
+    case nothingCounts(WriteRefusal)
+
+    /// Why the account may not write now; `nil` if it may.
+    public var refusal: WriteRefusal? {
+        switch self {
+        case .mayWrite: return nil
+        case .ended(_, _, let refusal), .nothingCounts(let refusal): return refusal
+        }
+    }
 }
 
 /// A vault's membership after one verified record: who the members are, in which roles, and which vault key is
@@ -119,8 +175,8 @@ public struct MembershipState: Sendable, Hashable {
     ///
     /// **Not cryptographic.** A read-only member holds the vault key and a former member holds every key from their
     /// time, so either can produce a ciphertext that decrypts. What stops it counting is that every member's client
-    /// asks this question before merging a write, and the transport's own permission where it has one (CloudKit's
-    /// read-only participant). The UI must say so.
+    /// judges the author of what it merges (`MembershipLedger.writeStanding(of:)`), and the transport's own
+    /// permission where it has one (CloudKit's read-only participant). The UI must say so.
     public func writePermission(for accountID: UUID) -> WritePermission {
         guard !isDeleted else { return .refused(.vaultDeleted) }
         guard let member = member(accountID) else { return .refused(.notAMember) }

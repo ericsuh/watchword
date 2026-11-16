@@ -206,7 +206,9 @@ half delivered** on a Mac; the transports are open.
   `MembershipLedger` (verification from the pinned owner and the records already held; a grow-only tree of valid
   records with the accepted chain a deterministic function of it, so concurrent administrators and any order of
   arrival settle the same way everywhere; removals that lose a fork owed and carried out again; proposal status;
-  signed persistence), `writePermission` (F4.5);
+  signed persistence), `writePermission` and `writeStanding` (F4.5): whether an account may write now, and which of
+  its writes count once it may not, by the **write cut** that the record ending its permission carries, the same on
+  every device;
 - fingerprint verification: the typed safety number and the scannable `FingerprintCode`, `VerifiedContacts` (signed
   pins behind the `VerifiedContactStore` port), the `KeyBundleDirectory` port, and both sides of an invitation
   (`OutgoingInvitation`, `IncomingInvitation`) as state machines that cannot wrap or accept a key before the
@@ -215,14 +217,13 @@ half delivered** on a Mac; the transports are open.
 - key grants: `KeyGrantCodec`, and `MembershipLedger.grantSender`/`openGrant`, which accept a grant only from the
   account the chain entitles;
 - removal, leaving and rotation: `RotationPlanner`, `RotationPlan` (data, signed, resumable), `LeaveRequest`,
-  `PendingRotation` (F4.3, F4.4), and `recordsToReseal`, which also lists what a member wrote before losing the
-  right to write, so that a demotion or removal strands nothing; the per-item-keys question decided against
-  (ADR 0007, closing D10);
+  `PendingRotation` (F4.3, F4.4), and `recordsToReseal`; the per-item-keys question decided against (ADR 0007,
+  closing D10);
 - tests: unit suites for every encoding and transition, known answers from an independent Python implementation,
   the two- and three-member simulation over a hostile store (`SharingScenarioTests`: S3 and S4 at the protocol
-  level), and the adversarial area "sharing and membership" (`04-test-plan.md` §6.4). Reviewed twice:
-  `06-adversarial-review.md` §I (S1 to S16 by the author, S17 to S27 from independent reviews, each fixed with a
-  regression test).
+  level), and the adversarial area "sharing and membership" (`04-test-plan.md` §6.4). Reviewed three times:
+  `06-adversarial-review.md` §I (S1 to S16 by the author, S17 to S27 from independent reviews, S28 from the final
+  verification and S29 to S31 from the work on it, each fixed with a regression test or recorded as accepted).
 
 Verified on Linux only (swift-crypto over BoringSSL). A macOS run against CryptoKit is still owed; the one place
 the two are known to differ, randomised Ed25519 signing, is why bundles are compared by key rather than by value.
@@ -231,8 +232,11 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 
 - Integration into `VaultSession`: a ledger, keys, at most one rotation plan and the pending proposals per shared
   vault; the sync pass of `02-architecture.md` §8.8 during `sync()` (`SimulatedMember` is its reference);
-  `writePermission(for:)` and the member's signing key from the ledger in `SyncKeyring.verify`; the author of each
-  stored version, for `SealedRecordReference`; re-sealing through `ItemMerge.written`; SQLite adapters for
+  `writeStanding(of:)` and the member's signing key from the ledger in `SyncKeyring.verify`; **the write cut over
+  sync's own objects** (`02-architecture.md` §8.8: bound to segments by digest, applied to each value's own author
+  through its `GroupStamp` and the device registry, and taken out of what was already merged; until this exists,
+  review finding S28 is closed in the module and open in the product); re-sealing through `ItemMerge.written`;
+  SQLite adapters for
   `VerifiedContactStore`, the saved ledger, the saved plan and the pending proposals. It depends on the session holding more than one vault
   and on the device registry (D9), which is why this milestone stopped at the protocol.
 - The transports' own sharing: `CKShare` with `UICloudSharingController`/`NSSharingService`, the folder-share flow

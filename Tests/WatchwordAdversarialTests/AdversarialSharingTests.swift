@@ -651,7 +651,8 @@ struct AdversarialSharingTests {
 
     /// A5, a former member with the old vault key, their account key and a store that still takes their writes
     /// (a shared folder, or a store that ignores its own share list); and A4, a read-only member doing the same.
-    @Test("writes by a former member or a read-only member reach the store and are refused by every remaining member")
+    /// Every remaining member here has seen the removal; `writeAfterUnseenRemoval` is the device that has not.
+    @Test("writes by a former member or a read-only member reach the store and count for no remaining member")
     func postRevocationWrites() async throws {
         let world = SharingWorld()
         var (vault, owner, members) = try await world.household(roles: [.readWrite, .readWrite, .readOnly])
@@ -689,6 +690,387 @@ struct AdversarialSharingTests {
         }
     }
 
+    /// A5 and A1 together: a former member with the old vault key and their account key, and a store that still
+    /// takes their writes and withholds the removal record from one remaining member's device. That device merges
+    /// the write, because in its ledger the author is still a member. If writes were judged only when merged, and
+    /// what was merged stayed merged, the device would go on to seal the write again under its own name once it
+    /// learned of the removal, and every other member would accept it (review finding S28).
+    @Test("a write made after a removal counts for nobody, not even through a device that merged it before it knew")
+    func writeAfterUnseenRemoval() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite, .readWrite])
+        var device = members[0]
+        var former = members[1]
+        try await device.sync(vault)
+        try await former.sync(vault)
+        let record = UUID()
+        try await former.write("theirs", to: vault, recordID: record, version: 1)
+        let oldKey = try former.currentKey(vault)
+        #expect(try await owner.remove(former.accountID, from: vault) == .complete)
+        let removal = SharingObjectLocation.membership(try #require(try owner.ledger(vault).chain.last).record).name
+        await world.store.hide([removal], from: device.accountID)
+
+        try await former.write("planted", to: vault, recordID: record, version: 50, under: oldKey)
+        let elsewhere = UUID()
+        try await former.write("planted too", to: vault, recordID: elsewhere, version: 1, under: oldKey)
+        try await device.maintain(vault)
+        #expect(
+            try await device.readable(in: vault) == [record: "planted", elsewhere: "planted too"],
+            "nothing this device has seen says the author may not write")
+
+        // The device learns of the removal. The record says which of the member's writes count, and these are not
+        // among them, whenever and wherever they were merged.
+        await world.store.reveal(to: device.accountID)
+        try await device.maintain(vault)
+        try await owner.maintain(vault)
+        try await device.maintain(vault)
+        var newcomer = try await world.member("newcomer", seed: 902)
+        let invitation = try await owner.invite(
+            newcomer.accountID, to: vault, as: .readWrite, safetyNumber: newcomer.safetyNumber)
+        try await newcomer.accept(invitation, ownerSafetyNumber: owner.safetyNumber)
+        for reader in [owner, device, newcomer] {
+            #expect(try await reader.readable(in: vault) == [record: "theirs"], "\(reader.name)")
+            let planted = try await reader.items(in: vault).filter {
+                $0.author == former.accountID && !($0.recordID == record && $0.version == 1)
+            }
+            #expect(planted.count == 2 && planted.allSatisfy { $0.outcome == .refused(.notAMember) })
+        }
+        let afterwards = await world.store.allObjects.keys.filter { $0.hasSuffix(device.accountID.uuidString) }
+        #expect(afterwards.isEmpty, "the device published nothing of it under its own name")
+
+        // Not destroyed either: the device holds what it had merged aside, for its person to look at.
+        #expect(
+            try await device.setAside(in: vault)
+                == [
+                    SetAsideItem(
+                        recordID: elsewhere, version: 1, origin: former.accountID, text: "planted too",
+                        refusal: .notAMember),
+                    SetAsideItem(
+                        recordID: record, version: 50, origin: former.accountID, text: "planted", refusal: .notAMember),
+                ].sorted { $0.recordID.uuidString < $1.recordID.uuidString })
+    }
+
+    /// A4 and A1 together: a member made read-only, whose client is not the honest one, and a store that withholds
+    /// the demotion from another member's device. A demotion has no transport step and rotates nothing, so the
+    /// member's later writes are sealed under the current key and reach everyone.
+    @Test("a write made after a demotion counts for nobody, not even through a device that merged it before it knew")
+    func writeAfterUnseenDemotion() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite, .readWrite])
+        var device = members[0]
+        var demoted = members[1]
+        try await device.sync(vault)
+        try await demoted.sync(vault)
+        let record = UUID()
+        try await demoted.write("before", to: vault, recordID: record, version: 1)
+        try await owner.changeRole(of: demoted.accountID, to: .readOnly, in: vault)
+        let demotion = SharingObjectLocation.membership(try #require(try owner.ledger(vault).chain.last).record).name
+        await world.store.hide([demotion], from: device.accountID)
+
+        try await demoted.write("after", to: vault, recordID: record, version: 2, under: demoted.currentKey(vault))
+        try await device.maintain(vault)
+        #expect(try await device.readable(in: vault) == [record: "after"])
+
+        await world.store.reveal(to: device.accountID)
+        try await device.maintain(vault)
+        try await owner.maintain(vault)
+        for reader in [owner, device] {
+            #expect(try await reader.readable(in: vault) == [record: "before"], "\(reader.name)")
+            #expect(try await reader.items(in: vault).map(\.outcome) == [.read("before"), .refused(.readOnly)])
+        }
+        #expect(
+            try await device.setAside(in: vault) == [
+                SetAsideItem(recordID: record, version: 2, origin: demoted.accountID, text: "after", refusal: .readOnly)
+            ])
+
+        // Made read-write again, the owner's choice: everything they signed counts, as it does for any member.
+        try await owner.changeRole(of: demoted.accountID, to: .readWrite, in: vault)
+        try await device.sync(vault)
+        #expect(try await device.readable(in: vault) == [record: "after"])
+        #expect(try await device.setAside(in: vault).isEmpty)
+    }
+
+    /// A5 and A1 as above, and an honest device that passes the write on before it knows: it is still sealing
+    /// records again after an earlier, routine rotation, so it publishes the former member's write as a version of
+    /// its own, under a key and a name every member accepts. A rule that looked only at who signed an object would
+    /// let the write through in that version.
+    @Test("a former member's late write does not come back inside a version that an unknowing member sealed again")
+    func lateWriteSealedAgainByAnother() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite, .readWrite])
+        var device = members[0]
+        var former = members[1]
+        try await device.sync(vault)
+        try await former.sync(vault)
+        let record = UUID()
+        try await owner.write("genuine", to: vault, recordID: record, version: 1)
+        let firstKey = try former.currentKey(vault)
+
+        // A routine rotation everyone sees, then the removal, which the store keeps from the device.
+        try await owner.planRotation(.routine, in: vault)
+        #expect(try await owner.resumeRotation(in: vault) == .complete)
+        try await device.sync(vault)
+        try await former.sync(vault)
+        #expect(try await owner.remove(former.accountID, from: vault) == .complete)
+        let removal = SharingObjectLocation.membership(try #require(try owner.ledger(vault).chain.last).record).name
+        await world.store.hide([removal], from: device.accountID)
+
+        // Under the first key, so that the device, catching up on the routine rotation, seals it again.
+        try await former.write("planted", to: vault, recordID: record, version: 50, under: firstKey)
+        try await device.maintain(vault)
+        let relayed = SimulatedMember.itemName(vault: vault, recordID: record, version: 51, author: device.accountID)
+        #expect(await world.store.allObjects[relayed] != nil, "sealed again by a member in good standing")
+        #expect(try await device.readable(in: vault) == [record: "planted"])
+
+        await world.store.reveal(to: device.accountID)
+        try await device.maintain(vault)
+        try await owner.maintain(vault)
+        try await device.maintain(vault)
+        for reader in [owner, device] {
+            #expect(try await reader.readable(in: vault) == [record: "genuine"], "\(reader.name)")
+            let seen = try await reader.items(in: vault).first { $0.author == device.accountID && $0.version == 51 }
+            #expect(seen?.origin == former.accountID, "it says whose work it carries")
+            #expect(seen?.outcome == .refused(.notAMember), "and that work is outside the cut")
+        }
+        let current = try owner.ledger(vault).state.vaultKeyID
+        #expect(try await owner.inventory(of: vault).allSatisfy { $0.keyID == current })
+        #expect(try await device.inventory(of: vault).allSatisfy { $0.keyID == current })
+    }
+
+    /// A5 with store write access, after their removal: writes objects that claim places in their own stream which
+    /// the cut covers (a second "first object", a second object after their first) instead of continuing it, hoping
+    /// that a cut is only a count. And A1, withholding part of the stream from a member who joins later.
+    @Test("a former member cannot place a write inside their cut, and a withheld stream delays what counts")
+    func forkedStream() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite, .readWrite])
+        var remaining = members[0]
+        var former = members[1]
+        try await remaining.sync(vault)
+        try await former.sync(vault)
+        let record = UUID()
+        try await former.write("one", to: vault, recordID: record, version: 1)
+        let afterOne = try #require(former.streams[vault])
+        try await former.write("two", to: vault, recordID: record, version: 2)
+        let tip = SimulatedMember.itemName(vault: vault, recordID: record, version: 2, author: former.accountID)
+        let oldKey = try former.currentKey(vault)
+        #expect(try await owner.remove(former.accountID, from: vault) == .complete)
+        try await remaining.sync(vault)
+
+        former.streams[vault] = afterOne
+        try await former.write("second second", to: vault, recordID: record, version: 60, under: oldKey)
+        former.streams[vault] = nil
+        try await former.write("second first", to: vault, recordID: record, version: 61, under: oldKey)
+        former.streams[vault] = ItemStreamPosition(count: 0, last: afterOne.last)
+        try await former.write("first after first", to: vault, recordID: record, version: 62, under: oldKey)
+        for reader in [owner, remaining] {
+            #expect(try await reader.readable(in: vault) == [record: "two"], "\(reader.name)")
+            let late = try await reader.items(in: vault).filter { $0.version >= 60 }
+            #expect(late.count == 3 && late.allSatisfy { $0.outcome == .refused(.notAMember) })
+        }
+
+        // A member who joins later is not shown the object the cut names. Without it they cannot tell what is
+        // inside, so nothing of the former member's counts for them yet, the owner's re-sealed copy included; shown
+        // it, they agree with everyone else. Withholding delays; it never puts a write inside the cut.
+        var newcomer = try await world.member("newcomer", seed: 903)
+        await world.store.hide([tip], from: newcomer.accountID)
+        let invitation = try await owner.invite(
+            newcomer.accountID, to: vault, as: .readWrite, safetyNumber: newcomer.safetyNumber)
+        try await newcomer.accept(invitation, ownerSafetyNumber: owner.safetyNumber)
+        #expect(try await newcomer.readable(in: vault).isEmpty)
+        #expect(try await newcomer.reseal(vault) == 0)
+        await world.store.reveal(to: newcomer.accountID)
+        try await newcomer.sync(vault)
+        #expect(try await newcomer.readable(in: vault) == [record: "two"])
+    }
+
+    /// A4 who expects to be removed, with A1: prepares a stream of writes, and has the store show the removing
+    /// device only the last object, which names the rest by digest. If the cut were that object's digest, everything
+    /// before it would be inside the cut unseen, to be brought out after the removal.
+    @Test("a cut covers only a stream the removing device holds whole, so nothing is brought out later inside it")
+    func preparedStream() async throws {
+        let world = SharingWorld()
+        var (vault, owner, members) = try await world.household(roles: [.readWrite])
+        var former = members[0]
+        try await former.sync(vault)
+        let record = UUID()
+        try await former.write("kept back", to: vault, recordID: record, version: 1)
+        try await former.write("shown", to: vault, recordID: record, version: 2)
+        let first = SimulatedMember.itemName(vault: vault, recordID: record, version: 1, author: former.accountID)
+        await world.store.hide([first], from: owner.accountID)
+
+        #expect(try await owner.remove(former.accountID, from: vault) == .complete)
+        #expect(try owner.ledger(vault).chain.last?.record.writeCut == .nothing)
+        await world.store.reveal(to: owner.accountID)
+        try await owner.maintain(vault)
+        #expect(try await owner.readable(in: vault).isEmpty)
+        #expect(try await owner.setAside(in: vault).map(\.text) == ["kept back", "shown"], "held aside, not lost")
+    }
+
+    /// A4, an administrator, or anyone holding an administrator's key: signs records that carry a write cut where
+    /// no permission to write ends, so that one record would have two encodings or a later reader would take the
+    /// cut for something it is not. And A1, altering the cut of a genuine record or swapping in a longer one.
+    @Test("a write cut is accepted only on the record that ends a permission to write, exactly as it was signed")
+    func misplacedWriteCut() async throws {
+        let household = try await SharingHousehold.make()
+        let owner = household.owner
+        var keys = household
+        let misplaced: [(MembershipRecord.Operation, PublicKeyBundle?, UUID?)] = [
+            (.addMember(household.outsider.accountID, role: .readWrite), household.outsider.bundle, nil),
+            (.changeRole(household.reader.accountID, to: .readWrite), nil, nil),
+            (.changeRole(household.writer.accountID, to: .administrator), nil, nil),
+            (.rotateKey, nil, keys.newKeyID()),
+            (.removeMember(household.reader.accountID), nil, keys.newKeyID()),
+            (.deleteVault, nil, nil),
+        ]
+        for (operation, adding, newKeyID) in misplaced {
+            var forged = household.forgery(operation, signer: owner, adding: adding, newKeyID: newKeyID)
+            var device = household
+            // The honest record for the operation, from the tests' own encoder, is one the ledger takes.
+            try device.adopt(forged.signed(by: owner.keyset))
+            forged.writeCut = [1]
+            device = household
+            #expect(throws: MembershipError.unexpectedWriteCut, "\(operation)") {
+                try device.adopt(forged.signed(by: owner.keyset))
+            }
+            #expect(device.state == household.state)
+        }
+        var genesis = ForgedRecord(
+            genesisOf: household.vaultID, owner: owner.bundle, vaultKeyID: household.ledger.chain[0].state.vaultKeyID)
+        genesis.writeCut = [1]
+        #expect(throws: LedgerError.noGenesis) {
+            _ = try Self.freshDevice(household, [genesis.signed(by: owner.keyset)])
+        }
+
+        // Where a permission does end, the cut is the signer's, to the byte.
+        for operation in [
+            MembershipRecord.Operation.removeMember(household.writer.accountID),
+            .changeRole(household.writer.accountID, to: .readOnly),
+        ] {
+            let newKeyID = operation == .removeMember(household.writer.accountID) ? keys.newKeyID() : nil
+            var forged = household.forgery(operation, signer: owner, newKeyID: newKeyID)
+            forged.writeCut = [1, 2, 3]
+            let genuine = try forged.signed(by: owner.keyset)
+            var altered = forged
+            altered.writeCut = [1, 2, 4]
+            var device = household
+            #expect(throws: MembershipError.signatureInvalid) {
+                try device.adopt(altered.withSignature(Array(genuine.suffix(64))))
+            }
+            altered.writeCut = [UInt8](repeating: 1, count: MembershipLimits.maximumWriteCutLength + 1)
+            #expect(throws: SharingFormatError.tooLarge(MembershipLimits.maximumWriteCutLength + 1)) {
+                try device.adopt(altered.signed(by: owner.keyset))
+            }
+            try device.adopt(genuine)
+            #expect(device.ledger.chain.last?.record.writeCut.bytes == [1, 2, 3])
+            #expect(device.ledger.writeStanding(of: household.writer.accountID).refusal != nil)
+        }
+    }
+
+    /// A1 with two honest administrators, as in `withheldSiblingReleasedLate`: a fork displaces the record that
+    /// removed a member, so that the member is listed again. If their writes counted again in full while the removal
+    /// is owed, the store could reopen the door for them by timing a fork.
+    @Test("while a removal is owed, the member's writes count exactly as the displaced record's branch left them")
+    func owedRemovalKeepsItsCut() async throws {
+        var household = try await SharingHousehold.make()
+        let second = try SharingParty(seed: 42)
+        try await household.add(second, as: .administrator, by: household.owner)
+        let fork = household.ledger
+        let target = household.writer.accountID
+        let listed = try #require(household.state.member(target))
+        var generator = SeededGenerator(seed: 46)
+
+        // The removal carries the cut.
+        let cut = try WriteCut([5, 5, 5])
+        let removal = try RotationPlanner.plan(
+            .removal(target), ledger: fork, memberKeys: .findingNothing(in: fork), writeCut: cut,
+            signedBy: second.keyset, using: &generator)
+        var device = fork
+        device.ingest([removal.record.contents])
+        #expect(device.writeStanding(of: target) == .ended(cut: cut, author: listed, refusal: .notAMember))
+        let stale = try Self.groundRotation(below: removal.recordHash, on: fork, by: household.administrator, seed: 47)
+        device.ingest([stale.record.contents])
+        #expect(
+            device.state.member(target)?.role == .readWrite, "listed again, and able to write as far as the state says")
+        #expect(device.owedRemovals.map(\.record) == [removal.proposal])
+        #expect(device.writePermission(for: target) == .refused(.removalPending))
+        #expect(device.writeStanding(of: target) == .ended(cut: cut, author: listed, refusal: .removalPending))
+        #expect(device.owedRemovals.first?.standing == device.writeStanding(of: target))
+        #expect(try Self.restored(device, household).writeStanding(of: target) == device.writeStanding(of: target))
+
+        // The branch made them read-only first, with the cut there, and then removed them with none.
+        let demotion = try fork.proposeRoleChange(of: target, to: .readOnly, writeCut: cut, signedBy: second.keyset)
+        var branch = fork
+        branch.ingest([demotion.encoded()])
+        let later = try RotationPlanner.plan(
+            .removal(target), ledger: branch, memberKeys: .findingNothing(in: branch), writeCut: nil,
+            signedBy: second.keyset, using: &generator)
+        branch.ingest([later.record.contents])
+        #expect(branch.writeStanding(of: target) == .ended(cut: cut, author: listed, refusal: .notAMember))
+        let first = try Self.groundRotation(below: demotion.hash, on: fork, by: household.administrator, seed: 48)
+        var other = fork
+        other.ingest([first.record.contents])
+        let next = try RotationPlanner.plan(.routine, ledger: other, signedBy: household.administrator.keyset)
+        device = branch
+        let report = device.ingest([first.record.contents, next.record.contents])
+        #expect(report.superseded == [demotion, later.proposal])
+        #expect(device.state.member(target)?.role == .readWrite)
+        #expect(device.owedRemovals.map(\.record) == [later.proposal])
+        #expect(device.writeStanding(of: target) == .ended(cut: cut, author: listed, refusal: .removalPending))
+    }
+
+    /// A5, a former administrator with their key and store write access: takes a member's genuine, pending leave
+    /// request and carries the departure out on a branch from before their own removal, with a write cut of their
+    /// choosing (nothing). A departure is owed whoever signed it, because the member asked; if the cut of the record
+    /// that carried it out were believed as well, every device would set the leaving member's work aside on a
+    /// former administrator's say-so, and the administrator who plans the departure again would sign that.
+    @Test("a former administrator's cut on a dead branch decides nothing about a leaving member's work")
+    func deadBranchDepartureCut() async throws {
+        var household = try await SharingHousehold.make()
+        let fork = household.ledger
+        let writer = household.writer.accountID
+        let listed = try #require(household.state.member(writer))
+        try household.rotate(.removal(household.administrator.accountID), by: household.owner)
+        let request = try LeaveRequest.make(leaving: household.state, as: household.writer.keyset)
+        var generator = SeededGenerator(seed: 49)
+        let dead = try RotationPlanner.plan(
+            .departure(request), ledger: fork, memberKeys: .findingNothing(in: fork), writeCut: .nothing,
+            signedBy: household.administrator.keyset, using: &generator)
+
+        var device = household.ledger
+        let report = device.ingest([dead.record.contents])
+        #expect(report.outranked == [dead.proposal] && !report.changedHead)
+        #expect(device.owedRemovals.map(\.reason) == [.departure(request)], "the member did ask to leave")
+        #expect(device.owedRemovals.first?.standing == .mayWrite)
+        #expect(device.writeStanding(of: writer) == .mayWrite, "what they wrote goes on counting")
+        #expect(device.writePermission(for: writer) == .refused(.removalPending), "their own device writes no more")
+
+        // The owner's device carries the departure out, and its cut is the one that counts.
+        let cut = try WriteCut([8])
+        let again = try RotationPlanner.plan(
+            .departure(request), ledger: device, memberKeys: .findingNothing(in: device), writeCut: cut,
+            signedBy: household.owner.keyset, using: &generator)
+        device.ingest([again.record.contents])
+        #expect(device.owedRemovals.isEmpty)
+        #expect(device.writeStanding(of: writer) == .ended(cut: cut, author: listed, refusal: .notAMember))
+
+        // Had a current administrator signed the displaced departure, its cut would have stood meanwhile
+        // (`owedRemovalKeepsItsCut`); a former one's removal, without the member's signature, is not owed at all.
+        let removal = try RotationPlanner.plan(
+            .removal(writer), ledger: fork, memberKeys: .findingNothing(in: fork), writeCut: .nothing,
+            signedBy: household.administrator.keyset, using: &generator)
+        device = household.ledger
+        device.ingest([removal.record.contents])
+        #expect(device.owedRemovals.isEmpty)
+        #expect(device.writeStanding(of: writer) == .mayWrite)
+    }
+
+    static func restored(_ ledger: MembershipLedger, _ household: SharingHousehold) throws -> MembershipLedger {
+        try MembershipLedger.restore(
+            ledger.persisted(signedBy: household.owner.keyset), vaultID: household.vaultID,
+            owner: trusted(household.owner), account: household.owner.bundle)
+    }
+
     /// A5 with store write access: signs an item as a remaining member (whose signature they cannot make), or under
     /// a remaining member's name with their own key.
     @Test("a former member cannot write in a remaining member's name")
@@ -711,8 +1093,10 @@ struct AdversarialSharingTests {
                 recordVersion: 5),
             key: oldKey.key, using: &generator)
         let name = SimulatedMember.itemName(vault: vault, recordID: recordID, version: 5, author: owner.accountID)
-        let signature = try former.keyset.sign(Array(name.utf8) + [0] + envelope, domain: .logSegment)
-        await world.store.tamper(name, contents: signature + envelope)
+        let object = try SimulatedMember.itemObject(
+            name: name, sequence: 1, previous: [UInt8](repeating: 0, count: 32), envelope: envelope,
+            signedBy: former.keyset)
+        await world.store.tamper(name, contents: object)
 
         let seen = try await remaining.items(in: vault).first { $0.recordID == recordID }
         #expect(seen?.outcome == .forged)
@@ -1263,7 +1647,7 @@ struct AdversarialSharingTests {
         #expect(device.writePermission(for: target) == .refused(.removalPending), "their writes are still refused")
         #expect(device.writePermission(for: target, atEpoch: device.state.epoch) == .refused(.removalPending))
         let underNewerKey = SealedRecordReference(
-            recordID: UUID(), kind: .item, keyID: removal.newKeyID, version: 2, author: second.accountID)
+            recordID: UUID(), kind: .item, keyID: removal.newKeyID, version: 2)
         #expect(device.recordsToReseal(in: [underNewerKey]).isEmpty, "nothing is sealed back towards a key they hold")
         #expect(
             device.pendingRotation(
@@ -1377,7 +1761,7 @@ struct AdversarialSharingTests {
         #expect(device.owedRemovals.map(\.record) == [removal.proposal])
         #expect(device.writePermission(for: target) == .refused(.removalPending))
         let fresh = SealedRecordReference(
-            recordID: UUID(), kind: .item, keyID: removal.newKeyID, version: 1, author: household.owner.accountID)
+            recordID: UUID(), kind: .item, keyID: removal.newKeyID, version: 1)
         #expect(device.recordsToReseal(in: [fresh]).isEmpty)
         #expect(
             try Self.freshDevice(
@@ -1428,7 +1812,10 @@ struct AdversarialSharingTests {
         let report = try await bystander.sync(vault)
         try await mallory.sync(vault)
         #expect(report.adopted.map(\.hash) == [genuine.hash])
-        #expect(report.rejected.map(\.reason) == [.invalid(.signatureInvalid), .invalid(.signatureInvalid)])
+        // The squatted deletion is refused. The squatted demotion is refused too if the store lists it ahead of the
+        // genuine record, and is otherwise a copy of a record already held; which, depends on the two digests.
+        #expect(Set(report.rejected.map(\.reason)) == [.invalid(.signatureInvalid)])
+        #expect((1...2).contains(report.rejected.count))
         for member in [owner, bystander, mallory] {
             #expect(try member.ledger(vault).state.member(mallory.accountID)?.role == .readOnly, "\(member.name)")
         }
