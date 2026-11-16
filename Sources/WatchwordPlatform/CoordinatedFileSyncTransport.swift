@@ -228,9 +228,10 @@
                             error == nil ? Result(catching: body) : .failure(CoordinationFailure())
                         Task { await self.finish(result) }
                     }
+                    // Created inside the actor, so the task runs on it: `giveUp()` is a plain call here.
                     timer = Task {
                         await deadline()
-                        await self.giveUp()
+                        self.giveUp()
                     }
                 }
             } onCancel: {
