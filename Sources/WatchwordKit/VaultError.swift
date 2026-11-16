@@ -23,6 +23,9 @@ public enum VaultError: Error, Equatable, Sendable {
     case quickUnlockRefused(QuickUnlockRefusal)
     case biometricAuthenticationFailed
     case itemNotFound(UUID)
+    /// The item is no longer at the version the caller read: a sync merged another device's edit, or another write
+    /// landed, in between. Nothing was written; reopen the item and apply the change again (docs/06 §H, Y29).
+    case versionConflict(UUID)
     case unknownVault(UUID)
     /// `save` cannot change an item's vault: use `move(itemID:to:)` or `copy(itemID:to:)` (PRD F2.2).
     case vaultChangeNotSupported

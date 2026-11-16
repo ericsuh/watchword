@@ -171,7 +171,8 @@ half delivered** on a Mac; the transports are open.
   merge tracked with tests recorded as known issues or a named remedy — the engine must pass a tombstone's version to
   the merger (Y28, fixed when the sync-core work merged: the engine passes the joined erasure's stamp, and a record's
   erasures are joined as a set of deletions, `ItemErasures`), `VaultSession.save` must refuse a draft made from an
-  older version (Y29), and the session should show items as the merge reads them (Y30).
+  older version (Y29), and the session should show items as the merge reads them (Y30); both fixed when the session
+  integration merged (`versionConflict`; every read is `ItemMerge.canonical`).
 - Adversarial suite "sync log" (A1, insider and former devices, A8): byte flips anywhere, moved and replayed
   objects, withheld segments, forgeries, record swaps inside a validly signed segment, versions for another device
   or vault, implausible versions (U5), stale snapshots, local rollback, tampered staging, parser mutations and

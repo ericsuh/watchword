@@ -459,6 +459,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.
 - The sync adapter holds the session, never a key; every key operation re-enters the actor and throws
   `SyncKeyringError.locked` after `lock()`.
+- A save is a compare-and-swap: `write(expecting:)` checks the row it read and commits conditionally on it. `save`
+  refuses a draft whose `version` is not the stored item's (`versionConflict`, Y29); `saveCredentialItem` requires
+  absent or the version the model read. Never let a stale editor's draft through `ItemMerge.stamped`.
+- Every read goes through `openItem`, which returns `ItemMerge.canonical` of the decrypted item (Y30): the UI and
+  AutoFill never see sync metadata as a writer claimed it.
 - Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
   exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
   signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting

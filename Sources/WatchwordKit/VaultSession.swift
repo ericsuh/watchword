@@ -1055,8 +1055,18 @@ public actor VaultSession {
     /// Creates or updates an item. The vault owns `createdAt`, `modifiedAt`, `version`, `history`, `trashedAt` and
     /// `keptAfterDeletion`; whatever the caller put there is replaced. Scopes are checked against the scope policy here, the one place
     /// they can enter the vault from the UI (PRD F11.2).
+    ///
+    /// An update must be made from the stored version: a draft whose `version` is not the stored item's (a sync
+    /// merged another device's edit while the editor was open) is refused with `versionConflict`, and the editor
+    /// reopens the item (Y29).
     @discardableResult
     public func save(_ draft: Item) async throws -> Item {
+        // A draft made from an earlier version than the stored one would be stamped as an edit that had seen
+        // everything since, and replace it (Y29): refused, for the editor to reopen the item.
+        try await save(draft, expecting: .versionIfPresent(draft.version))
+    }
+
+    func save(_ draft: Item, expecting expectation: WriteExpectation) async throws -> Item {
         for scope in draft.scopes {
             do {
                 try ScopePolicy.validate(scope)
@@ -1064,7 +1074,8 @@ public actor VaultSession {
                 throw VaultError.scopeRejected(error)
             }
         }
-        return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft) { item, existing, now in
+        return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft, expecting: expectation) {
+            item, existing, now in
             item = draft
             if let existing {
                 item.createdAt = existing.createdAt
@@ -1155,6 +1166,7 @@ public actor VaultSession {
         vaultID: UUID? = nil,
         creating draft: Item? = nil,
         allowingDeletedVault: Bool = false,
+        expecting expectation: WriteExpectation? = nil,
         _ mutate: (inout Item, Item?, Date) -> Void
     ) async throws -> Item {
         let epoch = lockEpoch
@@ -1163,6 +1175,9 @@ public actor VaultSession {
         let now = await clock.now()
         let existingRow = try await store.record(RecordKey(recordID: id, kind: .item))
         let keys = try requireKeys(since: epoch)
+        // Checked against the row this write replaces, and the commit is conditional on that row: together, a
+        // compare-and-swap.
+        try expectation?.check(existingRow, id: id)
 
         let existing = try existingRow.map { try openItem($0, keys: keys) }
         guard var item = existing ?? draft else { throw VaultError.itemNotFound(id) }
@@ -1238,7 +1253,9 @@ public actor VaultSession {
             throw VaultError.recordMismatch(row.recordID)
         }
         highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, item.version)
-        return item
+        // Sync metadata is a writer's claim (Y30): every reader, the UI included, gets the one reading every device
+        // makes of it, never counts above the row's version or values under a group they do not belong to.
+        return ItemMerge.canonical(item, origin: Self.origin(row))
     }
 
     /// The context an item record must carry, built from its row: where it was found, never what it says.

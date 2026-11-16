@@ -348,13 +348,13 @@ failed each time.
   engine now passes the joined erasure's stamp, and `ItemRecordMerger` believes no summary naming a row above it.
   Within that bound an insider can still name a *lower* row, or another device, in its summary; the write that
   deletion makes is then at a lower revision than its tombstone, which raises nothing and is the same on every device.
-- **Saving a draft made from an older version** (Y29). `ItemMerge.stamped` treats every difference between the draft
-  and the stored version as the person's edit. `VaultSession.save` passes it a draft opened before a sync merged
-  another device's edit, which then silently undoes that edit. The session must refuse a draft whose version is not
-  the stored one.
-- **Items are shown as stored** (Y30). A record adopted when the device held no version of the item is stored as
-  written, and `VaultSession` shows it without reading it through `ItemMerge.canonical`. Every merge and save reads it
-  canonically, so the laws are unaffected; what a person sees before the first merge is the writer's rendering.
+- **Saving a draft made from an older version** (Y29, fixed). `ItemMerge.stamped` treats every difference between the
+  draft and the stored version as the person's edit, so a draft opened before a sync merged another device's edit
+  would silently undo that edit. `VaultSession.save` now refuses a draft whose version is not the stored one
+  (`versionConflict`), and the editor reopens the item.
+- **Items were shown as stored** (Y30, fixed). A record adopted when the device held no version of the item is stored
+  as written; `VaultSession` now reads every item through `ItemMerge.canonical`, so what a person sees is what every
+  merge and save makes of it.
 - **A merge result over the payload limit stops a stream** (Y37). Two versions that each fit the 1 MiB limit can
   have a join that does not — two long concurrent note edits, or history that only grows — and any writer can arrange
   it. `ItemRecordMerger` then throws `ItemMergeError.resultNotSealable`, and the engine rejects the whole object that

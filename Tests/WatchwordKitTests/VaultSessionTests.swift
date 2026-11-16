@@ -303,6 +303,8 @@ struct VaultSessionItemTests {
             item.fields[1].value = large + "\(edit)"
             do {
                 saved = try await vault.session.save(item)
+                // Each edit is made from the version just stored: a draft of an older one is refused (Y29).
+                item = saved
             } catch let error as ItemCodecError {
                 guard case .payloadTooLarge = error else { throw error }
                 refused = true
