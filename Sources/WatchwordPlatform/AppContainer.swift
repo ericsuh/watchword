@@ -16,5 +16,14 @@
                 .appendingPathComponent("Library/Application Support/Watchword", isDirectory: true)
                 .appendingPathComponent(databaseName, isDirectory: false)
         }
+
+        /// `<App Group container>/Library/Application Support/Watchword/DeviceLocal`: this device's sealed, unsynced
+        /// records (the scan ledger and the prefix cache, §13.8), for `FileDeviceLocalStore`. Beside the database, so
+        /// erasing the account's files reaches both; never in a folder a sync provider or a backup reads. `nil` without
+        /// the App Group, as for the database.
+        public static func deviceLocalStoreURL(appGroup: String) -> URL? {
+            databaseURL(appGroup: appGroup)?.deletingLastPathComponent()
+                .appendingPathComponent("DeviceLocal", isDirectory: true)
+        }
     }
 #endif
