@@ -30,7 +30,7 @@
     ///   absence safely: a stream waits at the gap (it never skips one) and the next sync fetches it; the folder's
     ///   `SyncFolderPresenter` reports the download's arrival as a remote-change hint. Nothing waits for the network
     ///   inside a coordinated read.
-    /// - **Bounded waits.** An access not granted coordination before its deadline (thirty seconds), or whose task is
+    /// - **Bounded waits.** An access not granted coordination before its deadline (two minutes), or whose task is
     ///   cancelled, is given up and its coordinator cancelled. For a fetch that is `objectUnreadable`, that object's
     ///   failure alone (its stream waits, the sync and this device's publishing go on); for a listing, a create or a
     ///   delete it is `unavailable`. Download status is checked once before the read, so a file known not to be here
@@ -39,14 +39,19 @@
     /// Nothing here decides what to trust: everything it returns is checked by the engine like anything else from a
     /// transport. Not built: other file providers with a security-scoped bookmark, and polling them.
     public struct CoordinatedFileSyncTransport: SyncTransport {
-        /// Returns when an access that has not been granted coordination yet should be given up. The default waits
-        /// thirty seconds; tests pass one that returns at once.
+        /// Returns when an access that has not been granted coordination yet should be given up. The default waits two
+        /// minutes, counted from the request: long enough for the iCloud daemon or a busy device to grant an access to a
+        /// file that is here (a file that is not is never waited for), short enough that a holder that never lets go
+        /// cannot hold a sync open. Only the wait for the grant counts: once the accessor runs, nothing gives it up, so a
+        /// process too busy to schedule this task cannot turn a granted access into a failure. Tests pass their own.
         public typealias Deadline = @Sendable () async -> Void
 
         public let base: FileSyncTransport
         let deadline: Deadline
 
-        public init(root: URL, coordinationDeadline: @escaping Deadline = { try? await Task.sleep(for: .seconds(30)) })
+        public static let standardDeadline: Deadline = { try? await Task.sleep(for: .seconds(120)) }
+
+        public init(root: URL, coordinationDeadline: @escaping Deadline = CoordinatedFileSyncTransport.standardDeadline)
         {
             base = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
             deadline = coordinationDeadline

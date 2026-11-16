@@ -44,6 +44,7 @@
         }
 
         static let registry = Registry()
+        static let chunkSize = 16 << 10
 
         override class func canInit(with request: URLRequest) -> Bool { true }
 
@@ -57,7 +58,10 @@
                 let response = HTTPURLResponse(
                     url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
                 client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                client?.urlProtocol(self, didLoad: Data(body))
+                // In pieces, as a network delivers it, so the client's count runs while the body is still arriving.
+                for start in stride(from: 0, to: body.count, by: Self.chunkSize) {
+                    client?.urlProtocol(self, didLoad: Data(body[start..<min(start + Self.chunkSize, body.count)]))
+                }
                 client?.urlProtocolDidFinishLoading(self)
             case .redirect(let location)?:
                 let response = HTTPURLResponse(

@@ -12,8 +12,14 @@
     /// conflict versions) must not open a way around them: a planted link is never followed, a planted placeholder is at
     /// most a withheld object (which A1 could always do), and nothing is ever written over an existing object. Runs on a
     /// Mac only; required there through its `darwin:` line in `adversarial-suites.txt`.
-    @Suite("Adversarial: Apple adapters: iCloud Drive transport", .tags(.adversarial))
+    @Suite("Adversarial: Apple adapters: iCloud Drive transport", .serialized, .tags(.adversarial))
     struct AdversarialCoordinatedFileSyncTransportTests {
+        /// A transport whose coordination deadline is never reached in a test: a loaded runner may take its time to
+        /// schedule these tasks, and that must decide nothing here (the deadline has a test of its own).
+        static func transport(_ root: URL) -> CoordinatedFileSyncTransport {
+            CoordinatedFileSyncTransport(root: root) { try? await Task.sleep(for: .seconds(86_400)) }
+        }
+
         static func root() -> URL {
             URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 .appendingPathComponent("watchword-adversarial-coordinated-\(UUID().uuidString)", isDirectory: true)
@@ -24,7 +30,7 @@
         @Test("a directory replaced by a link is neither listed, read nor written through")
         func linkedDirectory() async throws {
             let root = Self.root()
-            let transport = CoordinatedFileSyncTransport(root: root)
+            let transport = Self.transport(root)
             let name = SyncObjectLocation.segment(vaultID: UUID(), author: UUID(), sequence: 1).name
             let url = try transport.base.fileURL(for: name)
             let elsewhere = Self.root()
@@ -51,7 +57,7 @@
         @Test("planted placeholders are at most a withheld object")
         func plantedPlaceholders() async throws {
             let root = Self.root()
-            let transport = CoordinatedFileSyncTransport(root: root)
+            let transport = Self.transport(root)
             let name = SyncObjectLocation.segment(vaultID: UUID(), author: UUID(), sequence: 1).name
             try await transport.create(name, contents: [1, 2])
             let url = try transport.base.fileURL(for: name)
@@ -66,11 +72,12 @@
         /// A1 makes an object's file larger than any object can be, behind the size check's back: still refused.
         @Test("an oversized object is refused under coordination too")
         func oversized() async throws {
-            let transport = CoordinatedFileSyncTransport(root: Self.root())
+            let transport = Self.transport(Self.root())
             let name = SyncObjectLocation.segment(vaultID: UUID(), author: UUID(), sequence: 1).name
             try await transport.create(name, contents: [1])
             let handle = try FileHandle(forWritingTo: try transport.base.fileURL(for: name))
-            try handle.truncate(atOffset: UInt64(4) << 30)
+            // Twice the reader's limit is enough, and stays cheap where a file system does not keep it sparse.
+            try handle.truncate(atOffset: UInt64(128) << 20)
             try handle.close()
             await #expect(throws: SyncTransportError.objectTooLarge(name)) {
                 try await transport.fetch(name, maximumLength: 64 << 20)

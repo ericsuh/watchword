@@ -394,7 +394,8 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   (`ubiquitousItemDownloadingStatus` `notDownloaded`) — is listed, fetched as absent after
   `startDownloadingUbiquitousItem`, and counts as existing for a create; absence is safe, as a stream waits at its gap.
   The download status is checked before the coordinated read, so a file known to be absent is not waited for, and
-  again inside it, so one evicted in between is still read as absent. Each access gives up at a deadline (30 s) or on
+  again inside it, so one evicted in between is still read as absent. Each access gives up at a deadline (two minutes, counting only the wait for the grant; once the accessor runs
+  nothing gives it up, so a process too busy to schedule its tasks cannot fail a granted access) or on
   cancellation and cancels its coordinator: a fetch so given up is `objectUnreadable` (that object waits, the sync goes
   on), a listing, create or delete `unavailable`. `SyncFolderPresenter` (`NSFilePresenter` on the root) turns changes
   into remote-change hints. An object with unresolved `NSFileVersion` conflicts is refused (`conflictingVersions`)

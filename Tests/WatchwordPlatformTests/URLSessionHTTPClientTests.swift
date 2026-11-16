@@ -9,8 +9,13 @@
     /// Shared by the HTTP client's suites: requests on prefixes no other test uses, through a client whose only
     /// "network" is `StubURLProtocol`.
     enum HTTPFixtures {
-        static func client(limits: URLSessionHTTPClient.Limits = .standard) -> URLSessionHTTPClient {
-            URLSessionHTTPClient(limits: limits, protocolClasses: [StubURLProtocol.self])
+        /// URLSession's timers as long as the limits allow and an overall deadline no test reaches, so a loaded runner's
+        /// scheduling decides nothing.
+        static func client() -> URLSessionHTTPClient {
+            URLSessionHTTPClient(
+                limits: URLSessionHTTPClient.Limits(idleTimeout: 600, totalTimeout: 600),
+                protocolClasses: [StubURLProtocol.self], deadline: { _ in try? await Task.sleep(for: .seconds(86_400)) }
+            )
         }
 
         /// A range request for `prefix` (five hex digits), as `PwnedPasswordsClient` makes it.
@@ -27,7 +32,7 @@
     /// `URLSessionHTTPClient` keeps the `HTTPClient` port's promises (docs/02-architecture.md §13.8): exactly the
     /// request given, an ephemeral session with nothing stored, the answer as it came. Hostile servers are the
     /// adversarial suite's ("Apple adapters: HTTP client").
-    @Suite("URLSession HTTP client")
+    @Suite("URLSession HTTP client", .serialized)
     struct URLSessionHTTPClientTests {
         @Test("sends exactly the method, URL and headers given, and returns status, headers and body as received")
         func exchange() async throws {

@@ -61,14 +61,15 @@ struct AdversarialDeviceLocalStoreTests {
     }
 
     /// A8 plants a huge file under a record's name to exhaust memory when the session reads its ledger: refused from
-    /// its size, before any byte is read. The file is sparse, so the test costs nothing.
+    /// its size, before any byte is read. The file is sparse where the file system allows, and small enough to be cheap where it does not.
     @Test("an oversized planted record is refused before it is read")
     func oversized() async throws {
         let (store, _, _) = try Self.fixture()
         let name = UUID()
         try await store.write([1], as: name)
         let handle = try FileHandle(forWritingTo: store.fileURL(for: name))
-        try handle.truncate(atOffset: UInt64(8) << 30)
+        // Well over the limit, and cheap even where a file system does not keep it sparse.
+        try handle.truncate(atOffset: UInt64(256) << 20)
         try handle.close()
         await #expect(throws: DeviceLocalFileError.recordTooLarge(name)) { try await store.read(name) }
     }

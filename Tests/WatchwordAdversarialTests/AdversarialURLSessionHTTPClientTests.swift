@@ -13,13 +13,19 @@
     /// (a server that never answers, or drips), or send the request — the prefix and the API key header — to another
     /// host or over plain HTTP by redirecting. Runs on a Mac only (`URLSession`); required there through its `darwin:`
     /// line in `adversarial-suites.txt` (docs/04-test-plan.md §6.6).
-    @Suite("Adversarial: Apple adapters: HTTP client", .tags(.adversarial))
+    @Suite("Adversarial: Apple adapters: HTTP client", .serialized, .tags(.adversarial))
     struct AdversarialURLSessionHTTPClientTests {
-        static func client(
-            deadline: @escaping URLSessionHTTPClient.Deadline = URLSessionHTTPClient.standardDeadline
-        ) -> URLSessionHTTPClient {
-            URLSessionHTTPClient(limits: .standard, protocolClasses: [StubURLProtocol.self], deadline: deadline)
+        /// A client whose own deadline is the test's to give, and whose URLSession timers are as long as the limits
+        /// allow: a loaded runner may be slow to schedule the read loop, and that must not turn "refused at the limit"
+        /// into "timed out" (it did, on a three-core runner, before these were decoupled from the wall clock).
+        static func client(deadline: @escaping URLSessionHTTPClient.Deadline = Self.never) -> URLSessionHTTPClient {
+            URLSessionHTTPClient(
+                limits: URLSessionHTTPClient.Limits(idleTimeout: 600, totalTimeout: 600),
+                protocolClasses: [StubURLProtocol.self], deadline: deadline)
         }
+
+        /// A deadline no test reaches: it returns only when the exchange is over and its task cancelled.
+        static let never: URLSessionHTTPClient.Deadline = { _ in try? await Task.sleep(for: .seconds(86_400)) }
 
         /// A deadline that has already passed: the exchange is given up as soon as it has started, whatever the
         /// clock says, so a test of a server that never answers waits for nothing.

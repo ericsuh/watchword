@@ -7,6 +7,11 @@
     import WatchwordTestSupport
 
     enum CoordinatedFixtures {
+        /// A transport whose coordination deadline is never reached in a test (the deadline test passes its own).
+        static func transport(_ root: URL) -> CoordinatedFileSyncTransport {
+            CoordinatedFileSyncTransport(root: root) { try? await Task.sleep(for: .seconds(86_400)) }
+        }
+
         static func temporaryRoot() -> URL {
             URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 .appendingPathComponent("watchword-coordinated-\(UUID().uuidString)", isDirectory: true)
@@ -44,12 +49,12 @@
     /// transport contract under `NSFileCoordinator`, placeholders of files not downloaded yet, create-once among
     /// concurrent coordinated writers, change notification, and two sync engines over it. A real ubiquity container
     /// needs a signed app with the iCloud entitlement, so download and eviction by iCloud itself are not exercised here.
-    @Suite("Coordinated iCloud Drive transport")
+    @Suite("Coordinated iCloud Drive transport", .serialized)
     struct CoordinatedFileSyncTransportTests {
         @Test("keeps the sync transport contract under file coordination")
         func contract() async throws {
             let violations = try await SyncTransportContract.violations {
-                CoordinatedFileSyncTransport(root: CoordinatedFixtures.temporaryRoot())
+                CoordinatedFixtures.transport(CoordinatedFixtures.temporaryRoot())
             }
             #expect(violations == [])
         }
@@ -57,7 +62,7 @@
         @Test("an object not downloaded yet is listed, fetched as absent, blocks a create, and can be deleted")
         func placeholder() async throws {
             let root = CoordinatedFixtures.temporaryRoot()
-            let transport = CoordinatedFileSyncTransport(root: root)
+            let transport = CoordinatedFixtures.transport(root)
             let name = SyncTransportContract.name
             try CoordinatedFixtures.plantPlaceholder(for: name, in: root)
             #expect(try await transport.list(prefix: SyncTransportContract.prefix) == [name])
@@ -71,7 +76,7 @@
 
         @Test("of many concurrent creates of one name, exactly one succeeds and nothing is overwritten")
         func concurrentCreates() async throws {
-            let transport = CoordinatedFileSyncTransport(root: CoordinatedFixtures.temporaryRoot())
+            let transport = CoordinatedFixtures.transport(CoordinatedFixtures.temporaryRoot())
             let name = SyncTransportContract.name
             let outcomes = await withTaskGroup(of: UInt8?.self) { group in
                 for writer in UInt8(1)...8 {
@@ -101,7 +106,7 @@
             let presenter = SyncFolderPresenter(root: root) { continuation.yield() }
             presenter.start()
             defer { presenter.stop() }
-            try await CoordinatedFileSyncTransport(root: root).create(SyncTransportContract.name, contents: [1])
+            try await CoordinatedFixtures.transport(root).create(SyncTransportContract.name, contents: [1])
             #expect(await CoordinatedFixtures.firstEvent(stream, within: .seconds(10)))
         }
 
@@ -113,7 +118,7 @@
         func deadline() async throws {
             let root = CoordinatedFixtures.temporaryRoot()
             let name = SyncTransportContract.name
-            try await CoordinatedFileSyncTransport(root: root).create(name, contents: [1])
+            try await CoordinatedFixtures.transport(root).create(name, contents: [1])
             let url = try FileSyncTransport(root: root).fileURL(for: name)
             let (held, holding) = AsyncStream.makeStream(of: Void.self)
             let release = DispatchSemaphore(value: 0)
@@ -128,12 +133,12 @@
                 try await impatient.fetch(name, maximumLength: 10)
             }
             release.signal()
-            #expect(try await CoordinatedFileSyncTransport(root: root).fetch(name, maximumLength: 10) == [1])
+            #expect(try await CoordinatedFixtures.transport(root).fetch(name, maximumLength: 10) == [1])
         }
 
         @Test("two sync engines exchange an item through the coordinated folder")
         func engines() async throws {
-            let transport = CoordinatedFileSyncTransport(root: CoordinatedFixtures.temporaryRoot())
+            let transport = CoordinatedFixtures.transport(CoordinatedFixtures.temporaryRoot())
             let keys = FakeAccountKeys(seed: 11)
             let vault = SyncTransportContract.vault
             await keys.addVaultKey(vaultID: vault)
