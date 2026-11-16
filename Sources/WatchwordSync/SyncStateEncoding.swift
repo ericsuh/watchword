@@ -38,6 +38,7 @@ struct EncodedState: Codable {
     var snapshotCoverage: [String: UInt64]
     /// Absent in a row written before ADR 0009.
     var stashUnsaved: Bool?
+    var stashGeneration: UInt64?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -61,6 +62,7 @@ struct EncodedState: Codable {
             .sorted { $0.name < $1.name }
         snapshotCoverage = Self.strings(state.snapshotCoverage)
         stashUnsaved = state.stashUnsaved
+        stashGeneration = state.stashGeneration
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -97,6 +99,7 @@ struct EncodedState: Codable {
             state.snapshots[location] = coverage
         }
         state.stashUnsaved = stashUnsaved ?? false
+        state.stashGeneration = stashGeneration ?? 0
         return state
     }
 

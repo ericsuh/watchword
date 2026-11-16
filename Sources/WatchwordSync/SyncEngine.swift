@@ -248,13 +248,18 @@ public actor SyncEngine {
         let (loadedStash, stashDropped) = try await loadStash(rebuilding: &state)
         stash = loadedStash
         // What a revoked device carried is not read any more (§7.8): its own versions stay, and hold nothing back.
-        stash.forgetRetired(retired)
+        let freed = stash.forgetRetired(retired)
+        let forgotten = stash
         var reconcile = reconcile
         let carried = carriedRawKinds
-        // An earlier version dropped entries of a kind this one carries, the stash being full; or the stash was not
-        // saved after a sync that counted segments as merged. The log still holds what is missing, in its segments or
-        // in a snapshot by a device that read it (ADR 0009).
-        let incomplete = state.stashUnsaved || stash.overflow.values.contains { !$0.isDisjoint(with: carried) }
+        // An earlier version dropped entries of a kind this one carries, the stash being full; the stash was not
+        // saved after a sync that counted segments as merged, or its row is not the one the state names; or room was
+        // freed where entries had been crowded out. The log still holds what is missing, in its segments or in a
+        // snapshot by a device that read it (ADR 0009).
+        let incomplete =
+            state.stashUnsaved || (freed && !stash.crowdedOut.isEmpty)
+            || !stash.crowdedOut.isDisjoint(with: carried)
+            || stash.overflow.values.contains { !$0.isDisjoint(with: carried) }
         if incomplete {
             if judge == nil { reconcile = true } else { report.replayNeeded = true }
         }
@@ -270,6 +275,7 @@ public actor SyncEngine {
             state.publishedAcknowledgement = kept.publishedAcknowledgement
             state.lastPublishedSequence = kept.lastPublishedSequence
             if judge == nil { state.erasures = kept.erasures }
+            state.stashGeneration = kept.stashGeneration
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
             // so those are kept across it.
             var replayed = SyncStash()
@@ -306,11 +312,20 @@ public actor SyncEngine {
         } catch SyncTransportError.unavailable {
             report.transportUnavailable = true
         }
-        // The stash once per sync, then the state that says it was saved.
+        // The stash once per sync, under the next generation, then the state that names it. Locked, the session
+        // cannot sign it: a stash changed only by forgetting what revoked devices carried is worked out again next
+        // time; one changed otherwise (a replay begun) is marked, so the next sync replays.
+        var stashSaved = true
         if stashDropped || stash != loadedStash {
-            try await syncState.saveStash(stash.encoded(), vaultID: vaultID)
+            stash.generation = state.stashGeneration &+ 1
+            do {
+                try await syncState.saveStash(stash.encoded(), vaultID: vaultID)
+                state.stashGeneration = stash.generation
+            } catch SyncKeyringError.locked {
+                stashSaved = stash == forgotten && !stashDropped
+            }
         }
-        state.stashUnsaved = stashIncomplete
+        state.stashUnsaved = stashIncomplete || !stashSaved
         try await syncState.saveState(state)
         return report
     }
@@ -318,9 +333,16 @@ public actor SyncEngine {
     /// The stored stash, held to this engine's caps. One that does not parse or is over them (the file was edited,
     /// A8) is dropped, and the state marked so that the log is replayed to rebuild it.
     private func loadStash(rebuilding state: inout SyncState) async throws -> (SyncStash, dropped: Bool) {
-        guard let bytes = try await syncState.stash(vaultID: vaultID) else { return (SyncStash(), false) }
-        guard let parsed = try? SyncStash.parse(bytes), parsed.count <= configuration.maximumStashedEntries,
-            parsed.bytes <= configuration.maximumStashedBytes
+        guard let bytes = try await syncState.stash(vaultID: vaultID) else {
+            // None, though the state names one that was saved (A8 deleted it): not taken as empty.
+            if state.stashGeneration != 0 { state.stashUnsaved = true }
+            return (SyncStash(), state.stashGeneration != 0)
+        }
+        guard
+            let parsed = try? SyncStash.parse(
+                bytes, maximumEntries: configuration.maximumStashedEntries,
+                maximumBytes: configuration.maximumStashedBytes),
+            parsed.generation == state.stashGeneration
         else {
             state.stashUnsaved = true
             return (SyncStash(), true)
@@ -708,21 +730,31 @@ public actor SyncEngine {
         for entry in entries {
             let held = stash.held(in: SyncStash.Slot(entry))
             if held.contains(where: { $0.entry == entry }) { continue }
+            // Only the writer's own word, or this carrier's, counts: an entry another carrier attributed to the
+            // writer keeps out nothing (an insider's high version would otherwise suppress the genuine one, N15).
             let contained = held.contains { kept in
-                kept.entry.version >= entry.version && (!fromSegment || kept.isAuthorsOwn)
+                kept.entry.version >= entry.version && (kept.isAuthorsOwn || kept.author == author)
             }
             if contained { continue }
             if fromSegment {
                 for old in held where old.entry.version < entry.version { stash.remove(old) }
             }
             let used = stash.usage(of: author)
-            let fits =
-                stash.count < configuration.maximumStashedEntries
-                && stash.bytes + entry.length <= configuration.maximumStashedBytes
-                && used.count < configuration.maximumStashedEntriesPerAuthor
-                && used.bytes + entry.length <= configuration.maximumStashedBytesPerAuthor
-            guard fits else {
+            guard
+                used.count < configuration.maximumStashedEntriesPerAuthor,
+                used.bytes + entry.length <= configuration.maximumStashedBytesPerAuthor
+            else {
+                // Its own share is full: held against it.
                 stash.overflow[author, default: []].insert(entry.rawKind)
+                report.unknownEntriesDropped += 1
+                continue
+            }
+            guard
+                stash.count < configuration.maximumStashedEntries,
+                stash.bytes + entry.length <= configuration.maximumStashedBytes
+            else {
+                // The vault's stash is full of what others carried: held against nobody (N17).
+                stash.crowdedOut.insert(entry.rawKind)
                 report.unknownEntriesDropped += 1
                 continue
             }
@@ -1190,7 +1222,7 @@ public actor SyncEngine {
         // that work on and makes nothing collectable.
         var vector = state.merged
         let holding = stash.authorsHoldingBackSnapshots(retired: retired)
-        if !holding.isEmpty || stashIncomplete {
+        if !holding.isEmpty || !stash.crowdedOut.isEmpty || stashIncomplete {
             guard owed else {
                 report.snapshotWithheld = true
                 report.snapshotWithheldBy = holding

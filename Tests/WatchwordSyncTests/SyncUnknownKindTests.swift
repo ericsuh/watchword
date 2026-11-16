@@ -270,7 +270,7 @@ struct SyncUnknownKindTests {
         #expect(report.rejected.isEmpty && report.waiting.isEmpty)
         let merged = try await home.earlier.items()
         #expect(merged.count == 6 && merged[last.id] != nil)
-        #expect(await home.earlier.stash().overflow == [home.laterID: [EnvelopeKind.scanStatus.rawValue]])
+        #expect(await home.earlier.stash().crowdedOut == [EnvelopeKind.scanStatus.rawValue], "the vault's cap")
 
         let upgraded = await home.upgraded { $0.maximumStashedEntries = 2 }
         let after = try await upgraded.sync()
@@ -413,7 +413,7 @@ extension SyncUnknownKindTests {
         await home.earlierState.tamperStash(SyncStash().encoded(), vaultID: SyncFixtures.vault)
         let report = try await home.earlier.sync()
         #expect(report.fetched > 0, "replayed")
-        #expect(await home.earlier.stash() == saved)
+        #expect(await home.earlier.stash().entries == saved.entries)
         #expect(await home.earlier.state()?.stashUnsaved == false)
     }
 }
@@ -557,5 +557,102 @@ struct SyncUnknownKindJudgedTests {
         #expect(rows[fromRevoked.id] == revokedResult && rows[fromTrusted.id] == trustedResult)
         let third = try await upgraded.sync(publishing: false)
         #expect(third.unknownEntriesProcessed == 0 && third.applied == 0 && !third.replayNeeded)
+    }
+}
+
+/// The second review of the stash (docs/06 §N, N14 to N19).
+@Suite("Record kinds a device does not know: the stash under review")
+struct SyncStashReviewTests {
+    /// An insider's snapshot attributes a version far above the real one to another device's record. Held, it must
+    /// not stop the genuine version that another carrier's snapshot holds from being kept: once the insider is revoked
+    /// its entry is forgotten, and the genuine one would be gone with it.
+    @Test("an entry another carrier attributed to a device does not keep out that device's genuine version")
+    func foreignAttributionSuppressesNothing() async throws {
+        let home = await VersionedHousehold.make()
+        let insider = UUID(uuidString: "D0000000-0000-4000-8000-0000000000E0")!
+        await home.keys.trust(device: insider)
+        let carrier = await home.newcomer(SyncFixtures.deviceC)
+        let bad = SyncTestClient(
+            deviceID: insider, vaultID: SyncFixtures.vault, keys: home.keys, transport: home.transport,
+            configuration: VersionedHousehold.laterConfiguration(), opaqueKinds: VersionedHousehold.laterKinds)
+        let item = try await home.later.save(Household.login(title: "Bank"))
+        let genuine = try await home.scan(item, "genuine")
+        var bogus = UnknownSyncEntry(SyncEntry(genuine))
+        bogus.version = 1 << 40
+        try await home.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: SyncFixtures.vault, author: insider, number: 1, vector: [:], entries: [],
+                unknownEntries: [bogus]),
+            as: bad)
+        try await home.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: SyncFixtures.vault, author: SyncFixtures.deviceC, number: 2, vector: [:],
+                entries: [SyncEntry(genuine)]),
+            as: carrier)
+        try await home.earlier.sync()
+        await home.keys.retire(device: insider)
+        try await home.earlier.sync()
+        let kept = await home.earlier.stash()
+        #expect(kept.entries.map(\.entry.envelope) == [genuine.envelope])
+        #expect(kept.entries.first?.author == SyncFixtures.deviceC)
+    }
+
+    /// Two insiders fill the vault's cap between them, within their own shares. What an honest device's objects
+    /// carried and could not be kept is not held against that device (it is not named, and it is not tied to it), and
+    /// once the insiders are revoked the room they took is freed and the log replayed to bring it back.
+    @Test("entries crowded out by others are not blamed on their carrier, and come back once room is freed")
+    func crowdedOutIsNotBlamed() async throws {
+        let home = await VersionedHousehold.make {
+            $0.maximumStashedEntries = 4
+            $0.maximumStashedEntriesPerAuthor = 2
+        }
+        let insiders = [
+            UUID(uuidString: "D0000000-0000-4000-8000-000000000010")!,
+            UUID(uuidString: "D0000000-0000-4000-8000-000000000011")!,
+        ]
+        for insider in insiders {
+            await home.keys.trust(device: insider)
+            let bad = SyncTestClient(
+                deviceID: insider, vaultID: SyncFixtures.vault, keys: home.keys, transport: home.transport)
+            try await home.plant(
+                SyncPayload(
+                    kind: .segment, vaultID: SyncFixtures.vault, author: insider, number: 1, vector: [:], entries: [],
+                    unknownEntries: (1...2).map {
+                        UnknownSyncEntry(
+                            recordID: UUID(), rawKind: 99, keyID: SyncPayload.zeroUUID, version: $0, device: insider,
+                            envelope: nil, erasure: [1])
+                    }),
+                as: bad)
+        }
+        let item = try await home.later.save(Household.login(title: "Bank"))
+        let result = try await home.scan(item, "honest")
+        try await home.later.sync()
+        let report = try await home.earlier.sync()
+        #expect(report.unknownEntriesDropped == 1)
+        let crowded = await home.earlier.stash()
+        #expect(crowded.overflow[home.laterID] == nil, "not held against the honest device")
+        for insider in insiders { await home.keys.retire(device: insider) }
+        let after = try await home.earlier.sync()
+        #expect(after.fetched > 0, "the freed room is filled again from the log")
+        let kept = await home.earlier.stash()
+        #expect(kept.entries.map(\.entry.envelope) == [result.envelope])
+        #expect(kept.authorsHoldingBackSnapshots(retired: Set(insiders)) == [home.laterID])
+    }
+
+    /// A8 replaces the stash row with an empty one that parses, while the state says entries were kept: the device
+    /// would forget them and write ordinary snapshots again. The row carries the generation the state names.
+    @Test("a stash row that is not the generation the state names is rebuilt, not taken as empty")
+    func staleOrMissingRowIsRebuilt() async throws {
+        let home = await VersionedHousehold.make()
+        let item = try await home.later.save(Household.login(title: "Bank"))
+        try await home.scan(item, "found")
+        try await home.later.sync()
+        try await home.earlier.sync()
+        let saved = await home.earlier.stash()
+        #expect(saved.count == 1)
+        await home.earlierState.tamperStash(SyncStash().encoded(), vaultID: SyncFixtures.vault)
+        let report = try await home.earlier.sync()
+        #expect(report.fetched > 0, "replayed")
+        #expect(await home.earlier.stash().entries == saved.entries)
     }
 }

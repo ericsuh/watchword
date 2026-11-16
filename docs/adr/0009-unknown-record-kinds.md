@@ -1,7 +1,8 @@
 # ADR 0009: Record kinds a reader does not know are critical or ignorable by their raw value
 
 Status: accepted. Date: 2026-11-16. Amended the same day after an independent review (`06-adversarial-review.md` §N,
-N8 to N13): authors, per-author caps, the stash's own row, revoked devices, the owed snapshot.
+N8 to N13): authors, per-author caps, the stash's own row, revoked devices, the owed snapshot. Amended again after a
+second review (N14 to N20): the row signed and generation-bound, the dedupe and crowding rules, a linear parse.
 
 ## Context
 A sync segment or snapshot (`SyncPayload`, `02-architecture.md` §7.5) lists record versions, each with a kind byte
@@ -50,8 +51,9 @@ reader can (a segment's entries are its author's; the version is positive; the r
 entry's kind and key, so an item cannot be filed under an ignorable label and passed over), and kept byte for byte in
 the **stash** (`SyncStash`), together with its **author**, the device whose signed segment or snapshot carried it; the
 rest of the payload is merged and the stream goes on. An entry already contained in one held is not kept again: the
-same entry, or a lower version by the same writer (for an entry from a segment, only one that writer's own stream
-carried). A version from a segment replaces the same device's lower versions of the record (its author's later write
+same entry, or a lower version by the same writer than one held on the writer's own word (from its own stream or
+snapshot) or on this carrier's; a version another carrier attributed to the writer keeps out nothing, or an insider's
+inflated version would suppress the genuine one and both would go when the insider is revoked (N15). A version from a segment replaces the same device's lower versions of the record (its author's later write
 contains them; a deletion only replaces a deletion); one from a snapshot replaces nothing, because a snapshot may
 attribute a version to any device. Every lookup goes through the entry's slot (record, kind, writer, deletion), so
 keeping an entry costs a dictionary lookup, not a scan of the stash. When a version that carries the kind syncs, it
@@ -66,16 +68,32 @@ after every merged segment: a full stash is about 5 MB, and a flooder could othe
 segment of a catch-up. Crash safety comes from `SyncState.stashUnsaved`, set in memory as soon as the stash changes and
 so saved with the state that counts the segment as merged, and cleared once the stash is saved. A sync that finds it
 set, or a row that does not parse, cannot trust the stash to hold everything its merged segments said, and replays the
-log to rebuild it. The row is parsed as hostile (it is in a file A8 can edit): only ignorable kinds, positive versions,
-a deletion with no key, a live entry with a non-empty envelope within the payload's bound, counts checked before
-anything is allocated, and the whole held to the engine's caps. `processStashed` also drops any entry of a critical
-kind unread, so a planted row can never apply an item deletion.
+log to rebuild it.
+
+**The row is signed and generation-bound** (N14, N19). Ignorable data is still data: a planted kept *deletion* of a
+scan result, processed, erases it here, is remembered as an erasure, and goes out in this device's next snapshot as a
+tombstone signed with the account key, wiping the result across the household; naming a revoked device as its carrier
+would take it past a shared vault's judge. So the session signs every row it writes (`AuthenticatedSyncState`, the
+account key, `SignatureDomain.syncStash`, a domain of its own — raw value 9 — over `"WWST" ‖ vault ID ‖ device ID ‖
+stash`; a magic inside `pendingDeletion`'s domain would not do, as those messages start with a vault ID and have no
+magic of their own), checked with the keyset or, locked, the Keychain's copy of the account key; a row that does not
+verify reads as one that does not parse. Each row also carries a generation that the engine raises at each save and
+records in `SyncState.stashGeneration`: a row of another generation (an older signed one put back, say), or none
+while the state names one, is not taken as empty, and the log is replayed. Locked, the session cannot sign: a stash
+changed only by forgetting what revoked devices carried is simply worked out again at the next sync, and any other
+change leaves `stashUnsaved` set. The row is also parsed as hostile: only ignorable kinds, positive versions, a
+deletion with no key, a live entry with a non-empty envelope within the payload's bound, the declared count checked
+against the engine's caps before a single entry is read and the bytes as they are read, and each slot sorted once, so
+a row costs `n log n` however its entries fall (a quadratic parse of one slot took minutes, N16). `processStashed`
+also drops any entry of a critical kind unread.
 
 **Revoked devices.** A revoked device's objects are not read (§7.8), so what it carried is forgotten — except its own
 versions from its own stream, which nothing else carries: those are kept (across a replay too, which cannot bring
-them back), processed once their kind is read, and hold nothing back. Entries it carried for other devices are
-carried by those devices' own streams or by snapshots of devices that read them. What it dropped past the caps is
-forgotten: no replay reads its objects.
+them back), processed once their kind is read, and hold nothing back — unless trusted devices' entries have been
+crowded out, when room for those comes first and the revoked device's own versions go too. Entries it carried for
+other devices are dropped as well (N18): those devices' own streams carry them, or, collected, the later snapshots of
+devices that read the kind, which every device merges; this device may lack such a version until one of those
+arrives. What it dropped past the caps is forgotten: no replay reads its objects.
 
 **Shared vaults and the judge** (`02-architecture.md` §8.10, `10-sync-correctness.md` §9). A segment the judge holds
 aside, or makes wait, keeps nothing aside: its unknown entries are passed over with it, as its known ones are held
@@ -107,9 +125,11 @@ but another such one; it only hands the work on.
 
 **Bounds.** At most `SyncConfiguration.maximumStashedEntries` (4,096) entries and `maximumStashedBytes` (4 MiB) per
 vault, and `maximumStashedEntriesPerAuthor` (2,048) and `maximumStashedBytesPerAuthor` (2 MiB) carried by any one
-device, so one device cannot crowd out the rest. Past any of them, an entry is not kept,
-`SyncReport.unknownEntriesDropped` counts it and its kind is recorded against its author (`SyncStash.overflow`). The
-stream still merges (a cap that stopped the stream would let whoever fills it stall the device), the device writes no
+device, so one device cannot crowd out the rest. Past any of them, an entry is not kept and
+`SyncReport.unknownEntriesDropped` counts it. Past its author's share, the kind is recorded against that author
+(`SyncStash.overflow`); past the vault's cap, which others' entries filled, it is recorded against nobody
+(`SyncStash.crowdedOut`, N17), so an honest device is not named in `snapshotWithheldBy` for what insiders crowded out,
+and when room is freed (their revocation) the log is replayed to fill it again. The stream still merges (a cap that stopped the stream would let whoever fills it stall the device), the device writes no
 ordinary snapshot (as above), and the first version that carries a dropped kind replays the log (a reconciling sync),
 which still holds every dropped entry: in its segment, or in a snapshot by a device that read it. So a flood costs this
 device storage up to the cap and one stash write per sync, and after an update one replay; it loses nothing for anyone.
@@ -131,12 +151,18 @@ device's ceiling without bound through entries nothing checks.
   snapshot owed for a revoked device's work is still written), `snapshotWithheldBy` names the device, and revoking it
   ends it: what it carried is then forgotten. It cannot get a critical record passed over: the record's header must
   name the kind its entry does (`itemUnderIgnorableLabel`).
-- The stash lives in the state file, which A8 can edit. A row naming a critical kind, or over the caps, is refused
-  and rebuilt from the log (`plantedStash`). Since only ignorable kinds are ever kept, the worst a planted or removed
-  entry can do is add or remove advisory data on this device (a planted deletion of a scan result is no stronger than
-  a planted erasure in `SyncState.erasures`); every live entry is still opened under its own context and the vault key
-  when processed. Emptying the stash would let the device write a snapshot again, the same exposure as a row deleted
-  from the record store before a snapshot.
+- The stash lives in the state file, which A8 can edit, and an earlier draft of this record argued that, holding only
+  advisory data, it was not worth signing. A review showed otherwise (N14): a planted kept deletion spreads, as a
+  signed tombstone in this device's next snapshot. Rows are now signed by the session and bound to the vault, the
+  device and the state's generation (`plantedStashRow` with real keys; `plantedStash`, `staleOrMissingRowIsRebuilt`).
+  What remains (N19): `SyncState` itself is not authenticated, so A8 who rewrites the state too (generation zero, no
+  marker) and deletes the row makes the device forget what it kept, and it may then write an ordinary snapshot
+  without those entries — the same exposure as rows deleted from the record store before a snapshot, and only for
+  advisory kinds. It cannot make the device apply anything it did not receive.
+- `SQLiteSyncStateStore` is at schema version 2 (the `stash` table). An older app finds version 2 and throws
+  `unsupportedSchemaVersion` rather than misread the file; nothing is deleted, and that app syncs nothing until it is
+  updated again. Downgrading is not supported: the file holds pending deletions and the quarantine, which no replay
+  can rebuild, so it is never thrown away to let an older version start afresh.
 - A new kind's raw value is a decision: ignorable only if skipping it can neither lose data nor change what is
   secure, and its records must satisfy "a later version by one device contains that device's earlier ones", as every
   kind written from a device's current row does. A kind's criticality can never change once released.

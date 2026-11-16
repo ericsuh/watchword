@@ -22,6 +22,11 @@ public enum SignatureDomain: UInt8, Sendable, CaseIterable {
     case accountHeader = 7
     /// A fact in the account's vault directory (§7.7): a vault-key wrap vouched for, or a vault deleted.
     case vaultDirectory = 8
+    /// The stash of a vault's sync state (ADR 0009): entries of kinds this version cannot read, kept in the local
+    /// state store until a version that can processes them, so a row planted in that file is never processed. A
+    /// domain of its own rather than a magic inside `pendingDeletion`'s: those messages begin with a vault ID and
+    /// have no magic, so nothing could keep a stash message from being read as one.
+    case syncStash = 9
 }
 
 public enum Signatures {

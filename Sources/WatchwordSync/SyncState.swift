@@ -69,6 +69,9 @@ public struct SyncState: Sendable, Hashable {
     /// state that counts a segment as merged is saved, cleared once the stash is. Found set when a sync starts, the
     /// stash may lack entries of segments counted as merged, so the log is replayed to rebuild it.
     public var stashUnsaved = false
+    /// The generation of the last stash row saved (`SyncStash.generation`). A row of another generation, or none while
+    /// this is above zero, is not trusted to hold what this state says was merged, and the log is replayed.
+    public var stashGeneration: UInt64 = 0
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID

@@ -206,6 +206,39 @@ struct AdversarialVaultSyncTests {
         #expect(try await f.b.session.items().items.isEmpty, "the person's deletion still reaches B")
     }
 
+    /// Threat: A8, with the local sync state file, plants a stash row (ADR 0009) holding a deletion of a scan result
+    /// (kind 10, an ignorable kind this version reads): no key, an erasure summary, a version within the vault's
+    /// high water. Processed, it would erase the result here, be remembered as an erasure, and go out in this device's
+    /// next snapshot as a tombstone signed with the account key, wiping the result across the household. Naming a
+    /// revoked device as its carrier would take it past a shared vault's judge. The session signs the rows it writes,
+    /// bound to the vault and the device, so a row it did not write — unsigned, signed by another key, or its own row
+    /// of another vault — is refused, and the log is replayed instead; nothing in it is applied.
+    @Test("a stash row planted in the local sync state is never processed")
+    func plantedStashRow() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        let rows = try await f.a.store.records(in: f.vaultID, kind: .item)
+        let row = try #require(rows.first)
+        var stash = SyncStash()
+        stash.insert(
+            .init(
+                entry: UnknownSyncEntry(
+                    recordID: row.recordID, rawKind: EnvelopeKind.scanStatus.rawValue, keyID: SyncPayload.zeroUUID,
+                    version: row.version + 1, device: Self.deviceB, envelope: nil, erasure: [1, 2, 3]),
+                author: Self.deviceB))
+        let key = RecordKey(recordID: row.recordID, kind: .scanStatus)
+        let base = try #require(f.a.sync?.state)
+        let otherVault = UUID(uuidString: "0B0B0B0B-0000-4000-8000-00000000000B")!
+        let genuineElsewhere = try await AuthenticatedSyncState(base: InMemorySyncStateStore(), session: f.a.session)
+            .signedStash(stash.encoded(), vaultID: otherVault)
+        for planted in [stash.encoded(), Array(repeating: 0x5A, count: 64) + stash.encoded(), genuineElsewhere] {
+            try await base.saveStash(planted, vaultID: f.vaultID)
+            let report = try await f.a.session.sync()
+            #expect(report.unknownEntriesProcessed == 0, "a planted row was processed")
+            #expect(await (try? base.loadState(vaultID: f.vaultID))??.erasures[key] == nil)
+        }
+    }
+
     /// Threat: code that kept the sync adapter past a `lock()` (an engine mid-sync, a stray task) tries to use the
     /// keys. Every key operation goes back to the actor, which has zeroised them, and refuses.
     @Test("after lock, the sync adapter refuses every operation that needs a key")

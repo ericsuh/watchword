@@ -123,7 +123,8 @@ enum StashFixtures {
 
     /// A stash's encoding with one entry, as `SyncStash.encoded()` lays it out, for rows `encoded()` would never write.
     static func row(kind: UInt8, keyID: UUID, version: UInt64 = 1, flags: UInt8, body: [UInt8]) -> [UInt8] {
-        var out = Array("WWSK".utf8) + [1] + SyncPayload.littleEndian(UInt32(0)) + SyncPayload.littleEndian(UInt32(1))
+        var out = Array("WWSK".utf8) + [2] + SyncPayload.littleEndian(UInt64(0)) + SyncPayload.littleEndian(UInt32(0))
+        out += SyncPayload.littleEndian(UInt32(0)) + SyncPayload.littleEndian(UInt32(1))
         out += SyncPayload.bytes(SyncFixtures.deviceA) + SyncPayload.bytes(record) + [kind] + SyncPayload.bytes(keyID)
         out += SyncPayload.littleEndian(version) + SyncPayload.bytes(SyncFixtures.deviceA) + [flags]
         return out + SyncPayload.littleEndian(UInt32(body.count)) + body
@@ -176,9 +177,36 @@ struct SyncStashEncodingTests {
         #expect(throws: SyncFormatError.unknownFlags(3)) {
             try SyncStash.parse(StashFixtures.row(kind: 10, keyID: StashFixtures.key, flags: 3, body: [1]))
         }
-        var counted = Array("WWSK".utf8) + [1] + SyncPayload.littleEndian(UInt32(0))
-        counted += SyncPayload.littleEndian(UInt32.max)
+        var counted =
+            Array("WWSK".utf8) + [2] + SyncPayload.littleEndian(UInt64(0)) + SyncPayload.littleEndian(UInt32(0))
+        counted += SyncPayload.littleEndian(UInt32(0)) + SyncPayload.littleEndian(UInt32.max)
         #expect(throws: SyncFormatError.countTooLarge) { try SyncStash.parse(counted) }
+    }
+}
+
+extension SyncStashEncodingTests {
+    /// A row is in a file A8 can edit, and a quadratic parse of one crafted to put every entry in one slot took
+    /// minutes (N16): parsing is `n log n` whatever the slots, and a declared count over the caller's cap is refused
+    /// before a single entry is read.
+    @Test("a row of many entries in one slot parses in time, and one over the caps is refused from its header")
+    func hostileRowCost() throws {
+        var stash = SyncStash()
+        for version in 1...8192 {
+            stash.insert(
+                .init(
+                    entry: UnknownSyncEntry(
+                        recordID: StashFixtures.record, rawKind: 99, keyID: SyncPayload.zeroUUID,
+                        version: UInt64(version), device: SyncFixtures.deviceA, envelope: nil, erasure: [7]),
+                    author: SyncFixtures.deviceA))
+        }
+        let bytes = stash.encoded()
+        let clock = ContinuousClock()
+        let started = clock.now
+        let parsed = try SyncStash.parse(bytes)
+        #expect(clock.now - started < .seconds(5))
+        #expect(parsed == stash && parsed.count == 8192)
+        #expect(throws: SyncFormatError.countTooLarge) { try SyncStash.parse(bytes, maximumEntries: 4096) }
+        #expect(throws: SyncFormatError.countTooLarge) { try SyncStash.parse(bytes, maximumBytes: 1 << 10) }
     }
 }
 
@@ -323,6 +351,35 @@ struct SyncStateStoreContractTests {
                 "CREATE TRIGGER keep BEFORE DELETE ON pending_deletions BEGIN SELECT RAISE(IGNORE); END")
             raw.close()
             #expect(throws: RecordStoreError.unexpectedSchema("keep")) { _ = try SQLiteSyncStateStore(url: url) }
+        }
+
+        @Test("a version 1 database gains the stash table and keeps what it held")
+        func migratesFromVersion1() throws {
+            let url = StateStoreFixtures.temporaryURL()
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let directory = try SQLiteRecordStore.resolvingSymlinks(url.deletingLastPathComponent().path)
+            let path = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(url.lastPathComponent)
+            let raw = try SQLiteConnection(path: path.path)
+            for table in [
+                SQLiteSyncStateStore.stateTable, SQLiteSyncStateStore.stagedTable, SQLiteSyncStateStore.pendingTable,
+                SQLiteSyncStateStore.quarantineTable,
+            ] {
+                try raw.execute(table)
+            }
+            try raw.execute("PRAGMA user_version = 1")
+            raw.close()
+
+            let store = try SQLiteSyncStateStore(url: url)
+            try store.saveState(StateStoreFixtures.state())
+            #expect(try store.stash(vaultID: SyncFixtures.vault) == nil)
+            let bytes = StashFixtures.stash().encoded()
+            try store.saveStash(bytes, vaultID: SyncFixtures.vault)
+            let reopened = try SQLiteSyncStateStore(url: url)
+            #expect(try reopened.stash(vaultID: SyncFixtures.vault) == bytes)
+            #expect(try reopened.loadState(vaultID: SyncFixtures.vault) == StateStoreFixtures.state())
+            let version = try SQLiteConnection(path: path.path).query("PRAGMA user_version").first?.first
+            #expect(version == .integer(2))
         }
 
         @Test("a database from a newer schema is refused, not misread")

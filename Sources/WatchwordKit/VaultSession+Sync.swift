@@ -395,6 +395,49 @@ extension VaultSession {
         }
     }
 
+    // MARK: - The stash (ADR 0009)
+
+    /// `"WWST" ‖ vault ID ‖ device ID ‖ stash`: bound to the vault and to this device, under its own domain.
+    static func stashMessage(_ stash: [UInt8], vaultID: UUID, deviceID: UUID) -> [UInt8] {
+        func bytes(_ id: UUID) -> [UInt8] {
+            let u = id.uuid
+            return [u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7, u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15]
+        }
+        var message = Array("WWST".utf8)
+        message.append(contentsOf: bytes(vaultID))
+        message.append(contentsOf: bytes(deviceID))
+        message.append(contentsOf: stash)
+        return message
+    }
+
+    /// The row the state store keeps: `signatureLength u16 ‖ signature ‖ stash`.
+    func signStash(_ stash: [UInt8], vaultID: UUID) throws -> [UInt8] {
+        let (keys, record) = try syncKeys()
+        let signature = try keys.keyset.sign(
+            Self.stashMessage(stash, vaultID: vaultID, deviceID: record.deviceID), domain: .syncStash)
+        var row: [UInt8] = [
+            UInt8(truncatingIfNeeded: signature.count), UInt8(truncatingIfNeeded: signature.count >> 8),
+        ]
+        row.append(contentsOf: signature)
+        row.append(contentsOf: stash)
+        return row
+    }
+
+    /// The stash inside a row this session signed for `vaultID` on this device, or `nil`.
+    func verifiedStash(_ row: [UInt8], vaultID: UUID) async -> [UInt8]? {
+        var record = account
+        if record == nil { record = try? await loadAccount() }
+        guard row.count >= 2, let record, let signingKey = await trustedAccountSigningKey(record) else { return nil }
+        let length = Int(row[0]) | Int(row[1]) << 8
+        guard length <= SignedObject.maximumSignatureLength, row.count >= 2 + length else { return nil }
+        let signature = Array(row[2..<(2 + length)])
+        let stash = Array(row[(2 + length)...])
+        let message = Self.stashMessage(stash, vaultID: vaultID, deviceID: record.deviceID)
+        guard (try? Signatures.verify(signature, for: message, domain: .syncStash, signingKey: signingKey)) != nil
+        else { return nil }
+        return stash
+    }
+
     /// Copies the account's public signing key to the Keychain, for checking downloads while locked.
     func refreshSigningKey(account: AccountRecord, keys: UnlockedKeys) async throws {
         var signingKey = try keys.keyset.publicKeyBundle().signingKey
@@ -455,12 +498,21 @@ struct AuthenticatedSyncState: SyncStateStore {
         try await base.discardQuarantined(entries, vaultID: vaultID)
     }
 
+    /// The stash as the session signed it, or `[]` (which the engine refuses, and replays the log for) when the row
+    /// is not one this session wrote for this vault on this device. Checked with the Keychain's copy of the account
+    /// key while locked, as downloads are.
     func stash(vaultID: UUID) async throws -> [UInt8]? {
-        try await base.stash(vaultID: vaultID)
+        guard let row = try await base.stash(vaultID: vaultID) else { return nil }
+        return await session.verifiedStash(row, vaultID: vaultID) ?? []
     }
 
+    /// Signs the stash with the account key before it is stored; throws `SyncKeyringError.locked` while locked.
     func saveStash(_ bytes: [UInt8], vaultID: UUID) async throws {
-        try await base.saveStash(bytes, vaultID: vaultID)
+        try await base.saveStash(try await signedStash(bytes, vaultID: vaultID), vaultID: vaultID)
+    }
+
+    func signedStash(_ bytes: [UInt8], vaultID: UUID) async throws -> [UInt8] {
+        try await session.signStash(bytes, vaultID: vaultID)
     }
 
     func eraseAll() async throws {

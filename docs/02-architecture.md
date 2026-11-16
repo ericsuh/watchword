@@ -572,7 +572,14 @@ of the signing key with the other Keychain items. A pending deletion is the one 
 than rebuilds — it becomes a tombstone that erases the record everywhere — so the session reaches the store through
 `AuthenticatedSyncState`: each deletion it commits is signed with the account key (`SignatureDomain.pendingDeletion`,
 over every field and the deleted row's envelope), and a pending deletion that is not this device's, or does not verify,
-is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing. This holds per
+is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing. The stash of entries an
+earlier version cannot read (ADR 0009) is signed the same way (`SignatureDomain.syncStash`, bound to the vault, the
+device and the state's stash generation), because a kept deletion processed after an update would otherwise erase a
+record here and go out in this device's next snapshot; a row that does not verify is refused and the log replayed.
+The file is at schema version 2 (the stash's table, migrated from version 1 when it is opened); an older app finds
+version 2, throws `unsupportedSchemaVersion` rather than misread it, deletes nothing and syncs nothing until it is
+updated again. Downgrading is not supported, and the file is never thrown away to allow it: it holds pending deletions
+and the quarantine, which no replay rebuilds. This holds per
 vault: a pending deletion counts only for the vault it is filed under.
 
 **App.** Settings has Sync Now and the last report in words; a list row with conflicting values shows a badge, and

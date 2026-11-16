@@ -82,9 +82,10 @@ extension AdversarialSyncTests {
     /// Threat: an insider device (or A4), with the vault key and a trusted signing key, floods its stream with
     /// entries of an ignorable kind no version reads (raw 99), to fill other devices' storage, stall their streams,
     /// or crowd out honest results. A1 cannot do this at all: every entry is inside a signed, sealed segment. The stash
-    /// stops at its cap; past it entries are dropped and the kind recorded; every stream still merges (the flooder's
-    /// own items included); the device writes no snapshot that could cover what it dropped; honest results it dropped
-    /// come back from the log once it reads their kind, and the flood never makes it replay twice.
+    /// stops at the flooder's own share of its cap; past it the flooder's entries are dropped and the kind recorded
+    /// against it; every stream still merges (the flooder's own items included); honest results keep their room and are
+    /// processed after an update without a download; the device writes no snapshot that could cover what it dropped,
+    /// and the flood never makes it replay.
     @Test("flooding ignorable unknown entries hits the cap without stalling or losing honest data")
     func flood() async throws {
         let f = try await Self.fixture()
@@ -126,6 +127,8 @@ extension AdversarialSyncTests {
         func tune(_ configuration: inout SyncConfiguration) {
             configuration.maximumStashedEntries = 16
             configuration.maximumStashedBytes = 6 << 10
+            // The flooder's own share is half the vault's: honest results keep their room (N17).
+            configuration.maximumStashedEntriesPerAuthor = 8
         }
         var earlierConfiguration = SyncTestClient.configuration
         tune(&earlierConfiguration)
@@ -149,8 +152,7 @@ extension AdversarialSyncTests {
 
         // Updated to read scan results: the honest ones are all there, the flood is still capped, and the replay
         // it needed is not repeated on the next sync.
-        laterConfiguration.maximumStashedEntries = 16
-        laterConfiguration.maximumStashedBytes = 6 << 10
+        tune(&laterConfiguration)
         let upgraded = SyncTestClient(
             deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
             configuration: laterConfiguration, store: store, syncState: state, opaqueKinds: later)
@@ -265,8 +267,10 @@ extension AdversarialSyncTests {
         try await f.writer.sync()
         let reader = await f.reader()
         try await reader.sync()
-        var planted =
-            Array("WWSK".utf8) + [1] + SyncPayload.littleEndian(UInt32(0)) + SyncPayload.littleEndian(UInt32(1))
+        // The current layout and the generation the state names (none saved yet): only the kind is wrong.
+        var planted = Array("WWSK".utf8) + [2] + SyncPayload.littleEndian(UInt64(0))
+        planted += SyncPayload.littleEndian(UInt32(0)) + SyncPayload.littleEndian(UInt32(0))
+        planted += SyncPayload.littleEndian(UInt32(1))
         planted += SyncPayload.bytes(Self.a) + SyncPayload.bytes(item.id) + [EnvelopeKind.item.rawValue]
         planted += SyncPayload.bytes(SyncPayload.zeroUUID) + SyncPayload.littleEndian(UInt64(1 << 40))
         planted += SyncPayload.bytes(Self.a) + [1] + SyncPayload.littleEndian(UInt32(0))
