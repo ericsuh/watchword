@@ -284,14 +284,16 @@ interrupted by `lock()`). The integration's review (`06-adversarial-review.md` Â
 through stamps a writer chooses, the vault's description and erasures; values are now judged by their bytes against
 the segment that carried them, descriptions by the write that chose them, and a replay rebuilds erasures. Key IDs
 another vault holds are refused, member registries are anchored per vault, and a replay that is asked for is written
-down.
+down. Note-line removals, discards and history entries name the write that made them and are judged like values
+(S32, S43), and a version whose clock holds an edit outside a cut is held aside with it (S44), as is one claiming
+edits a current member has not published (S46) and a tombstone whose erasure summary does either (S45).
 
 **Still open:**
 
 - A macOS run of all of it against CryptoKit, and of `SQLiteSharingStore` at all.
 - Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself.
-- Note-line removals, an item's `history` and its `discards` are not attributed to a writer (S32, S43), which needs
-  stamps in the merge's model.
+- An erasure summary claims what a late writer had seen when the deleting device had merged its version (S45), and a
+  late version's claims about current members' future edits are carried on (S46).
 - A member invited after a demotion with no rotation since holds aside what only vouching could attribute (S42):
   rotate on demotion, or before inviting, when the UI is built.
 - The transports' own sharing: `CKShare` with `UICloudSharingController`/`NSSharingService`, the folder-share flow

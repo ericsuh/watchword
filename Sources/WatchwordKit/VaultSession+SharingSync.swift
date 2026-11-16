@@ -78,6 +78,8 @@ extension VaultSession {
             } else {
                 vault.needsReconcile = false
                 vault.index.judgedHead = vault.ledger.state.hash.bytes
+                // What the replay did not rebuild is held aside whole: gone from the vault, for the hygiene engine too.
+                hygieneRuntime?.takenOut = []
             }
             vault.indexChanged = true
             sharing.vaults[vaultID] = vault
@@ -365,6 +367,20 @@ extension VaultSession {
             requestReplay(location.vaultID)
         }
         if vault.index.awaiting.contains(location.author) { requestReplay(location.vaultID) }
+        // This device's own deletion, made on a copy that held a late write before it was shown the record that ended
+        // the writer's permission, and published since: it erased here what the summary claimed, and a replay, which
+        // holds it aside (S45), puts back what it should not have erased.
+        if location.author == account.deviceID,
+            let header = try? EnvelopeHeader.parse(envelope, expecting: location.envelopeKind)
+        {
+            for entry in entries where entry.isDeletion {
+                guard
+                    (try? await judgeAdmitsErasure(entry, in: location, sealedUnder: header.header.keyID)) == false
+                else { continue }
+                requestReplay(location.vaultID)
+                break
+            }
+        }
     }
 
     /// The values `entry` carries that are its author's own work: of a version, those whose stamp names the author;
@@ -424,6 +440,9 @@ extension VaultSession {
     ///   segment in hand) and the accounts listing the device may have written it; otherwise it is held aside until
     ///   that device's stream shows it (`SharedStreamIndex.awaiting`).
     ///
+    /// Note-line removals, discards and history entries are values like the rest, each naming its writer (S32, S43).
+    /// Last, every edit the version's clock says it contains must count (`knowledgeCounts`, S44).
+    ///
     /// A version that does not open here cannot be judged and is held aside; receiving its key replays the log.
     func judgeAdmits(_ record: StoredRecord) async throws -> Bool {
         guard sharing.vaults[record.vaultID] != nil else { return true }
@@ -467,9 +486,92 @@ extension VaultSession {
             if !accounts.isEmpty { awaited.insert(value.device) }
             admitted = false
         }
+        if admitted, record.kind == .item, let item = try? openItem(record, keys: keys) {
+            admitted = Self.knowledgeCounts(
+                ItemMerge.effectiveClock(item, origin: Self.origin(record)),
+                of: VersionKey(recordID: record.recordID, kind: record.kind.rawValue, version: record.version),
+                author: record.deviceID, judgedBy: account.deviceID, in: vault, vouched: vouched, listing: listing,
+                awaited: &awaited)
+        }
         if let known = sharing.vaults[record.vaultID]?.index.awaiting, !awaited.isSubset(of: known) {
             sharing.vaults[record.vaultID]?.index.awaiting.formUnion(awaited)
             sharing.vaults[record.vaultID]?.indexChanged = true
+        }
+        return admitted
+    }
+
+    /// Whether every edit a version's clock says it contains counts (review findings S44 and S46): a version built on
+    /// a write that does not count holds what that write had seen, and an edit made on it supersedes values its writer
+    /// was shown only through that write. So for each device in the clock (`ItemMerge.effectiveClock`, which covers
+    /// every stamp's `seen`) other than the version's own author, a segment of that device's stream that counts must
+    /// have carried a version of the record at or above the clock's count: the edits claimed were published, inside
+    /// the cut for an account whose permission to write ended (S44).
+    ///
+    /// That holds for a current member's edits too (S46): a claim to have seen edits their device has not published
+    /// yet is a claim about edits that do not exist, and it would supersede them when they are made, concurrent as
+    /// they are. Until that device's stream carries them the version waits (`awaited`); a claim about this device's
+    /// own edits beyond what it published is refused at once, since it knows what it wrote. A device whose stream this
+    /// device cannot read from its first segment (collected before the vault was shared, or sealed under keys this
+    /// account was never given) cannot be checked, and a current member's edits there are believed as before; a
+    /// version that vouches (S42) vouches for these as for its values. A device no account lists names nobody's work
+    /// and is passed over.
+    static func knowledgeCounts(
+        _ clock: VersionVector, of record: VersionKey, author: UUID, judgedBy me: UUID, in vault: SharedVault,
+        vouched: Bool, listing: (UUID) -> [UUID], awaited: inout Set<UUID>
+    ) -> Bool {
+        for (device, count) in clock.entries where device != author {
+            let accounts = listing(device)
+            guard !accounts.isEmpty else { continue }
+            let carriers = (vault.index.firstCarrier[device] ?? [:]).filter {
+                $0.key.recordID == record.recordID && $0.key.kind == record.kind && $0.key.version >= count
+            }
+            if carriers.contains(where: { Self.segmentCounts(device, sequence: $0.value, in: vault) }) { continue }
+            if accounts.allSatisfy({ vault.ledger.writeStanding(of: $0) == .mayWrite }) {
+                if vouched || vault.index.segment(device: device, sequence: 1) == nil { continue }
+                if device != me { awaited.insert(device) }
+                return false
+            }
+            if carriers.isEmpty {
+                if vouched, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) { continue }
+                awaited.insert(device)
+            }
+            return false
+        }
+        return true
+    }
+
+    /// Whether a permanent deletion's erasure summary counts (review finding S45): every edit its author says it had
+    /// seen is judged as a version's clock is (`knowledgeCounts`). A device that merged a late write and then deleted
+    /// the item claims what the late writer had seen, and would erase an honest version it was shown only through that
+    /// write; a deletion built on a late write is held aside like a version built on one, and the item it would have
+    /// erased stays. Only items' tombstones carry such a summary.
+    func judgeAdmitsErasure(_ entry: SyncEntry, in location: SyncObjectLocation, sealedUnder keyID: UUID) async throws
+        -> Bool
+    {
+        guard entry.kind == .item, sharing.vaults[location.vaultID] != nil else { return true }
+        guard let account = try await loadAccount() else { return false }
+        let ownView = try? await registry(account)
+        guard let vault = sharing.vaults[location.vaultID] else { return true }
+        let listing = { (device: UUID) in
+            self.accountsListing(device, in: location.vaultID, ownView: ownView, account: account)
+        }
+        let vouched = Self.vouchesForUncarriedValues(sealedUnder: keyID, in: vault, account: account.accountID)
+        var awaited: Set<UUID> = []
+        var admitted = true
+        let key = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
+        for erasure in ItemErasures(summary: entry.erasure).elements where erasure != .void {
+            guard
+                Self.knowledgeCounts(
+                    erasure.seen, of: key, author: entry.device, judgedBy: account.deviceID, in: vault,
+                    vouched: vouched, listing: listing, awaited: &awaited)
+            else {
+                admitted = false
+                break
+            }
+        }
+        if let known = sharing.vaults[location.vaultID]?.index.awaiting, !awaited.isSubset(of: known) {
+            sharing.vaults[location.vaultID]?.index.awaiting.formUnion(awaited)
+            sharing.vaults[location.vaultID]?.indexChanged = true
         }
         return admitted
     }
@@ -544,8 +646,14 @@ extension VaultSession {
     /// write. Its sealer held that record and every earlier segment. A device that holds every key never vouches:
     /// what it has not seen in its writer's stream waits for it (S36; S42 for what this leaves).
     static func vouchesForUncarriedValues(_ record: StoredRecord, in vault: SharedVault, account: UUID) -> Bool {
+        vouchesForUncarriedValues(sealedUnder: record.keyID, in: vault, account: account)
+    }
+
+    /// `vouchesForUncarriedValues(_:in:account:)` for whatever was sealed under `keyID`: a version, or the segment
+    /// carrying a tombstone.
+    static func vouchesForUncarriedValues(sealedUnder keyID: UUID, in vault: SharedVault, account: UUID) -> Bool {
         let ledger = vault.ledger
-        guard let sealed = ledger.keyEpoch(of: record.keyID) else { return false }
+        guard let sealed = ledger.keyEpoch(of: keyID) else { return false }
         let keyIDs = Set(ledger.chain.map(\.state.vaultKeyID))
         let passesOverSome = keyIDs.contains { keyID in
             if case SharingError.notEntitledToKey? = error(of: { try ledger.grantSender(forKey: keyID, to: account) }) {
@@ -626,6 +734,8 @@ extension VaultSession {
                 try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
                 // The engine's store, not the session's writer: this is not a deletion to publish.
                 try await store.commit(StoreChange(conditionalDeletions: [row.key: row.version]))
+                // Not deleted, to be rebuilt by the replay: the hygiene engine keeps what it knows of it (S47).
+                if kind == .item { hygieneRuntime?.takenOut.insert(row.recordID) }
             }
         }
         sharing.vaults[vaultID]?.needsReconcile = true
@@ -665,6 +775,12 @@ extension VaultSyncAdapter: WriteJudge {
 
     func admits(_ record: StoredRecord) async throws -> Bool {
         try await session.judgeAdmits(record)
+    }
+
+    func admitsErasure(_ entry: SyncEntry, in location: SyncObjectLocation, sealedUnder keyID: UUID) async throws
+        -> Bool
+    {
+        try await session.judgeAdmitsErasure(entry, in: location, sealedUnder: keyID)
     }
 
     func passesOverSegment(sealedUnder keyID: UUID, vaultID: UUID) async -> Bool {

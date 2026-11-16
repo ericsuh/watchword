@@ -409,7 +409,10 @@ validly signed segment), and acknowledgement and coverage values must be plausib
   of the fields is a last-writer-wins register of its own (`Item.fieldOrder`, stored, so a field removed and brought
   back returns to its place); it holds no field's contents, so of two concurrent reorders the later stands. A
   resolution records what the person had before them (`Item.discards`), so the values it discards stay discarded
-  when a copy that still holds them is merged in. The merge is a join — commutative, associative and idempotent, so
+  when a copy that still holds them is merged in. Every part names the write that made it — a line's removal
+  (`NoteLine.removedBy`), a history entry (`ItemHistoryEntry.writtenBy`) and a discard (`ItemDiscard`) as values do
+  by their stamps — which is what lets a shared vault's judge tell a late write's work from anyone else's (§8.10;
+  review findings S32, S43); one that names none is read as the work of the row carrying it. The merge is a join — commutative, associative and idempotent, so
   the same versions in any order, grouping and number give the same item — and every edit contains the version it was
   made on: an item is a state-based CRDT. `10-sync-correctness.md` states the model and the argument, component by
   component, and how it is checked (random histories, every small history, and arbitrary metadata). The merger
@@ -1359,7 +1362,9 @@ has not been run.
 proposed and has not seen adopted, and a **stream index** (`SharedStreamIndex`): for every segment of every device's
 stream in the vault, the digest of the object (SHA-256 of its name and envelope), the account whose keys signed it,
 the record versions it carried, and the digest of every value it carried that its stream had not carried before and
-whose stamp names that stream's device (format 2, S36); and the devices a version is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
+whose stamp names that stream's device (format 2, S36; format 3 since note-line removals, discards and history
+entries are values too, S32 and S43, so an older index is refused and rebuilt by a replay); and the devices a version
+is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
 account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
 account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
 anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Pins live behind `VerifiedContactStore`.
@@ -1413,9 +1418,21 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   checked yet (the stream is not all here) makes the stream wait, as at a gap.
 - *Applied to work.* Every remote version, from a segment or a snapshot and whoever sealed it, is admitted only if
   its own revision counts (the segment of its writer's stream that first carried it, for the account that signed
-  that segment) and every value it holds counts: each group's values, kept and retained values, the field order and
-  each note line, read through `ItemMerge.canonical`, and the vault's description, attributed to the write that chose
-  it (`VaultMetadata.writtenBy`, kept by every re-seal, S37). A value is judged by its **bytes, stamp included**
+  that segment) and every value it holds counts: each group's values, kept and retained values, the field order,
+  each note line, each removal of a line, each resolution's discard and each history entry once per write that
+  recorded it (S32, S43), read through `ItemMerge.canonical`, and the vault's description, attributed to the write that
+  chose it (`VaultMetadata.writtenBy`, kept by every re-seal, S37). A removal, discard or entry that names no writer is
+  the work of the row carrying it. And every edit the version's clock says it contains, of any device but its own
+  writer's, must have been published in a segment of that device's stream that counts (a version of the record at or
+  above that count, `knowledgeCounts`): a version built on a late write holds what that write had seen, and an edit
+  made on it supersedes what its writer was shown only through it, so it is held aside like the write (S44); and a
+  claim to have seen a current member's edits that their stream has not published is a claim about edits that do not
+  exist yet, which would supersede them when they are made, so the version waits for that stream (S46; one about this
+  device's own edits is refused). A current member's device whose stream this device cannot read from its first
+  segment is not checked. A tombstone is judged the same way before it is applied or remembered
+  (`WriteJudge.admitsErasure`): its erasure summary is its author's clock, and one built on a late write would erase
+  what its author was shown only through it, so it is held aside and the item stays (S45; `10-sync-correctness.md`
+  §9). A value is judged by its **bytes, stamp included**
   (`ItemMerge.attributedValues`), never by the revision its stamp names, which its writer chose (S36): it counts
   through a segment of the stream of the device its stamp names that carried those exact bytes, if that segment
   counts (its signer may write, or it is inside the cut). A value naming this device that none of its segments
@@ -1455,10 +1472,8 @@ the ledger holds it in `laterFormatRecords` (§8.8 step 1): one that arrives bef
 chain once that record is here. Tests: "Vault session: a shared vault in a later format", and
 `laterFormatBeforeItsParent` and `laterFormatImpostorsThroughTheSession` in "shared vaults through the session".
 
-**Limits** (also `06-adversarial-review.md` §I, S32 to S35 and S42, S43):
+**Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46):
 
-- A note line's removal carries no revision, so a former member's late removal of a line, merged by a device before it
-  knew and published in that device's own version, is not told apart from the device's own (S32).
 - A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
   through vouching count only while every listing account's work can count (S33, insider denial of service like S11).
 - Vouching is for a member who joined after a rotation, and only under a key introduced at or after the latest record
@@ -1466,8 +1481,10 @@ chain once that record is here. Tests: "Vault session: a shared vault in a later
   values from before the last rotation until the next one seals them again, and a store withholding one device's
   stream from another delays every version carrying that device's values there (S42). Rotate after a demotion before
   inviting.
-- An item's `history` and `discards` name no writer, so a former member's late discard, merged by a device before it
-  knew, removes retained values (values already superseded by an edit) from that device's copy (S43, beside S32).
+- A permanent deletion's erasure summary is the deleting device's clock, and tombstones are judged by their segment
+  only: a device that merged a late version and then deleted the item claims what the late writer had seen (S45). A
+  late version's vectors can claim edits of a current member that do not exist yet, which a device merging it carries
+  on (S46). Both tracked, neither reproduced.
 - A member who joined after a rotation reads records sealed before it only once a device that holds the old key has
   sealed them again (rotation does so for every record a member who may write holds), and a version of a shared vault
   that does not open here is held aside, not merged (S34).

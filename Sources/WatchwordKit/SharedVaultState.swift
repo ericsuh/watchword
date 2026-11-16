@@ -43,7 +43,10 @@ struct SharedStreamIndex: Sendable, Hashable {
     }
 
     static let magic: [UInt8] = Array("WWSI".utf8)
-    static let formatVersion: UInt8 = 2
+    /// 3 since note-line removals, discards and history entries became attributable values (review findings S32,
+    /// S43): an index of an earlier format filed none of them, so it is refused on load and rebuilt from the log by a
+    /// replay, which files them, before anything is judged against it.
+    static let formatVersion: UInt8 = 3
     static let maximumLength = 64 << 20
 
     /// By device, then sequence number.

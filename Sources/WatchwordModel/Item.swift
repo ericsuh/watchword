@@ -50,10 +50,11 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
     /// brought back by a later merge returns to its place. `nil` on items written before the order was stored, where
     /// the order of `fields` stands in.
     public var fieldOrder: [UUID]?
-    /// Per group, what a person had before them when they resolved a conflict there (`ItemMerge.resolve`): values
-    /// retained for the group and written by a revision this vector contains were discarded by that choice, and stay
-    /// discarded when a copy that still holds them is merged in (PRD F7.7).
-    public var discards: [ItemGroup: VersionVector]
+    /// Per group, every resolution of a conflict there (`ItemMerge.resolve`) and what the person had before them:
+    /// values retained for the group and written by a revision one of these vectors contains were discarded by that
+    /// choice, and stay discarded when a copy that still holds them is merged in (PRD F7.7). Each names the
+    /// resolution that wrote it (review finding S43).
+    public var discards: [ItemGroup: [ItemDiscard]]
 
     public init(
         id: UUID = UUID(),
@@ -77,7 +78,7 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         clock: VersionVector = VersionVector(),
         noteLines: [NoteLine] = [],
         fieldOrder: [UUID]? = nil,
-        discards: [ItemGroup: VersionVector] = [:]
+        discards: [ItemGroup: [ItemDiscard]] = [:]
     ) {
         self.id = id
         self.vaultID = vaultID
@@ -133,7 +134,13 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         clock = try container.decodeIfPresent(VersionVector.self, forKey: .clock) ?? VersionVector()
         noteLines = try container.decodeIfPresent([NoteLine].self, forKey: .noteLines) ?? []
         fieldOrder = try container.decodeIfPresent([UUID].self, forKey: .fieldOrder)
-        discards = try container.decodeIfPresent([ItemGroup: VersionVector].self, forKey: .discards) ?? [:]
+        if let stamped = try? container.decodeIfPresent([ItemGroup: [ItemDiscard]].self, forKey: .discards) {
+            discards = stamped
+        } else {
+            // The first form: one vector per group, naming no resolution.
+            let vectors = try container.decodeIfPresent([ItemGroup: VersionVector].self, forKey: .discards) ?? [:]
+            discards = vectors.mapValues { [ItemDiscard(revision: nil, seen: $0)] }
+        }
     }
 
     /// The first field of a given kind, if any.
@@ -202,10 +209,38 @@ public struct ItemHistoryEntry: Hashable, Codable, Sendable {
     /// The item version these fields belonged to.
     public var version: UInt64
     public var fields: [Field]
+    /// The edits that recorded the entry, in order (usually one): an entry is a write like any other, and names its
+    /// writer so that a shared vault's judge can tell whose it is (docs/02-architecture.md §8.10, review finding S43).
+    /// Set by the vault on save (`ItemMerge.stamped`), never by the caller. Empty on entries from before history named
+    /// a writer, which the merge reads as written by the record's own write.
+    public var writtenBy: [Revision]
 
-    public init(replacedAt: Date, version: UInt64, fields: [Field]) {
+    public init(replacedAt: Date, version: UInt64, fields: [Field], writtenBy: [Revision] = []) {
         self.replacedAt = replacedAt
         self.version = version
         self.fields = fields
+        self.writtenBy = writtenBy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case replacedAt, version, fields, writtenBy
+    }
+
+    /// Synthesised decoding, except that `writtenBy` may be absent: entries written before it existed still open.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        replacedAt = try container.decode(Date.self, forKey: .replacedAt)
+        version = try container.decode(UInt64.self, forKey: .version)
+        fields = try container.decode([Field].self, forKey: .fields)
+        writtenBy = try container.decodeIfPresent([Revision].self, forKey: .writtenBy) ?? []
+    }
+
+    /// Synthesised encoding, except that an empty `writtenBy` is left out, as it was before it existed.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(replacedAt, forKey: .replacedAt)
+        try container.encode(version, forKey: .version)
+        try container.encode(fields, forKey: .fields)
+        if !writtenBy.isEmpty { try container.encode(writtenBy, forKey: .writtenBy) }
     }
 }

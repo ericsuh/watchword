@@ -554,7 +554,19 @@ public actor SyncEngine {
                         continue
                     }
                     if waitsForJudge { break }
+                    let keyID = try EnvelopeHeader.parse(
+                        object.object.envelope, expecting: object.location.envelopeKind
+                    ).header.keyID
                     for entry in payload.entries {
+                        if entry.isDeletion, let judge,
+                            !(try await judge.admitsErasure(entry, in: object.location, sealedUnder: keyID))
+                        {
+                            // What its author had seen does not all count (review finding S45): kept for the person,
+                            // never applied, and judged again by a replay.
+                            report.heldAside.append(entry.key)
+                            try await syncState.quarantine(entry, vaultID: vaultID)
+                            continue
+                        }
                         try await apply(
                             entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
                             highWater: &highWater, report: &report)
@@ -744,6 +756,16 @@ public actor SyncEngine {
                 continue
             }
             let entry = stashed.known(as: kind)
+            if entry.isDeletion, judge != nil {
+                // A shared vault judges a tombstone by the segment that carried it (`admitsErasure`, S45), and a kept
+                // one has no segment left to judge it by: processed here, it is a revoked device's (its other kept
+                // entries wait for the replay). Held aside, as one not admitted would be: the record stays.
+                report.heldAside.append(entry.key)
+                try await syncState.quarantine(entry, vaultID: vaultID)
+                stash.remove(kept)
+                report.unknownEntriesProcessed += 1
+                continue
+            }
             do {
                 if let envelope = entry.envelope {
                     let context = EnvelopeContext(

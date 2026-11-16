@@ -64,6 +64,9 @@ public enum HygieneStep: Sendable, Hashable {
 struct HygieneRuntime {
     struct Known: Hashable {
         var version: UInt64
+        /// The device that wrote the row, where it is known: a shared vault that takes out a version that no longer
+        /// counts can rebuild the item at the same version, written by another device (§8.10).
+        var device: UUID? = nil
         var inDeletedVault: Bool
         /// The version of the item's scan-status row the engine's evidence was matched from (§13.9); `nil` for none.
         var scanVersion: UInt64? = nil
@@ -81,6 +84,9 @@ struct HygieneRuntime {
     var readyEpoch: UInt64?
     /// What the engine was last shown of each item, so a reconcile decrypts only what changed.
     var known: [UUID: Known] = [:]
+    /// Items whose row a shared vault took out to rebuild it (`takeOutWhatNoLongerCounts`), until the replay that
+    /// rebuilds them has run: absent from the store meanwhile, but not deleted, so a reconcile must not forget them.
+    var takenOut: Set<UUID> = []
 }
 
 /// The prefix cache the engine's client uses: sealed records in the device-local store, read and written only
@@ -352,8 +358,9 @@ extension VaultSession {
         for row in rows {
             seen.insert(row.recordID)
             let scanRow = scanRows[row.recordID].flatMap { $0.vaultID == row.vaultID ? $0 : nil }
+            hygieneRuntime?.takenOut.remove(row.recordID)
             let now = HygieneRuntime.Known(
-                version: row.version, inDeletedVault: directory[row.vaultID]?.isDeleted ?? false,
+                version: row.version, device: row.deviceID, inDeletedVault: directory[row.vaultID]?.isDeleted ?? false,
                 scanVersion: scanRow?.version)
             guard known[row.recordID] != now, let item = try? openItem(row, keys: keys) else { continue }
             // Only the results changed: the engine keeps its analysis and takes the new evidence.
@@ -361,7 +368,8 @@ extension VaultSession {
             changed.append(
                 (presented, now, scanEvidence(for: presented, row: scanRow, keys: keys, deviceID: deviceID)))
         }
-        let gone = Set(known.keys).subtracting(seen)
+        // An item taken out to be rebuilt is not gone: forgetting it would forget its breaches (review finding S47).
+        let gone = Set(known.keys).subtracting(seen).subtracting(hygieneRuntime?.takenOut ?? [])
         for id in gone {
             await engine.remove(id)
             guard epoch == lockEpoch else { return }
@@ -371,8 +379,21 @@ extension VaultSession {
         guard epoch == lockEpoch else { return }
         for (item, state, evidence) in changed {
             let previous = hygieneRuntime?.known[item.id]
-            if previous?.version != state.version || previous?.inDeletedVault != state.inDeletedVault {
-                guard (try? await engine.update(item)) != nil, epoch == lockEpoch else { return }
+            if previous?.version != state.version || previous?.device != state.device
+                || previous?.inDeletedVault != state.inDeletedVault
+            {
+                // A row that replaces the one the engine saw without being newer is the item rebuilt by a shared
+                // vault's take-out (S47): the engine would refuse it as a stale copy, and go on analysing a version
+                // the vault no longer holds.
+                let rebuilt = previous.map { previous in
+                    state.version < previous.version
+                        || (state.version == previous.version && previous.device.map { $0 != state.device } == true)
+                }
+                if rebuilt == true {
+                    guard (try? await engine.replace(item)) != nil, epoch == lockEpoch else { return }
+                } else {
+                    guard (try? await engine.update(item)) != nil, epoch == lockEpoch else { return }
+                }
             }
             guard (try? await engine.updateSynced(evidence, now: now)) != nil, epoch == lockEpoch else { return }
             hygieneRuntime?.known[item.id] = state
@@ -386,7 +407,8 @@ extension VaultSession {
         let epoch = lockEpoch
         guard let engine = hygieneRuntime?.engine, hygieneRuntime?.readyEpoch == epoch else { return }
         guard (try? await engine.update(item)) != nil, epoch == lockEpoch else { return }
-        hygieneRuntime?.known[item.id] = HygieneRuntime.Known(version: item.version, inDeletedVault: false)
+        hygieneRuntime?.known[item.id] = HygieneRuntime.Known(
+            version: item.version, device: account?.deviceID, inDeletedVault: false)
         guard let scanRow = try? await scanStatusRow(for: item), let account = try? await loadAccount() else { return }
         let now = await clock.now()
         guard epoch == lockEpoch, let keys else { return }

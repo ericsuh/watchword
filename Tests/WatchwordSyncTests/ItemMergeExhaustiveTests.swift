@@ -193,6 +193,12 @@ struct LongRunningItemMergeExhaustiveTests {
     /// the step so that counts repeat, so two histories that insert the same line at the same revision by different
     /// paths store two versions where they stored one. On the old exploration that alone added two versions (and the
     /// pairs and triples they form) to three starting points; drawing a constant nonce gives the old totals exactly.
+    /// Then S43: a history entry names the writes that recorded it, so where two histories record the same entry (the
+    /// same time, version and fields, which the exploration's clock gives two devices in two branches) from different
+    /// devices and reach otherwise equal items, they store two versions where they stored one: eight more versions
+    /// in "three devices" and eighteen in "two devices" (388 there in the nightly run), with the pairs and triples
+    /// they form, every other count the same; with the writers stripped, each extra version of the standard run
+    /// equals one the old exploration stored.
     static func check(
         _ start: MergeModel, alphabet: [MergeModel.Operation], depth: Int, expecting expected: Totals,
         sourceLocation: SourceLocation = #_sourceLocation
@@ -224,10 +230,10 @@ struct LongRunningItemMergeExhaustiveTests {
             expecting: TestEnvironment.isLongRun
                 ? Totals(
                     histories: 121733, conflicts: 25568, resolutions: 64, erased: 694, kept: 2414,
-                    versions: 29193, pairs: 231687, triples: 853571)
+                    versions: 29581, pairs: 232569, triples: 855053)
                 : Totals(
-                    histories: 6569, conflicts: 792, resolutions: 0, erased: 42, kept: 54, versions: 2201,
-                    pairs: 12559, triples: 36741))
+                    histories: 6569, conflicts: 792, resolutions: 0, erased: 42, kept: 54, versions: 2219,
+                    pairs: 12595, triples: 36795))
     }
 
     @Test("two devices that already disagree about one field, every history from there")
@@ -300,7 +306,7 @@ struct LongRunningItemMergeExhaustiveTests {
         Self.check(
             start, alphabet: [.setField, .removeField, .restore, .resolve, .delete], depth: 3,
             expecting: Totals(
-                histories: 5731, conflicts: 1664, resolutions: 0, erased: 226, kept: 1080, versions: 888,
-                pairs: 6139, triples: 21968))
+                histories: 5731, conflicts: 1664, resolutions: 0, erased: 226, kept: 1080, versions: 896,
+                pairs: 6163, triples: 22016))
     }
 }

@@ -102,7 +102,7 @@ struct AdversarialItemMergeTests {
         hostile.retainedValues = [
             ConflictingValue(stamp: Self.stamp(.max, Self.insider, seen: everything), value: .title("Kept"))
         ]
-        hostile.discards[.title] = VersionVector(everything)
+        hostile.discards[.title] = [ItemDiscard(revision: nil, seen: VersionVector(everything))]
         hostile.noteLines.append(
             NoteLine(
                 id: NoteLine.ID(revision: Revision(version: .max, device: Self.honest), index: .max),
@@ -258,7 +258,9 @@ struct AdversarialItemMergeTests {
         ]
         hostile.revisions[ItemGroup(rawValue: "nonsense")] = stamp
         hostile.retainedValues = [ConflictingValue(stamp: stamp, value: .field(nil))]
-        hostile.discards[ItemGroup(rawValue: "zzz")] = VersionVector([Self.honest: 2])
+        hostile.discards[ItemGroup(rawValue: "zzz")] = [
+            ItemDiscard(revision: nil, seen: VersionVector([Self.honest: 2]))
+        ]
 
         for merged in [Self.merge(honest, hostile), Self.merge(hostile, honest)] {
             #expect(merged.title == "Honest rename")
@@ -531,8 +533,17 @@ struct AdversarialItemMergeTests {
                     ItemMerge.sameState(keptBoth, Self.merge(keptA, keptB)),
                     "\(context): settling does not commute with merging")
             }
-            #expect(Set(merged.history).isSuperset(of: mine.history), "\(context): history shortened")
-            let removed = Set(hostile.noteLines.filter(\.removed).map(\.id))
+            // Every entry kept, and every write that recorded it (S43): an entry gains writers, never loses one.
+            var writers: [ItemHistoryEntry: Set<Revision>] = [:]
+            for entry in merged.history {
+                writers[ItemState.content(of: entry), default: []].formUnion(entry.writtenBy)
+            }
+            for entry in mine.history {
+                #expect(
+                    writers[ItemState.content(of: entry)]?.isSuperset(of: entry.writtenBy) == true,
+                    "\(context): history shortened")
+            }
+            let removed = Set(hostile.noteLines.filter { $0.removed || !$0.removedBy.isEmpty }.map(\.id))
             let visible = Set(NoteText.lines(of: merged.notes))
             for line in mine.noteLines where !line.removed && !removed.contains(line.id) {
                 #expect(visible.contains(line.text), "\(context): a note line was dropped that nothing removed")
@@ -663,7 +674,12 @@ struct AdversarialItemMergeTests {
                     }
                     return planted
                 }
-            case 3: item.discards[group] = vector(&generator)
+            case 3:
+                // Discards that name a writer or none, several to a group as often as not (S43).
+                item.discards[group] = (0..<Int.random(in: 1...3, using: &generator)).map { _ in
+                    ItemDiscard(
+                        revision: Bool.random(using: &generator) ? revision(&generator) : nil, seen: vector(&generator))
+                }
             default: break
             }
         }
@@ -691,7 +707,10 @@ struct AdversarialItemMergeTests {
                     after: Bool.random(using: &generator)
                         ? ids.randomElement(using: &generator)! : item.noteLines.randomElement(using: &generator)?.id,
                     text: (["x", "y", "x\ny", ""] + words).randomElement(using: &generator)!,
-                    removed: Int.random(in: 0..<4, using: &generator) == 0)
+                    removed: Int.random(in: 0..<4, using: &generator) == 0,
+                    // Removals that name writers, on removed lines and on shown ones (S32).
+                    removedBy: Int.random(in: 0..<4, using: &generator) == 0
+                        ? (0..<Int.random(in: 1...2, using: &generator)).map { _ in revision(&generator) } : [])
             }
             if Bool.random(using: &generator) { item.noteLines.shuffle(using: &generator) }
             if Int.random(in: 0..<4, using: &generator) == 0 { item.notes = "claimed, not what the lines say" }
@@ -700,7 +719,13 @@ struct AdversarialItemMergeTests {
             item.history.append(
                 ItemHistoryEntry(
                     replacedAt: Date(timeIntervalSince1970: Double(Int.random(in: 0..<3, using: &generator))),
-                    version: counts.randomElement(using: &generator)!, fields: [field(&generator)]))
+                    version: counts.randomElement(using: &generator)!, fields: [field(&generator)],
+                    writtenBy: (0..<Int.random(in: 0...2, using: &generator)).map { _ in revision(&generator) }))
+            // The same entry again, naming other writers, as often as not.
+            if Bool.random(using: &generator), var copy = item.history.last {
+                copy.writtenBy = [revision(&generator)]
+                item.history.append(copy)
+            }
         }
         return item
     }

@@ -270,7 +270,10 @@ lists what is open (file protection and the screens, Credential Exchange, restor
   calling `lock()`, never after.
 - **Stale copies are refused.** The engine remembers the highest version of each item it has seen; an older copy
   (or one from before a trash or deletion) changes nothing: `update` returns `false`, `scan` returns `.stale`. A
-  scan whose item changed while its requests were in flight records nothing.
+  scan whose item changed while its requests were in flight records nothing. The one way past it is `replace`, for a
+  row the store holds in place of the one shown without being newer (a shared vault's take-out rebuilt the item,
+  S47): the session tells them apart by the row's version *and* device, and keeps an item taken out from being
+  forgotten until its replay has run.
 - "Clear" is about every password in the item: more than 16 password fields is `incomplete`, and two password
   fields sharing an ID share the worse result. An unknown result is never "not breached".
 - The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts; bindings). They are
@@ -382,8 +385,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   associative and idempotent on whole items, on any metadata, and every update (`stamped`, `resolve`, `settle`)
   contains the version it was made on. Every component of `ItemState` is a semilattice — registers (the values no
   other supersedes, where "supersedes" is strict coverage of the stamps' vectors), field order (`Item.fieldOrder`,
-  last-writer-wins), note lines (`NoteText.join` per ID), history (union), retained values less what
-  `Item.discards` covers. Never drop a value at merge time for any reason but a value that supersedes it (not even an
+  last-writer-wins), note lines (`NoteText.join` per ID, removals unioned), history (union, and per entry the union
+  of its writers), retained values less what `Item.discards` (a set per group) covers. Never drop a value at merge time for any reason but a value that supersedes it (not even an
   equal one), never truncate, and never order by anything but `CanonicalWriter` bytes — each of those was a
   convergence bug (Y18, Y22). A change here runs `LongRunningItemMergeLawTests` and
   `LongRunningItemMergeExhaustiveTests`, whose asserted counts change only for a reason you can state.
@@ -393,6 +396,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - An edit of a group that holds a conflict moves the conflicting values to `Item.retainedValues`; only
   `ItemMerge.resolve` (an explicit choice) discards them, and records what it had seen in `Item.discards` so they
   stay discarded.
+- **Every part of an item names the write that made it** (`docs/10-sync-correctness.md` §9): values by their stamps,
+  lines by their IDs, a line's removal by `NoteLine.removedBy`, a history entry by `ItemHistoryEntry.writtenBy`, a
+  discard by `ItemDiscard.revision` — set by `ItemMerge.stamped` and `resolve`, never taken from the caller; one that
+  names none is read as the row's own (`ItemState.init`). A new part of the state must name its writer too and be
+  covered by `ItemMerge.attributedValues`, or a shared vault's judge cannot hold a late write's use of it aside.
 - A permanent deletion, applied to a version it does not cover, is one write by the deleting device at the
   tombstone's revision (`ItemMerge.settle`, from the `ItemErasure` the tombstone carries): the same on every device,
   never a fresh edit per device. Several deletions of one item are several such writes (`ItemErasures`, their set),
@@ -430,7 +438,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   device's work, covering revoked streams alone; what a revoked device carried is forgotten except its own versions,
   which hold nothing back and survive a replay. `stashUnsaved` makes a sync after a crash replay the log. A critical
   kind stops the stream at the object, skips nothing and sets `requiresNewerVersion`. Never let a stashed entry reach
-  the store or a merger except through `processStashed`, which drops any critical kind (only A8 can plant one).
+  the store or a merger except through `processStashed`, which drops any critical kind (only A8 can plant one). In a
+  shared vault nothing a held-aside segment carried is kept, a trusted device's kept entries are judged by the replay
+  (never processed from the stash), and a revoked device's kept tombstone is held aside (`admitsErasure` has no
+  segment to judge it by).
 - Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
   `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
 
@@ -562,9 +573,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
-  (`ItemMerge.attributedValues`; a vault's description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*,
-  through a segment of the stream of the device the stamp names that carried those bytes (`SharedStreamIndex`); never
-  by the revision a stamp names, which its writer chose (S36). A value naming this device that it never published
+  (`ItemMerge.attributedValues`, note-line removals, discards and history entries included, S32 and S43; a vault's
+  description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*, through a segment of the stream of the
+  device the stamp names that carried those bytes (`SharedStreamIndex`); never by the revision a stamp names, which its
+  writer chose (S36). Then its clock (`knowledgeCounts`): every edit it contains, of any device but its own writer's,
+  must have been published in a segment of that device's stream that counts, so a version built on a late write is
+  held aside with it (S44), and one claiming a current member's edits their stream has not published waits for it
+  (S46; a claim beyond this device's own published edits is refused). A tombstone's erasure summary is judged the same
+  way before it is applied or remembered (`WriteJudge.admitsErasure`, S45): a deletion built on a late write is held
+  aside and the item stays. A value naming this device that it never published
   counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down

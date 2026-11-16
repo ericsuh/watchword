@@ -417,3 +417,145 @@ extension SyncUnknownKindTests {
         #expect(await home.earlier.state()?.stashUnsaved == false)
     }
 }
+
+/// A shared vault's judge, scripted: holds aside the segments it is told to, and admits or refuses every erasure.
+actor ScriptedJudge: WriteJudge {
+    private var heldAside: Set<SyncObjectLocation> = []
+    private var refusesErasures = false
+
+    func holdAside(_ location: SyncObjectLocation) {
+        heldAside.insert(location)
+    }
+
+    func refuseErasures() {
+        refusesErasures = true
+    }
+
+    func record(segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8], entries: [SyncEntry]) {}
+
+    func admitsSegment(_ location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) -> SegmentAdmission {
+        heldAside.contains(location) ? .holdAside : .apply
+    }
+
+    func admits(_ record: StoredRecord) -> Bool {
+        true
+    }
+
+    func admitsErasure(_ entry: SyncEntry, in location: SyncObjectLocation, sealedUnder keyID: UUID) -> Bool {
+        !refusesErasures
+    }
+
+    func passesOverSegment(sealedUnder keyID: UUID, vaultID: UUID) -> Bool {
+        false
+    }
+}
+
+extension VersionedHousehold {
+    /// The earlier device's engine as a shared vault runs it (a judge, no snapshots, no collection), of the earlier
+    /// version or, `upgraded`, the later.
+    func judgedEngine(_ judge: ScriptedJudge, upgraded: Bool = false) -> SyncEngine {
+        let keyring = FakeSyncKeyring(deviceID: earlierID, keys: keys)
+        var configuration = upgraded ? Self.laterConfiguration() : Self.earlierConfiguration()
+        configuration.maintainsLog = false
+        var mergers: [EnvelopeKind: any RecordMerger] = [.item: FakeItemMerger(keyring: keyring)]
+        if upgraded {
+            for (kind, schema) in Self.laterKinds {
+                mergers[kind] = OpaqueRecordMerger(keyring: keyring, schemaVersion: schema)
+            }
+        }
+        return SyncEngine(
+            vaultID: SyncFixtures.vault, deviceID: earlierID, store: earlierStore, syncState: earlierState,
+            transport: transport, keyring: keyring, merger: KindRoutingMerger(mergers), configuration: configuration,
+            judge: judge)
+    }
+
+    /// Permanently deletes a scan record on the later device, as the session does: a pending deletion to publish.
+    func deleteScan(_ itemID: UUID) async throws {
+        let key = RecordKey(recordID: itemID, kind: .scanStatus)
+        let row = try #require(try await later.sessionStore.record(key))
+        try await later.sessionStore.commit(StoreChange(conditionalDeletions: [key: row.version]))
+    }
+}
+
+/// How kept entries meet a shared vault's judge (the late-writes rules, docs/10 §9; ADR 0009).
+@Suite("Record kinds a device does not know, in a shared vault")
+struct SyncUnknownKindJudgedTests {
+    @Test("a segment the judge holds aside puts nothing in the stash")
+    func heldAsideSegmentKeepsNothing() async throws {
+        let home = await VersionedHousehold.make()
+        let judge = ScriptedJudge()
+        let item = try await home.later.save(Household.login(title: "Late"))
+        try await home.scan(item, "late result")
+        try await home.later.sync()
+        await judge.holdAside(.segment(vaultID: SyncFixtures.vault, author: home.laterID, sequence: 1))
+        let report = try await home.judgedEngine(judge).sync(publishing: false)
+        #expect(report.heldAside == [RecordKey(recordID: item.id, kind: .item)])
+        #expect(report.unknownEntriesKept == 0)
+        #expect(await home.earlier.stash().isEmpty)
+        #expect(await home.earlier.state()?.merged[home.laterID] == 1, "the stream went on past it")
+    }
+
+    /// A tombstone is judged by the segment that carried it (`admitsErasure`, S45). In a shared vault only a revoked
+    /// device's kept entries are processed without a replay, and a kept tombstone has no segment left to judge it by,
+    /// so it is held aside like a tombstone the judge refused: the record stays. The device's live versions are judged
+    /// by `admits` as usual.
+    @Test("a revoked device's kept tombstone is held aside in a shared vault, its live versions judged as usual")
+    func keptTombstoneIsHeldAside() async throws {
+        let home = await VersionedHousehold.make()
+        let judge = ScriptedJudge()
+        let item = try await home.later.save(Household.login(title: "Bank"))
+        let result = try await home.scan(item, "found")
+        try await home.later.sync()
+        try await home.deleteScan(item.id)
+        try await home.later.sync()
+        try await home.judgedEngine(judge).sync(publishing: false)
+        #expect(await home.earlier.stash().count == 2, "the version and the tombstone")
+        await home.keys.retire(device: home.laterID)
+
+        let report = try await home.judgedEngine(judge, upgraded: true).sync(publishing: false)
+        let key = RecordKey(recordID: item.id, kind: .scanStatus)
+        #expect(report.heldAside == [key])
+        #expect(report.unknownEntriesProcessed == 2 && !report.replayNeeded)
+        #expect(try await VersionedHousehold.rows(home.earlier, .scanStatus)[item.id] == result)
+        #expect(await home.earlierState.quarantined(vaultID: SyncFixtures.vault).contains { $0.isDeletion })
+        #expect(await home.earlier.stash().isEmpty)
+    }
+
+    /// The session's take-out ends in a replay (`needsReconcile`, §8.10). A replay rebuilds the stash from the log,
+    /// except a revoked device's own versions, which no replay reads: those are kept across it and processed once,
+    /// and entries of a trusted device are processed by the replay itself, not also from the stash.
+    @Test("a replay neither drops a revoked device's kept versions nor processes any kept entry twice")
+    func replayKeepsAndProcessesOnce() async throws {
+        let home = await VersionedHousehold.make()
+        let judge = ScriptedJudge()
+        let other = await home.newcomer(SyncFixtures.deviceC)
+        let fromRevoked = try await home.later.save(Household.login(title: "Revoked's"))
+        let revokedResult = try await home.scan(fromRevoked, "revoked's result")
+        try await home.later.sync()
+        let fromTrusted = try await other.save(Household.login(title: "Trusted's"))
+        let trustedResult = try await other.saveRecord(
+            Array("trusted's result".utf8), recordID: fromTrusted.id, kind: .scanStatus,
+            schemaVersion: VersionedHousehold.schema)
+        try await other.sync()
+        try await home.judgedEngine(judge).sync(publishing: false)
+        #expect(await home.earlier.stash().count == 2)
+        await home.keys.retire(device: home.laterID)
+
+        // A take-out's replay on the earlier version: the revoked device's own entry survives it.
+        try await home.judgedEngine(judge).sync(reconcile: true, publishing: false)
+        let kept = await home.earlier.stash()
+        #expect(kept.count == 2 && kept.entries.contains { $0.author == home.laterID })
+
+        // Upgraded: the revoked device's entry is processed now, the trusted one waits for the replay.
+        let upgraded = home.judgedEngine(judge, upgraded: true)
+        let first = try await upgraded.sync(publishing: false)
+        #expect(first.replayNeeded && first.unknownEntriesProcessed == 1)
+        let second = try await upgraded.sync(reconcile: true, publishing: false)
+        #expect(second.unknownEntriesProcessed == 0 && !second.replayNeeded)
+        #expect(await home.earlier.stash().isEmpty)
+        let rows = try await VersionedHousehold.rows(home.earlier, .scanStatus)
+        #expect(rows[fromRevoked.id] == revokedResult && rows[fromTrusted.id] == trustedResult)
+        let third = try await upgraded.sync(publishing: false)
+        #expect(third.unknownEntriesProcessed == 0 && third.applied == 0 && !third.replayNeeded)
+    }
+}

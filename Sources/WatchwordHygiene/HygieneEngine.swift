@@ -274,6 +274,21 @@ public actor HygieneEngine: SharesExecutor {
         return applied != .stale
     }
 
+    /// The store holds `item` in place of the version the engine last saw, though it is not newer: a shared vault
+    /// took out a version that no longer counts and rebuilt the item from the versions that do (docs/02-architecture.md
+    /// §8.10, "taken out"), at a lower version or at the same version by another device. The engine forgets which
+    /// version it saw and takes this one in; what the ledger holds for the item stays, as for any edit.
+    public func replace(_ item: Item) throws {
+        let applied = withResident { state -> Applied in
+            state.versions[item.id] = nil
+            state.gone.remove(item.id)
+            state.removed.remove(item.id)
+            state.synced[item.id] = nil
+            return Self.apply(item, to: &state)
+        }
+        guard applied != nil else { throw HygieneEngineError.locked }
+    }
+
     /// Takes `item` into the resident state, unless it is a stale copy.
     private static func apply(_ item: Item, to state: inout Resident) -> Applied {
         if let seen = state.versions[item.id] {

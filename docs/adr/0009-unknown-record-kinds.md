@@ -77,6 +77,17 @@ them back), processed once their kind is read, and hold nothing back. Entries it
 carried by those devices' own streams or by snapshots of devices that read them. What it dropped past the caps is
 forgotten: no replay reads its objects.
 
+**Shared vaults and the judge** (`02-architecture.md` §8.10, `10-sync-correctness.md` §9). A segment the judge holds
+aside, or makes wait, keeps nothing aside: its unknown entries are passed over with it, as its known ones are held
+aside, so a write that does not count never reaches the stash. A kept live version is judged by `admits` when it is
+processed, like any version. Kept entries of a trusted device are not processed from the stash at all: the session
+replays the log (`replayNeeded`, `needsReconcile`), whose segments the judge sees, so each is judged, a tombstone by
+`admitsErasure` (S45), exactly as if it had been read on arrival, and the replay's reset of the stash means none is
+processed twice. A revoked device's own kept versions survive that replay (no replay reads them) and a take-out
+(which works on stored rows only), and are processed once, from the stash; a kept *tombstone* among them has no
+segment left for `admitsErasure` to judge by, so it is held aside (quarantined, the record stays), as a refused
+tombstone is. In a vault of one account there is no judge, and kept tombstones are applied like any other.
+
 **Snapshots and collection.** A device holding entries carried by a **trusted** device, or that dropped some, **writes
 no ordinary snapshot** (`SyncReport.snapshotWithheld`, and `snapshotWithheldBy` names those devices). The alternative,
 carrying the kept entries forward in its snapshot, is not sound: a snapshot holds one entry per record, and a device

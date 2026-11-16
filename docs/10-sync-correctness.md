@@ -41,14 +41,19 @@ Everything else in §3 holds for *arbitrary* states, which is what makes §6 (ho
 | Registers | `revisions`, `conflicts`, and the attributes and `fields` themselves | Per group (each attribute, each field by ID): the set of stamped values no other value of the group supersedes. One is *shown* (it is the attribute or field), the rest are in `conflicts`. A field's removal is a value too (`.field(nil)`). |
 | Field order | `fieldOrder`, `revisions[.fieldOrder]` | The latest arrangement of the fields and its stamp. |
 | Clock | `clock` | The version vector of every edit the copy contains. |
-| Note lines | `noteLines` (`notes` is derived) | The set of lines by ID, each with the line it follows, its text, and whether it was removed. |
-| History | `history` | A set of earlier field values. |
+| Note lines | `noteLines` (`notes` is derived) | The set of lines by ID, each with the line it follows, its text, and the edits that removed it (`removedBy`; none for a line that is shown). |
+| History | `history` | A set of earlier field values, each with the edits that recorded it (`writtenBy`). |
 | Retained values | `retainedValues` | Conflicting values an edit superseded without the person choosing to discard them. |
-| Discards | `discards` | Per group, the version vector a person had before them when they resolved a conflict there. |
+| Discards | `discards` | Per group, every resolution of a conflict there: the revision that resolved it and the version vector the person had before them. |
 | Dates | `createdAt`, `modifiedAt` | Earliest creation, latest modification. |
 
 A **stamp** (`GroupStamp`) is the revision that wrote a value and the version vector of the writer's copy at the write
 (`seen`, which includes the write itself).
+
+Every part of the state names the write it came from: a value its stamp, a line its ID, a removal, a history entry
+and a discard the revisions in them (review findings S32, S43; §9 says why that matters). A removal, entry or discard
+that names none — a record from before they did, or a writer that left it out — is read as the work of the row that
+carries it (§6).
 
 Not part of the state: `version` and the device that wrote the row. They say which row carries the state, and two
 devices that merged the same edits store the same state under different rows (`ItemMerge.written` changes nothing
@@ -79,7 +84,10 @@ encoding that is injective and does not depend on hashing order, a locale or a J
 
 ### 3.1 Clock, dates, history
 
-Version vectors under entry-wise maximum, dates under minimum or maximum, and sets under union are semilattices.
+Version vectors under entry-wise maximum, dates under minimum or maximum, and sets under union are semilattices. The
+history is a map from entry (its time, version and fields) to the set of writes that recorded it, joined by union of
+the keys and union of the sets: a product of set unions, so a semilattice too. One entry recorded by two writes is
+shown once and names both.
 
 ### 3.2 Registers: a multi-value register per group
 
@@ -130,11 +138,13 @@ from the one saved, so a deliberate reorder is not displaced by a concurrent add
 
 ### 3.4 Notes: a sequence of lines (RGA)
 
-The state is a map from line ID to (anchor, text, removed). An ID is the revision that inserted the line, its index
-in that edit, and a nonce drawn at random for the edit (§6 says why). The join is the union of the maps, with lines present in
-both joined by `NoteText.join`: the later anchor, removed if either is, and for the text the same text or — when the
-two differ, which only a writer reusing an ID causes — every distinct line of either in byte order. Each part is a
-join (a maximum in a total order, a boolean "or", a set union with "removed" as top), so the map is a semilattice.
+The state is a map from line ID to (anchor, text, removals). An ID is the revision that inserted the line, its index
+in that edit, and a nonce drawn at random for the edit (§6 says why); the removals are the revisions of the edits that
+removed it, empty while it is shown. The join is the union of the maps, with lines present in both joined by
+`NoteText.join`: the later anchor, the union of the removals (removed if either is), and for the text the same text
+or — when the two differ, which only a writer reusing an ID causes — every distinct line of either in byte order. Each
+part is a join (a maximum in a total order, set unions, with "removed" as top for the text), so the map is a
+semilattice. Two devices removing one line concurrently both keep their removal.
 
 The document is a function of the map alone (`NoteText.ordered`): depth first from the start, each line's children
 newest first. This is a replicated growable array over lines: a line is never changed in place (an edit removes it and
@@ -145,13 +155,15 @@ Copies of one ID in a single record are gathered and joined in one pass, which i
 
 ### 3.5 Retained values and discards
 
-For one group the state is a pair `(T, X)`: a set `T` of retained values and a version vector `X`, canonical when no
-value in `T` was written by a revision `X` contains. The join is
+For one group the state is a pair `(T, X)`: a set `T` of retained values and a set `X` of discards, each a resolution's
+revision and the vector it had before it; `covered(X)` is the values written by a revision one of those vectors
+contains, and a pair is canonical when no value in `T` is covered. The join is
 
-    (T₁, X₁) ⊔ (T₂, X₂) = ((T₁ ∪ T₂) ∖ covered(X₁ ⊔ X₂),  X₁ ⊔ X₂)
+    (T₁, X₁) ⊔ (T₂, X₂) = ((T₁ ∪ T₂) ∖ covered(X₁ ∪ X₂),  X₁ ∪ X₂)
 
-`covered` grows with `X`, so for three states both groupings give `(T₁ ∪ T₂ ∪ T₃) ∖ covered(X₁ ⊔ X₂ ⊔ X₃)`; the join
-is also commutative and idempotent on canonical pairs. This is what makes a discard *stay* discarded (Y19): before,
+`covered` grows with `X`, so for three states both groupings give `(T₁ ∪ T₂ ∪ T₃) ∖ covered(X₁ ∪ X₂ ∪ X₃)`; the join
+is also commutative and idempotent on canonical pairs. (Before S43, `X` was one vector per group, the maximum of the
+resolutions' vectors: the same `covered`, but naming no resolution.) This is what makes a discard *stay* discarded (Y19): before,
 `resolve` removed retained values on the resolving device only, and the next merge with any other copy put them back.
 
 ### 3.6 The item
@@ -166,8 +178,8 @@ An update is *inflationary* if its result contains the state it was made on: `me
 
 | Update | Code | Why it contains its predecessor |
 | --- | --- | --- |
-| An edit: fields, attributes, notes, trash, restore | `ItemMerge.stamped` | Each changed group's register becomes one value whose stamp is the copy's clock plus the new revision. The clock covers every stamp the copy holds (an invariant `ItemState.init` maintains) and the revision is new (C2), so the new stamp strictly covers, hence supersedes, every value it replaces. Superseded conflicting values move to the retained set (a union). Notes: lines are added or marked removed, never dropped. History is the union with the predecessor's; `createdAt` the earlier, `modifiedAt` the later. Unchanged components are unchanged. |
-| Resolving a conflict | `ItemMerge.resolve` | As an edit of the one group, with the value chosen. The group's discard vector is joined with the clock the person had before them, which covers every retained value removed: the clock covers every stamp's `seen`, and every stamp is read with its own revision in `seen` (§6), so it contains the value's revision. |
+| An edit: fields, attributes, notes, trash, restore | `ItemMerge.stamped` | Each changed group's register becomes one value whose stamp is the copy's clock plus the new revision. The clock covers every stamp the copy holds (an invariant `ItemState.init` maintains) and the revision is new (C2), so the new stamp strictly covers, hence supersedes, every value it replaces. Superseded conflicting values move to the retained set (a union). Notes: lines are added or marked removed by the edit's revision, never dropped. History is the union with the predecessor's, an entry it did not hold recorded by the edit's revision (one it held keeps its writers; the caller's are not read); `createdAt` the earlier, `modifiedAt` the later. Unchanged components are unchanged. |
+| Resolving a conflict | `ItemMerge.resolve` | As an edit of the one group, with the value chosen. A discard naming the resolution and the clock the person had before them is added to the group's, and covers every retained value removed: the clock covers every stamp's `seen`, and every stamp is read with its own revision in `seen` (§6), so it contains the value's revision. |
 | Storing a merge result | `ItemMerge.written` | The state is unchanged. |
 | A deletion that did not cover the item | `ItemMerge.settle` | A join with a constant (§5). |
 
@@ -294,6 +306,12 @@ corrupted metadata.
   encoded, so a record can carry one whose vector omits it. Every stamp is read (`GroupStamp.clamped`) with its revision
   recorded: otherwise a resolution's discard vector, which tests a value's revision, did not cover a value it had
   removed, and the next merge brought it back (Y34).
+- *A part that names no writer is the row's own.* A removed line with no `removedBy`, a history entry with no
+  `writtenBy` and a discard with no revision are read as written by the row that carries them (its version and
+  device), and so written once named: records from before these parts named a writer still open and merge, and a
+  writer that leaves the name out has written them itself. Named writers are clamped to the row's version like every
+  other count. A shown line that names a removal is read as removed. A new item's history is its creator's, whatever
+  a copied entry named (`ItemMerge.stamped` with no predecessor).
 - *Line IDs cannot be predicted.* A device's next revision is one above the highest version it has seen, so another
   writer can predict it, and the record's version bound does not help against an edit made before the device has
   merged the writer's record: the writer simply writes its record at or above that version. Removed lines planted
@@ -329,8 +347,10 @@ it was read (Y32). The adversarial suite merges both kinds of record under a tim
 | --- | --- | --- |
 | The specification of §3.2–3.3, at every step | `MergeModel` (`Tests/WatchwordSyncTests`) | A pure model of devices editing and exchanging one item. Beside each copy it tracks, independently of the item's metadata, which writes were delivered to it and what each writer had seen, computes the values a multi-value register must hold, and compares. |
 | The laws, convergence, nothing lost | `LongRunningItemMergeLawTests` | Random histories of every kind of edit, resolution and deletion on 2–4 devices; the laws on random triples of stored versions, compared as whole items; the same versions delivered in random orders with repeats; every update checked inflationary; after full exchange all devices equal and every field value and note line typed still present unless a person discarded it. Widened nightly. |
-| Every small history | `LongRunningItemMergeExhaustiveTests` | From six starting points, every sequence of up to three steps (four nightly, for two of them) over an alphabet that includes conflict, resolution, trash, restore, deletion and respelling a value in another normalisation form. Each step is one device performing one operation with each choice it offers — which field or line, which spelling, and for a resolution which value is kept, the shown one or another (Y35: taking the first choice each time never resolved in favour of a value that was not shown) — or receiving another device's version. The same checks at every node, the laws on every triple of versions a history stores. The numbers of histories, versions, pairs and triples are asserted. Standard run: 34,933 histories; nightly: 297,775 (about half an hour on the loaded cloud VM). |
+| Every small history | `LongRunningItemMergeExhaustiveTests` | From six starting points, every sequence of up to three steps (four nightly, for two of them) over an alphabet that includes conflict, resolution, trash, restore, deletion and respelling a value in another normalisation form. Each step is one device performing one operation with each choice it offers — which field or line, which spelling, and for a resolution which value is kept, the shown one or another (Y35: taking the first choice each time never resolved in favour of a value that was not shown) — or receiving another device's version. The same checks at every node, the laws on every triple of versions a history stores. The numbers of histories, versions, pairs and triples are asserted. Standard run: 34,933 histories; nightly: 297,775 (about half an hour on the loaded cloud VM). Since S43 the counts of versions, pairs and triples are a little higher in two starting points: two branches that record the same history entry from different devices now store two versions (the entry names its writer), and with the writers stripped each extra version is one stored before. |
 | Each finding | `ItemMergeAuditTests`, `AdversarialItemMergeTests` | The smallest history that showed it. |
+| Writers of removals, discards and history (§9) | `ItemMergeWriterTests` | Each part names the write that made it, concurrent ones all kept; unnamed parts read as the row's own, clamped; the first form of `discards` decodes; the attributed parts of a merge are exactly the union of its inputs'. |
+| The write cut over merged state (§9) | `LongRunningLateWriteSimulationTests` | Four devices, one of whose account loses its permission part-way, its later writes made both through `stamped` and as a modified client that names no writer. One device holds late versions aside as they arrive, two merge everything and rebuild at the end from what counts; all three hold the same item, nothing in it is late (against ground truth kept apart from the metadata), and no version of a device that had merged nothing late is held aside. Widened nightly. |
 | Arbitrary metadata | `AdversarialItemMergeTests` | The laws on corrupted records, with canonically equivalent spellings and stamps that omit their own revision among the values, and with every update (edit, resolution, deletion) checked to contain the hostile version it was made on; absurd counts; cyclic, dangling and repeated lines, and removed lines planted under a device's next IDs; values under wrong groups; records at the payload limit, of incomparable values and of copies of one line ID; hostile erasure summaries; a clock naming thousands of devices, then deleted; two versions whose merge is over the payload limit, at the engine. |
 | The engine around it | `LongRunningSyncSimulationTests`, `SyncMergeCaseTests` | N devices, partitions, an eventually consistent store, locks, rollbacks. |
 
@@ -373,7 +393,99 @@ failed each time.
   revoked after planting an unreadable entry cannot hold snapshots back for good. A critical
   kind it cannot read stops that stream at the object, as a gap does; nothing past it is applied, so nothing is merged
   out of order, and the stream converges once the device is updated.
-- **Growth.** History, note-line tombstones, removed fields' stamps and retained values only grow. An item at the
+- **Growth.** History, note-line tombstones and their removals, removed fields' stamps, discards and retained values
+  only grow. An item at the
   payload limit refuses further edits until history moves to records of its own (already tracked), and merges as
   above.
 - **Dates** are the writers' clocks. `modifiedAt` is a maximum, so one device with a clock far ahead sets it for good.
+
+## 9. Late writes in a shared vault
+
+A shared vault's judge (`02-architecture.md` §8.10, `WriteJudge`) decides which versions count: once an account's
+permission to write has ended, only what is inside the cut of the record that ended it does. A device may merge a
+late version before it hears of that record (the store, A1, can withhold it), write on top of it and publish. So the
+judge must be able to recognise, in *any* version, whether it carries a late write's work, and a device that learnt of
+the cut late must be able to reach the state of one that knew it all along. Both rest on the model above.
+
+**The judge, as a predicate.** A version `v` counts when (1) its own revision is its writer's, in a segment that counts;
+(2) every attributed value it holds counts (`ItemMerge.attributedValues`): each group's values, conflicts and retained
+values and the field order by their stamps, each note line by its ID, each removal of a line by its revision, each
+discard by its resolution's revision, each history entry once per write that recorded it — judged by their bytes,
+stamp included, against the segment that carried them (S36); and (3) every edit its clock says it contains, of any
+device but its own writer's, was published in a segment of that device's stream that counts: one carried a version of
+the record at or above the clock's count (S44 for a device whose account's work does not all count, S46 for a current
+member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head and the stream index,
+which every device holding the same segments computes alike; it does not depend on when or where the version was
+merged. Where (3) cannot be decided yet (the claimed device's stream is not here that far) the version waits, held
+aside until that stream grows; a claim about the judging device's own edits beyond what it published is false at once.
+A current member's device whose stream this device cannot read from its first segment (collected before the vault was
+shared, or sealed under keys this account was never given, S42) is not checked, and its edits are believed as before.
+
+**Completeness: every effect of a write leaves a trace that names it.** Take a write `w` and any version `v` made, by
+any sequence of merges and updates, from a state that contains `w`'s result.
+
+- Lines, removals, discards and history entries only grow: every join is a union (§3.1, §3.4, §3.5) and every update
+  contains its predecessor (§4). So whatever `w` wrote of them is in `v`, naming `w` — and an unnamed one is read as
+  the work of the row carrying it, which for a late row is late (§6). A removal `w` made, a retained value `w`'s
+  discard covers, an entry `w` recorded: `v` holds a value attributed to `w`, and (2) fails. Before S32 and S43 these
+  three parts named no writer, and a removal or discard published again inside `v` counted as `v`'s writer's.
+- A value `w` wrote leaves the registers only when a value that supersedes it is written (§3.2), retained or not. Its
+  writer's `seen` contains `w`'s revision, and the clock covers every `seen` (§6), so the clock of every version that
+  holds the superseding value names `w`: (3) fails. Without (3), an edit made on a copy holding a late value took the
+  late writer's knowledge with it and superseded honest values its own writer was shown only through the late write
+  (S44: a title, which has no history, was lost everywhere).
+- A claim with no value behind it is still knowledge. A late version that changes nothing can claim, in its clock,
+  to have seen edits of a current member's device up to a count that device has not reached; a device that merged it
+  stamped its next edit with the claim, and that edit superseded the member's edits made meanwhile, concurrent as they
+  were (S46). Under (3) the late version is not merged until the member's stream has published edits that far, so
+  any edit stamped with the claim was made by a writer who had merged those edits first: the claim had come true
+  before anyone relied on it. On a device that relied on it anyway (one that could not check, above) the version made
+  on it waits on every other device until the claim comes true, which is the weak point (review finding S48,
+  below).
+- A permanent deletion is a write too (§5): its erasure summary is its author's clock, and settling against it erases
+  what the summary covers. A device that merged a late version and then deleted the item claims what the late writer
+  had seen, and its tombstone erased honest values it had been shown only through the late write (the late value had
+  superseded them in its view, S45). Every element of a tombstone's summary is judged by (3) before the tombstone is
+  applied or remembered (`WriteJudge.admitsErasure`); one that fails is held aside like a version, so the item stays,
+  and a replay judges it again.
+- What remains unattributed is a version's dates and `version`, which hold no one's data.
+
+So `J(v)` is false for every version that holds a late write or anything built on one. Every version that holds only
+what counts satisfies `J`: its writer's own work was published in its own stream (S36), and everything else it holds
+came from versions that count, whose attributed values and clock entries count by the same three clauses. In
+particular a device that merged nothing outside a cut never writes a version that is held aside, so nothing an honest
+device wrote is voided — `LongRunningLateWriteSimulationTests` checks exactly this.
+
+**Convergence.** Let `U` be the versions with `J` true, for the head both devices hold. A device that knew the head
+before a late version arrived held it aside, and every state it stored is the join of versions of `U` (§4's
+theorem, applied to the versions it admitted). A device that learnt it after takes out every stored version for which
+`J` is now false and replays its log (§8.10: "taken out"), which merges every version it holds and admits exactly those
+of `U`; its erasures are rebuilt from the segments that count too (S40). Both hold `⊔(U ∩ received)`, so devices that
+have received the same versions hold the same item, whichever learnt of the cut first. The judge is re-applicable to
+merged state because `J` is a property of each stored version, not a record of how it arrived; and `⊔` of a subset of
+`U` never contains an effect of a version outside `U`, by completeness. History is never pruned of a legitimate
+entry: entries in versions of `U` are in the join. Entries, removals and values a device wrote *on top of* a late
+write are in versions outside `U`; they are held aside with those versions, kept for the person, as every other value
+of them (S28).
+
+**Format.** `NoteLine.removedBy`, `ItemHistoryEntry.writtenBy` and the revision in `ItemDiscard` are new; records
+without them still decode, `discards` in its first form (one vector per group) included, and are read as above.
+Empty lists are not encoded, so lines that are shown and entries from old records cost no bytes. A device's stream
+index of an earlier format filed none of these values, so it is refused on load and rebuilt by a replay
+(`SharedStreamIndex` format 3).
+
+**What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
+wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,
+`lateClaimOfFutureEdits`). Clause (3) can only wait for a claim about a current member, never refute it, because no
+record says when it was made: a version stamped with a claim that is false when it is written is admitted once the
+claimed device's stream has grown that far. That is safe only because an honest device applies (3) before it merges
+anything, so no honest edit carries a claim that was false when it was made; where a device cannot check (a stream it
+cannot read from its start) it believes the claim, and a store (A1) that hides a current member's whole stream from it
+can still have it launder one (review finding S48). Bounding a claim by what its writer could have seen when it wrote
+needs the segments' acknowledgement vectors in the stream index and their causal closure through segments that count.
+Entries of a kind an earlier version cannot read (ADR 0009) meet the judge the same way: a segment held aside keeps
+nothing aside, kept entries of a trusted device are judged when the replay that follows an update reads their
+segments again, and a revoked device's kept tombstone, which has no segment left to judge, is held aside. Two other
+consequences are by design and recorded in `06-adversarial-review.md` §O: everything an unaware device wrote
+on an item after merging a late version of it is held aside, including edits of other groups (S49); and a deletion
+built on a late write is held aside, so the item comes back and the person must delete it again.
