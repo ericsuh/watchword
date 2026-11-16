@@ -941,7 +941,14 @@ verified against the real toolchain would otherwise widen matching:
 
 Conversely, Foundation's IDNA compatibility mapping is *honoured*: fullwidth `ＡMAZON.com` and
 Kelvin-sign `amazonK.com` arrive folded to `amazon.com`, which is what a browser resolves.
-Characters IDNA keeps distinct (Cyrillic `а`) stay distinct and never match an ASCII scope.
+Characters IDNA keeps distinct (Cyrillic `а`) stay distinct and never match an ASCII scope. A bare
+domain is mapped the same way, by parsing it as `https://<domain>/` once its own checks have passed, so one
+host has one normalised form whichever kind of identifier carries it. Until the import fuzzer found it, a
+domain was only lower-cased: `ＡMAZON.com` was `ａmazon.com` as a domain and `amazon.com` as a URL, so a
+scope saved from one never matched the other, and a bare-host scope an import made came back from its own
+export as a different host. Where Foundation finds no host, an ASCII domain keeps its checked form (malformed
+punycode stays visible to the phishing checks, and matches nothing that arrives as a URL) and a non-ASCII
+one is refused.
 
 Types carry the guarantee: `ScopeMatcher` and `ItemRanker` accept only a `NormalizedHost`, whose
 initializer is internal to the module, so the only way to obtain one is through the normaliser.
@@ -1539,21 +1546,192 @@ as an ID and counts) and reads passwords only from the item handed to `scan`. It
 
 ## 14. Import and export (`WatchwordInterchange`)
 
-- Parsers are pure functions `Data → [ImportedItem]` with hard limits (100 MB archive, 50,000
-  entries, zip-slip path checks, decompression ratio cap of 100:1).
-- 1PUX: unzip `export.data`, walk `accounts[].vaults[].items[]`; map `overview.title`,
-  `overview.urls`, `details.loginFields` (username/password designations), `details.sections[]
-  .fields[]` by field type (`concealed`, `string`, `totp`, `url`, `email`, `phone`, `date`,
-  `creditCardNumber`, ...), `categoryUuid` to item kind. Unknown fields become custom fields.
-- CSV: RFC 4180 parser; header mapping tables for 1Password 8 (`Title,Url,Username,Password,OTPAuth,
-  Favorite,Archived,Tags,Notes`), 1Password 7 (`URL`), and Apple (`Title,URL,Username,Password,
-  Notes,OTPAuth`). Export neutralises formula injection by prefixing `=+-@` cells with `'`.
-- CXF: encode/decode CXF v1.0 JSON for `basic-auth`, `passkey`, `totp`, `api-key`, `note`,
-  `custom-fields`; security questions and PINs export as `custom-fields`. Credential Exchange on iOS
-  26/macOS 26 uses `ASCredentialExportManager`/`ASCredentialImportManager`; on earlier OSes the CXF
-  file can still be produced for manual transfer.
-- Plaintext exports require password re-entry, display the warning, and are written with
-  `completeUnlessOpen` protection to a location the person chooses.
+Built in milestone 7 as a portable module: it imports `Foundation`, `WatchwordModel` and `WatchwordMatching`
+and nothing else, so every line of it runs under `swift test` on Linux. Parsers are pure functions from bytes
+to item drafts and a report; exporters are pure functions from items to bytes. Nothing in it reads a key, a
+file or a clock.
+
+**Limits (`InterchangeLimits`, SEC7, SEC9).** Checked before or while the cost is incurred, never after:
+100 MB for any input file and for the one decompressed document, 50,000 archive members and 50,000 entries
+(every array element walked counts, imported or not), a decompression ratio of 100:1 enforced *while*
+inflating, 512 KiB for one CSV row or one item as written, 256 KiB for one cell or field value, 1,000 fields
+(or members of a walked JSON object) per item, 100 columns in a CSV file, 64 levels of JSON nesting, 1,024
+bytes for an archive member's name. Those bound one entry and one file, not their product: fifty thousand
+entries of a thousand two-byte fields fit in 100 MB and would be fifty million `Field`s. So the import as a
+whole has budgets too. **One million fields** (fields, URLs, tags and earlier passwords, counted as each
+entry is about to be built; reaching it fails the file), which measured comes to about 100 MB of drafts
+from CSV and 250 MB from 1PUX; CSV rows are streamed into the assembler, never held beside the drafts.
+**Thirty-two URLs an entry and 100,000 a file** are considered as scopes, each distinct URL once (parsing a
+URL is the most expensive thing an import does per byte, and a 1.4 MB archive of repeated URLs used to buy a
+minute of it); further URLs are kept as `url` fields with a warning. And each draft is measured **as the
+vault will store it** (`StoredItemSize`, at most 768 KiB against `ItemCodec`'s 1 MiB): JSON escaping writes
+a control character as six bytes, every field carries a sync stamp, and every line of the notes is stored
+again with two identifiers, so 512 KiB as written can be megabytes as stored; an entry over the bound is
+skipped and listed, never reported as imported and then refused by the vault. The estimate is an upper
+bound by construction and the adversarial suite checks it against `ItemMerge.stamped` and `ItemCodec`.
+`InterchangeLimits.standard` holds these ceilings; an initialiser can tighten any of them and clamps each
+argument to `1...ceiling`, so no caller can loosen one. A file that cannot be read as
+what it claims to be ends in exactly one `InterchangeError`; a problem with one entry (too large, a repeated
+identifier, an unknown credential type) skips or degrades that entry and is listed in the `ImportReport`.
+The report's own warning list is capped at 10,000 with a count of the rest, because a refused URL of a few
+bytes earns a warning.
+
+**ZIP and DEFLATE (`ZIPArchive`, `Inflater`, `CRC32`, `ZIPWriter`).** Written here in safe Swift, because
+the input is hostile and the module may not use unsafe code or an Apple framework. The reader parses the
+central directory, validates *every* member, and decompresses only the one member asked for; nothing is
+extracted to disk and a nested archive is never opened. It refuses, each with a typed error: a member name
+that could escape a directory (absolute, drive letter, `.`/`..`/empty component, backslash, control
+character; judged on the name's bytes, since by characters a slash followed by a combining mark is not a
+slash) even though no name becomes a path; encryption, ZIP64 (sentinel sizes, the extra field, the
+locator, a streaming writer's local header), multi-disk archives, and every compression method but stored
+and deflate; members whose data overlaps another member's or the directory (the non-recursive bomb); and
+any archive with two readings (an end record that is not the last thing in the file, a directory that does
+not end where the end record begins, counts that disagree, a local header that disagrees with the directory,
+a repeated name, a wrong CRC-32). A declared size is checked against the document and ratio caps before any
+work, and bounds the inflater, so a member that lies about its size stops at the lie. The inflater follows
+zlib's strictness (over-subscribed and incomplete code sets, a block with no end code, a distance before the
+start of output, symbols the format reserves) and also refuses bytes after the final block. One thing zlib
+accepts is refused: more than 1,024 blocks averaging under 256 bytes of output each
+(`DeflateDefect.excessiveBlocks`). A block header is a fixed amount of work whatever the block emits, an
+empty dynamic block is under twelve bytes, and without the rule 100 MB of them was half a minute of work
+for no output, unseen by the ratio and document caps. With it the work is linear in the compressed and
+decompressed sizes with a small constant. `ZIPWriter` writes stored members only, deterministically,
+under the reader's own rules.
+
+**JSON (`JSONReader`).** Not `JSONSerialization`: that behaves differently on Linux and Apple platforms,
+resolves a repeated key by position and materialises the whole document. The reader is strict RFC 8259,
+refuses repeated keys, lone surrogates and NUL, bounds its recursion, and walks a document member by member:
+`skipValue` checks syntax without allocating and reports a value's extent, and only a value already measured
+to be within one entry's size is materialised. Memory is therefore proportional to one item, not to the file.
+Input must be valid UTF-8 (an optional byte-order mark is skipped); invalid UTF-8 and UTF-16 are refused, never
+repaired, because a replacement character inside a password is a different password. Wherever the module
+trims or searches text from a file it does so on bytes or scalars with its own code (`UTF8Text.trimmed`
+removes ASCII white space only): Foundation's white-space sets and string searches differ between Linux and
+Apple platforms, and a difference there is a difference in what becomes a scope.
+
+**CSV (`CSVReader`, `CSVWriter`, `PasswordCSV`).** An RFC 4180 reader that also accepts LF line ends and
+blank lines, and refuses a quote inside an unquoted cell, text after a closing quote, a bare carriage return,
+NUL, and a quote that never closes (which the per-cell and per-row caps stop from swallowing the file). The
+header row decides the mapping: 1Password 8 (`Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,
+Notes`), 1Password 7 (`URL`) and Apple Passwords (`Title,URL,Username,Password,Notes,OTPAuth`) are detected
+from it, unknown columns become concealed custom fields, and a first row naming fewer than two known columns
+is refused rather than guessed at. Cells are data on import, formula characters included. On export to
+Apple Passwords CSV, a cell beginning with `=`, `+`, `-`, `@`, tab or carriage return is prefixed with an
+apostrophe (`CSVWriter.FormulaPolicy.neutralise`, the default; SEC7) and each changed cell is reported.
+That prefix is part of the value to whatever imports the file, and generated passwords often begin with `-`
+or `+`, so `.preserve` exists for a file that goes straight into another password manager; which to offer,
+and how to warn, is the UI's decision. A passkey is left out of a CSV export and reported; fields with no
+column are written into the notes and reported; an item with several websites becomes one row for each.
+The URL column holds the item's sign-in URLs and nothing else: a `url` field that is not one of them (a
+link, a website the item is not scoped to) is a line of the notes, because whatever reads the file offers
+the row's password on that column's host.
+
+**1PUX (`OnePUX`).** Import reads `export.data` and walks `accounts[].vaults[].items[]`: `overview` (title,
+URLs, tags), `details.loginFields` by designation, `details.sections[].fields[]` by value type (`concealed`,
+`string`, `totp`, `url`, `email`, `phone`, `date`, `monthYear`, `creditCardNumber`, `address`, `sshKey`,
+`menu`, …), `notesPlain`, `passwordHistory`, `state` (active, archived, trashed) and `categoryUuid`. Login,
+Password, Secure Note, API Credential, Bank Account and Membership keep their shape through the field
+identifiers 1Password's templates use (`credential`, `accountNo`, `routingNo`, `membership_no`, `pin`, …);
+every other category becomes an item of custom fields. Attachments and links between items are reported,
+not imported. Nothing else is passed over without a line in the report, with one stated exception: the
+checkboxes, radio buttons and buttons of a saved web form (`fieldType` `C`, `R`, `B`), which are a page's
+state. Every other saved-form entry is kept as text; a number or boolean where text was expected is kept as
+its text; a value that is not of its type (a string under `date`) is kept as text with a warning. A `date`
+may be any day of the years 1 to 9999, since a date of birth is before 1970 (timestamps keep the narrower
+range), and one outside it is kept as its number with a warning. A sign-in name typed as an email address
+(`fieldType` `E`) is an `email` field. Watchword items have no category, so each field's section, source
+type, source identifier and the entry's category are kept in `Field.meta` (`InterchangeMeta`); the export
+uses the category the fields agree on, unless the item has since become a login, and otherwise reads one
+off the fields (a note with a field is a Secure Note, a membership is known by its template's field names).
+Export writes `export.attributes` and `export.data` into a stored archive, with the first user name or,
+failing that, the first email address as the login's username; passkeys are left out and reported.
+
+**CXF (`CredentialExchange`).** Reads and writes Credential Exchange Format 1.0 JSON: `basic-auth`,
+`passkey`, `totp`, `api-key`, `note` and `custom-fields`. Security questions, PINs, recovery codes and every
+field with no credential type of its own are written as `custom-fields`. On import, a credential of any other
+type is kept as concealed custom fields and reported; an item repeating an earlier identifier is skipped and
+reported; a passkey outside `PasskeyCredential`'s bounds (identifier, handle, key, large blob) is refused
+alone and reported, and the rest of its item is imported; an account's collections become tags on the items
+they list (a path longer than a kilobyte is passed over, so nesting cannot multiply the file's size); an
+`EditableField` whose value is a JSON number or boolean is kept as its text, and one with no text at all is
+reported; a subtitle is kept, as a text field, when it says something the title and fields do not; Android
+app scopes are reported; the version is judged once the whole document has been read, since JSON members
+come in any order. The same bytes are the payload of the OS Credential
+Exchange APIs (`ASCredentialExportManager`/`ASCredentialImportManager`, iOS 26 and macOS 26) and a file that
+can be moved by hand. The field names follow the published 1.0 specification as recorded in
+`00-research.md` §2.2; they were not re-verified against the specification text when this was written (the
+host was unreachable), which the integration step must do against a real export before shipping.
+
+**Into the vault (`ImportAssembler`).** Every format hands its entries to one assembler, so no format can
+skip a rule. A draft gets its `id` from an injected `RandomNumberGenerator` (never from the file) and the
+`vaultID` the caller names. A URL becomes a scope only through `ScopeDerivation`: `HostNormalizer`, then
+`ScopePolicy`, and one check stricter than the policy (a host with ASCII punctuation such as `*` is refused,
+so a file cannot plant a scope that reads as a wildcard); a refused URL is kept as a `url` field with a
+warning (F11.2). A scope is a host and nothing more, so a URL that says more than `https://host/` (another
+scheme, a port, the sign-in page, a `www.` that was stripped) is *also* kept as a `url` field, and every
+exporter writes that text back in place of the URL it would otherwise synthesise for the scope; which
+field stands for which scope is decided on export by deriving the host again, never from a hint. **No
+exporter writes a sign-in URL for a host the item is not scoped to** (`ExportSupport.websites`): whatever
+reads the file offers the item's secrets on every URL in that position, so a website field whose URL
+derives to some other host (the person removed the scope and the field stayed, or the field arrived by a
+road that never checked) is written as an ordinary field and reported (`ExportWarning.websiteNotScoped`),
+as is one beyond the number of URLs an import considers for an entry. A URL the policy refused, from which
+no scope can come, is still written where it was found. A one-time-password value is validated through `OTPParameters` and stored as a canonical
+`otpauth://totp/` URI; an unusable one is kept as a concealed custom field with a warning. A passkey goes
+through `PasskeyCredential`. Entries in the source's trash are skipped unless the caller asks for them, and
+are then marked, not trashed: only the vault moves an item to the trash.
+
+**Duplicates (`DuplicateDetector`).** Compares drafts with existing items (identical, or the same account:
+one shared host and login name) and computes what skip, keep both or merge would save; nothing is ever
+dropped or merged without the person's choice. A match is made on one host and one name, and the file
+controls everything else about its entry, so merge is where a hostile file would reach an existing secret:
+an entry listing the bank's URL and the attacker's, merged into the bank's item, would have AutoFill offer
+the real password on the attacker's site. The rule is that **a merge never changes where an existing item
+is offered or what it signs in with, in this app or in a file exported from it**. `merged` adds tags, notes
+(unless every line is already there; one linear pass, not a string search) and fields other than sign-in
+fields and URLs. New scopes, new user names, email addresses, passwords, one-time passwords and passkeys,
+and new `url` fields are *reported* (`DuplicateMatch.newHosts`, `hasNewSignInFields` and `hasNewURLFields`,
+`additions(of:to:)`) and added only when `MergeChoices` names the host or the field the person accepted;
+there is no "accept all". Field values are compared as bytes.
+
+URLs are in that list because of what an export does with them. An entry's URL that says more than its
+host is kept as a website field, and a second review found the consequence: merged by default, the
+attacker's `https://evil.example/login` became a field of the bank's item, widened nothing in this app, and
+was then written by every exporter among the item's sign-in URLs, beside the real password, for the next
+password manager (this one included) to offer it there. So every `url` field is a choice, whether the
+entry's own website or a link it carries; a link labelled "Website" inside a trusted item is a lure even
+when nothing fills on it. Accepting a URL accepts a field and never a host: it stays one of the item's
+websites only if its host, derived again from its text, is one of the merged item's scopes (the existing
+ones and the hosts accepted by name), and is otherwise added as a plain link. The other hints by which an
+imported field speaks for its whole entry (the 1PUX category, the CXF subtitle) are dropped from every
+field a merge adds, so the file decides nothing about the existing item beyond the fields themselves. The
+exporters' own rule above is the second barrier: an item that came to hold such a field some other way
+still exports no URL for a host it is not scoped to.
+
+**Export reports (`ExportReport`).** An export never fails over one item, and never leaves something behind
+without a line: the person deletes this app's copy on the strength of the report. Beyond passkeys, moved
+fields and neutralised cells, each exporter reports a scope limited to its host or with exclusions (no
+format can say so, and whatever imports the file will offer the item on subdomains), history a format
+cannot hold (all of it in CXF and CSV, everything but earlier passwords in 1PUX), the archived mark (CXF,
+CSV), tags (CSV), a website written as an ordinary field because the item is not scoped to its host, and
+anything a field records beside its value (which recovery codes are spent). Field
+values that sync is keeping for the person to choose between (`Item.conflicts`, `Item.retainedValues`, §7.5)
+are *written*, as concealed fields labelled "(unresolved value)" under "Unresolved values" (lines of the
+notes in CSV), and reported; unresolved values of anything else (a title, the scopes, a passkey) are
+counted and left out, since writing a conflicting scope as if it were the item's would be worse.
+
+**Instructions (`InterchangeGuide`, F8.5).** Step-by-step routes for moving to and from 1Password and Apple
+Passwords, as data the UI renders, with the caveats from research: passkeys do not survive CSV, Wi-Fi
+passwords are left out of Credential Exchange, and an exported file is plaintext.
+
+**Still to come (integration).** The module ends at bytes. The session step re-enters the account password
+before any plaintext export exists, writes the file with `completeUnlessOpen` (or stronger) protection to a
+place the person chooses, shows the standing warning, saves drafts through an import path that keeps the
+source's history and timestamps (`VaultSession.save` replaces both), and calls the OS Credential Exchange
+APIs. The duplicate screen must show each of `DuplicateMatch.newHosts` and ask about it by name before it
+puts a host in `MergeChoices`, show each of `MergeAdditions.urlFields` and `signInFields` with its full
+value before it puts a field there, and never pre-select either; the export screen must show the `ExportReport` before the person is told
+the export is complete. The encrypted Watchword archive needs the vault's keys and is built there too.
 
 ## 15. Module and target layout
 
@@ -1575,7 +1753,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
                                                                                     integration open]
   Sources/WatchwordHygiene      HIBP clients, scan schedule, strength estimator,
                                 reuse, report, HygieneEngine                       [milestone 6; adapter, wiring, UI open]
-  Sources/WatchwordInterchange  1PUX/CSV/CXF                                       [milestone 7]
+  Sources/WatchwordInterchange  CSV, 1PUX and CXF import/export, ZIP reader,
+                                DEFLATE inflater, import mapping, instructions      [milestone 7; integration open]
   Sources/WatchwordKit          VaultSession façade, UnlockPolicy, AutoLockPolicy,
                                 ports (KeychainStore, BiometricGate, WallClock)     [milestone 2, done]
   Sources/WatchwordPlatform     Apple adapters: SystemKeychainStore,
@@ -1584,6 +1763,9 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
                                 scenario builders as the ports arrive
 Apps/ (Xcode project generated with XcodeGen from project.yml)
   Watchword (iOS/iPadOS), Watchword (macOS), AutoFillExtension (iOS), AutoFillExtension (macOS)
+Fuzz/ (a package of its own, depending on this one by path; nothing in it reaches an app)
+  Sources/WatchwordFuzz         libFuzzer targets for the parsers that read hostile bytes   [milestone 7]
+  Corpus/<target>               committed seed inputs
 ```
 
 Ports (protocols) injected into the core: `KeychainStore`, `BiometricGate`, `RandomSource`,

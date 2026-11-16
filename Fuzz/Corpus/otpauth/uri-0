@@ -1,0 +1,1 @@
+otpauth://totp/Example:wendy?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Example&algorithm=SHA256&digits=8&period=60

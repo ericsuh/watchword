@@ -50,7 +50,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "Scenarios S1 and S2 through the request model", and "Request model over a real vault session" — S1 and S2 again over a `VaultSession` with a stand-in for its `CredentialVault` conformance; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Item merge audit regressions", "Item merge laws under random histories" and "Item merge, every small history" — the merge as a CRDT (`10-sync-correctness.md` §7): the specification of a multi-value register at every step, the semilattice laws on whole items, every update inflationary, the same versions in any order with repeats, convergence and nothing typed lost, with the number of histories explored asserted —, "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
-| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
+| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests (`WatchwordInterchangeTests`: "CSV reader and writer (RFC 4180)", "Password CSV import and export", "1PUX import and export", "Credential Exchange Format import and export", "ZIP reader and writer", "DEFLATE inflater and CRC-32" — against streams from Python's `zlib` and archives from Python's `zipfile` —, "Bounded JSON reader and writer", "Import mapping into the vault", "Duplicate detection", "Interchange instructions"; milestone 7). Still to come with the integration step: the session's password re-entry and file protection, the encrypted archive, and the Credential Exchange calls |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent (`WatchwordHygieneTests`: "Pwned Passwords: digest and prefix", "…: range parser", "…: cache entries", "…: client", "Breach scan scheduling", "Scan ledger", "Strength estimator", "Password reuse", "Item checks", "Hygiene report", "Hygiene engine", "Breached-account lookup"; milestone 6) |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
 | SEC1–SEC10 | Section 6 below |
@@ -434,6 +434,61 @@ read-only writes refused by the transport fake), and anything that depends on th
   crash, clear error.
 - CXF payloads with unknown types, duplicate IDs, and oversized blobs.
 
+Done in milestone 7, as "Adversarial: import parsers" (`AdversarialInterchangeTests`, adversary A7), with
+every case above and the attacks a parser author would add to them:
+
+- ZIP: twenty-four escaping member names (four of them hiding a separator before a combining mark, which a
+  check by characters does not see), in an archive whose wanted member is a good one; undecodable and empty
+  names; a bomb that is honest about its size (refused on the declaration), one that lies (stopped at the
+  lie) and the bare stream (stopped at the ratio); declared sizes of 2 GB and 4 GB; a nested archive that is
+  never opened and a nested bomb; overlapping members; more members than the limit; encryption, ZIP64,
+  multi-disk and nine unknown compression methods, each refused by name; archives that can be read two ways
+  (repeated names, local headers that disagree, a wrong CRC-32, a directory that is not where the end record
+  says, trailing bytes); and every prefix and every single-byte change of a valid archive, each ending in a
+  typed error or the true contents.
+- DEFLATE: hand-assembled streams for each defect (reserved block type, stored-length mismatch, a distance
+  before the start of output, reserved symbols, too many codes, missing, incomplete and over-subscribed code
+  sets, a repeat with nothing to repeat, a run past the declared lengths, a block that cannot end), every
+  prefix of valid streams, and seeded random damage.
+- CSV: formula payloads imported exactly and exported inert; record structure hidden inside quoted cells;
+  invalid UTF-8 and UTF-16; a byte-order mark before the header; an unterminated quote, an over-long row, too
+  many columns and 50,001 rows, each stopped at its limit; a file over 100 MB refused in every format before
+  it is parsed.
+- 1PUX and CXF: 10^6 items; 200,000 levels of nesting wherever it can sit; oversized items skipped while
+  their neighbours import; a flood of warnings capped; repeated keys refused; hostile URLs that never become
+  scopes, and the property that every imported scope passes `ScopePolicy`; an entry that names an existing
+  item's identifier, another vault, a version or a trash date, none of which reach the draft; unknown
+  credential types, repeated identifiers, an oversized key and a bomb in a passkey's large blob; a collection
+  tree built to multiply its own size; and one-time passwords that could not work, which never become working
+  fields.
+- Every parser over seeded random and mutated files: a value or an `InterchangeError`, nothing else.
+- Amplification, added after the module's first security review: a CSV file inside every per-entry limit
+  stopped at one million fields under the standard limits, and one a thousand columns wide stopped at its
+  header; a URL repeated 999 times in each entry parsed once, distinct URLs capped per entry and per file with
+  the rest kept as fields and reported; 100,000 empty dynamic DEFLATE blocks (valid to zlib) refused bare
+  and as an archive member of any declared size, as is a stream of one literal per block; entries that are
+  small as written and megabytes as stored (control characters, quotes, slashes, a quarter of a million
+  blank lines, 990 fields, 900 earlier passwords) skipped and listed, with every draft that *is* returned
+  stamped by `ItemMerge.stamped` and encoded by `ItemCodec` within its limit; and, as a seeded property,
+  the stored-size estimate never below what the vault encodes.
+- Duplicates: a hostile entry sharing one host and user name with an existing item, merged, leaves the set of
+  hosts on which `AutoFillGate.decide` fills that item unchanged and adds no sign-in field; the match names
+  the host the file tried to add, and only a host accepted by name is added. Merging notes built to make a
+  string search quadratic completes in one pass.
+- Duplicates, through an export (added after the second review): the same entry with URLs an import keeps
+  as text (a sign-in page, another port, a look-alike subdomain, a URL the policy refuses, a link in a
+  section), merged with nothing accepted, leaves the existing item equal to what it was; merged with every
+  URL accepted and no host, it leaves the sign-in URLs of the 1PUX, CXF and CSV exports (read off the files'
+  own structure) and the hosts on which `AutoFillGate.decide` offers the real password after export and
+  re-import unchanged; with the host accepted by name, every sign-in URL written derives to a scope of the
+  item. An item with no site is given none by a merged link, in any export. An item holding a website field
+  for a host it is not scoped to (a removed scope, a shared-vault member's write) exports no sign-in URL
+  for that host and reports it, in every format, and website fields beyond the per-entry URL count are not
+  written as sign-in URLs.
+
+Still to come with the integration step: that a plaintext export cannot be produced without re-entering the
+account password, and that the file is written with the protection class §14 names.
+
 ### 6.6 Hygiene (milestone 6)
 - HIBP responses with padding, missing padding, non-hex lines, huge bodies, HTTP 429/5xx; the
   client never sends more than 5 hex characters and sets the required headers (asserted on the
@@ -548,7 +603,9 @@ if the matcher changes.
 *Normalisation (F11.6).* In `HostNormalizerTests`: ASCII percent-escapes rejected, non-ASCII
 escapes accepted, zero-width/bidi/soft-hyphen rejected, over-long hosts and labels rejected,
 user-info rejected, and the IDNA compatibility mapping asserted as honoured so a future
-"hardening" change cannot silently break legitimate matching.
+"hardening" change cannot silently break legitimate matching. A host normalises alike as a domain and as a
+URL (fullwidth, Kelvin sign, ideographic full stop, compatibility characters), a non-ASCII domain the URL
+parser cannot read is refused, and the `host` fuzz target checks the same agreement on arbitrary input.
 
 *At the request model (milestone 5):* "no override" is a property of `CredentialProviderModel`'s API, not of a
 view: there is no call that releases after a refusal, which `AdversarialAutoFillRequestTests` checks request by
@@ -562,8 +619,37 @@ observable from the extension). Milestone 2 enforces F11.2 at the vault boundary
 
 ### 6.8 Fuzzing (nightly)
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
-  `otpauth://` parser, and `HostMatcher.normalize`. None exists yet; the envelope decoder
-  (`Envelope.parse`) is the first candidate now that it is complete.
+  `otpauth://` parser, and `HostMatcher.normalize`.
+
+Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`, with fourteen targets
+selected by `WATCHWORD_FUZZ_TARGET`: `csv`, `password-csv`, `inflate`, `zip`, `1pux`, `1pux-archive`, `cxf`,
+`amplify`, `envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the
+import's scope derivation), `otpauth` and `passkey`. Each target runs a parser over arbitrary bytes and then checks
+what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports and names no
+host that no exported item was scoped to, an inflated
+stream is within its caps, every imported scope passes `ScopePolicy`, every one-time-password and passkey
+field decodes, an accepted envelope serialises to its own bytes); a broken invariant traps, which is a
+finding. `mise run fuzz` builds it with `-sanitize=fuzzer`, splits its time budget between the targets,
+reads the committed seeds in `Fuzz/Corpus/<target>` and writes findings to `artifacts/`. Built without the
+sanitiser the same executable replays inputs (`WatchwordFuzz replay <target> <file>`), which reproduces a
+finding on any toolchain, and mutates a corpus blindly; the task falls back to that, with a warning, where
+the toolchain has no libFuzzer runtime (`--require` fails instead). Item payloads are JSON decoded by
+Foundation after authentication (§5), so there is no CBOR item decoder to fuzz; the canonical CBOR encoder
+has no decoder at all.
+
+Those targets run with limits a hundredth of the standard ones and inputs of at most 64 KiB, which keeps a
+run in the parsers and means they cannot see cost that only a large file incurs: a file that keeps every
+per-entry limit and spends their product (the review finding that led to the import-wide budgets). Two
+things address that. `amplify` reads its input as a recipe (a format, a repeat count and a unit) and expands
+it to as much as 1 MiB of CSV rows, 1PUX or CXF items, or the URLs or fields of 1PUX items, imported under
+the **standard** limits; what comes back must be inside the import-wide budgets and every draft inside the
+stored-size bound, and libFuzzer's memory limit and timeout judge the rest. And `mise run fuzz --max-len
+<bytes>` lifts the input length for a run aimed at one target.
+
+The harness is a package of its own so that the shipped manifest does not know it exists; the dependency
+and unsafe-confinement tripwires cover it (`07-supply-chain.md` §2). The first run found one defect, fixed
+with a regression test and a seed: the CSV writer wrote a first cell beginning with U+FEFF bare, and the
+reader then took it for a byte-order mark.
 
 ## 7. CI implementation
 

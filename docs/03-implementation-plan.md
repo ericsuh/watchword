@@ -27,7 +27,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 4 — sharing (protocol core done) | The protocol core — membership chain, verified contacts, invitations, key grants, rotation plans — with real Ed25519 and HPKE through swift-crypto (ADR 0006), and its adversarial suite | the implementation that ships (CryptoKit); wiring into `VaultSession` and sync; `CKShare`, `UICloudSharingController`/`NSSharingService`, the folder-share flow; the sharing UI |
 | 5 — AutoFill (portable core done) | The request model, TOTP, the passkey authenticator and identity planning — done, behind a vault port with fakes | AuthenticationServices, app-extension targets, `VaultSession`'s conformance, simulator and device QA |
 | 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done | open: the `URLSession` adapter, the wiring into `VaultSession`, background-task glue, the Watchtower-style report UI and its snapshot tests |
-| 7 — interchange | Parsers, adversarial parser tests, and the fuzz targets — a better host for them | Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive |
+| 7 — interchange (parsers, exporters and fuzz targets done) | Parsers, adversarial parser tests, and the fuzz targets — a better host for them; done | open: Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive, the session wiring and the screens |
 | 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
 
 Four rules this split implies, all of which outlive the milestones they came from:
@@ -347,7 +347,7 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - The embedded EFF list came from a mirror (eff.org was unreachable); compare it with EFF's file before the
   generator draws passphrases from it, and keep one copy when the generator gains its own.
 
-## Milestone 7 — Interchange
+## Milestone 7 — Interchange (parsers, exporters and fuzz targets done)
 
 - `WatchwordInterchange`: 1PUX, 1Password CSV, Apple CSV, CXF import/export; Credential Exchange
   integration on iOS 26/macOS 26; encrypted Watchword archive; in-app instructions.
@@ -358,6 +358,42 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
   the sanitisers on Linux x86\_64 is more comfortable than the macOS nightly leg — so keep the `Fuzz/`
   harnesses free of Apple imports and either host can run them. Credential Exchange on iOS 26/macOS
   26 and the encrypted Watchword archive (crypto) are Mac-only.
+- Done, on Linux (`02-architecture.md` §14): the module with its hard limits; the ZIP reader, DEFLATE
+  inflater and stored-only ZIP writer; the RFC 4180 reader and writer with formula neutralisation; the
+  1Password 8, 1Password 7 and Apple Passwords CSV mappings and the Apple Passwords CSV export; 1PUX import
+  and 1PUX-compatible export; CXF 1.0 import and export; the mapping into item drafts (injected identifiers,
+  scopes only through the normaliser and the policy, one-time passwords through `OTPParameters`, passkeys
+  through `PasskeyCredential`) with its report; duplicate detection; the instructions as data. Tests: fixtures
+  and round trips for each format, DEFLATE vectors from Python's `zlib`, archives from Python's `zipfile`, the
+  `import parsers` adversarial area, and the `Fuzz/` package with fourteen libFuzzer targets and a seed
+  corpus, run by `mise run fuzz` and the nightly workflow.
+- Done after the first security review of the module (`02-architecture.md` §14): a merge never widens an
+  existing item's scopes or adds to its sign-in fields without a per-host, per-field choice (`MergeChoices`);
+  import-wide budgets for fields and for URL parsing, CSV rows streamed, a block budget in the inflater, and
+  drafts measured as the vault will store them; URLs keep their text beside the scope and are written back
+  on export; dates before 1970; saved-form text, mistyped values, CXF numbers, subtitles and Android apps no
+  longer dropped in silence; export reports for unresolved sync values (which are now written), history,
+  scope restrictions, archived state, tags and recovery-code marks; 1PUX export of email sign-in names and of
+  remembered categories.
+- Done after the second review: a merge adds no `url` field without a per-field choice either, an accepted
+  URL is a website only where the item is scoped to its host, and merged fields drop the hints that speak
+  for their entry (category, subtitle). The first fix had left a road open: a URL kept as text was merged
+  as a field and then written by every exporter as a sign-in URL of the existing item. Exporters now write
+  a sign-in URL only for a host the item is scoped to (or a URL no scope can come from), report the rest
+  (`ExportWarning.websiteNotScoped`), and the CSV export no longer puts an arbitrary `url` field in its URL
+  column. The `1pux`, `cxf` and `password-csv` fuzz targets check that an export, read back, names no host
+  the items were not scoped to.
+- Open, all of it integration and most of it Mac-only: the session wiring (password re-entry before a
+  plaintext export, `completeUnlessOpen` file protection, the standing warning, an import path through
+  `VaultSession` that keeps imported history and timestamps); the encrypted Watchword archive; the OS
+  Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
+  and their XCUITests, including a duplicate screen that names each host a merge would add and asks about it
+  (`DuplicateMatch.newHosts`, `MergeChoices`), shows each URL and sign-in field before adding it
+  (`MergeAdditions.urlFields`, `signInFields`), and an export screen that shows the `ExportReport`. Before shipping: a check of the CXF and 1PUX field names against the published
+  formats and real exports from 1Password and Apple Passwords (the specifications were unreachable from the
+  session that wrote the parsers), and of the 1PUX export against 1Password's importer. The nightly `fuzz`
+  job runs on the macOS runner, whose toolchain may lack the libFuzzer runtime; the task then replays the
+  seeds and mutates them blindly and says so, and a Linux leg is the way to get real fuzzing there.
 
 ## Milestone 8 — Hardening and release
 

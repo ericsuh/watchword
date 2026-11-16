@@ -11,7 +11,8 @@ milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `Wa
 `WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
 its CloudKit and iCloud Drive transports, milestone 4's sharing protocol core (`WatchwordSharing`), which nothing
 calls yet, milestone 5's portable AutoFill core (`WatchwordAutoFill`) short of the extension adapter, and
-milestone 6's portable hygiene core (`WatchwordHygiene`) short of its network adapter, session wiring and UI.
+milestone 6's portable hygiene core (`WatchwordHygiene`) short of its network adapter, session wiring and UI, and milestone 7's import and export parsers
+(`WatchwordInterchange`) short of their wiring into the session and the apps.
 `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
@@ -35,7 +36,7 @@ mise run test --coverage                               # also writes an llvm-cov
 mise run test:adversarial                              # security suite only (its own CI job)
 mise run test:long --seed 1234                         # the nightly long randomised run; replay a nightly's seed
 mise run test:scripts                                  # the repository's own scripts (screenshots.yml's steps, app:screenshots), against stand-in tools
-mise run fuzz --max-total-time 60                      # libFuzzer harness (skips until Fuzz/ exists)
+mise run fuzz --max-total-time 60                      # libFuzzer over every target in Fuzz/ (--target <name>, --list)
 
 mise run lint                                          # swift format lint --strict (alias fmt:check)
 mise run fmt                                           # swift format --in-place
@@ -120,8 +121,8 @@ If an agent needs the real toolchain, the answer is Remote Control on a Mac (`cl
 --remote-control`), not a cloud session — that is the only arrangement with `xcodebuild`, a
 simulator and the Xcode MCP server.
 
-`WatchwordModel`, `WatchwordMatching`, `WatchwordGenerator`, `WatchwordEnvelope` and `WatchwordSync` import only
-`Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
+`WatchwordModel`, `WatchwordMatching`, `WatchwordGenerator`, `WatchwordEnvelope`, `WatchwordSync` and
+`WatchwordInterchange` import only `Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
 property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` and `RecordMerger` ports, and the day it
 imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
 policies and ports are portable too, and so are `WatchwordCrypto`, `WatchwordSharing`, `VaultSession` and `WatchwordAutoFill` through
@@ -137,7 +138,7 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Thirteen shipped modules, dependency-ordered, plus test support:
+Fourteen shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
@@ -186,6 +187,10 @@ Thirteen shipped modules, dependency-ordered, plus test support:
   conforms to its port) and never on AuthenticationServices.
 - **`WatchwordPlatform`** — Apple adapters: `SystemKeychainStore`, `LocalAuthenticationGate`, the Emergency Kit
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
+- **`WatchwordInterchange`** — import and export of other password managers' formats (milestone 7): `CSVReader`/
+  `CSVWriter` and `PasswordCSV` (1Password and Apple Passwords CSV), `OnePUX`, `CredentialExchange` (CXF 1.0), the
+  `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `StoredItemSize`, `DuplicateDetector`,
+  `InterchangeGuide`. Depends on `WatchwordModel` and `WatchwordMatching`; Foundation only, no keys, files or clocks.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
   checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for AutoFill
@@ -193,14 +198,18 @@ Thirteen shipped modules, dependency-ordered, plus test support:
   `AutoFillFixtures`; for hygiene `FakeHTTPClient`, which records every request, `RecordingPwnedRangeCache`,
   `SimulatedPwnedPasswords`; for sharing, with real keys, `HostileSharingStore`, `SimulatedMember` (the reference
   for the integration's sync pass, §8.8), `SharingHousehold` and `ForgedRecord`, an encoder of its own for records
-  the module would never sign). Test targets only; not a product, and no production target may depend on it.
+  the module would never sign; for imports `ZIPFixture` and `DeflateFixture`, which build the archives and streams
+  no real writer produces). Test targets only; not a product, and no production target may depend on it.
 
-`docs/02-architecture.md` §15 lists the module still to come (`WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
+`docs/02-architecture.md` §15 maps each module to its milestone; §14 describes import and export as built; §7.5
+describes sync as built, and
 §7.6 the vault side (keyring, saves, state, conflict UI); `docs/10-sync-correctness.md` is the model of an item as a
 CRDT and the argument that sync converges; `docs/03-implementation-plan.md` milestone 3 lists what is
 still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds). §8 describes sharing as
 built, and milestone 4 what is open there (wiring into `VaultSession` and sync, `CKShare`, the UI). §13 describes hygiene as
 built, and milestone 6 what is still open (the `URLSession` adapter, session wiring, background glue, the report UI).
+Milestone 7 lists what is open for import and export (session wiring, the encrypted archive, Credential Exchange,
+the screens).
 
 ### `WatchwordHygiene` invariants
 
@@ -255,6 +264,51 @@ built, and milestone 6 what is still open (the `URLSession` adapter, session wir
   one too. A cover costs `k! ×` the product of its parts, without zxcvbn's `10000^(k-1)` bonus, which rated
   `Spring2026!` strong; keyboard zigzags and parallel columns are single patterns. Explanations never quote the
   password.
+
+### `WatchwordInterchange` invariants
+
+An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the description. Before editing:
+
+- Limits are enforced before or while the cost is incurred (`InterchangeLimits`; an initialiser can tighten one, never
+  loosen it). A file ends in one `InterchangeError`; a bad entry is skipped or degraded and listed in the
+  `ImportReport`. Never drop, change or refuse something without a line in the report, on import or on export
+  (`ExportReport`, `ExportSupport`).
+- Per-entry and per-file limits do not bound their product, so the import as a whole has budgets
+  (`maximumTotalFields`, `maximumScopeDerivations`), counted in `ImportAssembler.add` before an entry is built. A new
+  per-entry cost needs a place in one of them. CSV rows are streamed (`CSVReader.forEachRecord`), never held beside
+  the drafts. A draft is measured as the vault will store it (`StoredItemSize`, checked against `ItemMerge.stamped`
+  and `ItemCodec` by the adversarial suite): if the stored form of an item changes, that estimate changes with it.
+- A merge never widens (`DuplicateDetector`), here or in a file exported afterwards: scopes, sign-in fields and
+  `url` fields from a file reach an existing item only through `MergeChoices`, one host or field at a time, and an
+  accepted URL stays a website (`InterchangeMeta.websiteType`) only where the merged item is scoped to its host.
+  Don't add an "accept all", and don't make `merged` add any of them by default.
+- An export never widens either: `ExportSupport.websites` is the one place that decides what a format writes as a
+  sign-in URL, and it writes none for a host the item is not scoped to (reported as `websiteNotScoped`). Don't let an
+  exporter put some other `url` field where a format keeps an entry's sites.
+- Every format hands its entries to `ImportAssembler`, the one place drafts are made: IDs from the injected generator
+  and the vault ID from the caller, never from the file; a URL becomes a scope only through `ScopeDerivation`
+  (`HostNormalizer`, then `ScopePolicy`) and otherwise stays a `url` field with a warning (a URL that says more than
+  its host is also kept as text beside its scope, and `ExportSupport.websites` writes it back); TOTP values go through
+  `OTPParameters`, passkeys through `PasskeyCredential`. Don't build an `Item` in a format's parser.
+- The ZIP reader validates every member and decompresses only the one asked for. Nothing is extracted to disk, nested
+  archives are never opened, and anything with two readings is refused. Don't add leniency to "support" a real-world
+  archive without an adversarial test for what the leniency admits.
+- JSON is walked one item at a time (`JSONReader.readBoundedValue`); don't materialise a document. No
+  `JSONSerialization`: its behaviour differs between Linux and Apple platforms.
+- Invalid UTF-8 is refused, never repaired. Cells and fields are data on import; only CSV *export* neutralises
+  formulas.
+- Checks on names, cells and URLs work on bytes or Unicode scalars, never on `Character`s and never through
+  Foundation's string searches or white-space sets: to `split` and `hasPrefix`, a slash followed by a combining mark
+  is not a slash (`../` + U+0301 passed as a name until review caught it), and `whitespacesAndNewlines` differs
+  between Linux and Apple platforms. Use `UTF8Text.trimmed`.
+- Searches over an entry's fields, URLs or sections use sets or dictionaries: a file can make any list long, and the
+  fuzz and adversarial suites assume linear work.
+- Exporters return plaintext bytes and a report and do nothing else. Password re-entry, file protection and the OS
+  Credential Exchange calls belong to the session and the apps.
+- The fuzz harness is its own package (`Fuzz/`, built only by `mise run fuzz`) so the shipped manifest never mentions
+  it; libFuzzer's entry point in `Fuzz/Sources/WatchwordFuzz/LibFuzzerEntry.swift` is the one pointer outside
+  `SecureMemory`, and both tripwires hold it there. A new parser of hostile bytes gets a target in `FuzzTarget` and a
+  seed in `Fuzz/Corpus/<target>/`.
 
 ### `SyncEngine` invariants
 
@@ -545,7 +599,7 @@ directions are tested; keep both when adjusting constants.
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"AutoFill request model"`, `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`,
   `"local vault store"`, `"Keychain item protection"`, `"sync log"`, `"sync log, item metadata"`, `"sync with real keys"`,
-  `"hygiene and breach checks"`, `"sharing and membership"`), so **renaming a suite breaks CI deliberately** — update
+  `"hygiene and breach checks"`, `"sharing and membership"`, `"import parsers"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
@@ -579,7 +633,7 @@ fails unless every other job succeeded and is the one check branch protection na
 runner bump never strands `main` waiting on a check that no longer reports. Everything Xcode-, AppKit- or
 screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is
 `mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
-runs, libFuzzer harnesses under `Fuzz/` (self-skipping), and an audit that every `uses:` is a 40-hex
+runs, the libFuzzer harness in `Fuzz/` (`mise run fuzz`), and an audit that every `uses:` is a 40-hex
 commit SHA. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS runner (`mise run ci:gate`), so a cloud
 session can run Mac-only gates before opening a pull request; it gates nothing. A dispatch runs the workflow and
 `ci:gate` as they are on that branch (one cut before mac-run.yml merged needs a rebase first), so `ci:gate`'s refusals

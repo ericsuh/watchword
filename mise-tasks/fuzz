@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
-#MISE description="Build the libFuzzer harness under Fuzz/ and run it for a bounded time (skips until Fuzz/ exists)"
-#USAGE flag "--max-total-time <seconds>" default="60" help="libFuzzer -max_total_time; the nightly job uses 1800"
-#USAGE flag "--corpus <dir>" default="corpus" help="Corpus directory, created if missing and grown by the run"
+#MISE description="Fuzz the parsers with the libFuzzer harness under Fuzz/, each target for a bounded time"
+#USAGE flag "--max-total-time <seconds>" default="60" help="Total fuzzing time, split evenly between the targets run; the nightly job uses 1800"
+#USAGE flag "--target <name>" help="Fuzz one target only (`--list` names them); all of them by default"
+#USAGE flag "--list" help="Print the target names and exit"
+#USAGE flag "--corpus <dir>" default="corpus" help="Working corpus directory, one subdirectory per target, created if missing and grown by the run. The committed seeds in Fuzz/Corpus are read as well and never written"
+#USAGE flag "--require" help="Fail when the toolchain has no libFuzzer runtime, instead of falling back to replaying the seeds and mutating them blindly"
+#USAGE flag "--seed <number>" default="1" help="Seed for the fallback's mutations (the libFuzzer run chooses its own and prints it)"
+#USAGE flag "--max-len <bytes>" default="65536" help="Longest input libFuzzer generates. The default keeps a run in the parsers; raise it (with --target) to look for cost that only shows on large files"
 #
-# docs/04-test-plan.md §6.8. Crashing inputs land in artifacts/.
+# docs/04-test-plan.md §6.8. The harness is the package in Fuzz/ (its manifest says why it is a package of its own).
+# Crashing inputs land in artifacts/<target>-<hash>; reproduce one without a sanitiser build:
+#
+#   swift build --package-path Fuzz -c release --product WatchwordFuzz
+#   Fuzz/.build/release/WatchwordFuzz replay <target> artifacts/<file>
 set -euo pipefail
 
 if [ ! -d Fuzz ]; then
@@ -11,7 +20,72 @@ if [ ! -d Fuzz ]; then
   exit 0
 fi
 
-swift build -c release -Xswiftc -sanitize=fuzzer -Xswiftc -parse-as-library --product WatchwordFuzz
-mkdir -p "$usage_corpus" artifacts
-"$(swift build -c release --show-bin-path)/WatchwordFuzz" "$usage_corpus" \
-  -max_total_time="$usage_max_total_time" -artifact_prefix=artifacts/ -rss_limit_mb=4096
+# The replay build: any toolchain, and the source of the target list.
+swift build --package-path Fuzz -c release --product WatchwordFuzz
+replay="$(swift build --package-path Fuzz -c release --show-bin-path)/WatchwordFuzz"
+
+if [ "${usage_list:-false}" = true ]; then
+  "$replay" list
+  exit 0
+fi
+
+targets=()
+while IFS= read -r name; do targets+=("$name"); done < <("$replay" list)
+if [ -n "${usage_target:-}" ]; then
+  found=false
+  for name in "${targets[@]}"; do
+    if [ "$name" = "$usage_target" ]; then found=true; fi
+  done
+  [ "$found" = true ] || { echo "::error::No fuzz target named $usage_target (--list names them)"; exit 1; }
+  targets=("$usage_target")
+fi
+
+# Not every toolchain ships the libFuzzer runtime (swift.org toolchains do; an Xcode toolchain may not). Ask the
+# compiler rather than guess from its name.
+probe=$(mktemp -d)
+trap 'rm -rf "$probe"' EXIT
+printf '%s\n' '@_cdecl("LLVMFuzzerTestOneInput") public func probe(_ start: UnsafePointer<UInt8>?, _ count: Int) -> CInt { 0 }' \
+  > "$probe/probe.swift"
+libfuzzer=true
+swiftc -sanitize=fuzzer -parse-as-library -o "$probe/probe" "$probe/probe.swift" > "$probe/log" 2>&1 || libfuzzer=false
+
+mkdir -p artifacts
+per_target=$((usage_max_total_time / ${#targets[@]}))
+[ "$per_target" -ge 1 ] || per_target=1
+failed=()
+
+if [ "$libfuzzer" = true ]; then
+  # Its own scratch path: the sanitised objects must not replace the replay build's.
+  scratch=Fuzz/.build/libfuzzer
+  flags=(-Xswiftc -sanitize=fuzzer -Xswiftc -parse-as-library -Xswiftc -DWATCHWORD_LIBFUZZER)
+  swift build --package-path Fuzz --scratch-path "$scratch" -c release --product WatchwordFuzz "${flags[@]}"
+  fuzzer="$(swift build --package-path Fuzz --scratch-path "$scratch" -c release --show-bin-path)/WatchwordFuzz"
+  for name in "${targets[@]}"; do
+    echo "===== fuzz $name (${per_target}s) ====="
+    mkdir -p "$usage_corpus/$name" "Fuzz/Corpus/$name"
+    # Swift's own crash reporter is switched off so that libFuzzer's handler sees the trap and writes the input out.
+    SWIFT_BACKTRACE=enable=no WATCHWORD_FUZZ_TARGET="$name" "$fuzzer" "$usage_corpus/$name" "Fuzz/Corpus/$name" \
+      -max_total_time="$per_target" -artifact_prefix="artifacts/$name-" -rss_limit_mb=4096 -timeout=30 \
+      -max_len="$usage_max_len" -print_final_stats=1 \
+      || failed+=("$name")
+  done
+else
+  message="This toolchain has no libFuzzer runtime ($(head -n 1 "$probe/log"))"
+  if [ "${usage_require:-false}" = true ]; then
+    echo "::error::$message"
+    exit 1
+  fi
+  echo "::warning::$message; replaying the seed corpus and mutating it blindly instead. That is a regression check, not fuzzing."
+  # No clock in the fallback: a fixed number of mutations per second of budget.
+  runs=$((per_target * 2000))
+  for name in "${targets[@]}"; do
+    echo "===== replay and mutate $name ($runs mutations) ====="
+    "$replay" mutate "$name" "$runs" "$usage_seed" "Fuzz/Corpus/$name" || failed+=("$name")
+  done
+fi
+
+if [ "${#failed[@]}" -gt 0 ]; then
+  echo "::error::Fuzz targets with findings: ${failed[*]} (inputs in artifacts/)"
+  exit 1
+fi
+echo "No findings in: ${targets[*]}"
