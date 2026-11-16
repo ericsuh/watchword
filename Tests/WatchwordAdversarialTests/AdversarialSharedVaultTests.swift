@@ -161,6 +161,43 @@ struct AdversarialSharedVaultTests {
         }
     }
 
+    /// Threat: someone with this device's files (A8) edits the saved stream index, which says which segment carried
+    /// each version and so whose work it is, or puts another account's saved ledger in place of this one's. Neither
+    /// is believed: the index is refused whole and rebuilt from the log, and a ledger that does not carry this
+    /// account's signature is not loaded, so the vault is never judged by a planted chain.
+    @Test("a planted stream index or ledger in the sharing state is refused on the next launch")
+    func plantedSharingState() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 950)
+        let member = members[0]
+        let bank = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, member])
+
+        let saved = try #require(await member.state.value(.streamIndex, vaultID: vaultID))
+        var altered = saved
+        altered[altered.count / 2] ^= 0x01
+        await member.state.tamper(.streamIndex, vaultID: vaultID, value: altered)
+        let relaunched = member.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+        try await relaunched.session.sync()
+        #expect(try await relaunched.session.item(id: bank.id).field(.password)?.value == "bank-password")
+        let rebuilt = try #require(await member.state.value(.streamIndex, vaultID: vaultID))
+        #expect(rebuilt != altered)
+
+        let foreign = try #require(await owner.state.value(.ledger, vaultID: vaultID))
+        await member.state.tamper(.ledger, vaultID: vaultID, value: foreign)
+        let again = member.vault.relaunched(seed: 13)
+        await again.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await again.session.unlock(password: TestVault.password)
+        #expect(try await again.session.sharedVaultIDs().isEmpty)
+        await #expect(throws: SharedVaultError.notShared(vaultID)) {
+            _ = try await again.session.sharedVaultStatus(vaultID)
+        }
+    }
+
     /// Threat: a key grant planted by someone the chain does not entitle to send one: the store (A1), or anyone with
     /// create access to the vault's prefix, files grants of a key of their own choosing, under the current key's ID,
     /// to the invitee, ahead of the owner's. Accepting must take the owner's key and nothing else; with only forged

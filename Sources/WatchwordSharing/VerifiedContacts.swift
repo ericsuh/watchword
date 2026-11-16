@@ -172,6 +172,8 @@ public struct VerifiedContacts: Sendable {
             guard replacingPin else { throw SharingError.keySubstituted(accountID: bundle.accountID) }
         }
 
+        // The caller's vault may have locked while the pin was read: a zeroised keyset traps when read.
+        guard !keyset.isZeroised else { throw SharingError.notPermitted }
         let seconds = VerifiedContacts.seconds(now)
         let content = VerifiedContacts.pinContent(
             pinner: account.accountID, method: method, seconds: seconds, bundle: bundle)

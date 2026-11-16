@@ -180,8 +180,10 @@ extension VaultSession {
     /// Saves one vault's ledger, proposals, plan and index, each signed by the account (or verified again on load).
     func saveSharedVault(_ vaultID: UUID) async throws {
         let settings = try sharingSettings()
+        guard let account = try await loadAccount() else { return }
+        // Read after the suspension: a lock that landed meanwhile has zeroised the keyset, and reading it traps.
         let keys = try requireKeys()
-        guard let vault = sharing.vaults[vaultID], let account = try await loadAccount() else { return }
+        guard let vault = sharing.vaults[vaultID] else { return }
         let ledger = try vault.ledger.persisted(signedBy: keys.keyset)
         let index = try vault.index.signed(account: account.accountID, vaultID: vaultID, keyset: keys.keyset)
         try await settings.state.setValue(
@@ -275,7 +277,7 @@ extension VaultSession {
     /// Every proposal of this device's: adopted ones forgotten, waiting ones published again, superseded ones
     /// proposed again on the new head if still wanted and possible (§8.3, S27). Returns whether anything was published.
     func settleProposals(in vaultID: UUID) async throws -> Bool {
-        let keys = try requireKeys()
+        _ = try requireKeys()
         var published = false
         var remaining: [MembershipRecord] = []
         for record in try sharedVault(vaultID).proposals {
@@ -288,8 +290,9 @@ extension VaultSession {
                 remaining.append(record)
                 published = true
             case .superseded:
-                guard let again = try await proposeAgain(record.operation, ledger: ledger, in: vaultID, keys: keys)
-                else { continue }
+                guard let again = try await proposeAgain(record.operation, ledger: ledger, in: vaultID) else {
+                    continue
+                }
                 try await publishSharingObject(SharingObject(again))
                 remaining.append(again)
                 published = true
@@ -301,15 +304,18 @@ extension VaultSession {
 
     /// The record that does on the current head what a superseded record of this device's did; `nil` if it has
     /// happened by other means, is no longer allowed, or is a rotation (which has a plan of its own).
-    private func proposeAgain(
-        _ operation: MembershipRecord.Operation, ledger: MembershipLedger, in vaultID: UUID, keys: UnlockedKeys
-    ) async throws -> MembershipRecord? {
+    /// Every signature is made with the keyset as it is after the last suspension (`requireKeys()`), never one read
+    /// before it.
+    private func proposeAgain(_ operation: MembershipRecord.Operation, ledger: MembershipLedger, in vaultID: UUID)
+        async throws -> MembershipRecord?
+    {
         switch operation {
         case .changeRole(let accountID, let role):
             let cut =
                 ledger.requiresWriteCut(changingRoleOf: accountID, to: role)
                 ? try await takeWriteCut(of: accountID, in: vaultID) : nil
-            return try? ledger.proposeRoleChange(of: accountID, to: role, writeCut: cut, signedBy: keys.keyset)
+            return try? ledger.proposeRoleChange(
+                of: accountID, to: role, writeCut: cut, signedBy: try requireKeys().keyset)
         case .addMember(let accountID, let role):
             // The invitation over again, from the pin: the key may have changed on the winning branch.
             guard let settings = sharing.settings, let contacts = try? verifiedContacts(settings),
@@ -317,12 +323,12 @@ extension VaultSession {
                     vaultID: vaultID, inviting: accountID, as: role, directory: settings.directory, contacts: contacts),
                 let account = try await loadAccount(),
                 let key = currentVaultKey(vaultID, keys: try requireKeys(), account: account),
-                let package = try? invitation.issue(ledger: ledger, vaultKey: key, signedBy: keys.keyset)
+                let package = try? invitation.issue(ledger: ledger, vaultKey: key, signedBy: try requireKeys().keyset)
             else { return nil }
             try await publishSharingObject(package.grant)
             return package.proposal
         case .deleteVault:
-            return try? ledger.proposeDeletion(signedBy: keys.keyset)
+            return try? ledger.proposeDeletion(signedBy: try requireKeys().keyset)
         case .createVault, .removeMember, .memberLeft, .rotateKey:
             return nil
         }

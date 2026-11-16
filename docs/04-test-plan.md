@@ -389,7 +389,8 @@ vaults through the session", real `VaultSession`s of different accounts over one
 member's late writes, merged by a device the store had not shown the removal, taken out again there and counted by no
 device, a member invited afterwards included, while what the cut held counts everywhere (S28); the same for a demoted
 member, with no rotation; a grant of a stranger's key filed under the current key's ID, alone and ahead of the genuine
-one; segments and membership records copied from one shared vault into another; a removal interrupted by `lock()`
+one; segments and membership records copied from one shared vault into another; a stream index altered in the sharing
+state, and another account's saved ledger planted there (A8); a removal interrupted by `lock()`
 while publishing its grants, resumed and completed by the next sync. Scenarios S3 and S4 through the session are
 `SharedVaultScenarioTests` (`WatchwordKitTests`).
 
