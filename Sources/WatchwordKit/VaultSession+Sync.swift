@@ -214,6 +214,31 @@ extension VaultSession {
         return entries
     }
 
+    /// The same versions as `quarantinedVersions()`, each with the vault it is kept in, for the screen that lists them
+    /// (PRD F7.7; review finding S49, which requires held-aside versions from shared vaults to be visible). Vaults in
+    /// directory order, entries in the order the state store keeps them.
+    public func quarantine() async throws -> [QuarantinedVersion] {
+        guard let syncSettings else { return [] }
+        guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        var versions: [QuarantinedVersion] = []
+        for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            for entry in try await syncSettings.state.quarantined(vaultID: vaultID) {
+                versions.append(QuarantinedVersion(vaultID: vaultID, entry: entry))
+            }
+        }
+        return versions
+    }
+
+    /// Discards quarantined versions from the vault each was kept in: the person's choice, so it needs the vault
+    /// unlocked (PRD F7.7).
+    public func discardQuarantined(_ versions: [QuarantinedVersion]) async throws {
+        _ = try requireKeys()
+        guard let syncSettings else { throw VaultError.syncNotConfigured }
+        for (vaultID, kept) in Dictionary(grouping: versions, by: \.vaultID) {
+            try await syncSettings.state.discardQuarantined(kept.map(\.entry), vaultID: vaultID)
+        }
+    }
+
     /// Discards quarantined versions: the person's choice, so it needs the vault unlocked (PRD F7.7).
     public func discardQuarantined(_ entries: [SyncEntry]) async throws {
         _ = try requireKeys()
@@ -559,6 +584,25 @@ struct VaultSyncAdapter: SyncKeyring, ItemSealer {
 
     func sealItem(_ item: Item) async throws -> StoredRecord {
         try await session.syncSealItem(item)
+    }
+}
+
+/// A remote version sync kept aside rather than merged (`VaultSession.quarantine()`): refused as implausible (review
+/// finding U5), unsealable once merged (Y37), or held aside in a shared vault because it carries work that does not
+/// count (docs/02-architecture.md §8.7). Kept until the person discards it (PRD F7.7).
+public struct QuarantinedVersion: Sendable, Hashable, Identifiable {
+    public var vaultID: UUID
+    public var entry: SyncEntry
+
+    public init(vaultID: UUID, entry: SyncEntry) {
+        self.vaultID = vaultID
+        self.entry = entry
+    }
+
+    /// The vault, the record and the version's stamp: one kept version.
+    public var id: String {
+        "\(vaultID.uuidString)/\(entry.recordID.uuidString)/\(entry.kind.rawValue)/\(entry.version)/"
+            + "\(entry.device.uuidString)/\(entry.isDeletion ? "d" : "v")"
     }
 }
 
