@@ -21,7 +21,9 @@ if [ -n "${usage_only_testing:-}" ] && [ "$platform" = all ]; then
   exit 2
 fi
 
-run_tests() { # run_tests <scheme> <destination> <result bundle name> <build settings...>
+run_tests() { # run_tests <action> <scheme> <destination> <result bundle name> <build settings...>
+  local action="$1"
+  shift
   local args=(-project Apps/Watchword.xcodeproj -scheme "$1" -destination "$2")
   if [ -n "${usage_results:-}" ]; then
     mkdir -p "$usage_results"
@@ -32,14 +34,14 @@ run_tests() { # run_tests <scheme> <destination> <result bundle name> <build set
   if [ -n "${usage_only_testing:-}" ]; then
     args+=("-only-testing:$usage_only_testing")
   fi
-  xcodebuild test "${args[@]}" "$@"
+  xcodebuild "$action" "${args[@]}" "$@"
 }
 
 # Each platform runs even if the other failed (a Mac without automation mode fails the macOS UI tests), and the task
 # fails if either did.
 failed=""
 if [ "$platform" = macos ] || [ "$platform" = all ]; then
-  run_tests Watchword-macOS 'platform=macOS' macOS "${macos_signing[@]}" || failed="$failed macOS"
+  run_tests test Watchword-macOS 'platform=macOS' macOS "${macos_signing[@]}" || failed="$failed macOS"
 fi
 if [ "$platform" = ios ] || [ "$platform" = all ]; then
   udid="${usage_simulator:-}"
@@ -48,12 +50,21 @@ if [ "$platform" = ios ] || [ "$platform" = all ]; then
 devices = json.load(sys.stdin)["devices"]
 print(next(d["udid"] for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")))')
   fi
-  # Boot the simulator and wait until it has finished booting before xcodebuild starts the UI-test runner. Left to
-  # itself, xcodebuild boots a shut-down simulator and launches the runner while a fresh CI device is still on its
-  # first boot; the runner then dies before any test runs ("Timed out waiting for AX loaded notification", or a
-  # crash in XCTWaiter's handleStalledWait while preparing). A booted simulator returns at once.
-  xcrun simctl bootstatus "$udid" -b
-  run_tests Watchword-iOS "platform=iOS Simulator,id=$udid" iOS "${ios_signing[@]}" || failed="$failed iOS"
+  destination="platform=iOS Simulator,id=$udid"
+  # Build first, with the simulator still shut down, then boot it, then test what was built. Booted before a build,
+  # a CI device has been seen to lose every one of its system processes at once while the build ran (SIGBUS paging
+  # in the shared cache), and xcodebuild then finds it shut down: "Failed to prepare device for impending launch",
+  # or the runner crashing while preparing. Booting and waiting for the boot to finish before the runner starts
+  # still matters: left to itself, xcodebuild launches the runner while a fresh device is on its first boot, and
+  # the runner dies before any test runs ("Timed out waiting for AX loaded notification"). A booted simulator
+  # returns at once.
+  if xcodebuild build-for-testing -project Apps/Watchword.xcodeproj -scheme Watchword-iOS \
+    -destination "$destination" "${ios_signing[@]}"; then
+    xcrun simctl bootstatus "$udid" -b
+    run_tests test-without-building Watchword-iOS "$destination" iOS "${ios_signing[@]}" || failed="$failed iOS"
+  else
+    failed="$failed iOS(build)"
+  fi
 fi
 
 if [ -n "$failed" ]; then
