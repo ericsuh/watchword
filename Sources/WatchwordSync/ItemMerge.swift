@@ -47,6 +47,9 @@ public enum ItemMerge {
     /// (`previous == nil`) has every group stamped. The caller's own sync metadata is ignored — the vault owns it, as
     /// it owns `version`.
     ///
+    /// "Differs" is byte for byte (docs/10-sync-correctness.md §2): a password, title or line retyped in another
+    /// Unicode normalisation form is an edit, saved as typed.
+    ///
     /// The result contains `previous`: merging the two gives the result again. For that, `revision` must be new to
     /// the item — above the version of the row `previous` was read from, as every version the vault assigns is — and
     /// the history and dates only ever grow (the history is the union of both, `createdAt` the earlier, `modifiedAt`
@@ -54,11 +57,18 @@ public enum ItemMerge {
     ///
     /// `previousOrigin` is the version and device of the row `previous` was read from; it stands in for the stamps
     /// of an item written before sync existed, and bounds every count `previous` holds.
-    public static func stamped(_ edited: Item, previous: Item?, previousOrigin: Revision? = nil, revision: Revision)
-        -> Item
-    {
+    ///
+    /// `generator` supplies the nonce of the note lines this edit inserts (`NoteLine.ID`), which is what stops
+    /// another writer from naming them before it has seen them. One number is drawn for every edit of an existing
+    /// item, whether or not it touches the notes.
+    public static func stamped(
+        _ edited: Item, previous: Item?, previousOrigin: Revision? = nil, revision: Revision,
+        using generator: inout some RandomNumberGenerator
+    ) -> Item {
         guard let previous else {
             // Read as an item without sync metadata written by `revision`: every group and line is stamped with it.
+            // Its lines are numbered as every device would number them from the notes alone; nobody can have filed
+            // anything under an item that did not exist.
             var fresh = edited
             fresh.revisions = [:]
             fresh.conflicts = [:]
@@ -69,6 +79,7 @@ public enum ItemMerge {
             fresh.discards = [:]
             return ItemState(fresh, origin: revision).item
         }
+        let nonce: UInt64 = generator.next()
         let origin = previousOrigin ?? Revision(version: previous.version, device: zeroDevice)
         var state = ItemState(previous, origin: origin)
         var clock = state.clock
@@ -86,6 +97,7 @@ public enum ItemMerge {
             // A field group the edit does not hold is a removed field.
             let new = desired[group] ?? .field(nil)
             let old = state.shown(group)?.value
+            // Compared byte for byte, as every `ItemGroupValue` is.
             guard old != new else { continue }
             // The edit settles what is shown; the conflicting values it supersedes are kept, not discarded. Those
             // equal to the value shown were replaced with it, knowingly.
@@ -96,13 +108,23 @@ public enum ItemMerge {
         if ItemState.arranged(Set(fieldIDs), order: state.order.ids) != fieldIDs {
             state.order = ItemState.FieldOrder(stamp: stamp, ids: fieldIDs)
         }
-        state.lines = NoteText.edit(state.lines, to: edited.notes, revision: revision)
+        state.lines = NoteText.edit(state.lines, to: edited.notes, revision: revision, nonce: nonce)
         state.history.formUnion(edited.history)
         state.clock = clock
         state.base = edited
         state.base.createdAt = min(edited.createdAt, previous.createdAt)
         state.base.modifiedAt = max(edited.modifiedAt, previous.modifiedAt)
         return state.item
+    }
+
+    /// `stamped`, with the line nonce drawn from the system's generator: what production calls. A test that needs
+    /// the same bytes on every run passes a seeded generator instead.
+    public static func stamped(_ edited: Item, previous: Item?, previousOrigin: Revision? = nil, revision: Revision)
+        -> Item
+    {
+        var generator = SystemRandomNumberGenerator()
+        return stamped(
+            edited, previous: previous, previousOrigin: previousOrigin, revision: revision, using: &generator)
     }
 
     /// Resolves a conflict by the person's explicit choice: `group` takes `value` (the one shown or one of the
@@ -180,7 +202,9 @@ public enum ItemMerge {
         return item
     }
 
-    /// Whether two versions hold the same state: everything but `version`, with histories compared as sets.
+    /// Whether two versions hold the same state: everything but `version`, with histories compared as sets. Text is
+    /// compared byte for byte, as `Item` equality is, so a device whose copy spells a value otherwise does not hold
+    /// the same state and is brought into line.
     public static func sameState(_ a: Item, _ b: Item) -> Bool {
         var a = a
         var b = b
@@ -225,20 +249,30 @@ public enum ItemMerge {
     /// applying it twice changes nothing, and devices that kept the same edits hold the same item. A trash or restore
     /// the deletion had not seen stays as a conflict beside it, the deletion shown; a restore made *after* it (on a
     /// copy that had met it) supersedes it like any later write, and is never undone by meeting the tombstone again.
+    ///
+    /// A version has met the deletion (`keep`) exactly when that join changes nothing: it holds the deletion's write
+    /// or one that supersedes it. That is decided from what the item holds, not from its clock claiming the
+    /// tombstone's revision, so it is the same join on a record whose clock claims more than its values show.
     public static func settle(_ item: Item, origin: Revision, against erasure: ItemErasure) -> Settlement {
         var state = ItemState(item, origin: origin)
         if state.clock.isCovered(by: erasure.seen) { return .erase }
         let revision = erasure.revision
-        if state.clock.contains(revision) { return .keep }
         var seen = erasure.seen
         seen.record(revision)
         let stamp = GroupStamp(revision: revision, seen: seen)
         let writes: [ItemGroupValue] = [.trashedAt(erasure.date ?? ItemErasure.undatedTrash), .keptAfterDeletion(true)]
+        var changed = false
         for value in writes {
             guard let group = group(of: value) else { continue }
-            state.registers[group] = ItemState.maximal(
-                Set(state.registers[group] ?? []).union([ConflictingValue(stamp: stamp, value: value)]))
+            let before = Set(state.registers[group] ?? [])
+            let after = ItemState.maximal(before.union([ConflictingValue(stamp: stamp, value: value)]))
+            if Set(after) != before {
+                state.registers[group] = after
+                changed = true
+            }
         }
+        // Registers that hold the write, or a value that supersedes it, come with a clock that covers it.
+        guard changed || !seen.isCovered(by: state.clock) else { return .keep }
         state.clock.formUnion(seen)
         return .kept(state.item)
     }

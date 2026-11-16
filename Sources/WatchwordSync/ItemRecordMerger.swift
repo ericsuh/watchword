@@ -20,6 +20,10 @@ public enum ItemMergeError: Error, Equatable, Sendable {
     case identityMismatch(UUID)
     /// No version above the ones given exists.
     case versionOverflow
+    /// Both versions opened, but what merging them gives could not be sealed: in practice it is over the payload
+    /// limit (SEC9), which the join of two versions that each fit can be. Nothing is wrong with either version, so
+    /// this is not a reason to distrust the object that carried the remote one (docs/10-sync-correctness.md §8, Y37).
+    case resultNotSealable(UUID)
 }
 
 /// The `RecordMerger` for item records: open both versions, `ItemMerge.merge`, seal the result through
@@ -64,16 +68,38 @@ public struct ItemRecordMerger: RecordMerger {
         if ItemMerge.sameState(merged, localItem) { return .keepLocal }
         let item = ItemMerge.written(
             merged, as: try Self.revision(above: max(local.version, remote.version), by: deviceID))
-        return .replace(try await sealer.sealItem(item))
+        return .replace(try await seal(item))
+    }
+
+    /// Seals what a merge or a settlement produced. A failure that is not the vault locking is reported as
+    /// `resultNotSealable`, so that a caller can tell "these two versions do not fit in one record" from "this
+    /// record is not to be trusted".
+    private func seal(_ item: Item) async throws -> StoredRecord {
+        do {
+            return try await sealer.sealItem(item)
+        } catch SyncKeyringError.locked {
+            throw SyncKeyringError.locked
+        } catch {
+            throw ItemMergeError.resultNotSealable(item.id)
+        }
     }
 
     /// What this device had seen of the item when it erased it, and the row it erased (`ItemErasure`).
+    ///
+    /// At most `SyncPayload.maximumErasureLength` bytes, as the port requires: every reader refuses a segment whose
+    /// tombstone carries more, and a refused segment stops its author's whole stream. An item's clock is a writer's
+    /// claim and can name thousands of devices (it cannot be truncated: docs/10-sync-correctness.md §6), so a
+    /// summary that would not fit says instead that this device had seen *nothing* (review finding Y36). That erases
+    /// nothing anywhere else: every other device keeps its version, in the trash, marked as kept after a deletion —
+    /// the direction that loses no data.
     public func erasureSummary(of record: StoredRecord) async throws -> [UInt8] {
         let item = try await sealer.openItem(record)
-        return try ItemErasure(
-            seen: ItemMerge.effectiveClock(item, origin: Self.origin(record)), row: record.version, device: deviceID,
-            date: item.modifiedAt
-        ).summary()
+        let seen = ItemMerge.effectiveClock(item, origin: Self.origin(record))
+        let summary = try ItemErasure(seen: seen, row: record.version, device: deviceID, date: item.modifiedAt)
+            .summary()
+        guard summary.count > SyncPayload.maximumErasureLength else { return summary }
+        return try ItemErasure(seen: VersionVector(), row: record.version, device: deviceID, date: item.modifiedAt)
+            .summary()
     }
 
     public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
@@ -100,7 +126,7 @@ public struct ItemRecordMerger: RecordMerger {
             // Above the record and above the tombstone, as every device that keeps a version writes it.
             let floor = max(record.version, tombstone ?? erasure.revision.version)
             let revision = try Self.revision(above: floor, by: deviceID)
-            return .replace(try await sealer.sealItem(ItemMerge.written(kept, as: revision)))
+            return .replace(try await seal(ItemMerge.written(kept, as: revision)))
         }
     }
 

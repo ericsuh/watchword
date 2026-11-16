@@ -19,12 +19,25 @@ import WatchwordTestSupport
 /// computed directly — the values of a group a copy holds are the writes delivered to it that no other write
 /// delivered to it was made knowing about — and compared with what the item shows and keeps (`checkSpecification`).
 struct MergeModel {
-    /// One operation by one device. What it acts on (which field, which line) is chosen by `pick`.
+    /// One operation by one device. What it acts on (which field, which line, which spelling, which of the values in
+    /// conflict) is chosen by `pick`.
+    ///
+    /// The `respell…` operations write one of two spellings of the same text that Swift's `String` takes for equal
+    /// and whose bytes differ (`spellings`): the merge must treat them as two values everywhere (review finding Y31).
     enum Operation: Hashable, CaseIterable, Sendable {
         case setField, addField, removeField, reorder
         case setTitle, toggleTag, setScopes, toggleArchived
         case insertLine, replaceLine, removeLine
         case trash, restore, resolve, delete
+        case respellField, respellTitle, respellLine
+    }
+
+    /// "café" with the accent as one scalar (63 61 66 C3 A9) and as a combining mark (63 61 66 65 CC 81): canonically
+    /// equivalent, so `==` on `String` says equal, and different bytes.
+    static let spellings = ["caf\u{E9}", "cafe\u{301}"]
+
+    static func bytes(_ text: String) -> [UInt8] {
+        Array(text.utf8)
     }
 
     struct Write {
@@ -76,8 +89,9 @@ struct MergeModel {
     // What a person typed, and what a person explicitly discarded.
     private(set) var fieldsWritten: Set<Field> = []
     private(set) var fieldsDiscarded: Set<Field> = []
-    private(set) var linesTyped: Set<String> = []
-    private(set) var linesRemoved: Set<String> = []
+    // Lines by their bytes: a `Set<String>` would take two spellings of a line for one.
+    private(set) var linesTyped: Set<[UInt8]> = []
+    private(set) var linesRemoved: Set<[UInt8]> = []
 
     // Coverage, so a test can assert that the cases it exists for occurred.
     private(set) var conflictsSeen = 0
@@ -112,7 +126,7 @@ struct MergeModel {
         }
         orderWrites[revision] = item.fields.map(\.id)
         fieldsWritten.formUnion(item.fields)
-        linesTyped.formUnion(NoteText.lines(of: notes))
+        linesTyped.formUnion(NoteText.lines(of: notes).map(Self.bytes))
         for index in replicas.indices {
             replicas[index].item = item
             replicas[index].writer = devices[0]
@@ -198,6 +212,22 @@ struct MergeModel {
             guard edited.isTrashed else { return false }
             edited.trashedAt = nil
             edited.keptAfterDeletion = false
+        case .respellField:
+            guard !edited.fields.isEmpty else { return false }
+            let field = pick(edited.fields.count)
+            let spelling = Self.spellings[pick(Self.spellings.count)]
+            guard Self.bytes(edited.fields[field].value) != Self.bytes(spelling) else { return false }
+            edited.fields[field].value = spelling
+        case .respellTitle:
+            let spelling = Self.spellings[pick(Self.spellings.count)]
+            guard Self.bytes(edited.title) != Self.bytes(spelling) else { return false }
+            edited.title = spelling
+        case .respellLine:
+            guard !lines.isEmpty else { return false }
+            let line = pick(lines.count)
+            let spelling = Self.spellings[pick(Self.spellings.count)]
+            guard Self.bytes(lines[line]) != Self.bytes(spelling) else { return false }
+            lines[line] = spelling
         case .resolve, .delete: return false
         }
         edited.notes = lines.joined(separator: "\n")
@@ -218,7 +248,10 @@ struct MergeModel {
                 ItemHistoryEntry(replacedAt: edited.modifiedAt, version: previous.version, fields: previous.fields),
                 at: 0)
         }
-        let saved = ItemMerge.stamped(edited, previous: previous, previousOrigin: origin, revision: revision)
+        // The line nonce, drawn as the vault draws it but from a seed, so that a history is the same on every run.
+        var generator = SeededGenerator(seed: UInt64(tick))
+        let saved = ItemMerge.stamped(
+            edited, previous: previous, previousOrigin: origin, revision: revision, using: &generator)
 
         // The specification's side: which groups this edit wrote, with what the writer had seen.
         let history = replicas[index].seen.union([revision])
@@ -228,13 +261,19 @@ struct MergeModel {
         }
         if saved.revisions[.fieldOrder]?.revision == revision { orderWrites[revision] = saved.fieldOrder ?? [] }
         fieldsWritten.formUnion(edited.fields)
-        let (before, after) = (Set(NoteText.lines(of: previous.notes)), Set(NoteText.lines(of: saved.notes)))
+        let before = Set(NoteText.lines(of: previous.notes).map(Self.bytes))
+        let after = Set(NoteText.lines(of: saved.notes).map(Self.bytes))
         linesTyped.formUnion(after)
         linesRemoved.formUnion(before.subtracting(after))
 
         checkUpdate(from: previous, origin: origin, to: saved, what: "an edit")
-        if saved.fields.map(\.id) != edited.fields.map(\.id) { fail("the saved fields are not in the order saved") }
-        if saved.notes != edited.notes { fail("the saved notes are not the notes saved") }
+        // What is saved is what was typed, byte for byte, in the order it was arranged.
+        if saved.fields != edited.fields { fail("the saved fields are not the fields saved, in the order saved") }
+        if Self.bytes(saved.notes) != Self.bytes(edited.notes) { fail("the saved notes are not the notes saved") }
+        if Self.bytes(saved.title) != Self.bytes(edited.title) { fail("the saved title is not the title saved") }
+        if saved.tags != edited.tags || saved.scopes != edited.scopes {
+            fail("the saved attributes are not those saved")
+        }
         store(saved, writer: device, at: index, delivered: replicas[index].delivered.union([revision]), seen: history)
     }
 
@@ -283,7 +322,7 @@ struct MergeModel {
             if case .field(let field?) = conflict.value { fieldsDiscarded.insert(field) }
         }
         fieldsDiscarded.formUnion(item.fields + item.history.flatMap(\.fields))
-        linesRemoved.formUnion(NoteText.lines(of: item.notes))
+        linesRemoved.formUnion(NoteText.lines(of: item.notes).map(Self.bytes))
         let revision = erasure.revision
         let history = replicas[index].seen.union([revision])
         erasureKnowledge[revision] = history
@@ -460,8 +499,8 @@ struct MergeModel {
         }
         let lost = fieldsWritten.subtracting(present).subtracting(fieldsDiscarded)
         if !lost.isEmpty { fail("field values lost: \(lost.map(\.value).sorted())") }
-        let lines = linesTyped.subtracting(NoteText.lines(of: item.notes)).subtracting(linesRemoved)
-        if !lines.isEmpty { fail("note lines lost: \(lines.sorted())") }
+        let lines = linesTyped.subtracting(NoteText.lines(of: item.notes).map(Self.bytes)).subtracting(linesRemoved)
+        if !lines.isEmpty { fail("note lines lost: \(lines.map { String(decoding: $0, as: UTF8.self) }.sorted())") }
     }
 
     /// The join of two versions, as a version: a merge result claims no write of its own, so it is read back at its

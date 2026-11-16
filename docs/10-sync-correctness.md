@@ -3,7 +3,7 @@
 This document states what an item *is* to the sync layer, what merging two versions of it means, and why devices that
 have received the same versions hold the same item. It is the argument behind `ItemMerge`, `ItemState` and `NoteText`
 (`Sources/WatchwordSync`), and the specification their tests check. `02-architecture.md` §7.5 describes sync as
-built; `06-adversarial-review.md` §H lists what this audit found (Y18–Y30).
+built; `06-adversarial-review.md` §H lists what this audit and its review found (Y18–Y37).
 
 The claim, in the vocabulary of Shapiro, Preguiça, Baquero and Zawirski ("Conflict-free Replicated Data Types",
 2011): an item is a **state-based CRDT**. Its states form a join-semilattice; `ItemMerge.merge` is the join; every
@@ -53,6 +53,17 @@ A **stamp** (`GroupStamp`) is the revision that wrote a value and the version ve
 Not part of the state: `version` and the device that wrote the row. They say which row carries the state, and two
 devices that merged the same edits store the same state under different rows (`ItemMerge.written` changes nothing
 else). Equality in every test is equality of the whole `Item` as sealed, with only `version` set aside.
+
+**Equality is of bytes.** Swift's `String ==` is Unicode canonical equivalence: "é" as one scalar and "e" followed by
+a combining accent are equal. To a password manager they are two values — a site hashes the bytes it is sent — and a
+merge that took them for one kept whichever spelling a device already held, so two devices could hold different bytes
+for good while every comparison, `sameState` included, called them equal; and an edit that only respelt a password
+was not saved (Y31). So the model's own `==` (`Field`, `ServiceScope`, `NoteLine`, `ItemGroupValue`, `Item`;
+`WatchwordModel/ExactEquality.swift`) compares text byte for byte, and `NoteText` compares lines by their UTF-8. Every
+set and register in this document is a set under that equality: two spellings are two elements, kept side by side,
+shown as a conflict, and an edit that changes only the spelling is an edit. Hashing is unchanged and stays consistent
+(values equal byte for byte are canonically equal, so hash alike). A `Set<String>` (tags, excluded hosts) still holds
+one spelling of a member; comparing two of them compares the spelling each holds.
 
 **Canonical form.** `ItemState.init(_:origin:)` reads an `Item` and `ItemState.item` writes one, and the round trip is
 the identity on everything `ItemMerge` produces: the shown value of each group is a fixed function of its register (a
@@ -119,7 +130,8 @@ from the one saved, so a deliberate reorder is not displaced by a concurrent add
 
 ### 3.4 Notes: a sequence of lines (RGA)
 
-The state is a map from line ID to (anchor, text, removed). The join is the union of the maps, with lines present in
+The state is a map from line ID to (anchor, text, removed). An ID is the revision that inserted the line, its index
+in that edit, and a nonce drawn at random for the edit (§6 says why). The join is the union of the maps, with lines present in
 both joined by `NoteText.join`: the later anchor, removed if either is, and for the text the same text or — when the
 two differ, which only a writer reusing an ID causes — every distinct line of either in byte order. Each part is a
 join (a maximum in a total order, a boolean "or", a set union with "removed" as top), so the map is a semilattice.
@@ -128,7 +140,8 @@ The document is a function of the map alone (`NoteText.ordered`): depth first fr
 newest first. This is a replicated growable array over lines: a line is never changed in place (an edit removes it and
 inserts the new text), an insertion is placed by the line it follows and its ID, and a removal keeps the line's place.
 The function is total — a line whose anchor is missing is treated as inserted at the start, lines in a cycle follow
-everything else by ID — so equal maps give equal documents, on any input.
+everything else, each cycle laid out depth first from its least ID — so equal maps give equal documents, on any input.
+Copies of one ID in a single record are gathered and joined in one pass, which is the same join (Y32).
 
 ### 3.5 Retained values and discards
 
@@ -154,7 +167,7 @@ An update is *inflationary* if its result contains the state it was made on: `me
 | Update | Code | Why it contains its predecessor |
 | --- | --- | --- |
 | An edit: fields, attributes, notes, trash, restore | `ItemMerge.stamped` | Each changed group's register becomes one value whose stamp is the copy's clock plus the new revision. The clock covers every stamp the copy holds (an invariant `ItemState.init` maintains) and the revision is new (C2), so the new stamp strictly covers, hence supersedes, every value it replaces. Superseded conflicting values move to the retained set (a union). Notes: lines are added or marked removed, never dropped. History is the union with the predecessor's; `createdAt` the earlier, `modifiedAt` the later. Unchanged components are unchanged. |
-| Resolving a conflict | `ItemMerge.resolve` | As an edit of the one group, with the value chosen. The group's discard vector is joined with the clock the person had before them, which covers every retained value removed. |
+| Resolving a conflict | `ItemMerge.resolve` | As an edit of the one group, with the value chosen. The group's discard vector is joined with the clock the person had before them, which covers every retained value removed: the clock covers every stamp's `seen`, and every stamp is read with its own revision in `seen` (§6), so it contains the value's revision. |
 | Storing a merge result | `ItemMerge.written` | The state is unchanged. |
 | A deletion that did not cover the item | `ItemMerge.settle` | A join with a constant (§5). |
 
@@ -183,7 +196,10 @@ settles each version of the item against it (`ItemMerge.settle`):
 - any other version is **kept, in the trash**: the deletion is applied to it as *a write by the deleting device at the
   tombstone's revision* (one above the row erased), having seen what the erasure had seen, that sets `trashedAt` and
   `keptAfterDeletion`;
-- a version whose clock already contains the tombstone's revision has met the deletion and stands as it is.
+- a version that already holds the deletion's write, or values that supersede it, and a clock that covers it, has
+  met the deletion and stands as it is. This is decided from what the version holds, not from its clock merely
+  naming the tombstone's revision, so the rule is the same join on a record whose clock claims more than its values
+  show (Y34).
 
 **What is exact.** The write is a function of the erasure alone, so applying a deletion to a version it does not cover
 is a join with a constant: it commutes with merging, applying it twice changes nothing, and every device that keeps the
@@ -235,7 +251,8 @@ corrupted metadata.
   every vector, stamp and line ID is read as at most `V`. The version is bound into the record's authenticated data
   and checked by the engine against the vault (U5), so this bounds every count by something the engine has vetted.
   Without it a writer could stamp a value as having seen every edit any device will ever make — a conflict no later
-  edit or resolution could clear — or plant note lines under the IDs another device's next edit will use (Y21, Y23).
+  edit or resolution could clear — or plant note lines under the IDs of edits made after its record is merged (Y21,
+  Y23; against edits made before that, see the nonce below).
   With it, C2 holds for every honest edit whatever the record held, which is what §4 needs.
 - *Values belong to their group.* A value filed under a group it does not fit (a title among a field's conflicts, one
   field's contents under another's ID, any group this client does not know or a second spelling of one it does) is not
@@ -248,21 +265,43 @@ corrupted metadata.
   supersedes all of it.
 - *Erasure summaries* are read by `ItemErasure(summary:)`: one that does not decode, names a version above 2^62, or
   whose vector claims more than the row it says it erased could hold, has seen nothing — it erases nothing, and no
-  arithmetic is done on its numbers (Y24).
+  arithmetic is done on its numbers (Y24). One this client *writes* is at most `SyncPayload.maximumErasureLength`
+  bytes, which every reader enforces: an item's clock is a claim and can name thousands of devices, and a tombstone
+  over the limit was refused by every other device, stopping the deleting device's stream for good. A summary that
+  would not fit says the deleting device had seen nothing, so it erases nothing elsewhere and every other copy is kept
+  in the trash (Y36). The engine should also refuse to publish an over-long erasure; that is its own check.
+- *A stamp contains its own write.* `GroupStamp.init` records the revision in `seen`, but a stamp decodes as it was
+  encoded, so a record can carry one whose vector omits it. Every stamp is read (`GroupStamp.clamped`) with its revision
+  recorded: otherwise a resolution's discard vector, which tests a value's revision, did not cover a value it had
+  removed, and the next merge brought it back (Y34).
+- *Line IDs cannot be predicted.* A device's next revision is one above the highest version it has seen, so another
+  writer can predict it, and the record's version bound does not help against an edit made before the device has
+  merged the writer's record: the writer simply writes its record at or above that version. Removed lines planted
+  under the IDs that edit will use then join with what the person types, and removal wins (Y21, which the version
+  bound alone did not close; Y33). So every edit of an existing item draws a nonce from the injected generator
+  (`ItemMerge.stamped(_:previous:previousOrigin:revision:using:)`) and puts it in the ID of every line it inserts:
+  naming a line takes having seen it. Lines of a new item, and lines read from notes stored before lines were, have
+  nonce zero; every device numbers those alike, and nobody can aim at an item before it exists.
 
 **What a writer can still do, because any writer may:** replace a value (by a stamp that claims to have seen it — a
-claim nobody can check), remove a field or a note line, discard retained values by claiming a resolution, delete an
-item it claims to have seen, and fill an item up to the payload limit. What it cannot do is make an honest value
-disappear without a value in the same group claiming to supersede it, make two honest devices disagree, or stop an
-honest device's later edits from taking effect.
+claim nobody can check), remove a field or a note line it has seen, discard retained values by claiming a resolution,
+delete an item it claims to have seen, and fill an item up to the payload limit. What it cannot do is make an honest
+group value disappear without a value in the same group claiming to supersede it, remove a note line it has not seen,
+make two honest devices disagree, or stop an honest device's later edits from taking effect. Note text has no safety
+net of its own: a removed line keeps its place but not its text, and lines are in neither the history nor the
+conflicts, so a writer that has seen a line and removes it leaves no trace of the text. That is the same capability
+every writer has by editing the notes; a recoverable trail for notes would need removed text kept until a person
+discards it.
 
 **Cost.** Reading and joining are linear in the size of the item except for one step: finding the values of a group
 nothing supersedes compares distinct vectors pairwise (each against the heavier ones not yet covered). Honest items
 hold at most one value per device per group. The payload limit (SEC9, 1 MiB) bounds a crafted item to a few thousand
 values in one group. Measured on the cloud VM with an optimised build: a 1 MiB record holding 4,000 values of one
 group, none superseding another and no two of equal weight (the worst case for the pruning), merges in about a tenth
-of a second — less than encoding and decoding the same payload as JSON takes. The adversarial suite merges such
-records under a time limit. The laws forbid truncating instead: "keep the first *k*" is not associative.
+of a second — less than encoding and decoding the same payload as JSON takes. Copies of one note-line ID are joined
+in one pass, gathering every distinct text piece once and sorting once: folding them in one at a time re-split and
+re-sorted the text so far at each step, so a record holding 8,000 copies of one ID cost about 13 s of CPU every time
+it was read (Y32). The adversarial suite merges both kinds of record under a time limit. The laws forbid truncating instead: "keep the first *k*" is not associative.
 
 ## 7. How this is checked
 
@@ -272,7 +311,7 @@ records under a time limit. The laws forbid truncating instead: "keep the first 
 | The laws, convergence, nothing lost | `LongRunningItemMergeLawTests` | Random histories of every kind of edit, resolution and deletion on 2–4 devices; the laws on random triples of stored versions, compared as whole items; the same versions delivered in random orders with repeats; every update checked inflationary; after full exchange all devices equal and every field value and note line typed still present unless a person discarded it. Widened nightly. |
 | Every small history | `LongRunningItemMergeExhaustiveTests` | From five starting points, every sequence of up to three steps (four nightly, for two of them) over an alphabet that includes conflict, resolution, trash, restore and deletion: the same checks at every node, the laws on every triple of versions a history stores. The numbers of histories, versions, pairs and triples are asserted. Standard run: 11,348 histories; nightly: 81,666. |
 | Each finding | `ItemMergeAuditTests`, `AdversarialItemMergeTests` | The smallest history that showed it. |
-| Arbitrary metadata | `AdversarialItemMergeTests` | The laws on corrupted records; absurd counts; cyclic, dangling and repeated lines; values under wrong groups; records at the payload limit; hostile erasure summaries. |
+| Arbitrary metadata | `AdversarialItemMergeTests` | The laws on corrupted records, with canonically equivalent spellings and stamps that omit their own revision among the values, and with every update (edit, resolution, deletion) checked to contain the hostile version it was made on; absurd counts; cyclic, dangling and repeated lines, and removed lines planted under a device's next IDs; values under wrong groups; records at the payload limit, of incomparable values and of copies of one line ID; hostile erasure summaries; a clock naming thousands of devices, then deleted; two versions whose merge is over the payload limit, at the engine. |
 | The engine around it | `LongRunningSyncSimulationTests`, `SyncMergeCaseTests` | N devices, partitions, an eventually consistent store, locks, rollbacks. |
 
 While writing them, each defence was removed in turn (same-value writes collapsed, discards not recorded, the stored
@@ -295,6 +334,14 @@ failed each time.
 - **Items are shown as stored** (Y30). A record adopted when the device held no version of the item is stored as
   written, and `VaultSession` shows it without reading it through `ItemMerge.canonical`. Every merge and save reads it
   canonically, so the laws are unaffected; what a person sees before the first merge is the writer's rendering.
+- **A merge result over the payload limit stops a stream** (Y37). Two versions that each fit the 1 MiB limit can
+  have a join that does not — two long concurrent note edits, or history that only grows — and any writer can arrange
+  it. `ItemRecordMerger` then throws `ItemMergeError.resultNotSealable`, and the engine rejects the whole object that
+  carried the remote version; since a stream is merged strictly in sequence, every later segment from that author is
+  never applied on that device, so unrelated items stop arriving, silently and for good. Neither version is lost. The
+  engine should treat that error like a U5 quarantine — keep the local version, quarantine the one entry (PRD F7.7)
+  and carry on with the stream; recorded as a known issue (`mergeOverThePayloadLimit`) until it does.
 - **Growth.** History, note-line tombstones, removed fields' stamps and retained values only grow. An item at the
-  payload limit refuses further edits and merges until history moves to records of its own (already tracked).
+  payload limit refuses further edits until history moves to records of its own (already tracked), and merges as
+  above.
 - **Dates** are the writers' clocks. `modifiedAt` is a maximum, so one device with a clock far ahead sets it for good.

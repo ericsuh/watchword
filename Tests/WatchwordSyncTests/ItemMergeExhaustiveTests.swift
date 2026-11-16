@@ -156,6 +156,11 @@ struct LongRunningItemMergeExhaustiveTests {
 
     /// Explores and compares with the totals recorded when the test was written. A change to the merge that alters
     /// what small histories reach shows up here as a different count, to be understood before the number is changed.
+    ///
+    /// Review finding Y33 changed three standard totals: the lines an edit inserts now carry a nonce, drawn here from
+    /// a generator seeded by the step so that counts repeat, so two histories that insert the same line at the same
+    /// revision by different paths store two versions where they stored one. Drawing a constant nonce gives the old
+    /// totals exactly.
     static func check(
         _ start: MergeModel, alphabet: [MergeModel.Operation], depth: Int, expecting expected: Totals,
         sourceLocation: SourceLocation = #_sourceLocation
@@ -189,8 +194,8 @@ struct LongRunningItemMergeExhaustiveTests {
                     histories: 32083, conflicts: 7324, resolutions: 20, erased: 376, kept: 1148, versions: 9077,
                     pairs: 65141, triples: 230823)
                 : Totals(
-                    histories: 2321, conflicts: 324, resolutions: 0, erased: 30, kept: 36, versions: 883, pairs: 4639,
-                    triples: 13139))
+                    histories: 2321, conflicts: 324, resolutions: 0, erased: 30, kept: 36, versions: 885, pairs: 4643,
+                    triples: 13145))
     }
 
     @Test("two devices that already disagree about one field, every history from there")
@@ -205,8 +210,8 @@ struct LongRunningItemMergeExhaustiveTests {
                     histories: 43593, conflicts: 42449, resolutions: 2134, erased: 208, kept: 1644, versions: 13277,
                     pairs: 121045, triples: 564263)
                 : Totals(
-                    histories: 3037, conflicts: 2979, resolutions: 80, erased: 6, kept: 68, versions: 1281, pairs: 9236,
-                    triples: 36066))
+                    histories: 3037, conflicts: 2979, resolutions: 80, erased: 6, kept: 68, versions: 1283, pairs: 9244,
+                    triples: 36086))
     }
 
     @Test("two devices, one of which has trashed the item, every history from there")
@@ -216,8 +221,8 @@ struct LongRunningItemMergeExhaustiveTests {
         Self.check(
             start, alphabet: Self.alphabet, depth: 3,
             expecting: Totals(
-                histories: 3514, conflicts: 968, resolutions: 2, erased: 95, kept: 322, versions: 1236, pairs: 7686,
-                triples: 25855))
+                histories: 3514, conflicts: 968, resolutions: 2, erased: 95, kept: 322, versions: 1238, pairs: 7692,
+                triples: 25867))
     }
 
     /// The start `resolutionDiscardsEverywhere` needs: both devices edited a field while it held a conflict, so each

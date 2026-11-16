@@ -236,13 +236,16 @@ planted in a file transport's directory (at the file and higher up). Quarantined
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
 that decodes): counts up to `UInt64.max` in stamps, clocks and line IDs (read as at most the record's version, so a
-later edit still supersedes); note lines planted under the IDs of another device's next edit; cyclic, dangling,
+later edit still supersedes); removed note lines planted under the IDs of another device's next edit, made before it
+merges the record; canonically equivalent spellings of one value; stamps whose vector omits their own revision; cyclic, dangling,
 self-anchored and repeated note lines and a chain thousands deep; values filed under groups they do not belong to,
 unknown groups and second spellings; repeated field IDs, devices and stamps, and stamps that claim to supersede each
-other; records at the payload limit full of mutually incomparable values, under a time limit; the semilattice laws
+other; records at the payload limit full of mutually incomparable values, or of copies of one note-line ID, under a
+time limit; a clock naming thousands of devices, deleted (the tombstone must still be accepted); the semilattice laws
 and "no honest value dropped unless a value of its group claims to supersede it" on randomly corrupted records
 (widened nightly); erasure summaries that overflow, lie or do not decode; and records that open to different items.
-One test is recorded as a known issue until the engine passes the tombstone's version to the merger (Y28).
+Two tests are recorded as known issues until the engine passes the tombstone's version to the merger (Y28) and
+quarantines a version it cannot merge instead of stopping the stream (Y37).
 
 **Implemented in milestone 3, with real keys** (`AdversarialVaultSyncTests`, suite "Adversarial: sync with real
 keys", `VaultSession` as the keyring): a byte flipped anywhere in a segment sealed with AES-GCM and signed with

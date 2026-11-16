@@ -429,8 +429,11 @@ the device registry (D9) is still needed before sync ships; a device that stops 
 collection back until it is removed; the store can withhold objects (reported, not prevented); an item's history
 lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
 refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
-trusted for the vault, so this is an insider's capability). From the audit of the merge (Y28–Y30): the engine does
-not yet pass a tombstone's version to the merger, which therefore believes the erasure summary about it; the session
+trusted for the vault, so this is an insider's capability). From the audit of the merge (Y28–Y30, Y36, Y37): the engine does
+not yet pass a tombstone's version to the merger, which therefore believes the erasure summary about it; it rejects the
+whole object carrying a version whose merge is over the payload limit, stopping that author's stream on that device,
+where it should quarantine the one entry; it does not refuse to publish an over-long erasure summary (the merger no
+longer writes one); the session
 does not yet refuse a draft made from an older version than the one stored; and items are shown as stored rather
 than as the merge reads them.
 

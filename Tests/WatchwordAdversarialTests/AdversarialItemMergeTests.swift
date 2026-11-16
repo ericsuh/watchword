@@ -52,9 +52,11 @@ struct AdversarialItemMergeTests {
                 ItemHistoryEntry(replacedAt: item.modifiedAt, version: previous.version, fields: previous.fields), at: 0
             )
         }
+        // The line nonce is drawn as the vault draws it, from a seed so that the test is the same on every run.
+        var generator = SeededGenerator(seed: version ^ 0x4E0C_E5EE_D000_0000)
         return ItemMerge.stamped(
             item, previous: previous, previousOrigin: origin(previous),
-            revision: Revision(version: version, device: device))
+            revision: Revision(version: version, device: device), using: &generator)
     }
 
     /// The row an item was read from. Who wrote it matters only for an item without sync metadata.
@@ -133,27 +135,49 @@ struct AdversarialItemMergeTests {
     }
 
     /// Threat: the insider knows the honest device's ID and the vault's version, so it knows the revision the honest
-    /// device's *next* edit will carry. It publishes a note line under that revision's first line ID. When the person
-    /// next types into the notes, their new line would take the same ID — and of two lines with one ID only one was
-    /// kept, so what they typed vanished as they saved it (review finding Y21).
-    @Test("lines planted under the IDs of a device's next edit do not swallow what the person types")
+    /// device's *next* edit will carry. It publishes note lines — marked removed, which wins a join — under the line
+    /// IDs that revision would use, in a record at or above that version (the engine lets a version jump by 2^20), so
+    /// that clamping to the record's version does not touch them. If the person types into the notes before their
+    /// device has merged that record, the new lines would take exactly the planted IDs and merge into removed lines:
+    /// what they typed gone from every device, with no conflict and no trace (review finding Y21, and Y33 for the
+    /// offline case the first fix missed).
+    ///
+    /// A line ID carries a nonce drawn for the edit, so the insider cannot name a line it has not seen. Here it plants
+    /// under nonce zero and a thousand guesses.
+    @Test("removed lines planted under the IDs of a device's next edits do not erase what the person types")
     func plantedLineIDs() {
         let base = Self.base(notes: "one")
-        var hostile = Self.edit(base, by: Self.insider, at: 2) { $0.archived = true }
-        for index in UInt32(0)..<4 {
-            hostile.noteLines.append(
-                NoteLine(
-                    id: NoteLine.ID(revision: Revision(version: 3, device: Self.honest), index: index),
-                    after: hostile.noteLines[0].id, text: "attacker's line \(index)"))
+        var hostile = Self.edit(base, by: Self.insider, at: 3) { $0.archived = true }
+        for version in UInt64(2)...4 {
+            for index in UInt32(0)..<4 {
+                for nonce in [UInt64(0), 1, .max] + (0..<1_000).map({ UInt64($0) &* 0x9E37_79B9_7F4A_7C15 }) {
+                    hostile.noteLines.append(
+                        NoteLine(
+                            id: NoteLine.ID(
+                                revision: Revision(version: version, device: Self.honest), index: index, nonce: nonce),
+                            after: hostile.noteLines[0].id, text: "", removed: true))
+                }
+            }
         }
-        hostile.notes = NoteText.text(hostile.noteLines)
-        let victim = Self.edit(hostile, by: Self.honest, at: 3) { $0.notes = "one\nmy recovery phrase" }
-        #expect(victim.notes == "one\nmy recovery phrase")
-        // The same, where the two meet only in a merge: the victim typed before seeing the insider's record.
-        let offline = Self.edit(base, by: Self.honest, at: 3) { $0.notes = "one\nmy recovery phrase" }
+        // The victim typed before seeing the insider's record, at exactly the revision the insider aimed at.
+        let offline = Self.edit(base, by: Self.honest, at: 2) {
+            $0.notes = "one\nmy recovery phrase\nand a second line"
+        }
+        #expect(offline.noteLines.contains { $0.id.revision == Revision(version: 2, device: Self.honest) })
         for merged in [Self.merge(offline, hostile), Self.merge(hostile, offline)] {
-            #expect(merged.notes.contains("my recovery phrase"))
+            #expect(merged.notes == "one\nmy recovery phrase\nand a second line")
         }
+        // The same at the insider's own version, and after merging its record: the next edits keep what is typed.
+        let level = Self.edit(base, by: Self.honest, at: 3) { $0.notes = "one\nmy recovery phrase" }
+        #expect(Self.merge(level, hostile).notes == "one\nmy recovery phrase")
+        let seen = ItemMerge.written(Self.merge(offline, hostile), as: Revision(version: 4, device: Self.honest))
+        let after = Self.edit(seen, by: Self.honest, at: 5) { $0.notes += "\nand a third" }
+        #expect(after.notes.hasSuffix("and a second line\nand a third"))
+        #expect(Self.merge(after, hostile).notes == after.notes)
+        // What the insider may do, as any writer may: remove a line it has seen, by the ID it now knows.
+        var removal = Self.edit(offline, by: Self.insider, at: 6) { $0.notes = "one\nand a second line" }
+        removal.notes = NoteText.text(removal.noteLines)
+        #expect(Self.merge(offline, removal).notes == "one\nand a second line")
     }
 
     // MARK: - Structure
@@ -345,6 +369,70 @@ struct AdversarialItemMergeTests {
         }
     }
 
+    /// Threat: the insider fills a record to the payload limit with note lines that all carry one ID, or a handful
+    /// of IDs, each copy with a different text. Copies of one ID are joined, keeping every text; joining them one at
+    /// a time re-split and re-sorted everything joined so far at each step, so one such record cost each honest
+    /// device ten to twenty seconds of CPU *every time it read the item* (optimised; minutes in this build), and a
+    /// few hundred of them kept sync busy for an hour (review finding Y32). Reading must stay linear in the payload.
+    @Test(
+        "a record full of note lines under one ID, or a few, is read in linear time and loses no honest line",
+        .timeLimit(.minutes(2)))
+    func linesUnderOneID() throws {
+        let base = Self.base()
+        let honest = Self.edit(base, by: Self.honest, at: 2) { $0.notes += "\nfourth" }
+        for ids in [1, 5] {
+            var hostile = Self.edit(base, by: Self.insider, at: 2) { $0.archived = true }
+            hostile.noteLines += (0..<6_000).map { n in
+                NoteLine(
+                    id: NoteLine.ID(revision: Revision(version: 2, device: Self.insider), index: UInt32(n % ids)),
+                    after: n < 50 ? base.noteLines[n % base.noteLines.count].id : nil, text: "t\(n)")
+            }
+            let size = try ItemCodec.encode(hostile).count
+            #expect(size > 700_000, "close to the payload limit (\(size) bytes)")
+            let merged = Self.merge(honest, hostile)
+            #expect(merged == Self.merge(hostile, honest))
+            #expect(Self.merge(merged, hostile) == merged && Self.merge(merged, merged) == merged)
+            let lines = Set(NoteText.lines(of: merged.notes))
+            #expect(lines.isSuperset(of: ["first", "second", "third", "fourth", "t0", "t5999"]))
+            #expect(lines.count == 6_004 && merged.noteLines.count == honest.noteLines.count + ids)
+            // Still an item a person can edit.
+            let edited = Self.edit(merged, by: Self.honest, at: 4) {
+                $0.notes = $0.notes.replacingOccurrences(of: "fourth", with: "4th")
+            }
+            #expect(NoteText.lines(of: edited.notes).contains("4th"))
+        }
+    }
+
+    /// Threat: the insider writes stamps that no `GroupStamp.init` produces — a vector that does not contain the
+    /// stamp's own revision (a stamp decodes as it was encoded) — on a value it files among the retained ones. A
+    /// resolution discards what the person had before them *by revision*; a value whose vector hid its revision was
+    /// removed where the person resolved and came back with the next merge, so an explicit discard (F7.7) did not
+    /// hold and the resolved version did not contain the one it was made on (review finding Y34).
+    @Test("a stamp that omits its own revision is read as containing it: a resolution discards the value for good")
+    func stampsThatOmitTheirRevision() throws {
+        let base = Self.base()
+        let honest = Self.edit(base, by: Self.honest, at: 2) { $0.fields[1].value = "mine" }
+        var hostile = Self.edit(base, by: Self.insider, at: 2) { $0.fields[1].value = "theirs" }
+        let json = """
+            {"stamp":{"revision":{"version":1,"device":"\(Self.other.uuidString)"},"seen":{"\(Self.honest.uuidString)":1}},
+             "value":{"field":{"_0":{"id":"\(Self.password.uuidString)","kind":"password","label":"Password","value":"planted","meta":{}}}}}
+            """
+        let planted = try JSONDecoder().decode(ConflictingValue.self, from: Data(json.utf8))
+        #expect(!planted.stamp.seen.contains(planted.stamp.revision), "decoded as written")
+        hostile.retainedValues = [planted]
+        let merged = ItemMerge.written(Self.merge(honest, hostile), as: Revision(version: 3, device: Self.honest))
+        #expect(merged.retainedValues.count == 1 && merged.hasConflicts)
+        let group = ItemGroup.field(Self.password)
+        let resolved = ItemMerge.resolve(
+            merged, group: group, choosing: merged.value(of: group)!, origin: Self.origin(merged),
+            revision: Revision(version: 4, device: Self.honest))
+        #expect(resolved.retainedValues.isEmpty && !resolved.hasConflicts)
+        for other in [merged, hostile, honest] {
+            let again = Self.merge(resolved, other)
+            #expect(again == resolved, "the discard holds against every copy that still has the value")
+        }
+    }
+
     // MARK: - Laws on anything
 
     /// Threat: the insider writes metadata chosen so that the merge is no longer a join — the result depends on the
@@ -395,6 +483,53 @@ struct AdversarialItemMergeTests {
                     let kept = [merged.value(of: group)!] + (merged.conflicts[group] ?? []).map(\.value)
                     #expect(kept.contains(candidate.value), "\(context): \(group.rawValue) lost an honest value")
                 }
+            }
+            // Updates made on a hostile record contain it, as they contain an honest one: an edit, a resolution, and
+            // a deletion that did not cover it, which is the same join whichever side of a merge it is applied to.
+            let next = Revision(version: hostile.version + 1, device: Self.honest)
+            var draft = hostile
+            draft.title = "renamed after"
+            draft.notes += "\nadded after"
+            draft.version = next.version
+            var nonces = SeededGenerator(seed: UInt64(round))
+            let edited = ItemMerge.stamped(
+                draft, previous: a, previousOrigin: Self.origin(a), revision: next, using: &nonces)
+            #expect(Self.merge(edited, a) == edited, "\(context): an edit does not contain its predecessor")
+            #expect(edited.title == "renamed after" && edited.conflicts[.title] == nil, "\(context): edit not shown")
+            #expect(
+                Array(edited.notes.utf8) == Array(draft.notes.utf8),
+                "\(context): the notes saved are not the notes typed")
+            for (group, values) in ItemMerge.conflicts(of: hostile) {
+                let chosen = values.randomElement(using: &generator)!.value
+                let resolved = ItemMerge.resolve(
+                    hostile, group: group, choosing: chosen, origin: Self.origin(hostile), revision: next)
+                #expect(
+                    Self.merge(resolved, a) == resolved, "\(context): a resolution does not contain its predecessor")
+                #expect(resolved.value(of: group) == chosen, "\(context): a resolution does not show the choice")
+                #expect(
+                    !resolved.retainedValues.contains { ItemMerge.group(of: $0.value) == group },
+                    "\(context): a resolution left retained values")
+            }
+            let erasure = ItemErasure(
+                seen: VersionVector([Self.honest: [0, 1, 2].randomElement(using: &generator)!]),
+                row: [1, 2, 9].randomElement(using: &generator)!, device: Self.other,
+                date: Date(timeIntervalSince1970: 7))
+            func settled(_ item: Item) -> Item? {
+                switch ItemMerge.settle(item, origin: Self.origin(item), against: erasure) {
+                case .erase: return nil
+                case .keep: return ItemMerge.canonical(item, origin: Self.origin(item))
+                case .kept(let kept):
+                    // Written above the row and the tombstone, as `ItemRecordMerger` writes it.
+                    let above = max(item.version, erasure.revision.version) + 1
+                    return ItemMerge.written(kept, as: Revision(version: above, device: Self.honest))
+                }
+            }
+            if let keptA = settled(a), let keptB = settled(b), let keptBoth = settled(ab) {
+                #expect(Self.merge(keptA, a) == keptA, "\(context): a deletion kept less than it was applied to")
+                #expect(settled(keptA) == keptA, "\(context): settling twice is not settling once")
+                #expect(
+                    ItemMerge.sameState(keptBoth, Self.merge(keptA, keptB)),
+                    "\(context): settling does not commute with merging")
             }
             #expect(Set(merged.history).isSuperset(of: mine.history), "\(context): history shortened")
             let removed = Set(hostile.noteLines.filter(\.removed).map(\.id))
@@ -468,19 +603,29 @@ struct AdversarialItemMergeTests {
             return VersionVector(entries)
         }
         func stamp(_ g: inout SeededGenerator) -> GroupStamp {
-            GroupStamp(revision: revision(&g), seen: vector(&g))
+            var stamp = GroupStamp(revision: revision(&g), seen: vector(&g))
+            // As a stamp decodes: its vector need not contain its own revision (review finding Y34).
+            if Int.random(in: 0..<3, using: &g) == 0 { stamp.seen = vector(&g) }
+            return stamp
         }
+        // Two spellings of one text, equal as `String`s and different in bytes (review finding Y31), among the others.
+        let words = ["hostile-0", "hostile-1", "caf\u{E9}", "cafe\u{301}"]
         let fieldIDs = [username, password, UUID(uuidString: "F1000000-0000-4000-8000-000000000003")!]
         func field(_ g: inout SeededGenerator) -> Field {
             Field(
-                id: fieldIDs.randomElement(using: &g)!, kind: .text, label: "L",
-                value: "hostile-\(Int.random(in: 0..<4, using: &g))")
+                id: fieldIDs.randomElement(using: &g)!, kind: .text,
+                label: ["L", "\u{E9}", "e\u{301}"].randomElement(using: &g)!,
+                value: words.randomElement(using: &g)!,
+                meta: Int.random(in: 0..<4, using: &g) == 0 ? [words.randomElement(using: &g)!: "m"] : [:])
         }
         func value(_ g: inout SeededGenerator) -> ItemGroupValue {
             switch Int.random(in: 0..<10, using: &g) {
-            case 0: return .title("hostile-\(Int.random(in: 0..<3, using: &g))")
-            case 1: return .tags(["a\nb", "a", "b"].randomElement(using: &g).map { [$0] } ?? [])
-            case 2: return .scopes([ServiceScope(host: "h\(Int.random(in: 0..<2, using: &g)).example.com")])
+            case 0: return .title(words.randomElement(using: &g)!)
+            case 1: return .tags((["a\nb", "a", "b"] + words).randomElement(using: &g).map { [$0] } ?? [])
+            case 2:
+                var scope = ServiceScope(host: "h\(Int.random(in: 0..<2, using: &g)).example.com")
+                if Bool.random(using: &g) { scope.host = words.randomElement(using: &g)! }
+                return .scopes([scope])
             case 3: return .archived(Bool.random(using: &g))
             case 4: return .trashedAt(Bool.random(using: &g) ? Date(timeIntervalSince1970: 5) : nil)
             case 5: return .keptAfterDeletion(Bool.random(using: &g))
@@ -508,12 +653,12 @@ struct AdversarialItemMergeTests {
                     var planted = conflict(&generator)
                     if Bool.random(using: &generator), let own = item.value(of: group) {
                         planted.value = Bool.random(using: &generator) ? own : planted.value
-                        if case .title = own {
-                            planted.value = .title("hostile-\(Int.random(in: 0..<3, using: &generator))")
-                        }
+                        if case .title = own { planted.value = .title(words.randomElement(using: &generator)!) }
                         if case .field = own {
                             planted.value = .field(
-                                Field(id: group.fieldID ?? username, kind: .text, label: "L", value: "hostile"))
+                                Field(
+                                    id: group.fieldID ?? username, kind: .text, label: "L",
+                                    value: words.randomElement(using: &generator)!))
                         }
                     }
                     return planted
@@ -536,14 +681,16 @@ struct AdversarialItemMergeTests {
         }
         if Bool.random(using: &generator) {
             let ids = (0..<4).map { _ in
-                NoteLine.ID(revision: revision(&generator), index: UInt32.random(in: 0..<2, using: &generator))
+                NoteLine.ID(
+                    revision: revision(&generator), index: UInt32.random(in: 0..<2, using: &generator),
+                    nonce: UInt64.random(in: 0..<2, using: &generator))
             }
             item.noteLines += (0..<Int.random(in: 1...6, using: &generator)).map { _ in
                 NoteLine(
                     id: ids.randomElement(using: &generator)!,
                     after: Bool.random(using: &generator)
                         ? ids.randomElement(using: &generator)! : item.noteLines.randomElement(using: &generator)?.id,
-                    text: ["x", "y", "x\ny", ""].randomElement(using: &generator)!,
+                    text: (["x", "y", "x\ny", ""] + words).randomElement(using: &generator)!,
                     removed: Int.random(in: 0..<4, using: &generator) == 0)
             }
             if Bool.random(using: &generator) { item.noteLines.shuffle(using: &generator) }
@@ -661,6 +808,126 @@ struct AdversarialItemMergeTests {
             "SyncEngine does not pass the tombstone's version to the merger, so the summary's row is believed"
         ) {
             #expect(kept.version <= 2 + SyncTestClient.configuration.maximumVersionJump)
+        }
+    }
+
+    // MARK: - Size, at the engine
+
+    static func clients(seed: UInt64, _ devices: [UUID]) async -> [SyncTestClient] {
+        let keys = FakeAccountKeys(seed: seed)
+        await keys.addVaultKey(vaultID: vault)
+        for device in devices { await keys.trust(device: device) }
+        let transport = InMemorySyncTransport()
+        return devices.map { SyncTestClient(deviceID: $0, vaultID: vault, keys: keys, transport: transport) }
+    }
+
+    /// Threat: the insider publishes one version of an item whose clock names thousands of made-up devices. A clock is
+    /// a claim like any other, and the merge joins it into every honest copy (it cannot truncate: that is not a join).
+    /// When a person then deletes the item — or the 30-day purge does it for them — the tombstone's erasure summary
+    /// carried that whole clock: over the 64 KiB a reader accepts, so every other device refused the deleting
+    /// device's segment with `erasureTooLarge`, at every sync, and that device's stream stopped there for good.
+    /// Nothing it wrote afterwards, in any item, reached anyone (review finding Y36).
+    ///
+    /// A summary that would not fit now says the deleting device had seen nothing: the tombstone is accepted, erases
+    /// nothing elsewhere, and the stream carries on.
+    @Test("deleting an item whose clock names thousands of devices does not stop the deleting device's stream")
+    func enormousClockAndDeletion() async throws {
+        let clients = await Self.clients(seed: 23, [Self.insider, Self.honest, Self.other])
+        let (writer, deleter, reader) = (clients[0], clients[1], clients[2])
+        var junk = Self.base()
+        var claimed: [UUID: UInt64] = [:]
+        for n in 0..<2_000 {
+            claimed[UUID(uuid: (0xDD, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, UInt8(n >> 8), UInt8(n & 0xFF)))] = 1
+        }
+        junk.clock = VersionVector(claimed)
+        let row = try await writer.keyring.sealItem(junk)
+        try await writer.sessionStore.commit(StoreChange(upserts: [row]))
+        try await writer.sync()
+        try await deleter.sync()
+        try await reader.sync()
+
+        // What the merger used to hand the engine, and what it hands it now.
+        let held = try #require(await deleter.store.record(row.key))
+        let whole = try ItemErasure(
+            seen: ItemMerge.effectiveClock(junk, origin: Revision(version: 1, device: Self.insider)), row: 1,
+            device: Self.honest, date: junk.modifiedAt
+        ).summary()
+        #expect(whole.count > SyncPayload.maximumErasureLength, "the clock does not fit in a summary")
+        let summary = try await ItemRecordMerger(sealer: deleter.keyring, deviceID: Self.honest)
+            .erasureSummary(of: held)
+        #expect(summary.count <= SyncPayload.maximumErasureLength)
+        let erasure = ItemErasure(summary: summary, tombstone: 2)
+        #expect(erasure.seen.isEmpty && erasure.row == 1 && erasure.device == Self.honest)
+
+        try await deleter.delete(junk.id)
+        try await deleter.sync()
+        let later = try await deleter.save(
+            Item(vaultID: Self.vault, title: "Written after the deletion", scopes: [], fields: []))
+        try await deleter.sync()
+
+        for _ in 0..<2 {
+            let report = try await reader.sync()
+            #expect(report.rejected.isEmpty && report.waiting.isEmpty)
+        }
+        #expect(try await reader.item(later.id).title == "Written after the deletion")
+        // The deletion claimed to have seen nothing, so it erased nothing here: the item is kept, in the trash, and
+        // is not one the purge removes — the direction that loses no data.
+        let kept = try await reader.item(junk.id)
+        #expect(kept.isTrashed && kept.keptAfterDeletion && !kept.isTrashedByPerson)
+        #expect(kept.field(.password)?.value == "honest-password")
+        // And every device settles on that.
+        try await writer.sync()
+        try await deleter.sync()
+        for client in clients {
+            let report = try await client.sync()
+            #expect(report.rejected.isEmpty && report.waiting.isEmpty)
+        }
+    }
+
+    /// Threat: none is needed — two honest devices each write long notes into one item without seeing the other's
+    /// (each version fits the payload limit, SEC9; their join does not) — and an insider (A4) can arrange it at will.
+    /// The merger cannot seal the join, so it throws; the engine rejects the whole object that carried the remote
+    /// version, and because a stream is merged strictly in sequence, every later segment from that device is never
+    /// applied on the device that could not merge: unrelated items stop arriving, silently and for good.
+    ///
+    /// The merger now says which failure this is (`ItemMergeError.resultNotSealable`), so that the engine can set
+    /// that one entry aside — keep the local version, quarantine the remote one (PRD F7.7) — and carry on with the
+    /// stream. The engine does not do that yet; recorded as a known issue until it does
+    /// (docs/06-adversarial-review.md §H, Y37).
+    @Test("two versions whose merge is over the payload limit do not stop the stream that carried one of them")
+    func mergeOverThePayloadLimit() async throws {
+        let clients = await Self.clients(seed: 24, [Self.honest, Self.other, Self.insider])
+        let (first, reader, second) = (clients[0], clients[1], clients[2])
+        let item = try await first.save(
+            Item(id: Self.itemID, vaultID: Self.vault, title: "Bank", scopes: [], fields: [], notes: "start"))
+        for client in clients { try await client.sync() }
+        for client in clients { try await client.sync() }
+        try await second.edit(item.id) { $0.notes = String(repeating: "c", count: 505_000) }
+        try await first.edit(item.id) { $0.notes = String(repeating: "a", count: 30_000) }
+        try await second.sync()
+        try await reader.sync()
+        let local = try #require(await reader.store.record(RecordKey(recordID: item.id, kind: .item)))
+        let remote = try #require(await first.store.record(RecordKey(recordID: item.id, kind: .item)))
+        try await first.sync()
+        let unrelated = try await first.save(
+            Item(vaultID: Self.vault, title: "Unrelated, written afterwards", scopes: [], fields: []))
+        try await first.sync()
+
+        await #expect(throws: ItemMergeError.resultNotSealable(item.id)) {
+            _ = try await ItemRecordMerger(sealer: reader.keyring, deviceID: Self.other)
+                .merge(local: local, remote: remote)
+        }
+        var report = SyncReport()
+        for _ in 0..<2 { report = try await reader.sync() }
+        let arrived = try await reader.items()[unrelated.id] != nil
+        // Neither version is lost meanwhile: each device still holds its own.
+        #expect(try await reader.item(item.id).notes.count == 505_000)
+        #expect(try await first.item(item.id).notes.count == 30_000)
+        withKnownIssue(
+            "SyncEngine rejects the object carrying a version it cannot merge, and the author's stream waits there"
+        ) {
+            #expect(report.rejected.isEmpty && report.waiting.isEmpty)
+            #expect(arrived, "an unrelated item written afterwards never arrives")
         }
     }
 

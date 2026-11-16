@@ -6,7 +6,7 @@ import WatchwordTestSupport
 
 @testable import WatchwordSync
 
-/// Regression tests for the audit of the item merge as a CRDT (docs/06-adversarial-review.md §H, Y18–Y27;
+/// Regression tests for the audit of the item merge as a CRDT (docs/06-adversarial-review.md §H, Y18–Y27, Y31–Y35;
 /// docs/10-sync-correctness.md). Each is the smallest history that showed the finding; the laws themselves are
 /// checked at large in `LongRunningItemMergeLawTests` and `LongRunningItemMergeExhaustiveTests`.
 @Suite("Item merge audit regressions")
@@ -335,5 +335,252 @@ struct ItemMergeAuditTests {
             #expect(!copy.isTrashed, "the restore was made knowing about the deletion")
             #expect(copy.field(.password)?.value == "typed-after-the-delete-was-made")
         }
+    }
+
+    // MARK: - Text is its bytes (Y31)
+
+    /// "café" with the accent as one scalar, and as "e" with a combining mark: equal as Swift `String`s, different
+    /// bytes — and so different passwords to the site that hashes them.
+    static let composed = "caf\u{E9}-pass"
+    static let decomposed = "cafe\u{301}-pass"
+
+    static func bytes(_ text: String) -> [UInt8] {
+        Array(text.utf8)
+    }
+
+    /// Y31. `stamped` decided whether a group changed with `==`, under which the two spellings are one value, and
+    /// rebuilt the item from the values it already held: a person who retyped a password in the form the site
+    /// accepts saved the old bytes, with no stamp and no history entry.
+    @Test("a value retyped in another normalisation form is an edit: saved as typed, stamped, and in the history")
+    func respeltValuesAreSavedAsTyped() {
+        var start = F.base(notes: "line \(Self.decomposed)\nlast")
+        start = F.edit(start, by: F.a, at: 2) {
+            $0.fields[1].value = Self.decomposed
+            $0.title = Self.decomposed
+        }
+        let saved = F.edit(start, by: F.a, at: 3) {
+            $0.fields[1].value = Self.composed
+            $0.title = Self.composed
+            $0.notes = "line \(Self.composed)\nlast"
+        }
+        #expect(Self.bytes(saved.fields[1].value) == Self.bytes(Self.composed))
+        #expect(Self.bytes(saved.title) == Self.bytes(Self.composed))
+        #expect(Self.bytes(saved.notes) == Self.bytes("line \(Self.composed)\nlast"))
+        let revision = Revision(version: 3, device: F.a)
+        #expect(saved.revisions[.field(F.fieldID(2))]?.revision == revision)
+        #expect(saved.revisions[.title]?.revision == revision)
+        #expect(saved.noteLines.contains { $0.id.revision == revision && !$0.removed })
+        #expect(saved.noteLines.filter(\.removed).count == 1, "the line respelt was replaced, the other kept")
+        // The spelling replaced is in the history, as any replaced value is.
+        #expect(saved.history.first?.fields[1].value.utf8.elementsEqual(Self.decomposed.utf8) == true)
+        #expect(F.merge((saved, F.a), (start, F.a)) == saved, "and the edit contains the version it was made on")
+    }
+
+    /// Y31. Two devices saved the two spellings of one password concurrently. Both were kept, but the views compared
+    /// with `==`: no conflict was reported, and the next edit of the field dropped the hidden spelling without
+    /// retaining it.
+    @Test("two spellings written concurrently are a conflict the person is shown, and an edit retains the other")
+    func twoSpellingsAreAConflict() {
+        let base = F.base()
+        let onA = F.edit(base, by: F.a, at: 2) { $0.fields[1].value = Self.composed }
+        let onB = F.edit(base, by: F.b, at: 2) { $0.fields[1].value = Self.decomposed }
+        let merged = F.merge((onA, F.a), (onB, F.b))
+        #expect(merged == F.merge((onB, F.b), (onA, F.a)))
+        let group = ItemGroup.field(F.fieldID(2))
+        #expect(merged.hasConflicts)
+        let hidden = ItemMerge.conflicts(of: merged)[group]?.map(\.value) ?? []
+        #expect(hidden.count == 1)
+        let held = Set(([merged.value(of: group)!] + hidden).map { Self.bytes(Self.text($0)) })
+        #expect(held == [Self.bytes(Self.composed), Self.bytes(Self.decomposed)])
+
+        let edited = F.edit(merged, by: F.a, at: 4) { $0.fields[1].value = "typed-after" }
+        #expect(edited.retainedValues.map(\.value) == hidden, "the spelling not shown is retained, not dropped")
+    }
+
+    /// Y31. One stamp, two spellings — what an insider gets by republishing another device's write respelt, and what
+    /// a rolled-back device can do by accident. The merge kept whichever spelling the receiving device already held
+    /// and reported the two results equal, so two devices filled different bytes for good.
+    @Test("one stamp carrying two spellings: both are kept, and every merge order gives the same bytes")
+    func oneStampTwoSpellings() {
+        let base = F.base()
+        let onA = F.edit(base, by: F.a, at: 2) {
+            $0.fields[1].value = Self.composed
+            $0.title = Self.composed
+        }
+        var respelt = onA
+        respelt.fields[1].value = Self.decomposed
+        respelt.title = Self.decomposed
+        respelt.version = 3
+        let (first, second) = ((onA, F.a), (respelt, F.c))
+        let left = F.merge(first, second)
+        let right = F.merge(second, first)
+        #expect(left == right)
+        #expect(Self.bytes(left.title) == Self.bytes(right.title))
+        #expect(Self.bytes(left.fields[1].value) == Self.bytes(right.fields[1].value))
+        #expect(!ItemMerge.sameState(left, onA) && !ItemMerge.sameState(left, respelt))
+        for group in [ItemGroup.title, .field(F.fieldID(2))] {
+            #expect(left.conflicts[group]?.count == 1, "both spellings are held")
+            #expect(ItemMerge.conflicts(of: left)[group]?.count == 1, "and shown as a conflict")
+        }
+        // A device that already holds either spelling ends where the others do.
+        #expect(F.merge(Self.again(left), first) == left && F.merge(Self.again(left), second) == left)
+        // Versions that differ only in a spelling are not the same state.
+        #expect(!ItemMerge.sameState(onA, ItemMerge.written(respelt, as: Revision(version: 2, device: F.a))))
+    }
+
+    @Test("note lines are compared by their bytes: a respelt line is replaced, an untouched one keeps its ID")
+    func noteLinesByBytes() {
+        let revision = Revision(version: 1, device: F.a)
+        let lines = NoteText.initial("keep\n\(Self.decomposed)\nkeep too", revision: revision)
+        let edited = NoteText.edit(
+            lines, to: "keep\n\(Self.composed)\nkeep too", revision: Revision(version: 2, device: F.a), nonce: 9)
+        #expect(Self.bytes(NoteText.text(edited)) == Self.bytes("keep\n\(Self.composed)\nkeep too"))
+        #expect(edited.filter(\.removed).map(\.id) == [lines[1].id])
+        #expect(edited.filter { $0.id.nonce == 9 }.count == 1)
+        #expect(NoteText.merge(edited, lines) == edited)
+    }
+
+    // MARK: - Note lines (Y32, Y33)
+
+    /// Y32. Copies of one line ID were folded in one at a time, re-splitting and re-sorting the text so far at each
+    /// step. The one-pass join must give what the fold gave, in any order.
+    @Test("joining many copies of one line at once gives what joining them pairwise in any order gives")
+    func joiningCopiesOfOneLine() {
+        let revision = Revision(version: 2, device: F.c)
+        let id = NoteLine.ID(revision: revision, index: 0)
+        func anchor(_ index: UInt32) -> NoteLine.ID { NoteLine.ID(revision: revision, index: index) }
+        let texts = ["b\na", "b\na", "a", "", "c\nb", "a\nb", Self.composed, Self.decomposed]
+        var generator = SeededGenerator(seed: 0x32)
+        for round in 0..<200 {
+            let count = Int.random(in: 1...6, using: &generator)
+            let copies = (0..<count).map { _ in
+                NoteLine(
+                    id: id,
+                    after: Bool.random(using: &generator) ? anchor(UInt32.random(in: 1...3, using: &generator)) : nil,
+                    text: texts.randomElement(using: &generator)!,
+                    removed: round % 4 == 0 && Int.random(in: 0..<5, using: &generator) == 0)
+            }
+            let normal = copies.map { $0.removed ? NoteText.removed($0) : $0 }
+            let together = NoteText.join(normal)
+            var folded = normal[0]
+            for copy in normal.dropFirst() { folded = NoteText.join(folded, copy) }
+            var backwards = normal[normal.count - 1]
+            for copy in normal.dropLast().reversed() { backwards = NoteText.join(backwards, copy) }
+            #expect(together == folded && together == backwards, "round \(round)")
+            #expect(
+                NoteText.ordered(copies) == [together]
+                    && NoteText.ordered(copies.shuffled(using: &generator)) == [together])
+        }
+        // The same text everywhere stays as written, unsorted; texts that differ are kept line by line.
+        let same = NoteLine(id: id, after: nil, text: "b\na")
+        #expect(NoteText.join([same, same, same]).text == "b\na")
+        #expect(NoteText.join([same, NoteLine(id: id, after: nil, text: "c")]).text == "a\nb\nc")
+    }
+
+    /// Y33. The lines an edit inserts carry a nonce drawn for that edit, so that their IDs cannot be named by a
+    /// writer that has not seen them.
+    @Test("every edit of an existing item draws a nonce for its lines; a new item's lines are numbered from zero")
+    func lineNonces() {
+        let base = F.base(notes: "one")
+        #expect(base.noteLines.allSatisfy { $0.id.nonce == 0 })
+        var item = base
+        item.notes = "one\ntwo"
+        item.version = 2
+        let revision = Revision(version: 2, device: F.a)
+        let first = ItemMerge.stamped(item, previous: base, previousOrigin: F.origin(base, F.a), revision: revision)
+        let second = ItemMerge.stamped(item, previous: base, previousOrigin: F.origin(base, F.a), revision: revision)
+        let nonces = [first, second].map { $0.noteLines.first { $0.id.revision == revision }?.id.nonce }
+        #expect(nonces[0] != nil && nonces[1] != nil && nonces[0] != nonces[1], "drawn afresh by the system generator")
+        var seeded = SeededGenerator(seed: 5)
+        var again = SeededGenerator(seed: 5)
+        #expect(
+            ItemMerge.stamped(
+                item, previous: base, previousOrigin: F.origin(base, F.a), revision: revision, using: &seeded)
+                == ItemMerge.stamped(
+                    item, previous: base, previousOrigin: F.origin(base, F.a), revision: revision, using: &again),
+            "and reproducible from a seed")
+    }
+
+    /// Y33. Clamping a record's line IDs to its version lowers the revision of an anchor too; it rebuilt the anchor
+    /// from revision and index alone, dropping the nonce, so a line written after a nonced line no longer named it and
+    /// moved to the start of the notes.
+    @Test("clamping keeps an anchor's nonce: a line still follows the line it was written after")
+    func clampingKeepsAnchors() {
+        let revision = Revision(version: 5, device: F.c)
+        let first = NoteLine(id: NoteLine.ID(revision: revision, index: 0, nonce: 7), after: nil, text: "first")
+        let second = NoteLine(id: NoteLine.ID(revision: revision, index: 1, nonce: 7), after: first.id, text: "second")
+        let clamped = NoteText.clamped([first, second], to: 3)
+        #expect(clamped.allSatisfy { $0.id.revision.version == 3 && $0.id.nonce == 7 })
+        #expect(clamped[1].after == clamped[0].id)
+        #expect(NoteText.text(clamped) == "first\nsecond")
+    }
+
+    // MARK: - Updates on any metadata (Y34)
+
+    /// Y34. A retained value whose stamp did not record its own revision (a stamp decodes as written) was removed by
+    /// a resolution on the resolving device but not covered by the discard it recorded, so merging the version the
+    /// resolution was made on brought it back: the update was not inflationary and the discard did not hold.
+    @Test("a resolution holds against a retained value whose stamp omits its own revision")
+    func resolutionCoversMalformedStamps() {
+        let base = F.base()
+        let onA = F.edit(base, by: F.a, at: 2) { $0.fields[1].value = "from-A" }
+        let onB = F.edit(base, by: F.b, at: 2) { $0.fields[1].value = "from-B" }
+        var held = F.merge((onA, F.a), (onB, F.b))
+        var stamp = GroupStamp(revision: Revision(version: 1, device: F.c), seen: VersionVector([F.a: 1]))
+        stamp.seen = VersionVector([F.a: 1])
+        #expect(!stamp.seen.contains(stamp.revision))
+        held.retainedValues = [ConflictingValue(stamp: stamp, value: F.password("retained"))]
+        held.version = 3
+        let origin = Revision(version: 3, device: F.c)
+
+        let group = ItemGroup.field(F.fieldID(2))
+        let resolved = ItemMerge.resolve(
+            held, group: group, choosing: F.password("from-A"), origin: origin,
+            revision: Revision(version: 4, device: F.a))
+        #expect(resolved.retainedValues.isEmpty && !resolved.hasConflicts)
+        let back = ItemMerge.merge(resolved, origin: Revision(version: 4, device: F.a), held, origin: origin)
+        #expect(back == resolved, "merging the version it was made on changes nothing")
+        #expect(back.retainedValues.isEmpty)
+    }
+
+    /// A record whose clock claims the tombstone's revision without holding the deletion's write (only crafted
+    /// metadata does) took a shortcut that skipped the write, so settling did not commute with merging. Whether a
+    /// version has met a deletion is now read from what it holds.
+    @Test("settling against a deletion is the same join on a record whose clock merely claims the tombstone")
+    func settlingIsAJoinOnAnyClock() throws {
+        let base = F.base()
+        let trashed = F.edit(base, by: F.a, at: 2) { $0.trashedAt = Date(timeIntervalSince1970: 1_800_000_002) }
+        let erasure = Self.erasure(of: trashed, by: F.a)
+        let edited = F.edit(base, by: F.b, at: 2) { $0.fields[1].value = "unseen" }
+        var claiming = edited
+        claiming.clock = claiming.clock.merging(VersionVector([F.a: erasure.revision.version]))
+        claiming.version = erasure.revision.version
+        let origin = Revision(version: claiming.version, device: F.b)
+
+        guard case .kept(let kept) = ItemMerge.settle(claiming, origin: origin, against: erasure) else {
+            Issue.record("a version that does not hold the deletion's write was taken to have met it")
+            return
+        }
+        #expect(kept.isTrashed && kept.keptAfterDeletion && !kept.isTrashedByPerson)
+        let keptOrigin = Revision(version: kept.version, device: F.b)
+        #expect(
+            ItemMerge.settle(kept, origin: keptOrigin, against: erasure) == .keep, "applying it twice changes nothing")
+        // It commutes with merging: settle either side first, or the merge.
+        guard case .kept(let plain) = ItemMerge.settle(edited, origin: F.origin(edited, F.b), against: erasure) else {
+            Issue.record("an unseen edit was not kept")
+            return
+        }
+        let mergedFirst = ItemMerge.merge(claiming, origin: origin, edited, origin: F.origin(edited, F.b))
+        guard
+            case .kept(let settledAfter) = ItemMerge.settle(
+                mergedFirst, origin: Revision(version: mergedFirst.version, device: ItemMerge.zeroDevice),
+                against: erasure)
+        else {
+            Issue.record("the merge of two uncovered versions was not kept")
+            return
+        }
+        let settledFirst = ItemMerge.merge(
+            kept, origin: keptOrigin, plain, origin: Revision(version: plain.version, device: F.b))
+        #expect(ItemMerge.sameState(settledAfter, settledFirst))
     }
 }

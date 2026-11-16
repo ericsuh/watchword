@@ -43,9 +43,11 @@ enum MergeFixtures {
                 ItemHistoryEntry(replacedAt: item.modifiedAt, version: previous.version, fields: previous.fields), at: 0
             )
         }
+        // The line nonce is drawn as the vault draws it, from a seed so that the test is the same on every run.
+        var generator = SeededGenerator(seed: version ^ 0x4E0C_E5EE_D000_0000)
         return ItemMerge.stamped(
             item, previous: previous, previousOrigin: origin(previous, device),
-            revision: Revision(version: version, device: device))
+            revision: Revision(version: version, device: device), using: &generator)
     }
 
     /// The origin of a version: the version it carries and, for the fixtures, the device given.
