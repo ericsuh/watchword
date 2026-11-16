@@ -241,9 +241,14 @@ public actor SyncEngine {
     ///
     /// `publishing: false` downloads and merges and publishes nothing: a member of a shared vault who may not write
     /// keeps a merged copy and writes nothing other devices would refuse (docs/02-architecture.md §8.7).
-    public func sync(reconcile: Bool = false, deferringDeletions: Bool = false, publishing: Bool = true)
-        async throws -> SyncReport
-    {
+    ///
+    /// `transportStopped` is a failure the caller already met in this sync (another vault's listing was throttled,
+    /// the account is signed out): the engine then makes no call to the transport, merges what it downloaded earlier,
+    /// publishes nothing and reports that failure, so one sync asks a stopped transport once, not once per vault.
+    public func sync(
+        reconcile: Bool = false, deferringDeletions: Bool = false, publishing: Bool = true,
+        transportStopped: SyncTransportError? = nil
+    ) async throws -> SyncReport {
         guard !running else { throw SyncError.syncInProgress }
         running = true
         defer { running = false }
@@ -294,16 +299,20 @@ public actor SyncEngine {
         if stash != loadedStash { state.stashUnsaved = true }
         state.nextSequence = max(state.nextSequence, 1)
         var listing = Listing()
-        do {
-            listing = try await pull(state: state, retired: retired, report: &report)
-            // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
-            // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
-            if let highest = listing.segments[deviceID]?.max() {
-                state.nextSequence = max(state.nextSequence, highest + 1)
+        if let transportStopped {
+            report.noteTransportFailure(transportStopped)
+        } else {
+            do {
+                listing = try await pull(state: state, retired: retired, report: &report)
+                // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
+                // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
+                if let highest = listing.segments[deviceID]?.max() {
+                    state.nextSequence = max(state.nextSequence, highest + 1)
+                }
+            } catch let error as SyncTransportError where error.stopsSync {
+                // Offline (PRD N3), throttled, signed out: still merge what was downloaded earlier, perhaps locked.
+                report.noteTransportFailure(error)
             }
-        } catch let error as SyncTransportError where error.stopsSync {
-            // Offline (PRD N3), throttled, signed out: still merge what was downloaded earlier, perhaps while locked.
-            report.noteTransportFailure(error)
         }
         do {
             try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
@@ -359,12 +368,17 @@ public actor SyncEngine {
         return (parsed, false)
     }
 
-    /// Downloads and signature-checks new objects only. Needs no keys (§7.4).
-    public func download() async throws -> SyncReport {
+    /// Downloads and signature-checks new objects only. Needs no keys (§7.4). With `transportStopped`, does nothing
+    /// but report it (see `sync`).
+    public func download(transportStopped: SyncTransportError? = nil) async throws -> SyncReport {
         guard !running else { throw SyncError.syncInProgress }
         running = true
         defer { running = false }
         var report = SyncReport()
+        if let transportStopped {
+            report.noteTransportFailure(transportStopped)
+            return report
+        }
         let state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         do {
             _ = try await pull(

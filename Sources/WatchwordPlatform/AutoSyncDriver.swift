@@ -9,16 +9,33 @@ public enum AutoSyncOutcome: Sendable, Hashable {
     /// The transport asked for a wait (`SyncTransportError.rateLimited`).
     case throttled(retryAfter: TimeInterval?)
 
-    /// The outcome of a sync that returned `report`: a transport that stopped the sync is a failure, a throttled one
-    /// with the wait it asked for.
+    /// The outcome of a sync that returned `report`, read from every part of it: the account's own objects, each
+    /// vault's log and each shared vault's pass. Any throttling makes it throttled, with the longest wait asked (a
+    /// wait not stated counts as none); otherwise any part that could not reach the transport makes it a failure.
     public init(_ report: AccountSyncReport) {
-        if case .rateLimited(let wait)? = report.transportFailure {
-            self = .throttled(retryAfter: wait)
-        } else if report.transportUnavailable {
-            self = .failed
-        } else {
-            self = .succeeded
+        var failures = report.vaults.values.map(\.transportFailure) + report.sharing.values.map(\.transportFailure)
+        failures.append(report.transportFailure)
+        var unavailable = report.transportUnavailable || report.vaults.values.contains { $0.transportUnavailable }
+        var throttled = false
+        var wait: TimeInterval?
+        for case let failure? in failures {
+            unavailable = unavailable || failure.stopsSync
+            guard case .rateLimited(let asked) = failure else { continue }
+            throttled = true
+            if let asked { wait = max(wait ?? asked, asked) }
         }
+        if throttled {
+            self = .throttled(retryAfter: wait)
+        } else {
+            self = unavailable ? .failed : .succeeded
+        }
+    }
+
+    /// The outcome of one vault's sync.
+    public init(_ report: SyncReport) {
+        var account = AccountSyncReport()
+        account.vaults[UUID()] = report
+        self.init(account)
     }
 
     /// The outcome of a sync that threw `error`.

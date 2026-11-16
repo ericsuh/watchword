@@ -22,6 +22,12 @@ extension VaultSession {
         var reports: [UUID: SharedVaultSyncReport] = [:]
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var report = SharedVaultSyncReport()
+            // A transport that stopped for one vault has stopped for all: the rest are not asked again.
+            if let stopped = reports.values.lazy.compactMap(\.transportFailure).first {
+                report.transportFailure = stopped
+                reports[vaultID] = report
+                continue
+            }
             do {
                 let before = try sharedVault(vaultID).ledger.state.hash
                 report.recordsRejected = try await ingestMembership(vaultID).rejected.count
@@ -33,9 +39,11 @@ extension VaultSession {
                 report.requiresNewerVersion = try sharedVault(vaultID).ledger.continuesInLaterFormat
             } catch {
                 report.failure = String(describing: error)
+                report.transportFailure = Self.stoppingTransportFailure(error)
             }
             reports[vaultID] = report
         }
+        guard !reports.values.contains(where: { $0.transportFailure != nil }) else { return reports }
         await refreshMemberRegistries(account: account)
         guard keys != nil else { return reports }
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
@@ -44,9 +52,19 @@ extension VaultSession {
                 try await saveSharedVault(vaultID)
             } catch {
                 reports[vaultID, default: SharedVaultSyncReport()].failure = String(describing: error)
+                if let stopped = Self.stoppingTransportFailure(error) {
+                    reports[vaultID, default: SharedVaultSyncReport()].transportFailure = stopped
+                    break
+                }
             }
         }
         return reports
+    }
+
+    /// `error` if it is a transport error that stops a sync.
+    static func stoppingTransportFailure(_ error: any Error) -> SyncTransportError? {
+        guard let error = error as? SyncTransportError, error.stopsSync else { return nil }
+        return error
     }
 
     /// How the engine of `vaultID` runs: a shared vault gets the judge and keeps its whole log (no snapshots, no
@@ -137,8 +155,10 @@ extension VaultSession {
                 try await saveSharedVault(vaultID)
             } catch {
                 report.failure = String(describing: error)
+                report.transportFailure = Self.stoppingTransportFailure(error)
             }
             reports[vaultID] = report
+            if report.transportFailure != nil { break }
         }
     }
 
