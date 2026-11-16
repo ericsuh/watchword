@@ -188,7 +188,8 @@ struct ScreenSheet<Content: View>: View {
         // Closed with Done: a swipe that scrolls past the top must not throw away an import being reviewed.
         .interactiveDismissDisabled()
         #if os(macOS)
-            .frame(minWidth: 560, minHeight: 640)
+            // Inside the 600-point window; the form scrolls, and Done is in the toolbar, always in view.
+            .frame(minWidth: 540, minHeight: 520)
         #endif
     }
 }

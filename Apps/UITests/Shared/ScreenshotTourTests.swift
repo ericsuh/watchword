@@ -365,9 +365,17 @@ extension XCUIApplication {
 
     /// Dismisses Settings and waits until its sheet has gone, so whatever comes next is not pictured or tapped
     /// through a sheet that is still closing.
-    func closeSettings() {
+    func closeSettings(file: StaticString = #filePath, line: UInt = #line) {
         let done = buttons["settings.done"]
+        if !waitUntilHittable(done, timeout: 5) {
+            attachTree("close Settings")
+            XCTFail("Settings' Done cannot be clicked", file: file, line: line)
+            return
+        }
         done.click()
-        XCTAssertTrue(done.waitForNonExistence(timeout: 10), "Settings is still open")
+        if !done.waitForNonExistence(timeout: 10) {
+            attachTree("close Settings")
+            XCTFail("Settings is still open", file: file, line: line)
+        }
     }
 }

@@ -23,7 +23,8 @@ extension XCUIApplication {
     /// a few short waits and at most eight scrolls, so a missing element fails in seconds, with the tree attached.
     @discardableResult
     func reveal(
-        _ identifier: String, at position: FormPosition = .anywhere, file: StaticString = #filePath, line: UInt = #line
+        _ identifier: String, at position: FormPosition = .anywhere, mayBeDisabled: Bool = false,
+        file: StaticString = #filePath, line: UInt = #line
     ) -> XCUIElement {
         let target = element(identifier)
         if !(target.waitForExistence(timeout: 2) && target.isHittable) {
@@ -40,6 +41,10 @@ extension XCUIApplication {
         if !target.waitForExistence(timeout: 2) {
             attachTree("reveal \(identifier)")
             XCTFail("\(identifier) was not found", file: file, line: line)
+        } else if !mayBeDisabled, !waitUntilHittable(target, timeout: 2) {
+            // In the hierarchy but not reachable: off the screen, or under a sheet that is still there.
+            attachTree("reveal \(identifier)")
+            XCTFail("\(identifier) is not hittable", file: file, line: line)
         }
         return target
     }
@@ -65,10 +70,18 @@ extension XCUIApplication {
     /// Attaches the whole element tree to the running test, kept whether or not it passes, for a failure that the
     /// assertion's own message cannot explain (which window or sheet an element is in, and whether it is hittable).
     func attachTree(_ reason: String) {
-        let attachment = XCTAttachment(string: debugDescription)
+        // The window's frame beside the tree: an element outside the screen exists but cannot be hit.
+        let frames = "window frame: \(windows.firstMatch.exists ? "\(windows.firstMatch.frame)" : "none")\n"
+        let attachment = XCTAttachment(string: frames + debugDescription)
         attachment.name = "element tree: \(reason)"
         attachment.lifetime = .keepAlways
-        XCTContext.runActivity(named: "Element tree (\(reason))") { $0.add(attachment) }
+        let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screen.name = "screen: \(reason)"
+        screen.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Element tree (\(reason))") {
+            $0.add(attachment)
+            $0.add(screen)
+        }
     }
 
     /// Waits until `element` can be clicked: it exists and nothing (a sheet still closing, say) covers it.
@@ -129,9 +142,14 @@ extension XCUIApplication {
 
     /// Clicks the control with `identifier` once it is enabled: one that waits for something the app does first.
     func tapWhenEnabled(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
-        let target = reveal(identifier, file: file, line: line)
+        // A disabled control may not count as hittable, so it is only required to be there until it is enabled.
+        let target = reveal(identifier, mayBeDisabled: true, file: file, line: line)
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: target)
         XCTAssertEqual(XCTWaiter().wait(for: [enabled], timeout: 15), .completed, "\(identifier) stayed disabled")
+        if !waitUntilHittable(target, timeout: 3) {
+            attachTree("tap \(identifier)")
+            XCTFail("\(identifier) is not hittable", file: file, line: line)
+        }
         target.click()
     }
 
