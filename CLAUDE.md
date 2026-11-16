@@ -13,9 +13,12 @@ vaults, the device registry and enrolment over the transport) short of its Cloud
 milestone 4's sharing protocol core (`WatchwordSharing`) and its wiring into `VaultSession` and `SyncEngine`, milestone 5's portable AutoFill core
 (`WatchwordAutoFill`) short of the extension adapter, milestone 6's hygiene core (`WatchwordHygiene`), driven by the session, short
 of its network adapter, background glue and UI, and milestone 7's import and export parsers (`WatchwordInterchange`),
-wired into the session with the encrypted Watchword archive, short of the apps' screens and Credential Exchange calls. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+wired into the session with the encrypted Watchword archive, short of Credential Exchange calls; and the apps' screen
+models (`WatchwordPresentation`). `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
-are not committed.
+are not committed. The account screens (vaults and sharing, devices, held-aside changes, the security report, import,
+export and restore) keep their logic in `WatchwordPresentation`, tested on Linux; their SwiftUI views and XCUITests are
+written but have not yet been built on a Mac.
 
 ## Commands
 
@@ -55,8 +58,15 @@ mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.y
 ```
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and
-syncs over an in-memory transport with `UITestPeer`, a second session of the same account the test drives from a
-Debug-only Settings section (it unlocks with `WATCHWORD_UITEST_PASSWORD` from the launch environment).
+syncs over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only
+Settings section: a second device of the same account (it enrols with `WATCHWORD_UITEST_PASSWORD` from the launch
+environment, and can rename items, change the password and write an implausible version) and another person's account
+that accepts invitations. A `--uitest` launch also has sharing over an in-memory key directory, a version-jump ceiling
+of 16 (so the peer's version lands in the quarantine), breach checks answered in process by `UITestPwnedPasswords`,
+and buttons that stand in for the system file picker (a sample CSV, the last exported archive). Account screens open
+from Settings in sheets of their own, each with a Done button (`screen.done`). UI tests find elements by
+`AccessibilityID` (`Apps/Shared/AccessibilityID.swift`, compiled into the UI-test bundles too); the identifiers are
+stable, so rename one only with every test that names it.
 `ScreenshotTourTests` is the screenshot tour: one pass through every flow that attaches a picture of each major
 screen (`Screens.capture("name", in: app)`, numbered in capture order, the app's window on macOS and the screen on
 iOS). A new screen is one `Screens.capture` line where the tour reaches it; capture after a tap or keystroke, or after
@@ -128,7 +138,8 @@ imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMem
 policies and ports are portable too, and so are `WatchwordCrypto`, `WatchwordSharing`, `VaultSession` and `WatchwordAutoFill` through
 swift-crypto (ADR 0006);
 `SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and all of
-`WatchwordPlatform` are not. `WatchwordHygiene` is wholly portable: it imports `Foundation`, `Crypto`, `SecureMemory`
+`WatchwordPlatform` are not; nor is `Apps/` (SwiftUI), so keep views thin and put screen logic in
+`WatchwordPresentation`, which is portable like `WatchwordKit`. `WatchwordHygiene` is wholly portable: it imports `Foundation`, `Crypto`, `SecureMemory`
 and `WatchwordModel`, and its only way to the network is the `HTTPClient` port, so the day it imports `URLSession`
 its tests stop being able to say what leaves the device.
 
@@ -138,7 +149,7 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Fourteen shipped modules, dependency-ordered, plus test support:
+Fifteen shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
@@ -217,6 +228,12 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `ArchivedItems` (an archive's decrypted items into
   drafts), `StoredItemSize`, `DuplicateDetector`, `InterchangeGuide`. Depends on `WatchwordModel` and
   `WatchwordMatching`; Foundation only, no keys, files or clocks. `WatchwordKit` depends on it, never the reverse.
+- **`WatchwordPresentation`** — the apps' screen models: one main-actor `@Observable` model per account screen
+  (`VaultsModel`, `SharedVaultModel`, `InvitationModel`, `AcceptInvitationModel`, `DevicesModel`, `QuarantineModel`,
+  `HygieneModel`, `ImportModel`, `ExportModel`) over a `ScreenContext` (the session, and the app's activity and lock
+  hooks), and the wording (`ErrorWording`, `SyncSummary`, `InterchangeWording`, `SharingCodes`). Depends on
+  `WatchwordKit` and the modules whose types it shows; `WatchwordPresentationTests` drives it over real sessions on
+  Linux. It decides nothing about security: every refusal stays in `VaultSession`, and the model words it.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `FakeDeviceKeyStore`, `TestVault`, whose
   `enrolledDevice` enrols a real second device over the transport; `RegistryFixture` for hand-built registry
