@@ -50,6 +50,9 @@ that a test target may contain both as long as a single test does not mix their 
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases; request-handler tests per request kind; identity publishing diff tests |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
+| F2.x vaults | `WatchwordKitTests`: "Vault session: vaults" — create, list, rename; each vault its own key and a sealed name; items per vault and across; copy; move, and a move interrupted at each commit (never neither, never falsely moved); vault deletion confirmed by item count, the Personal vault undeletable; search over decrypted items, never a secret (F2.3); directory rows edited in the file. "Vault session: vaults across devices" — a vault, its name and items reaching another device; concurrent renames; a move against an unseen edit (kept, in the trash: F7.6); the same move on two devices; unresolved values refused; a vault deleted against concurrent work (what the deletion had not seen is kept: F7.7); a locked device learning of a vault |
+| F5.2, F10.1, F10.2 enrolment and devices | `WatchwordKitTests`: "Vault session: enrolment from the transport (F5.2)" — a device joining from the transport, password and Secret Key alone; wrong credentials one failure, leaving nothing behind; an approved device; an account from before the registry; a store restored onto other hardware. "Vault session: devices, revocation and password changes" — a password change reaching other devices (old password refused, quick unlock destroyed, nothing merged or published until the new one is entered); enrolling after a change; revocation with and without a password change; a password change the person did not make, undone; a registry rolled back in the local file. `WatchwordCryptoTests`: "Device keys and signatures", "Device registry", "Published account header". Section 6.9 |
+| F7.5 automatic sync | `WatchwordSyncTests`: "Automatic sync policy" — unlock, debounced saves and their cap, a save during a sync, coalesced hints, periodic intervals locked and unlocked, backoff and retry, spacing, a clock moved backwards — all with dates, no sleeping |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
@@ -242,8 +245,24 @@ context; a locked device with no trusted key in the Keychain, which refuses ever
 until the next unlock; pending deletions planted in the local sync state (A8) — unsigned, badly signed, signed by
 another key, or another device's — none of which is published; the sync adapter used after `lock()`; and the
 keyring refusing to sign as another device. The Keychain item protection suite checks the new `accountSigningKey`
-item like the others and that every item has its own account name. Still to come with
-milestone 4: member key substitution, membership records, revocation and read-only enforcement.
+item like the others and that every item has its own account name. With the device registry the same suite
+adds: the account key alone, and a device key alone, refused (each object needs both signatures); a registered
+device writing in another device's stream; a revoked device's segments and snapshots, refused locked and unlocked
+while what it wrote before arrives through a trusted device's snapshot; a registration the store withholds; and
+records and a vault's description that do not cross from one vault to another. Still to come with
+milestone 4: member key substitution, membership records, revocation of members and read-only enforcement.
+
+`WatchwordSyncTests`, "Sync engine: revoked devices" (fake keyring): a revoked device's objects not read and not
+waited for; staged objects dropped; garbage collection resuming (Y6); snapshot election skipping it; what one
+device had merged handed on in a snapshot; a revoked device's own engine publishing nothing. "Sync engine:
+several erasures of one record": a deletion published although another device's later-stamped erasure is known
+(W13), a second deletion by the same device of a version its first had kept, published although its stamp is
+the lower (W18), and an erasure already applied not trashing a restored item again.
+`WatchwordKitTests`, "Multi-device vault simulation" (`LongRunningVaultSimulationTests`, nightly at 700 steps):
+real sessions over the eventually consistent server, several vaults, moves and copies, vault deletions, a device
+enrolling mid-run and a device revoked mid-run with or without a password change; every device left in the
+account converges, a device enrolling afterwards sees the same, no value anyone typed is lost unless a person
+discarded it, and nothing typed reaches the transport.
 
 ### 6.5 Interchange (milestone 7)
 - Zip-slip entry names, nested zip bombs beyond the ratio cap, 1PUX with 10^6 items, CSV cells
@@ -306,6 +325,33 @@ observable from the extension). Milestone 2 enforces F11.2 at the vault boundary
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
   `otpauth://` parser, and `HostMatcher.normalize`. None exists yet; the envelope decoder
   (`Envelope.parse`) is the first candidate now that it is complete.
+
+### 6.9 Account enrolment and the device registry (milestone 3)
+
+`AdversarialAccountTests`, suite "Adversarial: account enrolment and device registry", real keys throughout.
+Adversaries: A1 with the store, A8 with the local file, a revoked device that kept the keyset and its device key,
+an insider device in hands that do not know the password.
+
+- The published header (A1): KDF parameters out of bounds on either side refused before any derivation (SEC5,
+  SEC9); a byte flipped anywhere stops enrolment; another account's header, as it is or relabelled, enrols
+  nobody; an older header replayed beside the current one, in its place, and with the registry's record of the
+  change withheld too; planted objects among the headers.
+- The local header rolled back to before a password change (A8): refused even with the old password.
+- The registry: entries the account key did not sign never admitted; a second genesis entry signed with the real
+  account key; a revoked device registering again under its ID, under a new ID with its key, by enrolment with
+  the old password, and back-dating a revocation of the device that revoked it — nothing of it counts once the
+  password has changed; the stated limit of a revocation that keeps the password; a registered device announcing
+  a password change without the password.
+- The vault directory: a wrap copied or re-signed under another vault's name or another key ID, another account's
+  wrap, deletions unsigned, by a stranger, copied from another vault, of the Personal vault, or vouched for by a
+  revoked device; a vault description that is too large or has an endless name. Vault-key wrap rows edited in
+  the local file (A8): one moved under another vault, one deleted, another account's planted with a directory row
+  to list it — none opens, no vault is listed or written under a key that is not its own, the items are reported
+  unreadable, and the next sync restores the genuine wraps from the transport.
+
+Registry rules themselves, including the back-dating case the suite found, are in `WatchwordCryptoTests`
+"Device registry"; P-256 device signatures (low-S only) and the enrolment key have known answers from Python
+`cryptography`.
 
 ## 7. CI implementation
 

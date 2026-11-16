@@ -27,7 +27,6 @@ extension VaultSession {
     ///    any header for a password changed elsewhere, and the vault directory (vault keys and vault deletions).
     /// 2. Every vault's log (`SyncEngine.sync`), deleted vaults included, so that what a deletion had not seen
     ///    still arrives.
-    /// 3. What a vault's deletion left behind is put in the trash where it is.
     ///
     /// While locked only downloads run, with every signature checked against the registry and the account key kept
     /// in the Keychain; each report's `deferredUntilUnlock` says so (§7.4). The same holds, unlocked, while this
@@ -44,6 +43,7 @@ extension VaultSession {
         registryView = nil
 
         do {
+            try await startRegistryIfAccountPredatesIt(account: record, transport: syncSettings.transport)
             report.account = try await syncAccountObjects(account: record, transport: syncSettings.transport)
         } catch SyncTransportError.unavailable {
             report.transportUnavailable = true
@@ -87,7 +87,6 @@ extension VaultSession {
             vaultReport.awaitingNewPassword = report.awaitingNewPassword
             report.vaults[vaultID] = vaultReport
         }
-        if mayWrite { try? await settleDeletedVaults() }
         return report
     }
 

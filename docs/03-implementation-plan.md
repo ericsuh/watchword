@@ -23,7 +23,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
 | 1 — cryptographic core (done) | Yes since ADR 0006: every crypto suite runs, against swift-crypto's BoringSSL | The implementation that ships (CryptoKit, CommonCrypto), Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
-| 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
+| 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port; multiple vaults, the device registry, enrolment over the transport and the automatic sync policy — done, portable, against swift-crypto | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow, the Secure Enclave device-key adapter, and a macOS run of everything the sync-core work added |
 | 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
 | 5 — AutoFill | No | AuthenticationServices, app-extension targets, simulator and device QA |
 | 6 — hygiene | HIBP client, scheduling, strength estimator, reuse/age/2FA checks | the Watchtower-style report UI and its snapshot tests |
@@ -179,12 +179,43 @@ half delivered** on a Mac; the transports are open.
   and resolution, locked download, deletion against an unseen edit, the purge, SQLite across a relaunch), "Sync state
   store contract" over both stores, and the adversarial suite "sync with real keys" (byte flips, a foreign signer,
   moved objects, an insider's record swap, a missing Keychain key, the adapter after lock).
+- **Sync core, delivered (portable; written and run in a remote Linux session, against swift-crypto):**
+  - *Multiple vaults* (F2.1–F2.3): vaults the account owns are created, renamed, listed and deleted, each with
+    its own key wrapped under Ksym and a sealed description; items are listed per vault and across vaults,
+    copied, and moved (a copy and the original trashed in one commit, then deleted like any permanent deletion);
+    search runs over decrypted items in memory. `sync()` syncs every vault. Architecture §7.7.
+  - *Account objects and enrolment* (F5.2, F10.2): the account header, the registry and a vault directory on the
+    transport; `VaultSession.enrol` joins a second device from the transport, the password and the Secret Key
+    alone; a password change is the account's and reaches every device. Tests enrol devices for real over
+    `InMemorySyncTransport` (`TestVault.enrolledDevice`). Architecture §7.7.
+  - *Device registry* (review findings D9, Y5, Y6): a device signing key behind the `DeviceKeyStore` port
+    (software Ed25519 in the Keychain; P-256 verification in place), both signatures on everything written, a
+    grow-only registry of signed entries with password changes as checkpoints, revocation with or without a
+    password change, revoked devices retired from garbage collection and snapshot election. Architecture §7.8,
+    which also states what revocation does not do.
+  - *Automatic sync policy*: `AutoSyncPolicy`, pure and clock-injected. Architecture §7.9.
+  - Tests: suites "Device keys and signatures", "Device registry", "Published account header" (crypto);
+    "Automatic sync policy", "Account object names", "Sync engine: revoked devices" (sync); "Vault session:
+    vaults", "…vaults across devices", "…enrolment from the transport (F5.2)", "…devices, revocation and
+    password changes", "Multi-device vault simulation" (`LongRunningVaultSimulationTests`: real sessions,
+    several vaults, moves, enrolment and a revocation mid-run; converges and loses nothing); the adversarial area
+    "account enrolment and device registry", and more threats in "sync with real keys".
+  - **Not verified on a Mac.** Everything above built and ran on Linux only; `SystemKeychainStore` gained two
+    Keychain item names without being compiled, and `SQLiteSyncStateStore`/`SQLiteRecordStore` are unchanged but
+    now hold new record kinds. Dispatch `mac-run.yml` before relying on it.
+  - **`Apps/` was not touched and needs a follow-up:** `UITestPeer` still copies the account header and vault-key
+    wraps into its second session, which no longer makes a device of the account (it has no registration). It
+    must call `VaultSession.enrol(password:secretKey:accountID:)` over the shared in-memory transport after the
+    app's session has synced once; until then `SyncConflictTests` will fail. The app also needs UI for vaults,
+    devices, a changed password (`passwordChangedOnAnotherDevice`, `ignoringPasswordChange`) and revocation.
 - **Still open (Mac):** `CloudKitTransport` and the coordinated iCloud Drive wrapper around `FileSyncTransport`, and
-  with them sync in production builds (until then the app is built without `SyncSettings`) and automatic syncing;
-  the manual CloudKit workflow; device enrolment from the account header on the transport (tests and `UITestPeer`
-  copy the account header, vault-key wraps and Secret Key directly); a quarantine list in the UI; and item history in
-  records of its own, so the never-pruned history (F1.4) no longer counts against an item's 1 MiB payload. The device
-  registry (D9) must land before sync ships.
+  with them sync in production builds (until then the app is built without `SyncSettings`) and a driver for
+  `AutoSyncPolicy` (timers, push and file-presenter hints); the manual CloudKit workflow; the Secure Enclave
+  `DeviceKeyStore` adapter; a quarantine list in the UI; and item history in records of its own, so the never-pruned
+  history (F1.4) no longer counts against an item's 1 MiB payload.
+- **Still open (design):** an account re-key — new keyset and Secret Key, vault keys rotated — which is what ends a
+  revoked device's reading if it held the keyset (architecture §7.8, §16); it belongs with vault-key rotation in
+  milestone 4. Collecting a deleted vault's objects from the transport.
 
 ## Milestone 4 — Sharing
 

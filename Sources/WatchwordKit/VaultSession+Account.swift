@@ -49,25 +49,30 @@ struct RegistryAnchor: Equatable, Sendable {
 
     var genesis: ObjectDigest
     var credential: ObjectDigest
+    /// The generation of `credential`. The account header in the local file must not be older than this: that is
+    /// checked at unlock without needing a single registry entry, so deleting them from the file hides nothing.
+    var generation: UInt64
     /// The newest entries applied. The local store must still hold them, and so everything they descend from.
     var heads: [ObjectDigest]
 
     func encoded() -> [UInt8] {
         let kept = heads.sorted().prefix(Self.maximumHeads)
         var out = Self.magic + genesis.bytes + credential.bytes
+        out += (0..<8).map { UInt8(truncatingIfNeeded: generation >> (8 * $0)) }
         out += [UInt8(truncatingIfNeeded: kept.count), UInt8(truncatingIfNeeded: kept.count >> 8)]
         for head in kept { out += head.bytes }
         return out
     }
 
-    init(genesis: ObjectDigest, credential: ObjectDigest, heads: [ObjectDigest]) {
+    init(genesis: ObjectDigest, credential: ObjectDigest, generation: UInt64, heads: [ObjectDigest]) {
         self.genesis = genesis
         self.credential = credential
+        self.generation = generation
         self.heads = heads.sorted()
     }
 
     init?(bytes: [UInt8]) {
-        let fixed = Self.magic.count + 2 * ObjectDigest.byteCount + 2
+        let fixed = Self.magic.count + 2 * ObjectDigest.byteCount + 8 + 2
         guard bytes.count >= fixed, Array(bytes[..<Self.magic.count]) == Self.magic else { return nil }
         var offset = Self.magic.count
         func digest(_ offset: inout Int) -> ObjectDigest? {
@@ -75,6 +80,8 @@ struct RegistryAnchor: Equatable, Sendable {
             return ObjectDigest(bytes: Array(bytes[offset..<(offset + ObjectDigest.byteCount)]))
         }
         guard let genesis = digest(&offset), let credential = digest(&offset) else { return nil }
+        let generation = (0..<8).reduce(UInt64(0)) { $0 | UInt64(bytes[offset + $1]) << (8 * UInt64($1)) }
+        offset += 8
         let count = Int(bytes[offset]) | Int(bytes[offset + 1]) << 8
         offset += 2
         guard count <= Self.maximumHeads, bytes.count == fixed + count * ObjectDigest.byteCount else { return nil }
@@ -83,7 +90,7 @@ struct RegistryAnchor: Equatable, Sendable {
             guard let head = digest(&offset) else { return nil }
             heads.append(head)
         }
-        self.init(genesis: genesis, credential: credential, heads: heads)
+        self.init(genesis: genesis, credential: credential, generation: generation, heads: heads)
     }
 }
 
@@ -205,7 +212,8 @@ extension VaultSession {
     /// behind it.
     func pinRegistry(_ view: RegistryView, accountID: UUID) async throws {
         let anchor = RegistryAnchor(
-            genesis: view.state.genesis, credential: view.state.credential.id, heads: view.state.heads)
+            genesis: view.state.genesis, credential: view.state.credential.id,
+            generation: view.state.credential.generation, heads: view.state.heads)
         if await readAnchor(accountID) != anchor {
             try await writeAnchor(anchor, accountID: accountID)
         }
@@ -249,6 +257,9 @@ extension VaultSession {
     func dualSignature(_ message: [UInt8], domain: SignatureDomain, keys: UnlockedKeys, account: AccountRecord)
         async throws -> [UInt8]
     {
+        // Callers check the lock epoch after their own suspensions; this is the backstop, because reading a zeroised
+        // key traps.
+        guard !keys.keyset.isZeroised else { throw SyncKeyringError.locked }
         let accountSignature = try keys.keyset.sign(message, domain: domain)
         let device = try await deviceSignature(message, domain: domain, account: account)
         return DualSignature.encode(account: accountSignature, device: device)
@@ -273,6 +284,7 @@ extension VaultSession {
         parents: [ObjectDigest], author: RegistryEntry.Author, body: RegistryEntry.Body, account: AccountRecord,
         keyset: Keyset, enrolment: EnrolmentKey? = nil, previousCredential: EnrolmentKey? = nil
     ) async throws -> RegistryEntry {
+        guard !keyset.isZeroised else { throw VaultError.locked }
         var entry = RegistryEntry(
             accountID: account.accountID, parents: Array(parents.sorted().prefix(RegistryEntry.maximumParents)),
             author: author, body: body)
@@ -341,6 +353,7 @@ extension VaultSession {
         account: AccountRecord, credentialID: ObjectDigest, genesisID: ObjectDigest, unlockKey: EncryptionKey,
         keyset: Keyset
     ) async throws -> AccountHeaderObject {
+        guard !keyset.isZeroised, !unlockKey.isZeroised else { throw VaultError.locked }
         var header = AccountHeaderObject(
             accountID: account.accountID, generation: account.credentialGeneration, author: account.deviceID,
             kdf: account.kdf, salt: account.salt, unlockKeyID: account.unlockKeyID,
@@ -419,6 +432,8 @@ extension VaultSession {
         } else {
             deviceKey = try await deviceKeys.create(accountID: account.accountID, deviceID: account.deviceID)
         }
+        // The session may have locked while the key store was asked.
+        guard !keyset.isZeroised, !unlockKey.isZeroised else { throw VaultError.locked }
         let enrolment = EnrolmentKey.derive(from: unlockKey, accountID: account.accountID)
         defer { enrolment.zeroise() }
         let device = RegistryDevice(
@@ -437,7 +452,7 @@ extension VaultSession {
             [
                 Self.registryRow(genesis, account: account),
                 Self.headerRow(header, recordID: account.accountID, version: 1),
-            ], RegistryAnchor(genesis: genesis.id, credential: genesis.id, heads: [genesis.id])
+            ], RegistryAnchor(genesis: genesis.id, credential: genesis.id, generation: 0, heads: [genesis.id])
         )
     }
 
@@ -448,30 +463,26 @@ extension VaultSession {
         registryView = nil
         let accountID = account.accountID
         let stored = try await storedHeader(account)
-        var anchor = await readAnchor(accountID)
+        let anchor = await readAnchor(accountID)
 
-        if stored == nil, anchor == nil,
-            try await store.records(in: accountID, kind: .deviceRegistry).isEmpty
-        {
-            // An account from before the registry existed: this device starts it.
-            let genesis = try await registryGenesis(
-                account: account, unlockKey: keys.accountUnlockKey, keyset: keys.keyset, now: await clock.now())
-            try await store.commit(StoreChange(upserts: genesis.rows))
-            try await writeAnchor(genesis.anchor, accountID: accountID)
-            return
-        }
+        // An account from before the registry existed has none of this. Its registry is started at a sync, and only
+        // if the transport holds no header for the account (`startRegistryIfAccountPredatesIt`): a database
+        // restored without its registry rows must not start a second registry for an account that already syncs.
+        if stored == nil, anchor == nil { return }
 
         // The stored header is this account record's own only if it opens under the key just derived; then what it
         // names is authenticated by the password, and can restore a missing anchor (a Keychain that lost it, a
         // store restored onto other hardware) or move it forward (a crash between committing a password change and
         // pinning it).
+        // A device that has an anchor never takes another genesis entry: one registry per account, for good.
         if let stored, stored.header.unlockKeyID == account.unlockKeyID,
             (try? stored.header.openBinding(with: keys.accountUnlockKey)) == account.personalVaultID,
-            anchor?.credential != stored.header.credentialID || anchor?.genesis != stored.header.genesisID,
+            anchor == nil || anchor?.genesis == stored.header.genesisID,
+            anchor?.credential != stored.header.credentialID,
             let accountKey = await trustedAccountSigningKey(account)
         {
             let rows = try await store.records(in: accountID, kind: .deviceRegistry)
-            if let pinned = anchor, pinned.genesis == stored.header.genesisID,
+            if let pinned = anchor,
                 let view = try? Self.evaluateRegistry(
                     rows.map(\.envelope), accountID: accountID, accountKey: accountKey, genesis: pinned.genesis,
                     credential: pinned.credential),
@@ -483,18 +494,14 @@ extension VaultSession {
             if let view = try? Self.evaluateRegistry(
                 rows.map(\.envelope), accountID: accountID, accountKey: accountKey,
                 genesis: stored.header.genesisID, credential: stored.header.credentialID,
-                requiredHeads: anchor?.genesis == stored.header.genesisID ? anchor?.heads ?? [] : [])
+                requiredHeads: anchor?.heads ?? [])
             {
                 try await pinRegistry(view, accountID: accountID)
-                anchor = await readAnchor(accountID)
                 registryView = view
             }
         }
 
         guard let view = try? await registry(account) else { return }
-        if account.credentialGeneration < view.state.credential.generation {
-            throw VaultError.accountHeaderRolledBack
-        }
         // A store restored onto other hardware arrives without the device key (Keychain items never leave a
         // device): this installation is a new device, and says so. One whose registration no longer counts (it was
         // made with a password since changed) registers again under the same ID.
@@ -505,6 +512,37 @@ extension VaultSession {
         } else if view.state.standing(of: account.deviceID) == .unknown {
             try await registerThisDevice(account: account, keys: keys, asNewDevice: false)
         }
+    }
+
+    /// For an account created before the device registry existed — no registry entries, no published header, no
+    /// anchor — and only if the transport holds no account header either: this device starts the registry. If the
+    /// transport does hold one, the account already has a registry that this device is not part of, and it must
+    /// enrol again rather than start a second one (review finding W6).
+    func startRegistryIfAccountPredatesIt(account: AccountRecord, transport: any SyncTransport) async throws {
+        let epoch = lockEpoch
+        guard keys != nil, try await storedHeader(account) == nil, await readAnchor(account.accountID) == nil,
+            try await store.records(in: account.accountID, kind: .deviceRegistry).isEmpty,
+            try await transport.list(prefix: AccountObjectLocation.headerPrefix(account.accountID)).isEmpty
+        else { return }
+        let keys = try requireKeys(since: epoch)
+        let genesis = try await registryGenesis(
+            account: account, unlockKey: keys.accountUnlockKey, keyset: keys.keyset, now: await clock.now())
+        _ = try requireKeys(since: epoch)
+        try await store.commit(StoreChange(upserts: genesis.rows))
+        try await writeAnchor(genesis.anchor, accountID: account.accountID)
+        registryView = nil
+    }
+
+    /// Refuses an account header older than the credentials this device already follows: the local file was rolled
+    /// back to before a password change (A8), and the password that just opened it is one the person retired. Call
+    /// once the keyset has opened, which is what authenticates `keysetVersion` (it is bound into the wrap), and
+    /// before any key is installed. Needs nothing from the file but the account record, so deleting registry
+    /// entries hides nothing.
+    func refuseRolledBackHeader(_ account: AccountRecord) async throws {
+        guard let anchor = await readAnchor(account.accountID) else { return }
+        // The two move together with every credential change; apart, one of them was edited.
+        guard account.keysetVersion == account.credentialGeneration, account.keysetVersion >= anchor.generation
+        else { throw VaultError.accountHeaderRolledBack }
     }
 
     /// Whether credential entry `candidate` is `ancestor` or follows from it link by link.
@@ -729,9 +767,11 @@ extension VaultSession {
             else { continue }
             derivations += 1
             // `accountUnlockKey` validates the KDF parameters again before any work (SEC5, SEC9).
-            let unlockKey = try TwoSecretKeyDerivation.accountUnlockKey(
-                password: password, secretKey: secretKey, accountID: accountID, parameters: header.kdf,
-                salt: header.salt, keyID: header.unlockKeyID)
+            guard
+                let unlockKey = try? TwoSecretKeyDerivation.accountUnlockKey(
+                    password: password, secretKey: secretKey, accountID: accountID, parameters: header.kdf,
+                    salt: header.salt, keyID: header.unlockKeyID)
+            else { continue }
             guard
                 let keyset = try? Keyset.unwrap(
                     header.wrappedKeyset, accountID: accountID, with: unlockKey,
@@ -852,7 +892,8 @@ extension VaultSession {
         self.account = account
         try await writeAnchor(
             RegistryAnchor(
-                genesis: header.genesisID, credential: header.credentialID, heads: registered.state.heads),
+                genesis: header.genesisID, credential: header.credentialID, generation: header.generation,
+                heads: registered.state.heads),
             accountID: accountID)
         let newKeys = UnlockedKeys(accountUnlockKey: unlockKey, keyset: keyset, vaultKeys: vaultKeys)
         installed = true
@@ -1102,9 +1143,16 @@ extension VaultSession {
     ) async throws {
         let accountID = account.accountID
         let directory = try await vaultDirectory(account)
+        // While unlocked, a wrap row counts as known only if it opened. One edited in the file (A8) — moved under
+        // another vault, corrupted — is replaced by the signed copy on the transport, which `fetchDirectory` opens
+        // with the keyset before it is taken. While locked nothing can tell, and only missing rows are fetched.
+        let opened = keys.map { Set($0.vaultKeys.keys) }
         var knownKeys: Set<UUID> = []
         for vaultID in directory.keys {
-            knownKeys.formUnion(try await store.records(in: vaultID, kind: .vaultKeyWrap).map(\.recordID))
+            for row in try await store.records(in: vaultID, kind: .vaultKeyWrap)
+            where opened?.contains(row.recordID) ?? true {
+                knownKeys.insert(row.recordID)
+            }
         }
         let deleted = Set(directory.filter { $0.value.isDeleted }.keys)
         let fetched = try await fetchDirectory(
@@ -1113,8 +1161,15 @@ extension VaultSession {
 
         var change = StoreChange()
         var indexed = Set(directory.keys)
-        for wrap in fetched.keys where try await store.record(wrap.key) == nil {
+        for var wrap in fetched.keys {
+            let local = try await store.record(wrap.key)
+            if let local {
+                // A row that did not open is replaced, above the version it was at (a store never goes back).
+                guard opened?.contains(wrap.recordID) == false, local.version < UInt64.max else { continue }
+                wrap.version = local.version + 1
+            }
             change.upserts.append(wrap)
+            change.expectations[wrap.key] = local.map { .version($0.version) } ?? .absent
             report.vaultKeysFetched += 1
             if indexed.insert(wrap.vaultID).inserted,
                 !fetched.deletions.contains(where: { $0.recordID == wrap.vaultID })

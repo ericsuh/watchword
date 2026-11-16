@@ -378,6 +378,14 @@ public actor VaultSession {
         let unlockKey = opened.unlockKey
         let newKeys: UnlockedKeys
         do {
+            // The keyset opened, so the header's version is what its writer sealed. Older than the credentials this
+            // device already follows means the file was rolled back to a password the person retired.
+            do {
+                try await refuseRolledBackHeader(record)
+            } catch {
+                opened.keyset.zeroise()
+                throw error
+            }
             newKeys = try await openVaultKeys(unlockKey: unlockKey, keyset: opened.keyset, account: record)
         } catch {
             unlockKey.zeroise()
@@ -595,6 +603,12 @@ public actor VaultSession {
         }
         let newKeys: UnlockedKeys
         do {
+            do {
+                try await refuseRolledBackHeader(record)
+            } catch {
+                keyset.zeroise()
+                throw error
+            }
             newKeys = try await openVaultKeys(unlockKey: unlockKey, keyset: keyset, account: record)
         } catch {
             unlockKey.zeroise()
@@ -952,7 +966,9 @@ public actor VaultSession {
         // person "nothing changed" now would leave them believing the old password still works (F10.2). If the
         // anchor cannot be written now, the next unlock moves it: the header that opens names the credential.
         try? await writeAnchor(
-            RegistryAnchor(genesis: view.state.genesis, credential: credentialID, heads: [credentialID]),
+            RegistryAnchor(
+                genesis: view.state.genesis, credential: credentialID, generation: updated.credentialGeneration,
+                heads: [credentialID]),
             accountID: record.accountID)
         guard epoch == lockEpoch, let currentKeys = keys, currentKeys.keyset.accountID == oldKeys.keyset.accountID
         else {
@@ -1025,7 +1041,11 @@ public actor VaultSession {
         guard let row = try await store.record(RecordKey(recordID: id, kind: .item)) else {
             throw VaultError.itemNotFound(id)
         }
-        return try openItem(row, keys: try requireKeys(since: epoch))
+        var inDeletedVault = false
+        if let account = try await loadAccount(), row.vaultID != account.personalVaultID {
+            inDeletedVault = try await vaultDirectory(account)[row.vaultID]?.isDeleted ?? false
+        }
+        return Self.presented(try openItem(row, keys: try requireKeys(since: epoch)), inDeletedVault: inDeletedVault)
     }
 
     /// Creates or updates an item. The vault owns `createdAt`, `modifiedAt`, `version`, `history`, `trashedAt` and

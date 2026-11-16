@@ -292,7 +292,7 @@ struct AdversarialVaultSyncTests {
     func deviceKeyAloneCannotWrite() async throws {
         let f = try await Self.fixture()
         let accountID = try #require(try await f.b.session.status().accountID)
-        let deviceKey = try #require(await f.b.deviceKeys.extracted(accountID: accountID))
+        let deviceKey = try #require(await f.b.extractedDeviceKey(accountID: accountID))
         let location = SyncObjectLocation.segment(vaultID: f.vaultID, author: Self.deviceB, sequence: 2)
         let (envelope, message) = try await Self.sealed(f, at: location)
         let deviceSignature = try deviceKey.sign(
@@ -322,7 +322,7 @@ struct AdversarialVaultSyncTests {
         try await f.a.session.sync()
         let accountID = try #require(try await f.b.session.status().accountID)
         let keys = try #require(await f.b.session.keys)
-        let deviceKey = try #require(await f.b.deviceKeys.extracted(accountID: accountID))
+        let deviceKey = try #require(await f.b.extractedDeviceKey(accountID: accountID))
         let location = SyncObjectLocation.segment(vaultID: f.vaultID, author: Self.deviceC, sequence: 1)
         let (envelope, message) = try await Self.sealed(f, at: location)
         let accountSignature = try keys.keyset.sign(message, domain: .logSegment)

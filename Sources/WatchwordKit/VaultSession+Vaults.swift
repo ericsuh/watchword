@@ -366,8 +366,8 @@ extension VaultSession {
     /// becomes a deletion signed by the account key and this device, and every item is deleted through the same path
     /// as a permanent deletion, each tombstone carrying what this device had seen of the item. On another device an
     /// item, or an edit, that this device had not seen is therefore kept (PRD F7.6, F7.7): it stays in the deleted
-    /// vault, in the trash, from where the person can move it to another vault or delete it. The vault's key is
-    /// kept, so that what arrives later can still be read.
+    /// vault, shown in the trash as kept after a deletion, from where the person can move it to another vault or
+    /// delete it. The vault's key is kept, so that what arrives later can still be read.
     public func deleteVault(id: UUID, confirmingItemCount: Int) async throws {
         let epoch = lockEpoch
         _ = try requireKeys()
@@ -398,22 +398,17 @@ extension VaultSession {
                 conditionalDeletions: Dictionary(uniqueKeysWithValues: rows.map { ($0.key, $0.version) })))
     }
 
-    /// Whatever a vault's deletion left in it — an item, or an edit, its author had not seen — is put in the trash
-    /// where it is, marked as kept after a deletion, so it shows as what it is and the 30-day purge never takes it.
-    func settleDeletedVaults() async throws {
-        guard keys != nil, let account = try await loadAccount() else { return }
-        for (vaultID, entry) in try await vaultDirectory(account) where entry.isDeleted {
-            guard let keys, currentVaultKey(vaultID, keys: keys, account: account) != nil else { continue }
-            for row in try await store.records(in: vaultID, kind: .item) {
-                guard let keys = self.keys, let item = try? openItem(row, keys: keys), !item.isTrashed else {
-                    continue
-                }
-                _ = try? await write(id: item.id, allowingDeletedVault: true) { item, _, _ in
-                    item.trashedAt = item.modifiedAt
-                    item.keptAfterDeletion = true
-                }
-            }
-        }
+    /// An item as the person sees it. Whatever a vault's deletion left in it — an item, or an edit, its author had
+    /// not seen — is in the trash, kept after a deletion: shown that way, never written that way. A write here would
+    /// be an edit of this device's own, one per device, which the next deletion or move made elsewhere would not
+    /// have seen and so would have to keep (found by the vault simulation). Derived from the directory, it is the
+    /// same on every device, and the person's next deletion removes exactly what they were shown.
+    static func presented(_ item: Item, inDeletedVault: Bool) -> Item {
+        guard inDeletedVault else { return item }
+        var item = item
+        if item.trashedAt == nil { item.trashedAt = item.modifiedAt }
+        item.keptAfterDeletion = true
+        return item
     }
 
     // MARK: - Items across vaults (PRD F2.2, F2.3)
@@ -426,6 +421,8 @@ extension VaultSession {
     func items(inVaults vaultIDs: [UUID]) async throws -> ItemListing {
         let epoch = lockEpoch
         _ = try requireKeys()
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        let deleted = Set(try await vaultDirectory(account).filter { $0.value.isDeleted }.keys)
         var rows: [StoredRecord] = []
         for vaultID in vaultIDs {
             rows += try await store.records(in: vaultID, kind: .item)
@@ -434,7 +431,8 @@ extension VaultSession {
         var listing = ItemListing(items: [], unreadable: [])
         for row in rows {
             do {
-                listing.items.append(try openItem(row, keys: keys))
+                listing.items.append(
+                    Self.presented(try openItem(row, keys: keys), inDeletedVault: deleted.contains(row.vaultID)))
             } catch {
                 listing.unreadable.append(row.recordID)
             }
@@ -569,12 +567,14 @@ extension VaultSession {
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         let active = try await vaultDirectory(account).filter { !$0.value.isDeleted }.map(\.key)
         let vaultIDs = vaultID.map { id in active.filter { $0 == id } } ?? active
-        let scored = try await items(inVaults: vaultIDs).items.compactMap { item -> (Int, Item)? in
+        // `items(inVaults:)` is sorted by title; equal scores keep that order.
+        let scored = try await items(inVaults: vaultIDs).items.enumerated().compactMap {
+            position, item -> (score: Int, position: Int, item: Item)? in
             guard includingTrashed || !item.isTrashed, let score = ItemSearch.score(item, tokens: tokens) else {
                 return nil
             }
-            return (score, item)
+            return (score, position, item)
         }
-        return scored.sorted { $0.0 < $1.0 }.map(\.1)
+        return scored.sorted { ($0.score, $0.position) < ($1.score, $1.position) }.map(\.item)
     }
 }

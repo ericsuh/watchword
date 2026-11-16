@@ -1,4 +1,6 @@
 import Foundation
+import SecureMemory
+import WatchwordCrypto
 import WatchwordEnvelope
 import WatchwordKit
 import WatchwordStore
@@ -17,8 +19,9 @@ public struct TestVault: Sendable {
     public let clock: FakeClock
     /// The sync settings the session was built with, if any.
     public let sync: SyncSettings?
-    /// This device's signing key, in software, with handles to script it.
-    public let deviceKeys: FakeDeviceKeyStore
+    /// This device's signing key store. By default the production software store over `keychain`, so two vaults
+    /// that share a Keychain (a relaunch) are the same device, as on a real one.
+    public let deviceKeys: any DeviceKeyStore
 
     /// A session over fresh fakes. KDF parameters are the floor (`KDFParameters.baseline`), which is the cheapest
     /// derivation the policy accepts; there is no test-only weaker setting.
@@ -31,9 +34,13 @@ public struct TestVault: Sendable {
         sync: SyncSettings? = nil,
         seed: UInt64 = 7,
         deviceName: String = "",
-        deviceKeys: FakeDeviceKeyStore? = nil
+        deviceKeys: (any DeviceKeyStore)? = nil
     ) {
-        let deviceKeys = deviceKeys ?? FakeDeviceKeyStore(seed: TestEnvironment.seed(fallback: seed) &+ 0x5EED)
+        // The nightly seed varies every vault's randomness without making them all the same: two devices built from
+        // one seed would share a device key, which the registry refuses.
+        let seed = TestEnvironment.seed(fallback: 0) &+ seed
+        let deviceKeys =
+            deviceKeys ?? KeychainDeviceKeyStore(keychain: keychain, random: SeededGenerator(seed: seed &+ 0x5EED))
         self.store = store
         self.keychain = keychain
         self.biometrics = biometrics
@@ -49,7 +56,7 @@ public struct TestVault: Sendable {
                 appVersion: appVersion, kdf: .fixed(.baseline), deviceName: deviceName),
             sync: sync,
             deviceKeys: deviceKeys,
-            random: SeededGenerator(seed: TestEnvironment.seed(fallback: seed))
+            random: SeededGenerator(seed: seed)
         )
     }
 
@@ -90,6 +97,20 @@ public struct TestVault: Sendable {
         TestVault(
             store: store, keychain: keychain, biometrics: biometrics, clock: clock, appVersion: appVersion,
             sync: sync, seed: seed, deviceKeys: deviceKeys)
+    }
+
+    /// Loses this device's signing key, as a store restored onto other hardware does (Keychain items never leave a
+    /// device).
+    public func forgetDeviceKey(accountID: UUID) async {
+        await keychain.delete(.deviceSigningKey(accountID: accountID))
+    }
+
+    /// This device's software signing key: what someone who read its Keychain holds.
+    public func extractedDeviceKey(accountID: UUID) async -> SoftwareDeviceKey? {
+        guard let stored = await keychain.raw(.deviceSigningKey(accountID: accountID)), stored.count == 48 else {
+            return nil
+        }
+        return try? SoftwareDeviceKey(seed: SecureBytes(copying: Array(stored[16...])))
     }
 
     /// Creates the account and returns its Emergency Kit; the vault is left unlocked.

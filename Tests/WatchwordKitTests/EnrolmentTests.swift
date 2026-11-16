@@ -149,15 +149,29 @@ struct EnrolmentTests {
         let rows = await store.allRecords.filter { $0.kind == .deviceRegistry || $0.kind == .accountHeader }
         try await store.commit(StoreChange(deletions: rows.map(\.key)))
         await a.keychain.delete(.deviceRegistryAnchor(accountID: kit.accountID))
-        await a.deviceKeys.forget(accountID: kit.accountID)
+        await a.forgetDeviceKey(accountID: kit.accountID)
         await #expect(throws: VaultError.deviceRegistryUnavailable) { try await a.session.deviceStanding() }
 
+        // Unlocking alone does not start one: only a sync that finds no header for the account on the transport.
         try await a.session.unlock(password: TestVault.password)
-        #expect(try await a.session.deviceStanding() == .active)
+        await #expect(throws: VaultError.deviceRegistryUnavailable) { try await a.session.deviceStanding() }
         try await a.session.sync()
+        #expect(try await a.session.deviceStanding() == .active)
         let b = Self.newDevice(over: transport)
         try await b.session.enrol(password: TestVault.password, secretKey: kit.setupCode)
         #expect(try await b.session.deviceStanding() == .active)
+
+        // A database stripped the same way, for an account that already syncs: it starts nothing, and says so.
+        let stripped = InMemoryRecordStore()
+        let kept = await store.allRecords.filter { $0.kind != .deviceRegistry && $0.kind != .accountHeader }
+        try await stripped.commit(
+            StoreChange(account: .create(try #require(await store.loadAccount())), upserts: kept))
+        let c = TestVault(
+            store: stripped, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport), seed: 91)
+        try await c.session.unlock(password: TestVault.password, secretKey: kit.secretKey)
+        let report = try await c.session.syncAll()
+        #expect(report.registryUnavailable && report.combined.segmentsWritten == 0)
+        await #expect(throws: VaultError.deviceRegistryUnavailable) { try await c.session.deviceStanding() }
     }
 
     @Test("a store restored onto other hardware has no device key, and registers as a new device")
@@ -170,9 +184,10 @@ struct EnrolmentTests {
         try await restored.commit(
             StoreChange(
                 account: .create(try #require(await original.loadAccount())), upserts: await original.allRecords))
+        // Its device key store is the port's fake here: nothing in the session depends on which store it is.
         let b = TestVault(
             store: restored, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport), seed: 51,
-            deviceName: "Restored phone")
+            deviceName: "Restored phone", deviceKeys: FakeDeviceKeyStore(seed: 51))
         await #expect(throws: VaultError.secretKeyMissing) { try await b.session.unlock(password: TestVault.password) }
         try await b.session.unlock(password: TestVault.password, secretKey: kit.secretKey)
 
@@ -422,5 +437,80 @@ struct DeviceRegistrySessionTests {
         let report = try await relaunched.session.syncAll()
         #expect(report.account.registryEntriesFetched == 1 && !report.registryUnavailable)
         #expect(try await relaunched.session.devices().first { $0.id == lostID }?.isRevoked == true)
+    }
+}
+
+@Suite("Device key store (software)")
+struct KeychainDeviceKeyStoreTests {
+    static let accountID = UUID(uuidString: "AC000000-0000-4000-8000-0000000000AC")!
+    static let deviceID = Fleet.deviceID(1)
+
+    @Test("the software key is made once, kept in the Keychain for its device, signs, and is destroyed on request")
+    func lifecycle() async throws {
+        let keychain = FakeKeychain()
+        let store = KeychainDeviceKeyStore(keychain: keychain, random: SeededGenerator(seed: 5))
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == nil)
+        await #expect(throws: DeviceKeyError.keyMissing) {
+            try await store.sign([1, 2, 3], accountID: Self.accountID, deviceID: Self.deviceID)
+        }
+
+        let key = try await store.create(accountID: Self.accountID, deviceID: Self.deviceID)
+        #expect(key.algorithm == .ed25519)
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == key)
+        #expect(await keychain.raw(.deviceSigningKey(accountID: Self.accountID))?.count == 16 + 32)
+
+        let message = Array("a segment".utf8)
+        let signature = try await store.sign(
+            DeviceSignatures.signedBytes(domain: .logSegment, deviceID: Self.deviceID, message: message),
+            accountID: Self.accountID, deviceID: Self.deviceID)
+        try DeviceSignatures.verify(
+            signature, for: message, domain: .logSegment, deviceID: Self.deviceID, key: key)
+        // A second store over the same Keychain is the same device after a relaunch.
+        let relaunched = KeychainDeviceKeyStore(keychain: keychain)
+        #expect(try await relaunched.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == key)
+
+        try await store.delete(accountID: Self.accountID)
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == nil)
+        #expect(await keychain.isEmpty)
+    }
+
+    @Test("the fake keeps the port's contract: one key per account, for one device, gone when forgotten")
+    func fake() async throws {
+        let store = FakeDeviceKeyStore(seed: 9)
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == nil)
+        let key = try await store.create(accountID: Self.accountID, deviceID: Self.deviceID)
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == key)
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Fleet.deviceID(2)) == nil)
+        let message = Array("an entry".utf8)
+        let signature = try await store.sign(
+            DeviceSignatures.signedBytes(domain: .deviceRegistry, deviceID: Self.deviceID, message: message),
+            accountID: Self.accountID, deviceID: Self.deviceID)
+        try DeviceSignatures.verify(
+            signature, for: message, domain: .deviceRegistry, deviceID: Self.deviceID, key: key)
+        #expect(await store.signatures == 1)
+        await store.forget(accountID: Self.accountID)
+        await #expect(throws: DeviceKeyError.keyMissing) {
+            try await store.sign([1], accountID: Self.accountID, deviceID: Self.deviceID)
+        }
+        #expect(await store.isEmpty())
+    }
+
+    @Test("a key stored for one device ID is not another device's, and a malformed item is no key")
+    func boundToItsDevice() async throws {
+        let keychain = FakeKeychain()
+        let store = KeychainDeviceKeyStore(keychain: keychain, random: SeededGenerator(seed: 5))
+        _ = try await store.create(accountID: Self.accountID, deviceID: Self.deviceID)
+        let other = Fleet.deviceID(2)
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: other) == nil)
+        await #expect(throws: DeviceKeyError.keyMissing) {
+            try await store.sign([1], accountID: Self.accountID, deviceID: other)
+        }
+        await keychain.overwrite(.deviceSigningKey(accountID: Self.accountID), with: [1, 2, 3])
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == nil)
+        // Creating again replaces it: one key per installation.
+        let first = try await store.create(accountID: Self.accountID, deviceID: Self.deviceID)
+        let second = try await store.create(accountID: Self.accountID, deviceID: Self.deviceID)
+        #expect(first != second)
+        #expect(try await store.publicKey(accountID: Self.accountID, deviceID: Self.deviceID) == second)
     }
 }

@@ -236,7 +236,8 @@ struct AdversarialAccountTests {
 
     /// Threat: A8 puts back the account header the local file held before a password change (with the old wrapped
     /// keyset, which the old password opens), so that a password the person retired — perhaps because someone
-    /// learned it — unlocks this device again. The Keychain remembers which credentials the device already follows.
+    /// learned it — unlocks this device again. The Keychain remembers which credential generation the device already
+    /// follows, and the keyset's own wrap says which generation it belongs to.
     @Test("a local account header rolled back to before a password change is refused, even with the old password")
     func localHeaderRollback() async throws {
         let f = try await Self.fixture()
@@ -248,12 +249,21 @@ struct AdversarialAccountTests {
 
         await store.tamper(account: oldAccount)
         await store.tamper(oldHeader)
-        let relaunched = f.a.relaunched()
-        await #expect(throws: VaultError.accountHeaderRolledBack) {
-            try await relaunched.session.unlock(password: TestVault.password)
+        // As it was; then with the registry's entries deleted too, so nothing in the file records the change; then
+        // with the generation column left at its new value, so the row looks current.
+        var relabelled = oldAccount
+        relabelled.credentialGeneration += 1
+        let registry = await store.records(in: f.accountID, kind: .deviceRegistry)
+        for variant in 0..<3 {
+            if variant == 1 { try await store.commit(StoreChange(deletions: registry.map(\.key))) }
+            if variant == 2 { await store.tamper(account: relabelled) }
+            let relaunched = f.a.relaunched()
+            await #expect(throws: VaultError.accountHeaderRolledBack, "variant \(variant)") {
+                try await relaunched.session.unlock(password: TestVault.password)
+            }
+            #expect(try await relaunched.session.state() == .locked)
+            await #expect(throws: VaultError.locked) { try await relaunched.session.items() }
         }
-        #expect(try await relaunched.session.state() == .locked)
-        await #expect(throws: VaultError.locked) { try await relaunched.session.items() }
     }
 
     /// Threat: A1 fills the header prefix with objects that are not headers, or are headers that open for nobody,
@@ -621,6 +631,62 @@ struct AdversarialAccountTests {
                 #expect(wraps.map(\.recordID) == [try await keyID(of: vault)], "one key per vault, the genuine one")
             }
             try await reader.session.save(Item(vaultID: work.id, title: "Still writable", scopes: [], fields: []))
+        }
+    }
+
+    /// Threat: A8, with the local database file but not the Keychain, edits the vault-key wrap rows: Work's wrap
+    /// moved under Spare's vault ID (so that Spare's items might be read, or written, under Work's key), Spare's own
+    /// wrap deleted, and another account's wrap planted under a vault ID of its own with a directory row to list it.
+    /// A wrap takes its identity from the row, and its authenticated context names the vault, so a moved wrap opens
+    /// nothing; a vault whose key does not open is not listed or written, its items are reported unreadable, never
+    /// opened under another key; and the next sync puts back the genuine wraps, signed on the transport.
+    @Test("vault-key wraps edited in the local file open nothing, and the next sync restores the genuine ones")
+    func localVaultKeyWraps() async throws {
+        let f = try await Self.fixture()
+        let work = try await f.a.session.createVault(name: "Work")
+        let spare = try await f.a.session.createVault(name: "Spare")
+        try await f.a.session.save(Item(vaultID: work.id, title: "Work item", scopes: [], fields: []))
+        try await f.a.session.save(Item(vaultID: spare.id, title: "Spare item", scopes: [], fields: []))
+        try await f.a.session.sync()
+        let store = try #require(f.a.store as? InMemoryRecordStore)
+        let workWrap = try #require(await store.records(in: work.id, kind: .vaultKeyWrap).first)
+        let spareWrap = try #require(await store.records(in: spare.id, kind: .vaultKeyWrap).first)
+
+        var moved = workWrap
+        moved.vaultID = spare.id
+        await store.tamper(moved)
+        try await store.commit(StoreChange(deletions: [spareWrap.key]))
+        let other = try await Self.fixture(seed: 1234)
+        let otherStore = try #require(other.a.store as? InMemoryRecordStore)
+        _ = try await other.a.session.createVault(name: "Foreign")
+        let foreignWrap = try #require(
+            await otherStore.allRecords.first { $0.kind == .vaultKeyWrap && $0.vaultID != other.personal })
+        await store.tamper(foreignWrap)
+        await store.tamper(
+            VaultSession.directoryRow(
+                vaultID: foreignWrap.vaultID, accountID: f.accountID, deviceID: workWrap.deviceID))
+
+        let relaunched = f.a.relaunched()
+        try await relaunched.session.unlock(password: TestVault.password)
+        let listed = try await relaunched.session.vaults().map(\.id)
+        #expect(listed == [f.personal], "no vault is listed under a key that does not open for it")
+        let everything = try await relaunched.session.items(inVaults: [f.personal, work.id, spare.id])
+        #expect(everything.items.map(\.title) == ["Bank"])
+        #expect(everything.unreadable.count == 2, "both items are reported, neither is opened")
+        for vault in [work.id, spare.id, foreignWrap.vaultID] {
+            await #expect(throws: VaultError.unknownVault(vault)) {
+                try await relaunched.session.save(Item(vaultID: vault, title: "Planted", scopes: [], fields: []))
+            }
+        }
+
+        let report = try await relaunched.session.syncAll()
+        #expect(report.account.vaultKeysFetched == 2, "\(report.account)")
+        #expect(Set(try await relaunched.session.vaults().map(\.id)) == [f.personal, work.id, spare.id])
+        let restored = try await relaunched.session.items()
+        #expect(Set(restored.items.map(\.title)) == ["Bank", "Work item", "Spare item"])
+        #expect(restored.unreadable.isEmpty)
+        for vault in [work.id, spare.id] {
+            #expect(await store.records(in: vault, kind: .vaultKeyWrap).count == 1)
         }
     }
 
