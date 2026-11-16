@@ -28,7 +28,7 @@ that a test target may contain both as long as a single test does not mix their 
   in `WatchwordTestSupport`: `FakeKeychain` (simulates access-control prompts, enrolment change,
   device-only semantics), `FakeBiometricGate` (scripted success/failure/cancel), `FakeClock`,
   `SeededRandom` (deterministic CSPRNG stand-in for tests only; production uses the OS CSPRNG),
-  `FakeHTTP` (recorded HIBP responses), `InMemorySyncTransport` (shared between simulated clients,
+  `FakeHTTPClient` (records every request; scripted or `SimulatedPwnedPasswords` responses), `InMemorySyncTransport` (shared between simulated clients,
   supports partitions, reordering, duplication, and a "malicious server" mode that mutates or
   substitutes records), `FakeIdentityPublisher`.
 - **Scenario builders.** `Scenario.household()` yields two simulated users, each with two devices,
@@ -51,7 +51,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "Scenarios S1 and S2 through the request model", and "Request model over a real vault session" — S1 and S2 again over a `VaultSession` with a stand-in for its `CredentialVault` conformance; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
 | F8.x interchange | Fixture round trips for each format; instruction text snapshot tests |
-| F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent |
+| F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent (`WatchwordHygieneTests`: "Pwned Passwords: digest and prefix", "…: range parser", "…: cache entries", "…: client", "Breach scan scheduling", "Scan ledger", "Strength estimator", "Password reuse", "Item checks", "Hygiene report", "Hygiene engine", "Breached-account lookup"; milestone 6) |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
 | SEC1–SEC10 | Section 6 below |
 
@@ -358,6 +358,78 @@ milestone 4: member key substitution, membership records, revocation and read-on
   client never sends more than 5 hex characters and sets the required headers (asserted on the
   fake).
 - With keys absent, the scheduler performs no hashing and persists nothing derived from passwords.
+
+**Implemented in milestone 6** (`AdversarialHygieneTests`, suite "Adversarial: hygiene and breach checks"; the
+adversaries are in `02-architecture.md` §13.1). Every request is asserted on `FakeHTTPClient`, which records what
+a real adapter would have been asked to send:
+
+- *The service and the network path.* Over a full scan, a weekly re-scan and retries after 429, 503 and a
+  dropped connection, every request is exactly `GET https://api.pwnedpasswords.com/range/<five hex>` with exactly
+  `Add-Padding: true` and the `User-Agent`, and no request contains a sixth character of any digest; redirects and
+  URLs in bodies never produce a request to another host; a scan never sends an email address or contacts the
+  breached-account API; an API key, address or version string cannot inject a header, a path or a host. A 200
+  that cannot be read (empty, HTML, JSON, 60,000 lines) is never "not breached"; a listed suffix is found
+  wherever it is in the range and a near miss is not; `Retry-After` of zero, a negative number or 10^12 neither
+  spins the scanner nor stops it. An hour of locking and unlocking every minute after a 429 with
+  `Retry-After: 3600` sends nothing more, and a lock does not buy a new burst; refusing one range (503, or a
+  dropped connection, every time) does not stop the other items being checked, and the refused range is retried
+  at the backoff's pace, and the same holds for a vault unlocked for 20, 45 or 300 seconds every ten minutes
+  for a day, with the ledger carried by the session and the process either kept or new at each unlock (503, a
+  dropped connection, or a page of HTML with status 200): every other item is checked by the second unlock; a breached-account response of 160,000 tiny breaches is refused at entry 2,001, without
+  decoding what follows.
+- *Readers of the device at rest (A2, A3, A8).* With keys absent the schedule answers `.locked` for any ledger and
+  items and does not touch the ledger; the engine refuses every entry point that hashes or hands out derived
+  data, touches neither network nor cache, and has zeroised the reuse key; a lock while a request is in flight
+  drops the response (nothing cached, ledger untouched), including when the vault is unlocked again before the
+  response arrives; the ledger's encoding holds no hash, prefix or token, and the types that do hold
+  password-derived material are not `Encodable`; digests, tokens, keys and the API key print as redacted, and so
+  do strength estimates (the rank of a common password names it), analyses, range prefixes, cached ranges,
+  ledgers, the email address, URLs and header values; a planted cache entry that is misfiled, post-dated or
+  stale is not believed. After a lock the default prefix cache holds no prefix, including when the lock lands
+  while a range is on its way into the cache. A lock during `unlock` completes after one item's analysis, not
+  the vault's (asserted with a gate between items, three items into five hundred), and a cancelled unlock
+  leaves the engine locked with the reuse key zeroised; cancelled over an engine that was unlocked, it leaves
+  no prefix in the cache either.
+- *A malicious household member (A4).* Two thousand new items produce at most the burst and then one request per
+  spacing, and a save cannot bypass the limit; one item with 3,000 password fields, megabyte passwords and a
+  megabyte title costs sixteen checks and is paid for at the usual rate, and is reported `incomplete`, never
+  clear; a breached password cannot hide behind a duplicate field ID or beyond the per-item cap; a stale copy
+  of an item cannot mark its newer, breached password as checked; a password of combining marks and look-alike
+  digits costs no more dictionary work (counted in table steps) and no more than ten times the time of a
+  password of words, measured against it in the same run; text from the breached-account API is stripped of
+  control and bidirectional characters and never carries the service's HTML.
+
+The functional suites (`WatchwordHygieneTests`) cover: SHA-1 prefix and suffix and the reuse HMAC against
+vectors from Python's `hashlib`/`hmac`; the parser on padded, unpadded, malformed, oversized and
+line-limit responses; cache expiry, `freshAfter`, the cache codec and its damage cases; every status class;
+the schedule's table (create, edit, changed since last scan, weekly, resume after a lock, pacing, jitter,
+backoff, per-item retry, clock rollback, a failing item going to the back of the queue, a pass that cannot
+finish not blocking the next, a pass start slightly ahead of the clock, pacing handed on across a lock, a
+refused range across locks and across restarts, a failure's time of its own holding for its version only, the
+bound on failures kept, an interrupted scan paying for its requests, `Retry-After` bounded in the schedule
+itself, and after a clock is put back thirty days: a backoff, the weekly jitter and an item's own time each
+waited for once and within the policy's bound, and a failure dated ahead not keeping its item at the back) with
+`FakeClock`; the ledger's codec, with failures, and its damage cases; the estimator on known-weak and known-strong passwords (including a word, a year and a symbol,
+and keyboard columns and zigzags, none of which may score strong), generated passwords and passphrases, each
+pattern's explanation, the embedded lists' counts and uniqueness, the word table, and bounded time and
+bounded dictionary steps on hostile input; reuse, age, `http` addresses, the site directory; the report's
+severities, ordering, determinism and totals, and `incomplete`; the breached-account parser's leniency and
+its bounds; and the engine end to end, including stale copies, a save during a scan, a copy from before a
+trash or deletion, an unlock still analysing, a second unlock superseding the first, a failed check in the
+ledger and out again, twenty scans each interrupted by a lock at one instant sending no more than the burst
+(whether the vault is unlocked again before or after the response), a `Retry-After` that arrives just after a
+lock still honoured, and an unlock over an unlocked engine locking first (and leaving the engine locked with
+an empty cache when it then fails).
+
+The regression tests added after the first review of this module for the scheduling, locking, staleness,
+report, parser and rating faults were each checked by putting the fault back and seeing the test fail; the
+estimator's cost was measured before and after with the same inputs (`02-architecture.md` §13.4).
+
+Not covered, and why: no test calls the live service, and the fixtures are written to its documented format,
+not captured from it (it is not reachable from a cloud session); a capture on a Mac is open in milestone 6.
+The comparison's constant-time property is by construction and review, not measured. The `URLSession`
+adapter's obligations (no redirects, size limit on the decoded body, nothing logged) are untested until it
+exists.
 
 ### 6.7 Phishing resistance (PRD F11)
 

@@ -78,6 +78,33 @@ A zxcvbn-class strength estimator is also planned. **[decision]** port a minimal
 than vendoring a package: the dictionaries are the bulk of the code and can be checked in as
 verified data, and the estimator's output drives advice rather than any security boundary.
 
+**As built (milestone 6).** The estimator is written in `WatchwordHygiene` and its data is embedded as Swift
+source, one multi-line string literal per list, so there is still no non-Swift file under `Sources/` and
+nothing to load at run time. Each file's header names its source, the commit it was taken at and its licence:
+
+| File | Data | Source and licence |
+| --- | --- | --- |
+| `WordListCommonPasswords.swift` | 10,000 common passwords | zxcvbn `data/passwords.txt`, commit `67c4ece9`, MIT |
+| `WordListEnglish.swift` | 5,000 English words | zxcvbn `data/english_wikipedia.txt`, same commit, MIT |
+| `WordListNames.swift` | 500 surnames, 300 + 300 given names | zxcvbn, same commit, MIT (1990 US census) |
+| `WordListEFF.swift` | EFF large wordlist, 7,776 words | EFF, CC BY 3.0 US; text from a GitHub mirror (ulif/diceware `b3138e95`, SHA-256 `addd3553…b903e`), compared word for word with a second (redacted/XKCD-password-generator `b9813612`) because eff.org was unreachable |
+| `SiteDirectoryData.swift` | about 240 domains: TOTP and passkey support | 2factorauth/twofactorauth `9b39477c` (MIT) and 2factorauth/passkeys `ede77017` (CC BY 4.0), retrieved 2026-11-15 |
+
+- **[enforced]** `StrengthEstimatorTests` asserts each list's exact count, that the EFF list has 7,776 unique
+  words in its published order from `abacus` to `zoom`, and that every entry is lower-case and 3 to 32
+  characters. That is the uniqueness-and-count test asked for above, for the estimator's copy.
+- **[convention]** The MIT and Creative Commons notices travel in the file headers; an app release must
+  reproduce them in its acknowledgements.
+- **[open]** The EFF text has not been compared with EFF's own file. It is used here to *estimate* (where an
+  altered list could only misjudge a passphrase), not to *generate*; before the generator draws from it, verify
+  it against eff.org and keep a single copy.
+- **[decision]** These lists do not refresh. A stale password list only makes the estimator a little generous;
+  a stale site directory makes a suggestion late or wrong, which is why `EmbeddedSiteDirectory` is opt-in and
+  small. Adopting the full, regularly updated 2fa.directory dataset would be a standing data dependency of the
+  same kind as the full Public Suffix List and needs the same ADR.
+- The only code that makes network requests for this feature builds them from two constant hosts
+  (`HygieneHost`); N5's "only network destinations" is checked by the adversarial suite on the request values.
+
 ## 3. GitHub Actions and CI
 
 ### 3.1 Actions pinned to commit SHAs (T2)

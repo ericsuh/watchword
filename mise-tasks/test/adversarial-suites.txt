@@ -12,3 +12,4 @@ local vault store
 Keychain item protection
 sync log
 sync with real keys
+hygiene and breach checks
