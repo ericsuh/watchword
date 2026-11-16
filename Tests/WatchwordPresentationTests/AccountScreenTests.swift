@@ -1,8 +1,10 @@
 import Foundation
 import Testing
+import WatchwordCrypto
 import WatchwordKit
 import WatchwordModel
 import WatchwordPresentation
+import WatchwordSharing
 import WatchwordSync
 import WatchwordTestSupport
 
@@ -247,5 +249,77 @@ struct PasswordChangedElsewhereTests {
         #expect(await model.revoke(other, with: form), "\(model.errorMessage ?? "")")
         #expect(!model.awaitingNewPassword)
         #expect(model.rows.first { $0.id == other.id }?.isRevoked == true)
+    }
+}
+
+@Suite("Screen models: held-aside changes after sharing")
+@MainActor
+struct QuarantineAfterSharingTests {
+    /// The screenshot tour's order on macOS: the account shares a vault with another account, then its other device
+    /// (which has no sharing settings, as `UITestPeer`'s has not) writes a version past the jump ceiling into the
+    /// Personal vault. The sync's one line and its notices must still say a change was held for review.
+    @Test("a version past the ceiling is reported held for review when a shared vault is also syncing")
+    func heldForReviewWithASharedVault() async throws {
+        let transport = InMemorySyncTransport()
+        let directory = InMemoryKeyBundleDirectory()
+        var settings = SyncSettings(state: InMemorySyncStateStore(), transport: transport)
+        settings.configuration.maximumVersionJump = 16
+        let app = TestVault(sync: settings, seed: 901, deviceName: "UI-test device")
+        try await app.createAccount()
+        let appContacts = InMemoryVerifiedContactStore()
+        await app.session.configureSharing(
+            SharingSettings(state: InMemorySharingStateStore(), contacts: appContacts, directory: directory))
+        await directory.publish(try await app.session.publicKeyBundle())
+        let personal = try #require(await app.session.personalVaultID)
+        _ = try await app.session.save(
+            login(personal, "Library", host: "citylibrary.org", username: "pat", password: "x7#Vq9!mLp2$Zr8@Wn4&"))
+        try await app.session.sync()
+
+        // The other device of the account joins, with no sharing settings.
+        let peer = try await app.enrolledDevice(deviceID: TwoDevices.secondID, over: transport, name: "Other")
+        try await peer.session.unlock(password: TestVault.password)
+        try await peer.session.sync()
+        try await app.session.sync()
+
+        // As in the tour: the same item renamed on both devices, the conflict synced and resolved here.
+        var there = try #require(try await peer.session.items().items.first)
+        there.title += " elsewhere"
+        _ = try await peer.session.save(there)
+        try await peer.session.sync()
+        var here = try await app.session.item(id: there.id)
+        here.title = "Library here"
+        _ = try await app.session.save(here)
+        try await app.session.sync()
+        let conflicted = try await app.session.item(id: there.id)
+        if let other = conflicted.conflicts[.title]?.first {
+            try await app.session.resolveConflict(itemID: there.id, group: .title, choosing: other.value)
+        }
+        try await app.session.sync()
+
+        // A vault shared with another person, who accepts.
+        let member = try await SharingAccount.make(over: transport, directory: directory, seed: 902)
+        let household = try await app.session.createVault(name: "Household").id
+        try await app.session.shareVault(household)
+        try await app.session.verifyContact(member.accountID, evidence: .safetyNumber(member.safetyNumber))
+        let invitation = try await app.session.invite(member.accountID, to: household, as: .readWrite)
+        let ownerNumber = try await app.session.publicKeyBundle().fingerprint.safetyNumber
+        try await member.session.acceptInvitation(invitation, ownerEvidence: .safetyNumber(ownerNumber))
+        try await member.session.sync()
+        _ = try await app.session.syncAll()
+
+        // The other device edits the first live item forty times, then publishes.
+        try await peer.session.sync()
+        var item = try #require(try await peer.session.items().items.first { !$0.isTrashed })
+        #expect(item.vaultID == personal)
+        for round in 0..<40 {
+            item.notes = "Edited elsewhere, \(round + 1) times"
+            item = try await peer.session.save(item)
+        }
+        try await peer.session.sync()
+
+        let report = try await app.session.syncAll()
+        let summary = SyncSummary(report)
+        #expect(summary.headline.contains("held for review"), "\(summary.headline) \(report.combined)")
+        #expect(summary.notices.contains { if case .keptAside = $0 { return true } else { return false } })
     }
 }
