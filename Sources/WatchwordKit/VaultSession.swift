@@ -141,6 +141,10 @@ public actor VaultSession {
     var syncInFlight = false
     /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
     var registryView: RegistryView?
+    /// Registry entries fetched from the transport and found worth nothing (they can never count, or wait on a
+    /// parent that is not there), not fetched again by this session until a sync keeps something new: a revoked
+    /// device that floods the transport costs each of them one fetch (docs/02-architecture.md §7.8).
+    var skippedRegistryEntries: Set<ObjectDigest> = []
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(

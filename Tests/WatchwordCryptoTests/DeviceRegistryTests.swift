@@ -490,20 +490,97 @@ struct DeviceRegistryTests {
         #expect(Array(admitted.keys) == [genesis.id])
     }
 
-    @Test("a registry larger than any household's is refused, not evaluated")
-    func sizeLimit() throws {
+    @Test("more entries than are ever evaluated at once are refused, not evaluated")
+    func evaluationLimit() throws {
         var f = RegistryFixture()
         let genesis = f.genesis(device: Self.a)
         var entries: [ObjectDigest: RegistryEntry] = [genesis.id: genesis]
-        for index in 0..<DeviceRegistry.maximumEntries {
+        for index in 0..<DeviceRegistry.maximumEvaluated {
             // Distinct keys are enough for the count; the entries are never evaluated.
             entries[ObjectDigest(hashing: [UInt8(index & 0xFF), UInt8(index >> 8)])] = genesis
         }
-        #expect(throws: DeviceRegistryError.tooManyEntries(DeviceRegistry.maximumEntries + 1)) {
+        #expect(throws: DeviceRegistryError.tooManyEntries(DeviceRegistry.maximumEvaluated + 1)) {
             try DeviceRegistry.evaluate(
                 entries, accountID: f.accountID, accountSigningKey: f.accountSigningKey, genesis: genesis.id,
                 credential: genesis.id)
         }
+    }
+
+    @Test("a registry with more entries worth keeping than any household's is refused")
+    func sizeLimit() throws {
+        var f = RegistryFixture()
+        let genesis = f.genesis(device: Self.a)
+        // Revocations of devices that never existed: they change nothing, but a registered device signed them and
+        // nothing rules out that they might count, so they are kept, and counted.
+        var entries = [genesis]
+        for index in 0..<DeviceRegistry.maximumEntries {
+            let nobody = UUID(
+                uuid: (0x4E, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, UInt8(index >> 8), UInt8(index & 0xFF)))
+            entries.append(f.revoke(nobody, by: Self.a, parents: [entries[entries.count - 1]]))
+        }
+        #expect(throws: DeviceRegistryError.tooManyEntries(DeviceRegistry.maximumEntries + 1)) {
+            try f.evaluate(entries, genesis: genesis)
+        }
+        #expect(try f.evaluate(Array(entries.dropLast()), genesis: genesis).retainedEntries.count == 4096)
+    }
+
+    /// Review of the device registry ("flood"): a revoked device that kept the account key signs any number of
+    /// entries. Those that can never count are not retained — not stored, not published, not counted — whatever
+    /// arrives later; and evaluating only what is retained gives the same registry.
+    @Test("entries that can never count are not retained, and what is retained evaluates to the same registry")
+    func retention() throws {
+        var f = RegistryFixture()
+        let genesis = f.genesis(device: Self.a)
+        let addB = f.add(Self.b, by: Self.a, parents: [genesis])
+        let addX = f.add(Self.c, by: Self.a, parents: [addB])
+        let revokeX = f.revoke(Self.c, by: Self.a, parents: [addX])
+        _ = f.nextUnlockKey()
+        let change = f.credential(generation: 1, previous: genesis, by: Self.a, parents: [revokeX])
+
+        // Signed by its own key after the checkpoint sealed its revocation, back-dated or not.
+        let byRevoked = [
+            f.revoke(Self.a, by: Self.c, parents: [addX]),
+            f.add(Self.d, by: Self.c, parents: [change]),
+        ]
+        // Registered with the enrolment key the password change replaced.
+        let superseded = f.enrol(RegistryFixture.deviceID(0xE0), credential: genesis, generation: 0, parents: [change])
+        // In B's name without B's key; and by B, but not descending from B's registration.
+        var forged = f.add(Self.d, by: Self.b, parents: [change])
+        forged.authorSignature = [UInt8](repeating: 7, count: 64)
+        let unregistered = f.add(RegistryFixture.deviceID(0xE1), by: Self.b, parents: [genesis])
+        // Disconnected: no parents at all.
+        var orphan = RegistryEntry(accountID: f.accountID, parents: [], author: .device(Self.c), body: .revoke(Self.b))
+        orphan = f.signed(orphan)
+        let worthless = byRevoked + [superseded, forged, unregistered, orphan]
+
+        // What may still count: B adding a device, and an enrolment with the current password.
+        let honest = f.add(Self.d, by: Self.b, parents: [change])
+        let enrolled = f.enrol(RegistryFixture.deviceID(0xE2), credential: change, generation: 1, parents: [honest])
+        let entries = [genesis, addB, addX, revokeX, change, honest, enrolled] + worthless
+        let state = try f.evaluate(entries, genesis: genesis, credential: change)
+        #expect(state.retainedEntries == Set([genesis, addB, addX, revokeX, change, honest, enrolled].map(\.id)))
+        #expect(Set(state.devices.keys) == [Self.a, Self.b, Self.d, RegistryFixture.deviceID(0xE2)])
+        #expect(!state.validEntries.contains(unregistered.id), "B's entries descend from B's registration")
+
+        let kept = entries.filter { state.retainedEntries.contains($0.id) }
+        #expect(
+            try f.evaluate(kept, genesis: genesis, credential: change)
+                == {
+                    var expected = state
+                    expected.connectedEntries = state.retainedEntries
+                    return expected
+                }())
+
+        // A device still on the old password keeps what the change it has not confirmed needs, and the change.
+        let behind = try f.evaluate(entries, genesis: genesis)
+        #expect(behind.pendingCredentials.map(\.id) == [change.id])
+        #expect(behind.retainedEntries.isSuperset(of: [change.id, honest.id, enrolled.id]))
+
+        // An honest entry that names a worthless one as a parent (it saw it) keeps it: nothing it descends from is
+        // ever dropped.
+        let naming = f.add(RegistryFixture.deviceID(0xE3), by: Self.a, parents: [enrolled, byRevoked[1]])
+        let named = try f.evaluate(entries + [naming], genesis: genesis, credential: change)
+        #expect(named.retainedEntries.isSuperset(of: [naming.id, byRevoked[1].id]))
     }
 }
 

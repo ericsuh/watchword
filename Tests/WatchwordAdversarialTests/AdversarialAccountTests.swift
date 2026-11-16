@@ -517,6 +517,131 @@ struct AdversarialAccountTests {
         #expect(try await f.a.session.sync().awaitingNewPassword == false)
     }
 
+    /// Threat: the revoked device described above, after a revocation made **with a password change**, floods the
+    /// transport with registry entries the account key signs — as many as the registry's size limit — to fill
+    /// every device's registry with entries nobody can apply: some with no parents and no author signature, some
+    /// back-dated and signed by its own (revoked) key, some claiming another device as author without its key.
+    /// None of it is stored, kept or counted: the device that revoked it still syncs, a later revocation still
+    /// reaches the others, and a new device still enrols (review of the device registry, finding "flood").
+    @Test("a revoked device that kept the account key cannot fill the registry with entries that never count")
+    func registryFlood() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        _ = try await f.enrolled(Self.deviceC)
+        let lost = try await f.enrolled(Self.deviceX)
+        let deviceA = try #require(await f.a.session.account?.deviceID)
+
+        // What the lost device holds when it leaves the person's hands: its registry view and its keys.
+        let session = lost.session
+        let account = try #require(await session.account)
+        let keys = try #require(await session.keys)
+        let heads = try await session.registry(account).state.heads
+
+        try await f.a.session.revokeDevice(
+            Self.deviceX, password: .change(current: TestVault.password, new: Self.newPassword))
+        try await f.a.session.sync()
+        await b.session.lock()
+        try await b.session.syncAll()
+        try await b.session.unlock(password: Self.newPassword)
+        try await b.session.sync()
+        #expect(try await f.registryView(b).state.standing(of: Self.deviceX) == .revoked)
+
+        func junkID(_ index: Int) -> UUID {
+            UUID(uuid: (0x4A, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, UInt8(index >> 8), UInt8(index & 0xFF)))
+        }
+        for index in 0..<DeviceRegistry.maximumEntries {
+            let entry: RegistryEntry
+            switch index % 3 {
+            case 0:
+                // As the review found it: no parents, no author signature.
+                var bare = RegistryEntry(
+                    accountID: f.accountID, parents: [], author: .device(Self.deviceX), body: .revoke(junkID(index)))
+                bare.accountSignature = try keys.keyset.sign(bare.accountMessage, domain: .deviceRegistry)
+                bare.authorSignature = [UInt8](repeating: 0, count: 64)
+                entry = bare
+            case 1:
+                // Back-dated, and signed by its own key, which the registry once held.
+                entry = try await session.signedRegistryEntry(
+                    parents: heads, author: .device(Self.deviceX), body: .revoke(junkID(index)), account: account,
+                    keyset: keys.keyset)
+            default:
+                // In another device's name, without its key.
+                var forged = RegistryEntry(
+                    accountID: f.accountID, parents: heads, author: .device(deviceA), body: .revoke(junkID(index)))
+                forged.accountSignature = try keys.keyset.sign(forged.accountMessage, domain: .deviceRegistry)
+                forged.authorSignature = [UInt8](repeating: 7, count: 64)
+                entry = forged
+            }
+            await f.plant(entry)
+        }
+
+        try await f.a.session.sync()
+        try await b.session.sync()
+        for device in [f.a, b] {
+            let rows = try await device.store.records(in: f.accountID, kind: .deviceRegistry)
+            #expect(rows.count < 32, "none of it is stored")
+        }
+
+        // A revokes C as well, with another password change: it still syncs, and the change still spreads.
+        let third = "yet another passphrase entirely"
+        try await f.a.session.revokeDevice(Self.deviceC, password: .change(current: Self.newPassword, new: third))
+        let revoking = try await f.a.session.syncAll()
+        #expect(!revoking.registryUnavailable && revoking.account.headerPublished)
+        let told = try await b.session.syncAll()
+        #expect(told.awaitingNewPassword && !told.registryUnavailable)
+        await b.session.lock()
+        try await b.session.unlock(password: third)
+        try await b.session.sync()
+        let state = try await f.registryView(b).state
+        #expect(state.standing(of: Self.deviceC) == .revoked && state.standing(of: Self.deviceX) == .revoked)
+
+        // And a new device enrols with the newest password, from a transport still full of the flood.
+        let late = f.fresh(seed: 77)
+        try await late.session.enrol(password: third, secretKey: f.kit.setupCode)
+        let joined = try await f.registryView(late).state
+        #expect(joined.standing(of: Self.deviceC) == .revoked && joined.standing(of: Self.deviceX) == .revoked)
+        #expect(joined.standing(of: Self.deviceB) == .active)
+        #expect(try await late.store.records(in: f.accountID, kind: .deviceRegistry).count < 32)
+    }
+
+    /// Threat: the revoked device described above (account key and its own device key), once a password change
+    /// has sealed its revocation. One of its entries, written at the same time as its revocation, was seen by an
+    /// honest device and so sealed by the checkpoint, behind the revocation. It appends a revocation of its own that
+    /// names that entry, which would put it first in the replay — the order puts first what a revocation had seen —
+    /// and ahead of its revocation. A checkpoint seals the order of what it had seen: nothing appended after it
+    /// moves anything there.
+    @Test("an entry that arrives after a checkpoint cannot reorder what the checkpoint sealed")
+    func sealedOrder() throws {
+        let (a, b, x, d) = (
+            RegistryFixture.deviceID(0xA0), RegistryFixture.deviceID(0xB0), RegistryFixture.deviceID(0xC0),
+            RegistryFixture.deviceID(0xD0)
+        )
+        var exercised = false
+        for seed in UInt64(1)...16 {
+            var f = RegistryFixture(seed: seed)
+            let genesis = f.genesis(device: a)
+            let addB = f.add(b, by: a, parents: [genesis])
+            let addX = f.add(x, by: a, parents: [addB])
+            let seenByRevocation = f.add(RegistryFixture.deviceID(0xE4), by: a, parents: [addX])
+            let revokeX = f.revoke(x, by: a, parents: [seenByRevocation])
+            // X's own entry, at the same time as its revocation; B saw both, and A's password change saw B's entry.
+            let backdated = f.add(d, by: x, parents: [addX])
+            let sawBoth = f.add(RegistryFixture.deviceID(0xE5), by: b, parents: [backdated, revokeX])
+            _ = f.nextUnlockKey()
+            let change = f.credential(generation: 1, previous: genesis, by: a, parents: [sawBoth])
+            let entries = [genesis, addB, addX, seenByRevocation, revokeX, backdated, sawBoth, change]
+            let sealed = try f.evaluate(entries, genesis: genesis, credential: change)
+            #expect(sealed.standing(of: d) == .unknown, "seed \(seed)")
+
+            // Later, X names its back-dated entry in a revocation of its own.
+            let promoter = f.revoke(b, by: x, parents: [backdated])
+            exercised = exercised || backdated.id < seenByRevocation.id
+            let after = try f.evaluate(entries + [promoter], genesis: genesis, credential: change)
+            #expect(after.devices == sealed.devices && after.validEntries == sealed.validEntries, "seed \(seed)")
+        }
+        #expect(exercised, "no seed put the back-dated entry ahead of what the revocation had seen")
+    }
+
     // MARK: - The vault directory
 
     /// Threats to the vault directory, each against a device that reads it:

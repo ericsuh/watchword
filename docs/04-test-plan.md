@@ -341,7 +341,10 @@ an insider device in hands that do not know the password.
   account key; a revoked device registering again under its ID, under a new ID with its key, by enrolment with
   the old password, and back-dating a revocation of the device that revoked it — nothing of it counts once the
   password has changed; the stated limit of a revocation that keeps the password; a registered device announcing
-  a password change without the password.
+  a password change without the password; a revoked device flooding the transport with 4,096 entries the account
+  key signed (no parents, back-dated under its own key, in another device's name) — none is stored, the revoking
+  device still syncs, a later revocation and password change still spread, a new device still enrols; an entry
+  appended after a checkpoint trying to reorder the layer it sealed.
 - The vault directory: a wrap copied or re-signed under another vault's name or another key ID, another account's
   wrap, deletions unsigned, by a stranger, copied from another vault, of the Personal vault, or vouched for by a
   revoked device; a vault description that is too large or has an endless name. Vault-key wrap rows edited in

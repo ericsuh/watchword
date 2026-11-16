@@ -901,13 +901,12 @@ extension VaultSession {
         // The registry, from the genesis entry and credential the header's binding authenticated.
         let accountKey = try keyset.publicKeyBundle().signingKey
         var discarded = AccountObjectsReport()
-        let fetched = try await fetchRegistryEntries(
-            transport: transport, accountID: accountID, accountKey: accountKey, known: [], report: &discarded)
-        let raw = fetched.entries.map(\.bytes)
+        let gathered = try await gatherRegistryEntries(
+            transport: transport, accountID: accountID, accountKey: accountKey, held: [:], genesis: header.genesisID,
+            credential: header.credentialID, report: &discarded)
+        let raw = gathered.fetched.sorted { $0.key < $1.key }.map(\.value)
         guard
-            let view = try? Self.evaluateRegistry(
-                raw, accountID: accountID, accountKey: accountKey, genesis: header.genesisID,
-                credential: header.credentialID),
+            let view = gathered.view,
             view.state.credential.author == header.author,
             let authorKey = view.state.devices[header.author]?.key ?? view.state.revoked[header.author]?.key,
             (try? header.verifySignatures(accountSigningKey: accountKey, deviceKey: authorKey)) != nil
@@ -966,7 +965,7 @@ extension VaultSession {
         else { throw VaultError.accountNotOnTransport }
         account.personalVaultKeyID = personalKeyID
 
-        var rows = fetched.entries.map { Self.registryRow($0.bytes, accountID: accountID, deviceID: deviceID) }
+        var rows = raw.map { Self.registryRow($0, accountID: accountID, deviceID: deviceID) }
         rows.append(Self.registryRow(registration, account: account))
         rows.append(Self.headerRow(header, recordID: accountID, version: 1))
         rows += directory.keys.filter { vaultKeys[$0.recordID] != nil }
@@ -1006,43 +1005,115 @@ extension VaultSession {
 
     // MARK: - Account objects on the transport (docs/02-architecture.md §7.7)
 
-    /// Registry entries on the transport that this device does not hold: each must be named by the SHA-256 of its
-    /// bytes and signed by the account key, or it is not kept. Bounded by the registry's size limit.
-    func fetchRegistryEntries(
-        transport: any SyncTransport, accountID: UUID, accountKey: [UInt8], known: Set<ObjectDigest>,
+    /// Registry entries fetched in one batch, and batches in one gathering: each batch is evaluated together with
+    /// what is already held, so no evaluation exceeds `DeviceRegistry.maximumEvaluated`.
+    static let registryBatch = DeviceRegistry.maximumEntries / 2
+    static let maximumRegistryBatches = 8
+    static let maximumSkippedRegistryEntries = 1 << 16
+
+    /// Registry entries on the transport that this device does not hold, fetched in batches and judged together
+    /// with `held` from `genesis` along `credential` (docs/02-architecture.md §7.8). Each must be named by the
+    /// SHA-256 of its bytes and signed by the account key; of those, only what the evaluation retains
+    /// (`DeviceRegistryState.retainedEntries`) is returned. One whose missing parents are listed but not fetched yet
+    /// is held while the batches go on, and fetched again by a later sync if they never arrive. Everything else can
+    /// never count, is not kept, and is not fetched again by this session until a sync keeps something new
+    /// (`skippedRegistryEntries`): a revoked device that kept the account key can put any number of entries on the
+    /// transport, but they fill neither this device's registry nor its fetches.
+    ///
+    /// `view` is the registry evaluated from `held` and what was kept, or `nil` if it could not be evaluated (which
+    /// is then reported by the caller as it would be without the transport).
+    func gatherRegistryEntries(
+        transport: any SyncTransport, accountID: UUID, accountKey: [UInt8], held: [ObjectDigest: [UInt8]],
+        genesis: ObjectDigest, credential: ObjectDigest, requiredHeads: [ObjectDigest] = [],
         report: inout AccountObjectsReport
-    ) async throws -> (entries: [(id: ObjectDigest, bytes: [UInt8])], listed: Set<ObjectDigest>) {
-        var listed: Set<ObjectDigest> = []
-        var entries: [(id: ObjectDigest, bytes: [UInt8])] = []
-        for name in Set(try await transport.list(prefix: AccountObjectLocation.registryPrefix(accountID))).sorted() {
+    ) async throws -> (view: RegistryView?, fetched: [ObjectDigest: [UInt8]], listed: Set<ObjectDigest>) {
+        var listed: [ObjectDigest: String] = [:]
+        for name in Set(try await transport.list(prefix: AccountObjectLocation.registryPrefix(accountID))) {
             guard case .registryEntry(let id, let hex)? = AccountObjectLocation(name: name), id == accountID,
                 let digest = ObjectDigest(hex: hex)
             else {
                 report.ignoredNames += 1
                 continue
             }
-            listed.insert(digest)
-            guard !known.contains(digest), known.count + entries.count < DeviceRegistry.maximumEntries else {
-                continue
-            }
-            do {
-                guard let bytes = try await transport.fetch(name, maximumLength: RegistryEntry.maximumLength) else {
-                    continue
-                }
-                guard ObjectDigest(hashing: bytes) == digest,
-                    !DeviceRegistry.admit([bytes], accountID: accountID, accountSigningKey: accountKey).isEmpty
-                else {
-                    report.rejected.append(name)
-                    continue
-                }
-                entries.append((digest, bytes))
-            } catch SyncTransportError.unavailable {
-                throw SyncTransportError.unavailable
-            } catch {
-                report.rejected.append(name)
-            }
+            listed[digest] = name
         }
-        return (entries, listed)
+        var pool = held
+        var fetched: [ObjectDigest: [UInt8]] = [:]
+        var tried: Set<ObjectDigest> = []
+        var view: RegistryView?
+        var evaluated = false
+        for _ in 0..<Self.maximumRegistryBatches {
+            let room = DeviceRegistry.maximumEvaluated - pool.count
+            let batch = listed.keys.filter {
+                pool[$0] == nil && !tried.contains($0) && !skippedRegistryEntries.contains($0)
+            }.sorted().prefix(max(0, min(Self.registryBatch, room)))
+            if batch.isEmpty, evaluated { break }
+            for digest in batch {
+                tried.insert(digest)
+                do {
+                    guard
+                        let bytes = try await transport.fetch(
+                            listed[digest]!, maximumLength: RegistryEntry.maximumLength)
+                    else { continue }
+                    guard ObjectDigest(hashing: bytes) == digest,
+                        !DeviceRegistry.admit([bytes], accountID: accountID, accountSigningKey: accountKey).isEmpty
+                    else {
+                        report.rejected.append(listed[digest]!)
+                        continue
+                    }
+                    pool[digest] = bytes
+                    fetched[digest] = bytes
+                } catch SyncTransportError.unavailable {
+                    throw SyncTransportError.unavailable
+                } catch {
+                    report.rejected.append(listed[digest]!)
+                }
+            }
+            evaluated = true
+            view = try? Self.evaluateRegistry(
+                Array(pool.values), accountID: accountID, accountKey: accountKey, genesis: genesis,
+                credential: credential, requiredHeads: requiredHeads)
+            if let view {
+                // Kept: what the registry retains, and what waits only on parents still to be fetched. The rest is
+                // worth nothing, now and later.
+                var waiting = Set(pool.keys).subtracting(view.state.connectedEntries)
+                var changed = true
+                while changed {
+                    changed = false
+                    for digest in waiting {
+                        let parents = view.entries[digest]?.parents ?? []
+                        let fetchable = parents.allSatisfy { parent in
+                            view.state.connectedEntries.contains(parent) || waiting.contains(parent)
+                                || (listed[parent] != nil && !tried.contains(parent) && pool[parent] == nil
+                                    && !skippedRegistryEntries.contains(parent))
+                        }
+                        if parents.isEmpty || !fetchable {
+                            waiting.remove(digest)
+                            changed = true
+                        }
+                    }
+                }
+                for digest in Array(pool.keys)
+                where !view.state.retainedEntries.contains(digest) && !waiting.contains(digest) {
+                    pool[digest] = nil
+                    if fetched.removeValue(forKey: digest) != nil,
+                        skippedRegistryEntries.count < Self.maximumSkippedRegistryEntries
+                    {
+                        skippedRegistryEntries.insert(digest)
+                    }
+                }
+            } else if room <= 0 {
+                break
+            }
+            if batch.isEmpty { break }
+        }
+        if let current = view, current.entries.count != pool.count {
+            // Evaluated again from exactly what is kept, which is what the caller stores.
+            view = try? Self.evaluateRegistry(
+                Array(pool.values), accountID: accountID, accountKey: accountKey, genesis: genesis,
+                credential: credential, requiredHeads: requiredHeads)
+        }
+        return (view, fetched.filter { view?.state.retainedEntries.contains($0.key) ?? true }, Set(listed.keys))
     }
 
     /// The vault directory on the transport: wraps and deletions this device does not hold, each vouched for by a
@@ -1137,24 +1208,46 @@ extension VaultSession {
         //    verified becomes its own.
         try? await adoptVerifiedDeletions(account: account)
 
-        // 1. The registry: a grow-only set of entries, merged by union in both directions.
-        let localRows = try await store.records(in: accountID, kind: .deviceRegistry)
-        let local = Set(localRows.map { ObjectDigest(hashing: $0.envelope) })
-        let fetched = try await fetchRegistryEntries(
-            transport: transport, accountID: accountID, accountKey: accountKey, known: local, report: &report)
-        var newRows: [StoredRecord] = []
-        for entry in fetched.entries {
-            let row = Self.registryRow(entry.bytes, accountID: accountID, deviceID: account.deviceID)
-            if try await store.record(row.key) == nil { newRows.append(row) }
+        // 1. The registry: a grow-only set of entries, merged by union in both directions — of the entries that may
+        //    count. One that can never count (its author revoked behind a password change, say) is neither stored,
+        //    nor kept if it was, nor published, so it cannot fill the registry (`DeviceRegistry.maximumEntries`).
+        //    Without the Keychain's anchor (lost, or a store restored onto other hardware), what to keep is judged
+        //    from the local header's genesis and credential: that decides what is stored, not what is trusted,
+        //    which waits for the header to open under the password at the next unlock.
+        let pin: (genesis: ObjectDigest, credential: ObjectDigest, heads: [ObjectDigest])
+        if let anchor = await readAnchor(accountID) {
+            pin = (anchor.genesis, anchor.credential, anchor.heads)
+        } else if let stored = try await storedHeader(account) {
+            pin = (stored.header.genesisID, stored.header.credentialID, [])
+        } else {
+            return report
         }
-        if !newRows.isEmpty {
-            try await store.commit(StoreChange(upserts: newRows))
-            report.registryEntriesFetched = newRows.count
+        let localRows = try await store.records(in: accountID, kind: .deviceRegistry)
+        var held: [ObjectDigest: [UInt8]] = [:]
+        for row in localRows { held[ObjectDigest(hashing: row.envelope)] = row.envelope }
+        let gathered = try await gatherRegistryEntries(
+            transport: transport, accountID: accountID, accountKey: accountKey, held: held, genesis: pin.genesis,
+            credential: pin.credential, requiredHeads: pin.heads, report: &report)
+        if let judged = gathered.view {
+            var change = StoreChange()
+            for (_, bytes) in gathered.fetched.sorted(by: { $0.key < $1.key }) {
+                let row = Self.registryRow(bytes, accountID: accountID, deviceID: account.deviceID)
+                if try await store.record(row.key) == nil { change.upserts.append(row) }
+            }
+            for row in localRows where !judged.state.retainedEntries.contains(ObjectDigest(hashing: row.envelope)) {
+                change.deletions.append(row.key)
+            }
+            if !change.upserts.isEmpty || !change.deletions.isEmpty {
+                try await store.commit(change)
+                report.registryEntriesFetched = change.upserts.count
+            }
+            // Progress: what was skipped as waiting on a parent may be wanted now.
+            if !change.upserts.isEmpty { skippedRegistryEntries = [] }
         }
         registryView = nil
         guard let view = try? await registry(account) else { return report }
         try? await pinRegistry(view, accountID: accountID)
-        for id in view.state.connectedEntries.subtracting(fetched.listed).sorted() {
+        for id in view.state.retainedEntries.subtracting(gathered.listed).sorted() {
             guard let entry = view.entries[id] else { continue }
             if try await create(
                 AccountObjectLocation.registryEntry(accountID: accountID, id: id.hex).name,

@@ -658,13 +658,31 @@ entries and follow the same credentials compute the same registry). The entries 
 
 1. *Credential changes are checkpoints.* Everything a credential change had seen is replayed before anything it
    had not, generation by generation. An entry that arrives later is judged against the state the checkpoint
-   left, however old the parents it names.
+   left, however old the parents it names, and cannot reorder what the checkpoint sealed: a revocation moves
+   only entries of its own layer (otherwise a revoked device could append a revocation naming one of its own
+   back-dated, sealed entries, and so move it in front of its own revocation).
 2. Between checkpoints: causal order, each revocation as early as that allows (what it had seen, the
-   revocation, then what it had not), ties by entry ID.
+   revocation, then what it had not), ties by entry ID. A revocation that can never count (below) moves nothing.
 
 An entry is applied only if, at its place, its author is a registered device not yet revoked — or the current
-enrolment key, for an entry written knowing of it — and its signatures verify. A revoked device's ID and key are
-never accepted again; a registered device's key never changes; no key serves two devices. A candidate password
+enrolment key, for an entry written knowing of it — and its signatures verify. A device's entry must also
+descend from an entry that registered that device under that key: a device writes only once it is registered,
+so every honest entry does. A revoked device's ID and key are never accepted again; a registered device's key
+never changes; no key serves two devices.
+
+**What can never count is not kept.** Some entries are void whatever arrives later: past the last checkpoint, one
+whose author was revoked before it; one by a device that nothing it descends from registered under a key that
+verifies it; one by an enrolment key it does not descend from, that does not verify it, or whose generation was
+replaced. The registry does not retain them (`DeviceRegistryState.retainedEntries`: every other connected entry,
+and whatever a retained one descends from): a device does not store them, prunes them from its store, does not
+publish them, and does not fetch them again in the same session until a sync keeps something new. The size
+limit (`maximumEntries`, 4096) counts retained entries only, and a sync fetches in batches evaluated with what
+the device holds (at most `maximumEvaluated`, twice that, at once). So a revoked device that kept the account
+key can put any number of entries on the transport, but once a password change has sealed its revocation they
+fill no device's registry, stop no fetch of the entries that matter, and keep neither the password change from
+spreading nor a new device from enrolling (review of the device registry, "flood"). A registered device in the
+wrong hands, or a revoked one before a password change, can still sign entries that might count; the limit then
+refuses the registry rather than evaluate it without bound, as before. A candidate password
 change is judged *as if it were followed* (the registry replayed with it as the last checkpoint), never by where
 it falls among unsealed entries: otherwise a revoked device could hide the change from a device that has not been
 given the new password yet, by back-dating a revocation of the device that made it (found by the adversarial

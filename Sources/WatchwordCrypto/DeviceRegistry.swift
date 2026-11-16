@@ -234,7 +234,9 @@ public enum DeviceRegistryError: Error, Equatable, Sendable {
     /// The credential entry this device follows is missing, or does not lead back to the genesis entry link by
     /// link, each signed by the enrolment key of the one before.
     case brokenCredentialChain
-    /// More entries than any household's devices produce: refused rather than evaluated (PRD SEC9).
+    /// More entries than any household's devices produce: refused rather than evaluated (PRD SEC9). Counts the
+    /// entries that may count for something (`DeviceRegistryState.retainedEntries`) against
+    /// `DeviceRegistry.maximumEntries`, or everything handed in against `DeviceRegistry.maximumEvaluated`.
     case tooManyEntries(Int)
 }
 
@@ -290,6 +292,12 @@ public struct DeviceRegistryState: Sendable, Hashable {
     public var validEntries: Set<ObjectDigest> = []
     /// Every entry that descends from the genesis entry, valid or not.
     public var connectedEntries: Set<ObjectDigest> = []
+    /// The connected entries worth keeping: every one that counts, or might yet count, along the credentials this
+    /// device follows or one it has not confirmed yet, and everything they descend from. The rest can never count
+    /// (`DeviceRegistry.evaluate` says when), so a device neither stores nor publishes them, and they do not count
+    /// against `DeviceRegistry.maximumEntries` (review of the device registry: a revoked device that kept the
+    /// account key must not be able to fill the registry with entries nobody can apply).
+    public var retainedEntries: Set<ObjectDigest> = []
 
     public var credential: Credential {
         credentialChain[credentialChain.count - 1]
@@ -319,11 +327,22 @@ public struct DeviceRegistryState: Sendable, Hashable {
 ///    time as it was being revoked therefore counts for nothing.
 ///
 /// An entry is applied only if, at its place in that order, its author is a registered device that has not been
-/// revoked (or the current enrolment key, for a device registering itself) and its signatures verify. A revoked
-/// device's ID and key are never accepted again.
+/// revoked (or the current enrolment key, for a device registering itself) and its signatures verify. A device's
+/// entry must also descend from an entry that registered that device with that key: a device writes only once it
+/// is registered, so an honest entry always does, and the rule makes "can this entry ever count?" a question its
+/// ancestors answer for good. A revoked device's ID and key are never accepted again.
+///
+/// Some entries can never count, whatever arrives later, and are not kept (`DeviceRegistryState.retainedEntries`):
+/// one beyond the last checkpoint whose author was revoked before it, one by a device that nothing it descends from
+/// registered under a key that verifies it, and one by an enrolment key it does not descend from, that does not
+/// verify it, or whose generation has been replaced. They also move nothing in the replay order, and a checkpoint
+/// seals the order of what it had seen: an entry that arrives later cannot reorder the layers before it.
 public enum DeviceRegistry {
-    /// Far more than any household's devices produce; a registry beyond it is refused, not evaluated.
+    /// Far more than any household's devices produce; a registry whose entries worth keeping exceed it is refused,
+    /// not used.
     public static let maximumEntries = 4096
+    /// The most entries evaluated at once, kept or not: what a device holds plus one batch from the transport.
+    public static let maximumEvaluated = 2 * maximumEntries
 
     /// Parses and admits entries: an entry that does not parse, belongs to another account, or is not signed by the
     /// account key is dropped here, before it can count for anything. Needs public keys only.
@@ -369,8 +388,10 @@ public enum DeviceRegistry {
         let followed = Set(state.credentialChain.map(\.id))
         let head = state.credential.id
         var considered = 0
+        let dead = state.connectedEntries.subtracting(state.retainedEntries)
         for id in graph.ids.sorted() where !followed.contains(id) && considered < maximumCandidates {
-            guard case .credential(_, _, let previous)? = entries[id]?.body else { continue }
+            // One that can never count here (its author revoked behind a checkpoint, say) is not a candidate.
+            guard !dead.contains(id), case .credential(_, _, let previous)? = entries[id]?.body else { continue }
             // Where it branches off the chain this device follows: at the last link (a change this device has not
             // confirmed) or at an earlier one (a fork). One that leads nowhere on the chain is nothing.
             var cursor = previous
@@ -396,6 +417,9 @@ public enum DeviceRegistry {
         }
         state.pendingCredentials.sort { ($0.generation, $0.id) < ($1.generation, $1.id) }
         state.forkedCredentials.sort { ($0.generation, $0.id) < ($1.generation, $1.id) }
+        guard state.retainedEntries.count <= maximumEntries else {
+            throw DeviceRegistryError.tooManyEntries(state.retainedEntries.count)
+        }
         return state
     }
 
@@ -403,7 +427,7 @@ public enum DeviceRegistry {
     private static func prepare(
         _ entries: [ObjectDigest: RegistryEntry], accountID: UUID, accountSigningKey: [UInt8], genesis: ObjectDigest
     ) throws -> Graph {
-        guard entries.count <= maximumEntries else { throw DeviceRegistryError.tooManyEntries(entries.count) }
+        guard entries.count <= maximumEvaluated else { throw DeviceRegistryError.tooManyEntries(entries.count) }
         guard let root = entries[genesis],
             case .genesis(let rootKey, let rootDevice, let rootEnrolmentKey) = root.body,
             root.parents.isEmpty, root.author == .device(rootDevice.id), root.accountID == accountID,
@@ -455,7 +479,57 @@ public enum DeviceRegistry {
         state.connectedEntries = Set(graph.ids)
         var revokedKeys: Set<[UInt8]> = []
 
-        for id in graph.replayOrder(checkpoints: chain.map(\.id)) {
+        // 1. The layers the checkpoints sealed. Their order depends on what they hold and nothing else.
+        let layer = graph.layers(checkpoints: chain.map(\.id))
+        let unsealed = chain.count
+        let sealedOrder = graph.replayOrder(layer: layer, ordering: { layer[$0] < unsealed })
+        try apply(
+            sealedOrder.filter { layer[graph.index[$0]!] < unsealed }, entries: entries, graph: graph, chain: chain,
+            to: &state, revokedKeys: &revokedKeys)
+
+        // 2. What can never count past the last checkpoint: its author revoked by then, or nothing it descends from
+        //    able to make it count. It is not kept, and orders nothing.
+        let revokedBehindCheckpoint = Set(state.revoked.keys)
+        var dead: Set<Int> = []
+        for i in 0..<graph.ids.count where layer[i] == unsealed {
+            if graph.unverifiable.contains(i) {
+                dead.insert(i)
+                continue
+            }
+            switch entries[graph.ids[i]]!.author {
+            case .device(let author):
+                if revokedBehindCheckpoint.contains(author) { dead.insert(i) }
+            case .enrolment(let cited):
+                // A generation this chain has replaced never registers anyone again.
+                if let position = chain.firstIndex(where: { $0.id == cited }), position != chain.count - 1 {
+                    dead.insert(i)
+                }
+            }
+        }
+
+        // 3. The rest, after the sealed layers, in the order the entries that may count give it.
+        let fullOrder = graph.replayOrder(
+            layer: layer, ordering: { layer[$0] < unsealed || !dead.contains($0) })
+        try apply(
+            fullOrder.filter { layer[graph.index[$0]!] == unsealed }, entries: entries, graph: graph, chain: chain,
+            to: &state, revokedKeys: &revokedKeys)
+        guard state.credentialChain.count == chain.count else { throw DeviceRegistryError.brokenCredentialChain }
+
+        var hasValidChild: Set<ObjectDigest> = []
+        for id in state.validEntries {
+            for parent in entries[id]!.parents { hasValidChild.insert(parent) }
+        }
+        state.heads = state.validEntries.filter { !hasValidChild.contains($0) }.sorted()
+        state.retainedEntries = graph.closure(of: (0..<graph.ids.count).filter { !dead.contains($0) })
+        return state
+    }
+
+    /// Applies entries in replay order.
+    private static func apply(
+        _ order: [ObjectDigest], entries: [ObjectDigest: RegistryEntry], graph: Graph,
+        chain: [DeviceRegistryState.Credential], to state: inout DeviceRegistryState, revokedKeys: inout Set<[UInt8]>
+    ) throws {
+        for id in order {
             let entry = entries[id]!
             switch entry.body {
             case .genesis(_, let device, _):
@@ -467,7 +541,7 @@ public enum DeviceRegistry {
                 let current = state.credential
                 switch entry.author {
                 case .device(let author):
-                    guard deviceSigned(entry, by: author, in: state) else { continue }
+                    guard deviceSigned(entry, id: id, by: author, in: state, graph: graph) else { continue }
                 case .enrolment(let cited):
                     // Only the generation that is current here, and only an entry written knowing of it.
                     guard cited == current.id, graph.isAncestor(cited, of: id),
@@ -490,9 +564,9 @@ public enum DeviceRegistry {
                 }
 
             case .revoke(let target):
-                guard case .device(let author) = entry.author, deviceSigned(entry, by: author, in: state) else {
-                    continue
-                }
+                guard case .device(let author) = entry.author,
+                    deviceSigned(entry, id: id, by: author, in: state, graph: graph)
+                else { continue }
                 if var device = state.devices.removeValue(forKey: target) {
                     device.revokedBy = author
                     state.revoked[target] = device
@@ -508,7 +582,8 @@ public enum DeviceRegistry {
                 guard next < chain.count, chain[next].id == id else { continue }
                 // A link of the chain: it must be what the rules allow where it stands — written by a registered
                 // device, signed by the enrolment key of the generation before — or the chain is not one to follow.
-                guard case .device(let author) = entry.author, deviceSigned(entry, by: author, in: state),
+                guard case .device(let author) = entry.author,
+                    deviceSigned(entry, id: id, by: author, in: state, graph: graph),
                     previous == state.credential.id, credentialSigned(entry, by: state.credential),
                     (try? Signatures.validateSigningKey(enrolmentKey)) != nil
                 else { throw DeviceRegistryError.brokenCredentialChain }
@@ -516,18 +591,18 @@ public enum DeviceRegistry {
             }
             state.validEntries.insert(id)
         }
-        guard state.credentialChain.count == chain.count else { throw DeviceRegistryError.brokenCredentialChain }
-
-        var hasValidChild: Set<ObjectDigest> = []
-        for id in state.validEntries {
-            for parent in entries[id]!.parents { hasValidChild.insert(parent) }
-        }
-        state.heads = state.validEntries.filter { !hasValidChild.contains($0) }.sorted()
-        return state
     }
 
-    private static func deviceSigned(_ entry: RegistryEntry, by author: UUID, in state: DeviceRegistryState) -> Bool {
-        guard let device = state.devices[author] else { return false }
+    /// Whether `author` is registered here and signed `entry`, which descends from an entry that registered the
+    /// author under that key.
+    private static func deviceSigned(
+        _ entry: RegistryEntry, id: ObjectDigest, by author: UUID, in state: DeviceRegistryState, graph: Graph
+    ) -> Bool {
+        guard let device = state.devices[author], let index = graph.index[id],
+            graph.registrations[author, default: []].contains(where: {
+                $0.key == device.key && graph.isAncestor(index: $0.index, of: index)
+            })
+        else { return false }
         return
             (try? DeviceSignatures.verify(
                 entry.authorSignature, for: entry.deviceMessage, domain: .deviceRegistry, deviceID: author,
@@ -548,6 +623,13 @@ public enum DeviceRegistry {
         var isRevocation: [Bool] = []
         /// `ancestors[i]` has bit `j` set when entry `j` is an ancestor of entry `i`.
         var ancestors: [[UInt64]] = []
+        /// For each device ID, the entries that register it (genesis and add bodies, valid or not) and the key each
+        /// names.
+        var registrations: [UUID: [(index: Int, key: DevicePublicKey)]] = [:]
+        /// Entries no replay can ever apply, whatever else arrives, judged from their ancestors alone: by a device
+        /// that no ancestor registers under a key that verifies the entry, or by an enrolment key that is not an
+        /// ancestor or does not verify it.
+        var unverifiable: Set<Int> = []
 
         init(_ entries: [ObjectDigest: RegistryEntry], genesis: ObjectDigest) {
             // Connected: the genesis entry, and any other entry whose parents are all connected. An entry with a
@@ -584,33 +666,90 @@ public enum DeviceRegistry {
                 isRevocation.append(entry.isRevocation)
                 ancestors.append(bits)
             }
+            for (position, id) in order.enumerated() {
+                switch entries[id]!.body {
+                case .genesis(_, let device, _), .add(let device):
+                    registrations[device.id, default: []].append((position, device.key))
+                default:
+                    break
+                }
+            }
+            for (position, id) in order.enumerated() where position != 0 {
+                let entry = entries[id]!
+                let verifiable: Bool
+                switch entry.author {
+                case .device(let author):
+                    verifiable = registrations[author, default: []].contains { registration in
+                        isAncestor(index: registration.index, of: position)
+                            && (try? DeviceSignatures.verify(
+                                entry.authorSignature, for: entry.deviceMessage, domain: .deviceRegistry,
+                                deviceID: author, key: registration.key)) != nil
+                    }
+                case .enrolment(let cited):
+                    let key: [UInt8]?
+                    switch entries[cited]?.body {
+                    case .genesis(_, _, let enrolmentKey)?, .credential(_, let enrolmentKey, _)?: key = enrolmentKey
+                    default: key = nil
+                    }
+                    verifiable =
+                        isAncestor(cited, of: id)
+                        && key.map { key in
+                            (try? Signatures.verify(
+                                entry.authorSignature, for: entry.enrolmentMessage, domain: .deviceRegistry,
+                                signingKey: key)) != nil
+                        } == true
+                }
+                if !verifiable { unverifiable.insert(position) }
+            }
         }
 
         func isAncestor(_ ancestor: ObjectDigest, of entry: ObjectDigest) -> Bool {
             guard let a = index[ancestor], let e = index[entry] else { return false }
-            return ancestors[e][a / 64] & (1 << UInt64(a % 64)) != 0
+            return isAncestor(index: a, of: e)
         }
 
-        /// The one order every device replays the entries in: checkpoint by checkpoint (an entry belongs to the
-        /// first checkpoint that is it or descends from it, or to none), and within that causally, each revocation
-        /// as early as causality allows — what a revocation had seen first, then the revocation, then everything it
-        /// had not seen — with ties broken by ID. So an entry a device wrote at the same time as it was being
-        /// revoked comes after its revocation, and counts for nothing.
-        func replayOrder(checkpoints: [ObjectDigest]) -> [ObjectDigest] {
-            let unsealed = checkpoints.count
-            var layer = [Int](repeating: unsealed, count: ids.count)
+        func isAncestor(index a: Int, of e: Int) -> Bool {
+            ancestors[e][a / 64] & (1 << UInt64(a % 64)) != 0
+        }
+
+        /// The entries `members` names and everything they descend from.
+        func closure(of members: [Int]) -> Set<ObjectDigest> {
+            var bits = [UInt64](repeating: 0, count: (ids.count + 63) / 64)
+            for member in members {
+                bits[member / 64] |= 1 << UInt64(member % 64)
+                for word in 0..<bits.count { bits[word] |= ancestors[member][word] }
+            }
+            return Set((0..<ids.count).filter { bits[$0 / 64] & (1 << UInt64($0 % 64)) != 0 }.map { ids[$0] })
+        }
+
+        /// The checkpoint each entry belongs to: the first that is it or descends from it, or `checkpoints.count`
+        /// for none (not sealed yet).
+        func layers(checkpoints: [ObjectDigest]) -> [Int] {
+            var layer = [Int](repeating: checkpoints.count, count: ids.count)
             for (position, checkpoint) in checkpoints.enumerated().reversed() {
                 guard let c = index[checkpoint] else { continue }
                 layer[c] = position
-                for other in 0..<ids.count where ancestors[c][other / 64] & (1 << UInt64(other % 64)) != 0 {
+                for other in 0..<ids.count where isAncestor(index: other, of: c) {
                     layer[other] = position
                 }
             }
+            return layer
+        }
+
+        /// The one order every device replays the entries in: checkpoint by checkpoint (`layers`), and within that
+        /// causally, each revocation as early as causality allows — what a revocation had seen first, then the
+        /// revocation, then everything it had not seen — with ties broken by ID. So an entry a device wrote at the
+        /// same time as it was being revoked comes after its revocation, and counts for nothing.
+        ///
+        /// Only revocations `ordering` accepts move anything, and a revocation moves only entries of its own layer:
+        /// an entry that arrives after a checkpoint cannot reorder what the checkpoint sealed, and one that can never
+        /// count moves nothing at all.
+        func replayOrder(layer: [Int], ordering: (Int) -> Bool) -> [ObjectDigest] {
             // Entries a revocation depends on: the revocations themselves and everything they had seen.
             var leadsToRevocation = isRevocation
-            for revocation in 0..<ids.count where isRevocation[revocation] {
+            for revocation in 0..<ids.count where isRevocation[revocation] && ordering(revocation) {
                 for other in 0..<ids.count
-                where ancestors[revocation][other / 64] & (1 << UInt64(other % 64)) != 0 {
+                where layer[other] == layer[revocation] && isAncestor(index: other, of: revocation) {
                     leadsToRevocation[other] = true
                 }
             }
