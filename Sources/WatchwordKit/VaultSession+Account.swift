@@ -459,11 +459,17 @@ extension VaultSession {
     /// After an unlock: makes sure this device has what the registry needs of it, and refuses a header older than
     /// the credentials it already follows. Best effort except for that refusal — a registry that cannot be repaired
     /// here stops sync (`deviceRegistryUnavailable`), not the person's access to their vault.
+    ///
+    /// The session may lock at any suspension in here (auto-lock, the AutoFill extension finishing): `keys` is then
+    /// zeroised, and reading it traps. So the lock epoch is re-checked after every suspension before `keys` is
+    /// touched, and a lock ends the reconciliation quietly — it runs again at the next unlock.
     func reconcileAccountObjects(account: AccountRecord, keys: UnlockedKeys) async throws {
+        let epoch = lockEpoch
         registryView = nil
         let accountID = account.accountID
         let stored = try await storedHeader(account)
         let anchor = await readAnchor(accountID)
+        guard epoch == lockEpoch, !keys.accountUnlockKey.isZeroised else { return }
 
         // An account from before the registry existed has none of this. Its registry is started at a sync, and only
         // if the transport holds no header for the account (`startRegistryIfAccountPredatesIt`): a database
@@ -501,7 +507,7 @@ extension VaultSession {
             }
         }
 
-        guard let view = try? await registry(account) else { return }
+        guard let view = try? await registry(account), epoch == lockEpoch else { return }
         // A store restored onto other hardware arrives without the device key (Keychain items never leave a
         // device): this installation is a new device, and says so. One whose registration no longer counts (it was
         // made with a password since changed) registers again under the same ID.
@@ -996,6 +1002,9 @@ extension VaultSession {
                         expecting: VaultKey.wrapContext(vaultID: vaultID, keyID: keyID, keysetKeyID: header.keyID),
                         maximumLength: 1024)
                     if let keyset {
+                        // The session's keyset may have been zeroised by a `lock()` during the fetch: reading it
+                        // would trap. The rest of this sync is then a download.
+                        guard !keyset.isZeroised else { throw SyncKeyringError.locked }
                         try VaultKey.unwrap(object.envelope, vaultID: vaultID, keyID: keyID, with: keyset).zeroise()
                     }
                     keys[keyID] = StoredRecord(
@@ -1010,6 +1019,8 @@ extension VaultSession {
                 }
             } catch SyncTransportError.unavailable {
                 throw SyncTransportError.unavailable
+            } catch SyncKeyringError.locked {
+                throw SyncKeyringError.locked
             } catch {
                 report.rejected.append(name)
             }
