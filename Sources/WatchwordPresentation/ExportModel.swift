@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SecureMemory
 import WatchwordInterchange
 import WatchwordKit
 
@@ -32,9 +33,11 @@ public enum ExportKind: String, Hashable, Sendable, CaseIterable, Identifiable {
     }
 }
 
-/// A finished export: the bytes for the system's file exporter, and what the screen shows about them.
+/// A finished export, as the screen shows it. The bytes stay in the model, in zeroising memory, until
+/// `ExportModel.stage` writes them where the system's file mover takes them, and go at `discardFile`.
 public struct ExportFile: Hashable, Sendable {
-    public let bytes: [UInt8]
+    /// One export: a new one is a new file even with the same report.
+    public let id: UUID
     public let kind: ExportKind
     public let filename: String
     public let itemCount: Int
@@ -51,7 +54,7 @@ public struct ExportFile: Hashable, Sendable {
 /// password manager's importer).
 @MainActor
 @Observable
-public final class ExportModel {
+public final class ExportModel: LockSensitive {
     /// The standing warning (`InterchangeGuide.plaintextExportWarning`).
     public static let plaintextWarning = VaultSession.plaintextExportWarning
 
@@ -67,11 +70,27 @@ public final class ExportModel {
 
     private let context: ScreenContext
     private let now: @Sendable () -> Date
+    /// The file's bytes: plaintext for every format but the archive. Zeroised by `discardFile`.
+    private var contents: SecureBytes?
+    /// Where `stage` wrote them, until the file mover has taken them or the export is dropped.
+    private var stagingDirectory: URL?
 
     public init(context: ScreenContext, now: @escaping @Sendable () -> Date = { Date() }) {
         self.context = context
         self.now = now
+        context.locks?.register(self)
     }
+
+    /// On every lock: the bytes, any staged copy and the typed password and passphrase go (finding 6).
+    public func dropOnLock() {
+        discardFile()
+        password = ""
+        passphrase = ""
+        passphraseConfirmation = ""
+    }
+
+    /// Whether the model still holds a file's bytes (for tests: the bytes themselves never leave but by `stage`).
+    public var holdsContents: Bool { contents != nil }
 
     /// Why the export cannot run yet, or `nil`.
     public var problem: String? {
@@ -88,7 +107,7 @@ public final class ExportModel {
 
     public func load() async {
         await perform {
-            vaults = try await context.session.vaults().map { VaultRow($0, sharing: nil) }
+            vaults = try await VaultRow.load(from: context.session)
             if selectedVaults.isEmpty { selectedVaults = Set(vaults.map(\.id)) }
         }
     }
@@ -106,7 +125,7 @@ public final class ExportModel {
         self.password = ""
         self.passphrase = ""
         passphraseConfirmation = ""
-        file = nil
+        discardFile()
         await perform {
             let session = context.session
             let stamp = Self.stamp(self.now())
@@ -114,15 +133,19 @@ public final class ExportModel {
             case .archive:
                 let archive = try await session.exportArchive(
                     vaults: vaultIDs, passphrase: passphrase, password: password)
+                var bytes = archive.bytes
+                contents = SecureBytes(wiping: &bytes)
                 file = ExportFile(
-                    bytes: archive.bytes, kind: kind, filename: "Watchword Backup \(stamp).\(kind.fileExtension)",
+                    id: UUID(), kind: kind, filename: "Watchword Backup \(stamp).\(kind.fileExtension)",
                     itemCount: archive.itemCount, lines: [], unreadableCount: archive.unreadable.count)
             case .applePasswordsCSV, .onePUX:
                 let format: PlaintextExportFormat = kind == .onePUX ? .onePUX : .applePasswordsCSV
                 let export = try await session.exportPlaintext(format, vaults: vaultIDs, password: password)
                 let titles = try await Self.titles(session)
+                var bytes = export.bytes
+                contents = SecureBytes(wiping: &bytes)
                 file = ExportFile(
-                    bytes: export.bytes, kind: kind, filename: "Watchword Export \(stamp).\(kind.fileExtension)",
+                    id: UUID(), kind: kind, filename: "Watchword Export \(stamp).\(kind.fileExtension)",
                     itemCount: export.report.exportedCount,
                     lines: export.report.warnings.map { InterchangeWording.text(for: $0, titles: titles) },
                     unreadableCount: export.unreadable.count)
@@ -130,9 +153,46 @@ public final class ExportModel {
         }
     }
 
-    /// Drops the file's bytes: once saved, or when the screen closes.
+    /// Writes the file into a new directory of its own under `directory`, with `options` (on iOS the app passes
+    /// `.completeFileProtectionUnlessOpen`, so the file is never readable at rest while the device is locked), for the
+    /// system's file mover to take where the person chooses. Returns the file's URL. The staged copy is removed by
+    /// `finishSaving` or `discardFile`, whichever comes first (PRD F8.4; review of the account screens, finding 5).
+    public func stage(in directory: URL, options: Data.WritingOptions) throws -> URL {
+        guard let contents, let file else { throw CocoaError(.fileNoSuchFile) }
+        removeStagedCopy()
+        let folder = directory.appendingPathComponent("Export-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        stagingDirectory = folder
+        let url = folder.appendingPathComponent(file.filename, isDirectory: false)
+        try Data(contents.unprotectedCopy()).write(to: url, options: options.union(.withoutOverwriting))
+        return url
+    }
+
+    /// After the file mover: whatever is left of the staged copy is removed, and once the file was saved its bytes go.
+    public func finishSaving(saved: Bool) {
+        removeStagedCopy()
+        if saved { discardFile() }
+    }
+
+    /// The archive's bytes, which are ciphertext, for the UI-test hook that restores the archive just made. `nil` for a
+    /// plaintext export, whose bytes never leave the model but through `stage`.
+    public var archiveBytes: [UInt8]? {
+        guard file?.kind == .archive else { return nil }
+        return contents?.unprotectedCopy()
+    }
+
+    /// Drops the file: its bytes zeroised, any staged copy removed. Once saved, on cancel, when the screen closes,
+    /// and on every lock.
     public func discardFile() {
+        removeStagedCopy()
+        contents?.zeroise()
+        contents = nil
         file = nil
+    }
+
+    private func removeStagedCopy() {
+        if let stagingDirectory { try? FileManager.default.removeItem(at: stagingDirectory) }
+        stagingDirectory = nil
     }
 
     static func titles(_ session: VaultSession) async throws -> [UUID: String] {

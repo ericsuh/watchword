@@ -25,15 +25,21 @@ public struct QuarantineRow: Hashable, Sendable, Identifiable {
         (isDeletion ? "Deletion" : "Version \(version.entry.version)") + " by \(author)"
     }
 
-    /// Why it is here, for the person deciding whether to keep or discard it.
+    /// Why it is here, for the person deciding whether to keep or discard it: §8.7's account only for a version the
+    /// write judge held aside, U5's for one refused as implausible (review of the account screens, finding 7).
     public var explanation: String {
-        if isSharedVault {
+        switch version.reason {
+        case .heldAside:
             return "Held aside in a shared vault: it carries changes that no longer count, such as one made after a "
                 + "member's access ended, or an edit made after merging one. The item shows the version before it. "
                 + "Nothing in it was applied."
+        case .implausibleVersion:
+            return "Held back because its version number jumped far beyond anything written in this vault. It may "
+                + "come from a damaged device or from tampering. Nothing in it was applied."
+        case .unmerged:
+            return "Held back because it could not be combined with the version on this device. Nothing in it was "
+                + "applied."
         }
-        return "Held back because its version number jumped far beyond anything your devices have written. It may "
-            + "come from a damaged device or from tampering. Nothing in it was applied."
     }
 }
 
@@ -41,7 +47,7 @@ public struct QuarantineRow: Hashable, Sendable, Identifiable {
 /// choice and needs the vault unlocked; keeping costs nothing, so it is the default and needs no action.
 @MainActor
 @Observable
-public final class QuarantineModel {
+public final class QuarantineModel: LockSensitive {
     public private(set) var rows: [QuarantineRow] = []
     public private(set) var isSyncConfigured: Bool
     public private(set) var isWorking = false
@@ -52,6 +58,12 @@ public final class QuarantineModel {
     public init(context: ScreenContext) {
         self.context = context
         isSyncConfigured = context.session.isSyncConfigured
+        context.locks?.register(self)
+    }
+
+    /// The rows name items; they go with the keys.
+    public func dropOnLock() {
+        rows = []
     }
 
     /// Held-aside versions from shared vaults (S49: the UI must show them).
@@ -80,18 +92,23 @@ public final class QuarantineModel {
             uniquingKeysWith: { first, _ in first })
         let shared = Set((try? await session.sharedVaultIDs()) ?? [])
         let devices = Dictionary(
-            ((try? await session.devices()) ?? []).map { ($0.id, DeviceRow.displayName($0)) },
+            ((try? await session.devices()) ?? []).map { ($0.id, DeviceRow.reference($0)) },
             uniquingKeysWith: { first, _ in first })
         // The item's title on this device, looked up once per record; `.some(nil)` for a record it does not have.
-        var titles: [UUID: String?] = [:]
+        var titles: [String: String?] = [:]
         var result: [QuarantineRow] = []
         for version in versions {
             let entry = version.entry
-            if titles[entry.recordID] == nil {
-                let item = try? await session.item(id: entry.recordID)
-                titles[entry.recordID] = .some(item.map { $0.title.isEmpty ? "Untitled" : $0.title })
+            let titleKey = version.vaultID.uuidString + "/" + entry.recordID.uuidString
+            if titles[titleKey] == nil {
+                // Only an item of the vault the version is kept in: a record ID is the version's claim, and one that
+                // names an item of another vault must not borrow that item's title.
+                let item = (try? await session.item(id: entry.recordID)).flatMap {
+                    $0.vaultID == version.vaultID ? $0 : nil
+                }
+                titles[titleKey] = .some(item.map { $0.title.isEmpty ? "Untitled" : $0.title })
             }
-            let title = titles[entry.recordID] ?? nil
+            let title = titles[titleKey] ?? nil
             let subject: String
             switch entry.kind {
             case .item: subject = title ?? "An item this device does not have"
@@ -102,7 +119,8 @@ public final class QuarantineModel {
             let vaultName = vaults[version.vaultID].map { $0.name.isEmpty ? "Unnamed vault" : $0.name } ?? "A vault"
             result.append(
                 QuarantineRow(
-                    version: version, vaultName: vaultName, isSharedVault: shared.contains(version.vaultID),
+                    version: version, vaultName: vaultName,
+                    isSharedVault: shared.contains(version.vaultID) || version.reason == .heldAside,
                     subject: subject,
                     author: devices[entry.device] ?? "a device of another member (\(shortIdentifier(entry.device)))"))
         }

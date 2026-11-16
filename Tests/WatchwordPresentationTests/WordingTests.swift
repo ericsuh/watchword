@@ -140,15 +140,14 @@ struct SharingCodesTests {
         #expect(SharingCodes.account(from: "WWFP1-" + String(repeating: "0", count: 10)) == nil)
     }
 
-    @Test("a typed safety number is preferred, then a code, then the person's own comparison")
+    @Test("a typed safety number is preferred to the person's own comparison, and nothing else is evidence")
     func evidenceOrder() {
         var confirmation = FingerprintConfirmation()
-        #expect(confirmation.evidence(code: nil) == nil)
+        #expect(confirmation.evidence() == nil)
         confirmation.comparedByEye = true
-        #expect(confirmation.evidence(code: nil) == .comparedByEye)
-        #expect(confirmation.evidence(code: "WWFP1-X") == .scannedCode("WWFP1-X"))
+        #expect(confirmation.evidence() == .comparedByEye)
         confirmation.typedSafetyNumber = " 12345 "
-        #expect(confirmation.evidence(code: "WWFP1-X") == .safetyNumber("12345"))
+        #expect(confirmation.evidence() == .safetyNumber("12345"))
     }
 
     @Test("a safety number shows as twelve groups of five")

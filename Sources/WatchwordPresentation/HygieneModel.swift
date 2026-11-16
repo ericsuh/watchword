@@ -53,7 +53,7 @@ public struct HygieneSection: Hashable, Sendable, Identifiable {
 /// the sections the screen shows and paces the scan as the schedule asks.
 @MainActor
 @Observable
-public final class HygieneModel {
+public final class HygieneModel: LockSensitive {
     public typealias Sleep = @Sendable (Duration) async throws -> Void
 
     public private(set) var sections: [HygieneSection] = []
@@ -88,6 +88,13 @@ public final class HygieneModel {
         self.breachChecksAvailable = breachChecksAvailable
         self.now = now
         self.sleep = sleep
+        context.locks?.register(self)
+    }
+
+    /// The report names items; it goes with the keys.
+    public func dropOnLock() {
+        sections = []
+        scanStatus = nil
     }
 
     public func load() async {

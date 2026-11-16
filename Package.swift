@@ -125,7 +125,8 @@ let package = Package(
             name: "WatchwordPresentation",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordSync", "WatchwordStore", "WatchwordEnvelope",
-                "WatchwordCrypto", "WatchwordSharing", "WatchwordHygiene", "WatchwordInterchange",
+                "WatchwordCrypto", "WatchwordSharing", "WatchwordHygiene", "WatchwordInterchange", "WatchwordMatching",
+                "SecureMemory",
             ]
         ),
 
@@ -223,7 +224,7 @@ let package = Package(
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
                 "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordSharing", "WatchwordKit",
                 "WatchwordPlatform", "WatchwordAutoFill", "WatchwordHygiene", "WatchwordInterchange",
-                "WatchwordTestSupport", crypto,
+                "WatchwordPresentation", "WatchwordTestSupport", crypto,
             ]
         ),
     ],

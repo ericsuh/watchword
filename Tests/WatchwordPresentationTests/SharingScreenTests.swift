@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WatchwordCrypto
 import WatchwordKit
 import WatchwordPresentation
 import WatchwordSharing
@@ -136,5 +137,164 @@ struct SharingScreenTests {
         let model = SharedVaultModel(vaultID: personal, context: ContextProbe().context(owner.session))
         await model.share()
         #expect(model.errorMessage?.contains("never shared") == true)
+    }
+}
+
+@Suite("Screen models: member trust")
+struct MemberTrustTests {
+    static let me = UUID()
+    static let owner = UUID()
+    static let other = UUID()
+    static let members: [(accountID: UUID, role: MemberRole)] = [
+        (owner, .owner), (me, .readWrite), (other, .readWrite),
+    ]
+
+    @Test("a member is shown as verified only when the comparison on the current head says so (D17)")
+    func verifiedOnlyFromTheCheck() {
+        let rows = SharedVaultModel.rows(
+            members: Self.members, substituted: [], unverified: [], verified: nil, me: Self.me)
+        #expect(rows.first { $0.id == Self.me }?.trust == .you)
+        #expect(rows.filter { $0.id != Self.me }.allSatisfy { $0.trust == .notChecked })
+        #expect(rows.first { $0.id == Self.other }?.trustText == "Not checked yet")
+    }
+
+    @Test("a member in none of the check's lists is not verified either")
+    func unlistedIsNotVerified() {
+        let rows = SharedVaultModel.rows(
+            members: Self.members, substituted: [Self.other], unverified: [], verified: [], me: Self.me)
+        #expect(rows.first { $0.id == Self.other }?.trust == .keysChanged)
+        #expect(rows.first { $0.id == Self.owner }?.trust == .notChecked)
+    }
+
+    @Test("verified, unverified and changed keys come from the check's lists")
+    func fromTheLists() {
+        let rows = SharedVaultModel.rows(
+            members: Self.members, substituted: [], unverified: [Self.other], verified: [Self.owner], me: Self.me)
+        #expect(rows.first { $0.id == Self.owner }?.trust == .verified)
+        #expect(rows.first { $0.id == Self.other }?.trust == .unverified)
+    }
+}
+
+extension SharingScreenTests {
+    /// The member list after a relaunch: the substituted member's warning survives and the owner, compared, is
+    /// verified (review finding D17, SEC3).
+    @Test("after a relaunch the member list still warns of changed keys")
+    func memberListAfterRelaunch() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 621)
+        let viewer = try await household.account(seed: 622)
+        let target = try await household.account(seed: 623)
+        let forged = try Keyset.generate(accountID: target.accountID).publicKeyBundle()
+        await household.directory.tamper(target.accountID, contents: KeyBundleCodec.encode(forged))
+        try await viewer.session.verifyContact(
+            target.accountID, evidence: .safetyNumber(forged.fingerprint.safetyNumber))
+        await household.directory.publish(target.bundle)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.invite(viewer, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(target, to: vaultID, as: .readWrite, owner: owner)
+        for account in [owner, viewer, target, owner, viewer] { try await account.session.sync() }
+
+        let relaunched = viewer.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(state: viewer.state, contacts: viewer.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+        let model = SharedVaultModel(vaultID: vaultID, context: ContextProbe().context(relaunched.session))
+        await model.load()
+        #expect(model.members.first { $0.id == target.accountID }?.trust == .keysChanged)
+        #expect(model.members.first { $0.id == owner.accountID }?.trust == .verified)
+    }
+}
+
+extension SharingScreenTests {
+    /// A fingerprint code pasted from a message names an account; it is no comparison. Whoever can message the person
+    /// can send a code for an account of their own, so the safety number must still be typed or the comparison
+    /// confirmed, and a pin records how it was made, never as a scanned code.
+    @Test("a pasted fingerprint code identifies the account but verifies nothing")
+    func pastedCodeIsNotEvidence() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 631)
+        let stranger = try await household.account(seed: 632)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let invitation = InvitationModel(vaultID: vaultID, context: ContextProbe().context(owner.session))
+        invitation.accountText = OwnFingerprint(stranger.bundle).code
+        await invitation.lookUp()
+        guard case .compareFingerprint(let contact) = invitation.step else {
+            Issue.record("a pasted code skipped the comparison: \(invitation.step)")
+            return
+        }
+        #expect(contact.accountID == stranger.accountID && invitation.usesFingerprintCode)
+        await invitation.confirmFingerprint()
+        #expect(invitation.errorMessage != nil, "the code alone was taken as a comparison")
+        let pins = VerifiedContacts(store: owner.contacts, account: owner.bundle)
+        #expect(try await pins.pinned(stranger.accountID) == nil)
+
+        invitation.confirmation.comparedByEye = true
+        await invitation.confirmFingerprint()
+        #expect(try await pins.pinned(stranger.accountID)?.method == .comparedByEye)
+        guard case .chooseRole(let chosen) = invitation.step else {
+            Issue.record("expected the role step, got \(invitation.step)")
+            return
+        }
+        #expect(chosen.accountID == stranger.accountID)
+        #expect(invitation.inviteeName.contains(shortIdentifier(stranger.accountID)))
+        #expect(invitation.verificationText == "You confirmed that the two safety numbers match.")
+    }
+}
+
+extension SharingScreenTests {
+    /// A member who may write renames the shared vault "Personal" (A4, an editing member): every list must still tell
+    /// it from the account's own Personal vault, by ownership and role rather than by name.
+    @Test("a shared vault renamed Personal is labelled apart from the real Personal vault")
+    func sharedVaultNamedPersonal() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 641)
+        let member = home.members[0]
+        _ = try await member.session.renameVault(id: home.vaultID, to: "Personal")
+        try await member.session.sync()
+        try await home.owner.session.sync()
+        let model = VaultsModel(context: ContextProbe().context(member.session))
+        await model.load()
+        let named = model.rows.filter { $0.name == "Personal" }
+        #expect(named.count == 2)
+        let real = try #require(named.first { $0.isPersonal })
+        let shared = try #require(named.first { !$0.isPersonal })
+        #expect(real.label != shared.label)
+        #expect(real.badge == "Your own vault")
+        #expect(shared.badge == "Shared with you · Can edit")
+        #expect(shared.label == "Personal (Shared with you · Can edit)")
+
+        let owners = VaultsModel(context: ContextProbe().context(home.owner.session))
+        await owners.load()
+        #expect(owners.row(home.vaultID)?.badge == "Shared by you")
+    }
+}
+
+extension SharingScreenTests {
+    /// An invitation from an owner verified before (for another vault, say) is still a question for the person: it
+    /// is offered for confirmation, and nothing is joined until they say yes.
+    @Test("an invitation from a verified owner asks before joining")
+    func confirmBeforeJoining() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 651)
+        let invitee = try await household.account(seed: 652)
+        try await invitee.session.verifyContact(owner.accountID, evidence: .safetyNumber(owner.safetyNumber))
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.session.verifyContact(invitee.accountID, evidence: .safetyNumber(invitee.safetyNumber))
+        let invitation = try await owner.session.invite(invitee.accountID, to: vaultID, as: .readWrite)
+
+        let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        accept.codeText = SharingCodes.text(for: invitation)
+        await accept.read()
+        guard case .confirmJoin(let shown) = accept.step else {
+            Issue.record("joined without asking: \(accept.step)")
+            return
+        }
+        #expect(shown.accountID == owner.accountID)
+        #expect(try await !invitee.session.vaults().contains { $0.id == vaultID })
+        await accept.confirmJoin()
+        #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
     }
 }

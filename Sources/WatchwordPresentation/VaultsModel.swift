@@ -46,6 +46,22 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
 
     public var isReadOnly: Bool { sharing?.readOnlyReason != nil }
 
+    /// Whose vault this is and this account's part in it, from the session's facts rather than the name: a member who
+    /// may write can name a shared vault anything, "Personal" included (review of the account screens, finding 4).
+    /// Shown wherever a vault is named, beside the name.
+    public var badge: String {
+        if isPersonal { return "Your own vault" }
+        guard let sharing else { return "Only you" }
+        if sharing.role == .owner { return "Shared by you" }
+        return "Shared with you · " + sharing.roleName
+    }
+
+    /// The name with the badge, for menus and pickers that show one line.
+    public var label: String { "\(name) (\(badge))" }
+
+    /// Whether other accounts can read what is saved here.
+    public var isShared: Bool { sharing != nil }
+
     /// What the row says under the name.
     public var detail: String {
         if isPersonal { return "Your own vault. It is never shared." }
@@ -61,6 +77,20 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
         isPersonal = info.isPersonal
         createdAt = info.createdAt
         self.sharing = sharing
+    }
+}
+
+extension VaultRow {
+    /// Every vault the account can open, with each shared vault's standing: the one way a screen lists vaults, so
+    /// every list labels them alike (`badge`). Sharing facts that cannot be read leave a vault unlabelled as shared
+    /// only if the session reports no sharing at all.
+    public static func load(from session: VaultSession) async throws -> [VaultRow] {
+        let vaults = try await session.vaults()
+        var shared: [UUID: VaultSharing] = [:]
+        for id in (try? await session.sharedVaultIDs()) ?? [] {
+            if let status = try? await session.sharedVaultStatus(id) { shared[id] = VaultSharing(status) }
+        }
+        return vaults.map { VaultRow($0, sharing: shared[$0.id]) }
     }
 }
 
