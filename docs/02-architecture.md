@@ -472,8 +472,10 @@ other known stream has acknowledged merging it and some listed snapshot covers i
 deletes one of its own snapshots only when another listed snapshot covers everything it does. A snapshot's contents
 are trusted only as far as their signature: existing devices never delete anything because a snapshot omits it.
 
-**Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and replays the log. On a
-healthy device it changes nothing; on one whose file was rolled back it restores the newest versions.
+**Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and the erasures it has merged,
+and replays the log. On a healthy device it changes nothing; on one whose file was rolled back it restores the newest
+versions. A shared vault's engine, which has a judge and a whole log, rebuilds the erasures from the log as well
+(§8.9, S40).
 
 **Revoked devices.** The keyring tells the engine which devices are revoked (`SyncKeyring.retiredAuthors`, §7.8).
 From then on the engine does not read their objects at all (`SyncReport.retiredObjects`; staged ones are dropped
@@ -1259,13 +1261,15 @@ has not been run.
 **What the session keeps** per shared vault: the `MembershipLedger`, at most one saved `RotationPlan`, the records it
 proposed and has not seen adopted, and a **stream index** (`SharedStreamIndex`): for every segment of every device's
 stream in the vault, the digest of the object (SHA-256 of its name and envelope), the account whose keys signed it,
-and the record versions it carried. All of it goes through the `SharingStateStore` port as blobs, each signed by the
+the record versions it carried, and the digest of every value it carried that its stream had not carried before and
+whose stamp names that stream's device (format 2, S36); and the devices a version is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
 account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
 account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
 anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Pins live behind `VerifiedContactStore`.
 In-memory implementations serve tests; `SQLiteSharingStore` (`sharing.sqlite`, both ports) is the production one.
 A vault key received through a grant is stored like any other, as a `vaultKeyWrap` row under the keyset, with a
-directory row when the vault is new on the device; the key a shared vault's records are sealed under is the one the
+directory row when the vault is new on the device; a key whose ID the device already holds for another vault is
+refused (`keyIDInUse`, S38), because key IDs are public and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
 chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission` (in
 `writableVaultKey`, so every write path asks: save, move, copy, rename, conflict resolution). Deleting a shared vault
 is the owner's and also proposes `deleteVault`; a member leaves instead.
@@ -1283,7 +1287,8 @@ passes the owner it knows for the vault ID, the account itself for its own vault
 refused names remembered), member keys compared with the pins, proposals settled, the current key fetched if the
 chain entitles this account to it, and the device registry of every account the chains list or listed fetched from
 `account/<id>/registry/` and evaluated from the one genesis entry signed by the key the chain gives for that account,
-following its newest password change. Then each shared vault's log runs with the judge, publishing only if this
+following its newest password change. A registry is evaluated once per signing key the chains give an account, and
+each vault uses the one its own chain anchors (S39). Then each shared vault's log runs with the judge, publishing only if this
 account may write (a read-only or former member merges and publishes nothing, `sync(publishing:)`), and with
 `maintainsLog` off: a shared vault writes no snapshots and collects no segments, because a cut is judged against the
 departing account's own segments (§8.8, "a departed account's log"). After the logs: a saved plan continued, owed
@@ -1294,8 +1299,9 @@ logs download.
 **Verifying** (`SyncKeyring.verify`, `sharedVerify`): an object of a shared vault must carry the dual signature of a
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
 whose permission ended, the key in the record that ended it), and that account's standing must not be
-`nothingCounts`. A snapshot needs an account that may write now. Devices revoked from any member's account are not
-read.
+`nothingCounts`, nor that account one whose chain keys differ from this device's pin (`MemberKeyCheck.substituted`).
+A snapshot needs an account that may write now. Devices revoked from a member's account, as the vault's chain anchors
+it, are not read.
 
 **The write cut over sync's objects** (S28). The cut a removal, departure or demotion carries is, for each device
 whose segments the departing account's keys signed, the furthest sequence through which the signing device holds every
@@ -1309,33 +1315,49 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   with the chain through that sequence equal to the cut's. One beyond it is held aside; one whose chain cannot be
   checked yet (the stream is not all here) makes the stream wait, as at a gap.
 - *Applied to work.* Every remote version, from a segment or a snapshot and whoever sealed it, is admitted only if
-  every value it holds counts: its own revision and those of each group's stamp, each kept and retained value and each
-  note line, read through `ItemMerge.canonical`. A value's account is the signer of the segment of its writing
-  device's own stream that first carried that version (a device ID can be listed by two registries; a signature is
-  one account's); its standing decides, and for an ended account, whether that segment is inside the cut. A version
-  this device never saw in its writer's own stream counts only if every account whose registry lists the device may
-  write now, or if it is carried in a version sealed under a key the chain introduced at or after the record that
-  ended that account's permission, by a writer whose work counts: no grant of that key opens without the record, so
-  that writer judged the value against it. That is how a member invited after a removal, who holds none of the
-  departed member's keys and can open none of their segments, counts what the cut held: it reads it in the versions
-  rotation sealed again. Segments sealed under a key this account was never entitled to are passed over for that
-  reason (`WriteJudge.passesOverSegment`).
+  its own revision counts (the segment of its writer's stream that first carried it, for the account that signed
+  that segment) and every value it holds counts: each group's values, kept and retained values, the field order and
+  each note line, read through `ItemMerge.canonical`, and the vault's description, attributed to the write that chose
+  it (`VaultMetadata.writtenBy`, kept by every re-seal, S37). A value is judged by its **bytes, stamp included**
+  (`ItemMerge.attributedValues`), never by the revision its stamp names, which its writer chose (S36): it counts
+  through a segment of the stream of the device its stamp names that carried those exact bytes, if that segment
+  counts (its signer may write, or it is inside the cut). A value naming this device that none of its segments
+  carried counts only if its own copy of the record holds it: a device knows what it wrote, so a value relabelled
+  with its revision is refused there at once. A value carried by no segment held here waits: the version is held
+  aside and the device its stamp names is remembered (`SharedStreamIndex.awaiting`), and a new segment of that
+  device's stream replays the log. The one exception is a member who joined after a rotation, who cannot open the
+  segments that carried older values: for them a version sealed under a key introduced at or after the latest record
+  that ended anyone's permission to write vouches for such values (its sealer held that record and every earlier
+  segment, and judged them), provided the device is listed by an account whose work can count. Segments sealed under a
+  key this account was never entitled to are passed over for that reason (`WriteJudge.passesOverSegment`). A tombstone's
+  segment carries what applying it writes (`ItemMerge.attributedSettlement`), so a version kept after a deletion is
+  judged like any other.
 - *Taken out.* When the head changes, every local version of the vault that no longer counts is held aside and taken
   out of the store, and the log is replayed with the judge (a reconciling sync), so that each record is rebuilt from
-  the versions that count. Receiving a key, or a segment inside a cut that was missing, replays it again.
+  the versions that count. The replay rebuilds the engine's erasures from the log too, so a deletion whose segment no
+  longer counts erases nothing (S40). Receiving a key, a segment inside a cut that was missing, or a new segment of a
+  device a version is waiting on replays it again; the need is written down by clearing the saved index's head, and the
+  index is saved before anything a recorded segment lets count is merged, so a restart in between still replays (S41).
+  An index refused on load is rebuilt by a replay before anything is taken out against it.
 
 What is held aside is kept in the sync state's quarantine (`quarantinedVersions`, `SyncReport.heldAside`), never
 merged, never published by the device and discarded only by the person; the objects it came from are judged again
 on every replay of the log, so a write made while read-only counts once its author may write. A version that cannot be merged because the join would be
 over the payload limit is quarantined the same way (Y37).
 
-**Limits** (also `06-adversarial-review.md` §I, S32 to S35):
+**Limits** (also `06-adversarial-review.md` §I, S32 to S35 and S42, S43):
 
 - A note line's removal carries no revision, so a former member's late removal of a line, merged by a device before it
   knew and published in that device's own version, is not told apart from the device's own (S32).
-- A device ID listed by more than one member's registry makes values stamped with it count only while every listing
-  account's work counts: an insider who lists another member's device in their own registry makes that member's
-  later values depend on their own standing once they leave (S33, insider denial of service like S11).
+- A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
+  through vouching count only while every listing account's work can count (S33, insider denial of service like S11).
+- Vouching is for a member who joined after a rotation, and only under a key introduced at or after the latest record
+  that ended a permission: a member invited after a demotion, with no rotation since, holds aside versions carrying
+  values from before the last rotation until the next one seals them again, and a store withholding one device's
+  stream from another delays every version carrying that device's values there (S42). Rotate after a demotion before
+  inviting.
+- An item's `history` and `discards` name no writer, so a former member's late discard, merged by a device before it
+  knew, removes retained values (values already superseded by an edit) from that device's copy (S43, beside S32).
 - A member who joined after a rotation reads records sealed before it only once a device that holds the old key has
   sealed them again (rotation does so for every record a member who may write holds), and a version of a shared vault
   that does not open here is held aside, not merged (S34).

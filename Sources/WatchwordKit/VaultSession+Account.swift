@@ -665,6 +665,7 @@ extension VaultSession {
                 result.append((try sealItem(written, vaultKey: vaultKey, account: updated), row.version))
             case .vaultMetadata:
                 guard var metadata = try? openMetadata(row, keys: keys) else { continue }
+                metadata.writtenBy = metadata.writtenBy ?? Self.origin(row)
                 metadata.version = revision.version
                 result.append((try sealMetadata(metadata, vaultKey: vaultKey, account: updated), row.version))
             default:

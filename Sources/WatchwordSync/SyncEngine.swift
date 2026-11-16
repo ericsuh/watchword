@@ -213,13 +213,15 @@ public actor SyncEngine {
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
-            // are facts the log also holds, and keeping them stops a replay from putting an erased record back.
+            // are facts the log also holds, and keeping them stops a replay from putting an erased record back. Not
+            // in a vault with a judge: its log is whole (no snapshots, no collection), and an erasure merged before
+            // its author's work stopped counting must not outlive the replay that holds its segment aside (S40).
             let kept = state
             state = SyncState(vaultID: vaultID)
             state.nextSequence = kept.nextSequence
             state.publishedAcknowledgement = kept.publishedAcknowledgement
             state.lastPublishedSequence = kept.lastPublishedSequence
-            state.erasures = kept.erasures
+            if judge == nil { state.erasures = kept.erasures }
         }
         state.nextSequence = max(state.nextSequence, 1)
         var listing = Listing()

@@ -482,11 +482,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `vaultKeyWrap` rows like any other; their identity comes from where the grant is filed.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
-- **Every remote version is judged value by value** (`judgeAdmits`): its own revision and every stamp, kept and
-  retained value and note line, each for the account whose work it is, attributed by the first segment of the
-  writing device's own stream that carried it (`SharedStreamIndex`). A version that does not count is held aside in
-  the quarantine and never published; a change of head takes out what no longer counts and replays the log. Do not
-  judge by who sealed a version, and do not keep what was merged "for good" (S28).
+- **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
+  (`ItemMerge.attributedValues`; a vault's description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*,
+  through a segment of the stream of the device the stamp names that carried those bytes (`SharedStreamIndex`); never
+  by the revision a stamp names, which its writer chose (S36). A value naming this device that it never published
+  counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
+  does not count is held aside in the quarantine and never published; a change of head takes out what no longer
+  counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
+  (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
+- Member registries are anchored per vault (`memberRegistries`, S39), and a vault key whose ID this device holds for
+  another vault is refused (`keyIDInUse`, S38).
 - A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
   `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
   judge a cut.

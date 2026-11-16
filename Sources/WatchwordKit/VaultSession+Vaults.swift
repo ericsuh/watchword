@@ -34,6 +34,10 @@ public struct VaultMetadata: Codable, Hashable, Sendable {
     public var modifiedAt: Date
     /// Lamport version, bound into the record's authenticated data. Assigned by the vault.
     public var version: UInt64
+    /// The write that chose this description, when the row was sealed again rather than written (a rotation's
+    /// re-seal, a password change, the merge of two copies at one version); `nil` means the row's own version and
+    /// device. A shared vault's judge attributes the description to it (review finding S37).
+    public var writtenBy: Revision? = nil
 }
 
 public enum VaultMetadataCodec {

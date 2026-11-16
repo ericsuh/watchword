@@ -391,7 +391,12 @@ device, a member invited afterwards included, while what the cut held counts eve
 member, with no rotation; a grant of a stranger's key filed under the current key's ID, alone and ahead of the genuine
 one; segments and membership records copied from one shared vault into another; a stream index altered in the sharing
 state, and another account's saved ledger planted there (A8); a removal interrupted by `lock()`
-while publishing its grants, resumed and completed by the next sync. Scenarios S3 and S4 through the session are
+while publishing its grants, resumed and completed by the next sync. From the integration's review
+(`AdversarialSharedVaultAttributionTests.swift`): a late value relabelled as a remaining member's revision, and one
+back-dated to its author's in-cut revision (S36); a late rename stored again by an unaware member (S37); a late
+permanent deletion merged before the removal was known (S40); an invitation whose key ID is another vault's (S38); two
+vaults listing one account with different keys (S39); a replay asked for by a late stream, cut short by a lock and
+run after a relaunch (S41). Scenarios S3 and S4 through the session are
 `SharedVaultScenarioTests` (`WatchwordKitTests`).
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and

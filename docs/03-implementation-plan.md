@@ -280,13 +280,20 @@ session API a UI calls (verify, share, invite, accept, leave, change role, remov
 quarantining a version whose merge cannot be sealed (Y37); scenarios S3 and S4 through `VaultSession`s of different
 accounts over `InMemorySyncTransport` (`SharedVaultScenarioTests`) and the adversarial suite "shared vaults through the
 session" (a removed and a demoted member's late writes, a forged grant, objects swapped between vaults, a rotation
-interrupted by `lock()`).
+interrupted by `lock()`). The integration's review (`06-adversarial-review.md` §I, S36 to S43) found S28 still open
+through stamps a writer chooses, the vault's description and erasures; values are now judged by their bytes against
+the segment that carried them, descriptions by the write that chose them, and a replay rebuilds erasures. Key IDs
+another vault holds are refused, member registries are anchored per vault, and a replay that is asked for is written
+down.
 
 **Still open:**
 
 - A macOS run of all of it against CryptoKit, and of `SQLiteSharingStore` at all.
 - Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself.
-- Note-line removals are not attributed to their writer (S32), which needs a stamp in `NoteText`.
+- Note-line removals, an item's `history` and its `discards` are not attributed to a writer (S32, S43), which needs
+  stamps in the merge's model.
+- A member invited after a demotion with no rotation since holds aside what only vouching could attribute (S42):
+  rotate on demotion, or before inviting, when the UI is built.
 - The transports' own sharing: `CKShare` with `UICloudSharingController`/`NSSharingService`, the folder-share flow
   for the file transport (the `ShareAccessControl` port is the seam), and the key directory's adapter (the account
   record; `KeyBundleDirectory` is the port, `VaultSession.publicKeyBundle` what it publishes).

@@ -115,6 +115,7 @@ extension VaultSession {
         if mayWrite {
             for vaultID in sharedVaultsNeedingReplay() {
                 guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
+                await prepareSharedReplay(vaultID)
                 let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
                 let second = try await engine(vaultID).sync(reconcile: true, publishing: shared.publishing)
                 sharedEngineDidRun(vaultID, reconciled: true, report: second)
@@ -562,6 +563,8 @@ struct VaultMetadataMerger: RecordMerger {
         // The same version from a device that orders later (or over a damaged row): stored again above both, by
         // this device, so versions still only move forward.
         var copy = incoming
+        // Still the remote writer's description: in a shared vault the judge attributes it to them (review S37).
+        copy.writtenBy = incoming.writtenBy ?? Revision(version: remote.version, device: remote.deviceID)
         copy.version = local.version + 1
         return .replace(try await sealer.sealMetadata(copy))
     }

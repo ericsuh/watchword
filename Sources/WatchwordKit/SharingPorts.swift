@@ -96,4 +96,8 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     case notOwner
     /// The current vault key has not been received yet (its grant is not on the transport, or not for this account).
     case awaitingKey(UUID)
+    /// A vault key whose ID this device already holds for another vault (review finding S38). Key IDs are public
+    /// (grant names, envelope headers) and, for a shared vault, chosen by its owner: adopting one would displace the
+    /// other vault's key. Refused before anything is stored or made resident.
+    case keyIDInUse(UUID)
 }

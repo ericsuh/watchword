@@ -18,9 +18,20 @@ struct SharedVault: Sendable {
     /// Membership objects refused for good (`malformed`, `invalid`), so a flood is paid for once per session.
     var refusedNames: Set<String> = []
     var keyCheck: MemberKeyCheck?
-    /// Something this pass learnt changes which writes count: replay the vault's log with the judge.
+    /// Something this pass learnt changes which writes count: replay the vault's log with the judge. In memory; what
+    /// must outlast a restart is also written down by clearing `index.judgedHead` (review finding S41).
     var needsReconcile = false
     var indexChanged = false
+    /// The saved index was refused or missing, so it is being rebuilt from the log: what no longer counts is taken
+    /// out only once the replay has rebuilt it, never judged against an empty index.
+    var indexRebuilding = false
+}
+
+/// An account's device registry as one vault's chain anchors it: the account, and the signing key that chain lists
+/// for it (review finding S39). Two vaults may list different keys under one account ID; each judges by its own.
+struct MemberRegistryAnchor: Hashable, Sendable {
+    var accountID: UUID
+    var signingKey: [UInt8]
 }
 
 /// The session's sharing state: the settings, the shared vaults once loaded, and the other members' device
@@ -29,8 +40,8 @@ struct SharingRuntime: Sendable {
     var settings: SharingSettings?
     var vaults: [UUID: SharedVault] = [:]
     var loaded = false
-    /// Other accounts' registries, evaluated from the transport, by account.
-    var registries: [UUID: DeviceRegistryState] = [:]
+    /// Other accounts' registries, evaluated from the transport, by the anchor a vault's chain gives them.
+    var registries: [MemberRegistryAnchor: DeviceRegistryState] = [:]
 }
 
 /// A contact as the key directory gives it, with what this device knows of it: the fingerprint to compare out of
@@ -164,9 +175,11 @@ extension VaultSession {
                 } else {
                     // Refused whole (A8, or damage): rebuilt from the log.
                     vault.needsReconcile = true
+                    vault.indexRebuilding = true
                 }
             } else {
                 vault.needsReconcile = true
+                vault.indexRebuilding = true
             }
             loaded[vaultID] = vault
         }
@@ -346,7 +359,10 @@ extension VaultSession {
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         let ledger = try sharedVault(vaultID).ledger
         let state = ledger.state
-        guard !state.isDeleted, state.member(account.accountID) != nil, keys.vaultKeys[state.vaultKeyID] == nil
+        // Held for this vault, not merely under this ID: another vault's key with the same ID is no key of this one
+        // (S38), and `adoptVaultKey` refuses the grant's.
+        guard !state.isDeleted, state.member(account.accountID) != nil,
+            keys.vaultKeys[state.vaultKeyID]?.vaultID != vaultID
         else { return false }
         let grants = try await listSharingObjects(
             prefix: SharingObjectLocation.grantPrefix(
@@ -357,16 +373,44 @@ extension VaultSession {
             return false
         }
         try await adoptVaultKey(key, account: account, epoch: epoch)
-        // Records sealed under this key, held aside while it was missing, can be judged now.
-        sharing.vaults[vaultID]?.needsReconcile = true
+        // Records sealed under this key, held aside while it was missing, can be judged now; written down in the
+        // index too, so that a restart before the replay still replays (S41).
+        requestReplay(vaultID)
         return true
+    }
+
+    /// Asks for the vault's log to be replayed with the judge: in this sync, and, through the saved index, in the
+    /// next one if this one does not get that far (review finding S41).
+    func requestReplay(_ vaultID: UUID) {
+        guard sharing.vaults[vaultID] != nil else { return }
+        sharing.vaults[vaultID]?.needsReconcile = true
+        sharing.vaults[vaultID]?.index.judgedHead = nil
+        sharing.vaults[vaultID]?.indexChanged = true
+    }
+
+    /// Refuses a vault key whose ID this device already holds, resident or stored, for another vault (S38).
+    func checkKeyIDFree(_ keyID: UUID, for vaultID: UUID) async throws {
+        if let resident = keys?.vaultKeys[keyID], resident.vaultID != vaultID {
+            throw SharedVaultError.keyIDInUse(keyID)
+        }
+        if let stored = try await store.record(RecordKey(recordID: keyID, kind: .vaultKeyWrap)),
+            stored.vaultID != vaultID
+        {
+            throw SharedVaultError.keyIDInUse(keyID)
+        }
     }
 
     /// Stores a vault key received through a grant as this account's own (a `vaultKeyWrap` row, and a directory row
     /// if the vault is new here), and makes it resident.
     func adoptVaultKey(_ vaultKey: VaultKey, account: AccountRecord, epoch: UInt64) async throws {
-        let keys = try requireKeys(since: epoch)
         let vaultID = vaultKey.vaultID
+        do {
+            try await checkKeyIDFree(vaultKey.key.keyID, for: vaultID)
+        } catch {
+            vaultKey.zeroise()
+            throw error
+        }
+        let keys = try requireKeys(since: epoch)
         var change = StoreChange()
         if try await store.record(RecordKey(recordID: vaultKey.key.keyID, kind: .vaultKeyWrap)) == nil {
             let wrap = StoredRecord(
@@ -480,9 +524,19 @@ extension VaultSession {
         let joined = try incoming.accept(
             membership: records.map(\.contents), grants: grants, as: keys.keyset,
             continuing: sharing.vaults[vaultID]?.ledger)
+        // Before anything is held: a chain whose key ID is another vault's here would displace that vault's key
+        // (S38). Its owner chose the ID, and key IDs are public.
+        do {
+            try await checkKeyIDFree(joined.vaultKey.key.keyID, for: vaultID)
+            _ = try requireKeys(since: epoch)
+        } catch {
+            joined.vaultKey.zeroise()
+            throw error
+        }
         var vault = sharing.vaults[vaultID] ?? SharedVault(ledger: joined.ledger)
         vault.ledger = joined.ledger
         vault.needsReconcile = true
+        vault.index.judgedHead = nil
         sharing.vaults[vaultID] = vault
         try await adoptVaultKey(joined.vaultKey, account: account, epoch: epoch)
         try await saveSharedVault(vaultID)
@@ -674,6 +728,8 @@ extension VaultSession {
                     ItemMerge.written(canonical, as: revision), replacing: row, vaultKey: vaultKey, account: account)
             case .vaultMetadata:
                 guard var metadata = try? openMetadata(row, keys: current) else { continue }
+                // Sealed again, not written: the description stays the work of whoever chose it (S37).
+                metadata.writtenBy = metadata.writtenBy ?? Self.origin(row)
                 metadata.version = revision.version
                 let sealed = try sealMetadata(metadata, vaultKey: vaultKey, account: account)
                 try await writer(for: account).commit(

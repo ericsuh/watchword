@@ -16,10 +16,11 @@ struct VersionKey: Hashable, Sendable {
 /// What this device has seen of each device's stream in one shared vault: for every segment, the digest of the object
 /// and the account whose keys signed it, and which record versions it carried (docs/02-architecture.md §8.8).
 ///
-/// Two questions are answered from it. **Whose work is a value?** The account that signed the segment of the
-/// writing device's own stream that first carried the version the value was written in: a value's `GroupStamp`
-/// names a device and a version, and a device ID alone could be listed by more than one account's registry, while a
-/// signature is one account's. **Is a segment inside a write cut?** The cut commits to a device's stream up to a
+/// Two questions are answered from it. **Whose work is a value?** The account that signed a segment of the stream of
+/// the device the value's stamp names that carried the value's exact bytes, stamp included (`valueCarriers`, review
+/// finding S36): the stamp is the writer's claim, so a value is that device's work only where that device's own stream
+/// carried it, and a device ID alone could be listed by more than one account's registry, while a signature is one
+/// account's. A version's own revision is attributed the same way, through the segment that first carried it. **Is a segment inside a write cut?** The cut commits to a device's stream up to a
 /// sequence number by a chain of these digests, which every device recomputes from what it holds.
 ///
 /// Local state like the saved ledger, so it is signed by the account's own key under `SignatureDomain.membership`
@@ -30,10 +31,19 @@ struct SharedStreamIndex: Sendable, Hashable {
         var digest: [UInt8]
         var account: UUID
         var entries: [VersionKey]
+        /// The values this segment carried that an earlier segment of the same stream had not (review finding S36):
+        /// each the digest of an `AttributedValue`, filed under the device its stamp names.
+        var values: [ValueKey] = []
+    }
+
+    /// A value as the index files it: the device its stamp names, and SHA-256 of its encoding with the whole stamp.
+    struct ValueKey: Sendable, Hashable {
+        var device: UUID
+        var digest: [UInt8]
     }
 
     static let magic: [UInt8] = Array("WWSI".utf8)
-    static let formatVersion: UInt8 = 1
+    static let formatVersion: UInt8 = 2
     static let maximumLength = 64 << 20
 
     /// By device, then sequence number.
@@ -43,6 +53,13 @@ struct SharedStreamIndex: Sendable, Hashable {
     var judgedHead: [UInt8]?
     /// The lowest sequence of each device's stream that carried each version.
     private(set) var firstCarrier: [UUID: [VersionKey: UInt64]] = [:]
+    /// For each value, the streams that carried it and the lowest sequence of each. A value counts as the work of the
+    /// device its stamp names only through these: its bytes, stamp included, in a segment of a stream whose signer's
+    /// work counts at that sequence (S36, S37).
+    private(set) var valueCarriers: [ValueKey: [UUID: UInt64]] = [:]
+    /// Devices a version was held aside for because a value naming them was carried by none of their segments here:
+    /// a new segment of theirs can make it count, so recording one asks for a replay (`judgedHead` cleared).
+    var awaiting: Set<UUID> = []
 
     init() {}
 
@@ -55,6 +72,14 @@ struct SharedStreamIndex: Sendable, Hashable {
         for entry in segment.entries where (firstCarrier[device]?[entry] ?? .max) > sequence {
             firstCarrier[device, default: [:]][entry] = sequence
         }
+        for value in segment.values where (valueCarriers[value]?[device] ?? .max) > sequence {
+            valueCarriers[value, default: [:]][device] = sequence
+        }
+    }
+
+    /// Whether this device's stream already carried `value` at or before `sequence`.
+    func carries(_ value: ValueKey, device: UUID, atOrBefore sequence: UInt64) -> Bool {
+        (valueCarriers[value]?[device] ?? .max) <= sequence
     }
 
     func segment(device: UUID, sequence: UInt64) -> Segment? {
@@ -117,8 +142,13 @@ struct SharedStreamIndex: Sendable, Hashable {
                 for entry in segment.entries {
                     out += SharedBytes.bytes(entry.recordID) + [entry.kind] + SharedBytes.littleEndian(entry.version)
                 }
+                out += SharedBytes.littleEndian32(UInt32(segment.values.count))
+                for value in segment.values { out += SharedBytes.bytes(value.device) + value.digest }
             }
         }
+        let waiting = awaiting.sorted { $0.precedes($1) }
+        out += SharedBytes.littleEndian32(UInt32(waiting.count))
+        for device in waiting { out += SharedBytes.bytes(device) }
         return out + (try keyset.sign(out, domain: .membership))
     }
 
@@ -166,10 +196,24 @@ struct SharedStreamIndex: Sendable, Hashable {
                     }
                     entries.append(VersionKey(recordID: record, kind: kind[0], version: version))
                 }
+                guard let valueCount = reader.uint32(), Int(valueCount) <= reader.remaining / 48 else { return nil }
+                var values: [ValueKey] = []
+                values.reserveCapacity(Int(valueCount))
+                for _ in 0..<valueCount {
+                    guard let stampDevice = reader.uuid(), let valueDigest = reader.read(32) else { return nil }
+                    values.append(ValueKey(device: stampDevice, digest: valueDigest))
+                }
                 index.record(
                     device: device, sequence: sequence,
-                    segment: Segment(digest: digest, account: signer, entries: entries))
+                    segment: Segment(digest: digest, account: signer, entries: entries, values: values))
             }
+        }
+        guard let waitingCount = reader.uint32(), Int(waitingCount) <= reader.remaining / 16 else { return nil }
+        var previousWaiting: UUID?
+        for _ in 0..<waitingCount {
+            guard let device = reader.uuid(), previousWaiting.map({ $0.precedes(device) }) ?? true else { return nil }
+            previousWaiting = device
+            index.awaiting.insert(device)
         }
         guard reader.remaining == 0 else { return nil }
         return index
