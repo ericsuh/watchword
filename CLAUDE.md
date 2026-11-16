@@ -270,7 +270,10 @@ lists what is open (file protection and the screens, Credential Exchange, restor
   calling `lock()`, never after.
 - **Stale copies are refused.** The engine remembers the highest version of each item it has seen; an older copy
   (or one from before a trash or deletion) changes nothing: `update` returns `false`, `scan` returns `.stale`. A
-  scan whose item changed while its requests were in flight records nothing.
+  scan whose item changed while its requests were in flight records nothing. The one way past it is `replace`, for a
+  row the store holds in place of the one shown without being newer (a shared vault's take-out rebuilt the item,
+  S47): the session tells them apart by the row's version *and* device, and keeps an item taken out from being
+  forgotten until its replay has run.
 - "Clear" is about every password in the item: more than 16 password fields is `incomplete`, and two password
   fields sharing an ID share the worse result. An unknown result is never "not breached".
 - The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts; bindings). They are
@@ -561,9 +564,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (`ItemMerge.attributedValues`, note-line removals, discards and history entries included, S32 and S43; a vault's
   description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*, through a segment of the stream of the
   device the stamp names that carried those bytes (`SharedStreamIndex`); never by the revision a stamp names, which its
-  writer chose (S36). Then its clock (`knowledgeCounts`, S44): an edit it contains of a device whose account's work
-  does not all count must have been published in a segment that counts, so a version built on a late write is held
-  aside with it. A value naming this device that it never published
+  writer chose (S36). Then its clock (`knowledgeCounts`): every edit it contains, of any device but its own writer's,
+  must have been published in a segment of that device's stream that counts, so a version built on a late write is
+  held aside with it (S44), and one claiming a current member's edits their stream has not published waits for it
+  (S46; a claim beyond this device's own published edits is refused). A tombstone's erasure summary is judged the same
+  way before it is applied or remembered (`WriteJudge.admitsErasure`, S45): a deletion built on a late write is held
+  aside and the item stays. A value naming this device that it never published
   counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down

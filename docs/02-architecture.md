@@ -1397,11 +1397,17 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   each note line, each removal of a line, each resolution's discard and each history entry once per write that
   recorded it (S32, S43), read through `ItemMerge.canonical`, and the vault's description, attributed to the write that
   chose it (`VaultMetadata.writtenBy`, kept by every re-seal, S37). A removal, discard or entry that names no writer is
-  the work of the row carrying it. And every edit the version's clock says it contains, of a device whose account's
-  work does not all count, must have been published in a segment that counts (a version of the record at or above that
-  count, `knowledgeCounts`, S44): a version built on a late write holds what that write had seen, and an edit made on
-  it supersedes what its writer was shown only through it, so it is held aside like the write
-  (`10-sync-correctness.md` §9). A value is judged by its **bytes, stamp included**
+  the work of the row carrying it. And every edit the version's clock says it contains, of any device but its own
+  writer's, must have been published in a segment of that device's stream that counts (a version of the record at or
+  above that count, `knowledgeCounts`): a version built on a late write holds what that write had seen, and an edit
+  made on it supersedes what its writer was shown only through it, so it is held aside like the write (S44); and a
+  claim to have seen a current member's edits that their stream has not published is a claim about edits that do not
+  exist yet, which would supersede them when they are made, so the version waits for that stream (S46; one about this
+  device's own edits is refused). A current member's device whose stream this device cannot read from its first
+  segment is not checked. A tombstone is judged the same way before it is applied or remembered
+  (`WriteJudge.admitsErasure`): its erasure summary is its author's clock, and one built on a late write would erase
+  what its author was shown only through it, so it is held aside and the item stays (S45; `10-sync-correctness.md`
+  §9). A value is judged by its **bytes, stamp included**
   (`ItemMerge.attributedValues`), never by the revision its stamp names, which its writer chose (S36): it counts
   through a segment of the stream of the device its stamp names that carried those exact bytes, if that segment
   counts (its signer may write, or it is inside the cut). A value naming this device that none of its segments

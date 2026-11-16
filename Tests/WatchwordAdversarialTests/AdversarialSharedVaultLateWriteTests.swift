@@ -195,13 +195,15 @@ extension AdversarialSharedVaultTests {
     }
 
     /// Threat: review finding S44. A member demoted to read-only (A4 until then) whose client has not been shown the
-    /// record, with a store (A1) that withholds it from them and from another member's device, and that also holds
-    /// back the owner's stream from that device for a while. The owner renames the bank item; the demoted member's
-    /// client merges the rename and writes a late title over it, its stamp saying it had seen the owner's. The other
-    /// member's device merges only the late title, and the person renames the item again. That edit was made on a
-    /// copy that held the late write, so its stamp claims to have seen the owner's rename too, and would supersede it
-    /// everywhere: titles have no history, and the owner's would be gone, though the late write counts nowhere. A
-    /// version whose clock holds an edit that does not count is built on it, and is held aside like the edit.
+    /// record, with a store (A1) that withholds it from them and from another member's device. The owner renames the
+    /// bank item; the demoted member's client merges the rename and writes a late title over it, its stamp saying it
+    /// had seen the owner's. The other member's device merges both in one sync, so the person is shown only the late
+    /// title, and renames the item again. That edit was made on a copy that held the late write, so its stamp has seen
+    /// the owner's rename through it, and would supersede it everywhere: titles have no history, and the owner's
+    /// would be gone, though the late write counts nowhere. A version whose clock holds an edit that does not count is
+    /// built on it, and is held aside like the edit. (Before S46 the test also held the owner's stream back from the
+    /// other member's device, which merged the late title alone; a version claiming edits that device has not been
+    /// shown published now waits for them, so it no longer merges it at all.)
     @Test("a demoted member's late edit lends its knowledge to no edit made on top of it")
     func lateKnowledgeOfADemotedMember() async throws {
         let household = SharedVaultHousehold()
@@ -218,8 +220,6 @@ extension AdversarialSharedVaultTests {
         await memberView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
         try await owner.session.changeRole(of: demoted.accountID, in: vaultID, to: .readOnly)
 
-        let ownerDevice = try #require(await owner.session.deviceIDForTest())
-        await memberView.withholdNew(under: SyncObjectLocation.vaultPrefix(vaultID) + "log/\(ownerDevice.uuidString)/")
         var renamed = try await owner.session.item(id: bank.id)
         renamed.title = "Owner's title"
         try await owner.session.save(renamed)

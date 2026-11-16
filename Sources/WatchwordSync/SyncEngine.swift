@@ -449,7 +449,19 @@ public actor SyncEngine {
                         continue
                     }
                     if waitsForJudge { break }
+                    let keyID = try EnvelopeHeader.parse(
+                        object.object.envelope, expecting: object.location.envelopeKind
+                    ).header.keyID
                     for entry in payload.entries {
+                        if entry.isDeletion, let judge,
+                            !(try await judge.admitsErasure(entry, in: object.location, sealedUnder: keyID))
+                        {
+                            // What its author had seen does not all count (review finding S45): kept for the person,
+                            // never applied, and judged again by a replay.
+                            report.heldAside.append(entry.key)
+                            try await syncState.quarantine(entry, vaultID: vaultID)
+                            continue
+                        }
                         try await apply(
                             entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
                             highWater: &highWater, report: &report)

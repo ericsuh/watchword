@@ -285,7 +285,8 @@ through stamps a writer chooses, the vault's description and erasures; values ar
 the segment that carried them, descriptions by the write that chose them, and a replay rebuilds erasures. Key IDs
 another vault holds are refused, member registries are anchored per vault, and a replay that is asked for is written
 down. Note-line removals, discards and history entries name the write that made them and are judged like values
-(S32, S43), and a version whose clock holds an edit outside a cut is held aside with it (S44).
+(S32, S43), and a version whose clock holds an edit outside a cut is held aside with it (S44), as is one claiming
+edits a current member has not published (S46) and a tombstone whose erasure summary does either (S45).
 
 **Still open:**
 

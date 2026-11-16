@@ -399,10 +399,15 @@ the cut late must be able to reach the state of one that knew it all along. Both
 (2) every attributed value it holds counts (`ItemMerge.attributedValues`): each group's values, conflicts and retained
 values and the field order by their stamps, each note line by its ID, each removal of a line by its revision, each
 discard by its resolution's revision, each history entry once per write that recorded it — judged by their bytes,
-stamp included, against the segment that carried them (S36); and (3) every edit its clock says it contains, of a
-device whose account's work does not all count, was published in a segment that counts (S44). Call it `J(v)`. It is a
-function of the version's bytes, the accepted membership head and the stream index, which every device holding the
-same segments computes alike; it does not depend on when or where the version was merged.
+stamp included, against the segment that carried them (S36); and (3) every edit its clock says it contains, of any
+device but its own writer's, was published in a segment of that device's stream that counts: one carried a version of
+the record at or above the clock's count (S44 for a device whose account's work does not all count, S46 for a current
+member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head and the stream index,
+which every device holding the same segments computes alike; it does not depend on when or where the version was
+merged. Where (3) cannot be decided yet (the claimed device's stream is not here that far) the version waits, held
+aside until that stream grows; a claim about the judging device's own edits beyond what it published is false at once.
+A current member's device whose stream this device cannot read from its first segment (collected before the vault was
+shared, or sealed under keys this account was never given, S42) is not checked, and its edits are believed as before.
 
 **Completeness: every effect of a write leaves a trace that names it.** Take a write `w` and any version `v` made, by
 any sequence of merges and updates, from a state that contains `w`'s result.
@@ -417,6 +422,20 @@ any sequence of merges and updates, from a state that contains `w`'s result.
   holds the superseding value names `w`: (3) fails. Without (3), an edit made on a copy holding a late value took the
   late writer's knowledge with it and superseded honest values its own writer was shown only through the late write
   (S44: a title, which has no history, was lost everywhere).
+- A claim with no value behind it is still knowledge. A late version that changes nothing can claim, in its clock,
+  to have seen edits of a current member's device up to a count that device has not reached; a device that merged it
+  stamped its next edit with the claim, and that edit superseded the member's edits made meanwhile, concurrent as they
+  were (S46). Under (3) the late version is not merged until the member's stream has published edits that far, so
+  any edit stamped with the claim was made by a writer who had merged those edits first: the claim had come true
+  before anyone relied on it. On a device that relied on it anyway (one that could not check, above) the version made
+  on it waits on every other device until the claim comes true, which is the weak point (review finding S48,
+  below).
+- A permanent deletion is a write too (§5): its erasure summary is its author's clock, and settling against it erases
+  what the summary covers. A device that merged a late version and then deleted the item claims what the late writer
+  had seen, and its tombstone erased honest values it had been shown only through the late write (the late value had
+  superseded them in its view, S45). Every element of a tombstone's summary is judged by (3) before the tombstone is
+  applied or remembered (`WriteJudge.admitsErasure`); one that fails is held aside like a version, so the item stays,
+  and a replay judges it again.
 - What remains unattributed is a version's dates and `version`, which hold no one's data.
 
 So `J(v)` is false for every version that holds a late write or anything built on one. Every version that holds only
@@ -443,10 +462,15 @@ Empty lists are not encoded, so lines that are shown and entries from old record
 index of an earlier format filed none of these values, so it is refused on load and rebuilt by a replay
 (`SharedStreamIndex` format 3).
 
-**What remains.** A permanent deletion's erasure summary is the deleting device's clock: if that device had merged a
-late version, the summary claims what the late writer had seen and can erase an honest version it never showed the
-person. Tombstones are judged by their segment only (review finding S45, tracked). And a former member's late version
-can claim, in its vectors, to have seen a current member's edits that do not exist yet; a device that merges it
-carries the claim in its clock, where (3) takes it on that member's word, as it takes every current member's claims
-(§6): an edit made on that copy can supersede those future edits when they arrive (S46, tracked). Neither has been
-reproduced; both were found by reading, after S44.
+**What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
+wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,
+`lateClaimOfFutureEdits`). Clause (3) can only wait for a claim about a current member, never refute it, because no
+record says when it was made: a version stamped with a claim that is false when it is written is admitted once the
+claimed device's stream has grown that far. That is safe only because an honest device applies (3) before it merges
+anything, so no honest edit carries a claim that was false when it was made; where a device cannot check (a stream it
+cannot read from its start) it believes the claim, and a store (A1) that hides a current member's whole stream from it
+can still have it launder one (review finding S48). Bounding a claim by what its writer could have seen when it wrote
+needs the segments' acknowledgement vectors in the stream index and their causal closure through segments that count.
+Two other consequences are by design and recorded in `06-adversarial-review.md` §O: everything an unaware device wrote
+on an item after merging a late version of it is held aside, including edits of other groups (S49); and a deletion
+built on a late write is held aside, so the item comes back and the person must delete it again.

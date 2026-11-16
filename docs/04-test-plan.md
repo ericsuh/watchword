@@ -409,7 +409,10 @@ vaults listing one account with different keys (S39); a replay asked for by a la
 run after a relaunch (S41). From the fourth round (`AdversarialSharedVaultLateWriteTests.swift`): a late removal of a
 note line, made through the session and from a modified client that names no writer (S32); a late discard of
 retained values, back-dated to an in-cut revision, and a late history entry naming no writer (S43); and a demoted
-member's late title, whose knowledge an unaware member's rename on top of it carried (S44). Each is merged by a
+member's late title, whose knowledge an unaware member's rename on top of it carried (S44). From the fifth round
+(`AdversarialSharedVaultLateKnowledgeTests.swift`): a late version claiming the owner's future edits, which an unaware
+member's rename on top of it carried (S46), and a permanent deletion of a copy that held a late write (S45); and
+(`AdversarialSharedVaultTakeOutHygieneTests.swift`) the hygiene report of an item a take-out rebuilt (S47). Each is merged by a
 device the store had not shown the record, written on top of, and counts on no device once it is shown, the two
 devices holding the same item. Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
 parts names its writer and that a merge's attributed parts are exactly its inputs', and
