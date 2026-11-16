@@ -24,7 +24,9 @@ final class ImportExportTests: XCTestCase {
         app.openScreen(AccessibilityID.Settings.importItems)
         app.tap(AccessibilityID.Import.uiTestSample)
         XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).waitForExistence(timeout: 15))
-        XCTAssertFalse(app.reveal(AccessibilityID.Import.commit).isEnabled, "imported before the duplicate was decided")
+        XCTAssertFalse(
+            app.reveal(AccessibilityID.Import.commit, mayBeDisabled: true).isEnabled,
+            "imported before the duplicate was decided")
         app.tap(AccessibilityID.Import.choice("Library") + ".merge")
         app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
         let host = app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch

@@ -111,7 +111,7 @@ struct SettingsView: View {
             }
         }
         #if os(macOS)
-            .frame(minWidth: 560, minHeight: 700)
+            .frame(minWidth: 560, minHeight: 520)
         #endif
     }
 

@@ -17,8 +17,9 @@ struct WatchwordApp: App {
                 #endif
         }
         #if os(macOS)
-            // Tall enough for Settings and the account screens' sheets, which sit inside the window's frame.
-            .defaultSize(width: 900, height: 780)
+            // Small enough for a 1024×768 screen with the menu bar and the title bar, the CI runners' among them:
+            // Settings and the account screens' sheets sit inside the window's frame, and their content scrolls.
+            .defaultSize(width: 820, height: 600)
         #endif
     }
 }

@@ -23,7 +23,7 @@ final class SyncConflictTests: XCTestCase {
         app.syncNow()
         app.buttons["debug.peerRename"].click()
         XCTAssertTrue(app.staticTexts["debug.peerStatus"].waitForExistence(timeout: 30), app.debugDescription)
-        app.buttons["settings.done"].click()
+        app.closeSettings()
 
         // Meanwhile it is renamed here too, before this device has seen the other rename.
         let row = app.descendants(matching: .any)["items.row.Library"].firstMatch
@@ -42,7 +42,7 @@ final class SyncConflictTests: XCTestCase {
         app.backToList()
         app.openSettings()
         app.syncNow(expecting: "received")
-        app.buttons["settings.done"].click()
+        app.closeSettings()
         let renamed = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "items.row.Library")
         ).firstMatch
