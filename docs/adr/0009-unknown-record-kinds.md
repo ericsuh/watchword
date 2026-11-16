@@ -1,6 +1,7 @@
 # ADR 0009: Record kinds a reader does not know are critical or ignorable by their raw value
 
-Status: accepted. Date: 2026-11-16.
+Status: accepted. Date: 2026-11-16. Amended the same day after an independent review (`06-adversarial-review.md` §N,
+N8 to N13): authors, per-author caps, the stash's own row, revoked devices, the owed snapshot.
 
 ## Context
 A sync segment or snapshot (`SyncPayload`, `02-architecture.md` §7.5) lists record versions, each with a kind byte
@@ -47,46 +48,84 @@ snapshot its author has since collected is dropped from staging, so what waits i
 **An ignorable kind a reader does not carry** is parsed into `SyncPayload.unknownEntries`, checked as far as the
 reader can (a segment's entries are its author's; the version is positive; the record envelope's own header names the
 entry's kind and key, so an item cannot be filed under an ignorable label and passed over), and kept byte for byte in
-the sync state (`SyncState.stashed`); the rest of the payload is merged and the stream goes on. A version of a record
-from a segment replaces the same device's lower versions of it (its author's later write contains them; a deletion
-only replaces a deletion); one from a snapshot replaces nothing, because a snapshot may attribute a version to any
-device. When a version that carries the kind syncs, it processes what was kept, with every context check and the
-kind's merger, as if it had just arrived, without downloading anything again; an entry that does not check or merge
-is kept in the quarantine for the person (PRD F7.7). A shared vault's engine, whose judge must see each segment that
-carried a version (§8.8), replays its whole log instead (its log is never collected).
+the **stash** (`SyncStash`), together with its **author**, the device whose signed segment or snapshot carried it; the
+rest of the payload is merged and the stream goes on. An entry already contained in one held is not kept again: the
+same entry, or a lower version by the same writer (for an entry from a segment, only one that writer's own stream
+carried). A version from a segment replaces the same device's lower versions of the record (its author's later write
+contains them; a deletion only replaces a deletion); one from a snapshot replaces nothing, because a snapshot may
+attribute a version to any device. Every lookup goes through the entry's slot (record, kind, writer, deletion), so
+keeping an entry costs a dictionary lookup, not a scan of the stash. When a version that carries the kind syncs, it
+processes what was kept in ascending version order, with every context check and the kind's merger, as if it had just
+arrived, without downloading anything again; an entry that does not check or merge is kept in the quarantine for the
+person (PRD F7.7). A shared vault's engine, whose judge must see each segment that carried a version (§8.8), replays
+its whole log instead (its log is never collected).
 
-**Snapshots and collection.** A device holding entries it cannot read **writes no snapshot**
-(`SyncReport.snapshotWithheld`). The alternative, carrying the kept entries forward in its snapshot, is not sound: a
-snapshot holds one entry per record, and a device that cannot read a kind cannot join two concurrent versions of one
-record, so its snapshot would have to drop one of them while claiming to cover both segments; once those segments
-were collected, a device of the later version joining afterwards would never see the dropped one. With the rule,
-every snapshot comes from a device that read everything it merged, so whatever covers a segment carries what the
-segment said, and a segment is still collected only once every device has acknowledged it and a listed snapshot
-covers it. Acknowledging is safe: the device that acknowledges holds what it could not read. The cost is liveness,
-not data: if the device that is elected to write a snapshot cannot, the others step in at four times the threshold
-(§7.5); if every device that can still write holds such entries, nothing is collected until one is updated. A device
-that owes a snapshot for a revoked device's work (§7.8) also waits, holding that work in its own store.
+**Where the stash lives.** In a row of its own in the state store (`SyncStateStore.stash`/`saveStash`; a `stash` table,
+schema version 2, in `SQLiteSyncStateStore`), written once at the end of a sync, not inside `SyncState`, which is saved
+after every merged segment: a full stash is about 5 MB, and a flooder could otherwise force that write once per
+segment of a catch-up. Crash safety comes from `SyncState.stashUnsaved`, set in memory as soon as the stash changes and
+so saved with the state that counts the segment as merged, and cleared once the stash is saved. A sync that finds it
+set, or a row that does not parse, cannot trust the stash to hold everything its merged segments said, and replays the
+log to rebuild it. The row is parsed as hostile (it is in a file A8 can edit): only ignorable kinds, positive versions,
+a deletion with no key, a live entry with a non-empty envelope within the payload's bound, counts checked before
+anything is allocated, and the whole held to the engine's caps. `processStashed` also drops any entry of a critical
+kind unread, so a planted row can never apply an item deletion.
+
+**Revoked devices.** A revoked device's objects are not read (§7.8), so what it carried is forgotten — except its own
+versions from its own stream, which nothing else carries: those are kept (across a replay too, which cannot bring
+them back), processed once their kind is read, and hold nothing back. Entries it carried for other devices are
+carried by those devices' own streams or by snapshots of devices that read them. What it dropped past the caps is
+forgotten: no replay reads its objects.
+
+**Snapshots and collection.** A device holding entries carried by a **trusted** device, or that dropped some, **writes
+no ordinary snapshot** (`SyncReport.snapshotWithheld`, and `snapshotWithheldBy` names those devices). The alternative,
+carrying the kept entries forward in its snapshot, is not sound: a snapshot holds one entry per record, and a device
+that cannot read a kind cannot join two concurrent versions of one record, so its snapshot would have to drop one of
+them while claiming to cover both segments; once those segments were collected, a device of the later version joining
+afterwards would never see the dropped one. With the rule, every ordinary snapshot comes from a device that read
+everything a trusted device carried to it, so whatever covers a segment carries what the segment said, and a segment
+is still collected only once every device has acknowledged it and a listed snapshot covers it. Acknowledging is safe:
+the device that acknowledges holds what it could not read. The cost is liveness, not data: if the elected device
+cannot write one, the others step in at four times the threshold (§7.5); if every device holds such entries, nothing
+is collected until one is updated (or the device that carried them is revoked).
+
+The snapshot a device **owes** for a revoked device's work (§7.8) is written all the same, because waiting would keep
+that work from every device that joins later: its entries are the whole store as always, and its coverage names only
+revoked devices' streams. Nobody reads or collects those, so it makes nothing collectable, and it covers no snapshot
+but another such one; it only hands the work on.
 
 **Bounds.** At most `SyncConfiguration.maximumStashedEntries` (4,096) entries and `maximumStashedBytes` (4 MiB) per
-vault. Past either, an entry is not kept, `SyncReport.unknownEntriesDropped` counts it and its kind is recorded in
-`SyncState.stashOverflow`. The stream still merges (a cap that stopped the stream would let whoever fills it stall the
-device), the device writes no snapshot (as above), and the first version that carries a dropped kind replays the log
-(a reconciling sync), which still holds every dropped entry: in its segment, or in a snapshot by a device that read
-it. So a flood costs this device storage up to the cap and, after an update, one replay; it loses nothing for anyone.
+vault, and `maximumStashedEntriesPerAuthor` (2,048) and `maximumStashedBytesPerAuthor` (2 MiB) carried by any one
+device, so one device cannot crowd out the rest. Past any of them, an entry is not kept,
+`SyncReport.unknownEntriesDropped` counts it and its kind is recorded against its author (`SyncStash.overflow`). The
+stream still merges (a cap that stopped the stream would let whoever fills it stall the device), the device writes no
+ordinary snapshot (as above), and the first version that carries a dropped kind replays the log (a reconciling sync),
+which still holds every dropped entry: in its segment, or in a snapshot by a device that read it. So a flood costs this
+device storage up to the cap and one stash write per sync, and after an update one replay; it loses nothing for anyone.
+
+**The U5 ceiling.** A kept entry's version does not raise the vault's high water while it is unread (it is not
+checked against the ceiling either), so a device of an earlier version may judge a later jump in a kind it reads
+differently from one that reads everything. Kept entries are processed in ascending version order after the update,
+so the ceiling climbs through them as it would have on arrival. Counting them earlier would let any writer raise this
+device's ceiling without bound through entries nothing checks.
 
 ## Consequences
 - A1, the storage provider, cannot make a device skip anything: changing a kind byte fails the signature and the AEAD,
   as any change does, and the stream waits at the object (tested in "sync log": `kindFlip`).
 - An authenticated writer (an account's device, or A4 in a shared vault) can put any number of entries of an ignorable
-  kind in its own segments. The cap bounds what that costs a device that cannot read them; and since such a writer
-  can already stall collection by never acknowledging, its stopping snapshots by keeping devices' stashes non-empty
-  is no new capability. It cannot get a critical record passed over: the record's header must name the kind its entry
-  does (`itemUnderIgnorableLabel`).
-- The kept entries live in the sync state, which A8 can edit like the rest of `SyncState`. Since only ignorable kinds
-  are ever kept, the worst a planted or removed entry can do is add or remove advisory data on this device (a planted
-  deletion of a scan result is no stronger than a planted erasure in `SyncState.erasures`); every live entry is still
-  opened under its own context and the vault key when processed. Removing every kept entry would let the device write
-  a snapshot again, the same exposure as a row deleted from the record store before a snapshot.
+  kind in its own segments. The caps bound what that costs a device that cannot read them, and the per-author share
+  keeps it from crowding out honest results. It **can** keep every device from writing ordinary snapshots, for as long
+  as it is trusted, by publishing one entry of a kind no version defines: that is a new capability, and it stops
+  collection and makes devices that join later replay the whole log. It loses no data (the segments stay, and the
+  snapshot owed for a revoked device's work is still written), `snapshotWithheldBy` names the device, and revoking it
+  ends it: what it carried is then forgotten. It cannot get a critical record passed over: the record's header must
+  name the kind its entry does (`itemUnderIgnorableLabel`).
+- The stash lives in the state file, which A8 can edit. A row naming a critical kind, or over the caps, is refused
+  and rebuilt from the log (`plantedStash`). Since only ignorable kinds are ever kept, the worst a planted or removed
+  entry can do is add or remove advisory data on this device (a planted deletion of a scan result is no stronger than
+  a planted erasure in `SyncState.erasures`); every live entry is still opened under its own context and the vault key
+  when processed. Emptying the stash would let the device write a snapshot again, the same exposure as a row deleted
+  from the record store before a snapshot.
 - A new kind's raw value is a decision: ignorable only if skipping it can neither lose data nor change what is
   secure, and its records must satisfy "a later version by one device contains that device's earlier ones", as every
   kind written from a device's current row does. A kind's criticality can never change once released.

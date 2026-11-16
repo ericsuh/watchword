@@ -472,12 +472,18 @@ ignorable kind), so the kind byte, bound by the payload's AEAD and signature and
 is also its criticality and cannot be flipped alone. An entry of a critical kind the engine does not carry refuses the
 object: the stream stops there and skips nothing, the object stays staged, and `SyncReport.requiresNewerVersion` asks
 for an update. An entry of an ignorable kind it does not carry is checked as far as it can be without the kind (its
-author's, a positive version, its envelope's header naming the same kind and key), kept byte for byte in
-`SyncState.stashed`, and the stream merges on; the first engine that carries the kind processes what was kept,
-through every context check and the kind's merger, without downloading it again (a shared vault replays its log, for
-its judge). A device holding such entries writes no snapshot (below). The stash holds at most 4,096 entries and
-4 MiB per vault; past that an entry is dropped and its kind recorded (`SyncState.stashOverflow`), the stream still
-merges, and the version that learns the kind replays the log, which still holds it.
+author's, a positive version, its envelope's header naming the same kind and key), kept byte for byte in the stash
+(`SyncStash`) with the device whose object carried it, and the stream merges on; the first engine that carries the
+kind processes what was kept, through every context check and the kind's merger, without downloading it again (a
+shared vault replays its log, for its judge). The stash is a row of its own in the state store, written once per sync;
+`SyncState.stashUnsaved`, saved with each merged segment, makes the sync after a crash replay the log rather than
+trust a stash that may lack entries. It holds at most 4,096 entries and 4 MiB per vault, 2,048 and 2 MiB of them from
+any one device's objects; past a cap an entry is dropped and its kind recorded against that device, the stream still
+merges, and the version that learns the kind replays the log, which still holds it. A row that does not parse (only
+ignorable kinds, bounded lengths and counts, within the engine's caps) is dropped and rebuilt the same way. What a
+revoked device carried is forgotten, as its objects are no longer read, except its own versions from its own stream,
+which nothing else carries: those are kept, across a replay too, and hold nothing back. A device holding entries
+carried by a trusted device writes no ordinary snapshot (below).
 
 **Snapshots and garbage collection.** Once the segments not covered by a snapshot reach a threshold (never less
 than twice the number of streams, so the acknowledgements a snapshot causes cannot trigger the next), the lowest
@@ -489,9 +495,12 @@ the highest coverage any of them has when its next segment is missing. A device 
 other known stream has acknowledged merging it and some listed snapshot covers it, always keeping its newest; it
 deletes one of its own snapshots only when another listed snapshot covers everything it does. A snapshot's contents
 are trusted only as far as their signature: existing devices never delete anything because a snapshot omits it.
-Only a device that read everything it merged writes one (`SyncReport.snapshotWithheld` otherwise, ADR 0009): a
-snapshot from one that kept entries aside would cover their segments without being able to carry concurrent versions
-of one record, and once those segments were collected a device that reads the kind would never see what it left out.
+Only a device that read everything a trusted device carried to it writes an ordinary one (`SyncReport.snapshotWithheld`
+and `snapshotWithheldBy` otherwise, ADR 0009): a snapshot from one that kept entries aside would cover their segments
+without being able to carry concurrent versions of one record, and once those segments were collected a device that
+reads the kind would never see what it left out. The snapshot a device owes for a revoked device's work is written
+all the same, with coverage only of revoked devices' streams, which nobody reads or collects, so it hands that work on
+and makes nothing collectable.
 
 **Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and the erasures it has merged,
 and replays the log. On a healthy device it changes nothing; on one whose file was rolled back it restores the newest

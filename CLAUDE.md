@@ -423,11 +423,14 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   kind's merger. A new kind needs a line in `SyncSettings`' default `schemaVersions`, the merger table, the shared
   vault's `attributedValues`, `takeOutWhatNoLongerCounts`, `sharedInventory` and `resealSharedVault`.
 - A record kind is critical or ignorable by its raw value (ADR 0009: 10 to 127 ignorable, never renumber; choose a
-  new kind's value by that rule). An ignorable kind the engine does not carry is kept aside byte for byte
-  (`SyncState.stashed`, capped; past the cap dropped, recorded in `stashOverflow` and replayed from the log once
-  carried) and the stream merges on; a device holding such entries writes no snapshot. A critical one stops the stream
-  at the object, skips nothing and sets `requiresNewerVersion`. Never let a stashed entry reach the store or a merger
-  except through `processStashed`.
+  new kind's value by that rule). An ignorable kind the engine does not carry is kept aside byte for byte with the
+  device whose object carried it (`SyncStash`, its own row, saved once per sync; capped overall and per author; past a
+  cap dropped, recorded against the author, and replayed from the log once carried) and the stream merges on. A
+  device holding entries carried by a trusted device writes no ordinary snapshot, only the one it owes a revoked
+  device's work, covering revoked streams alone; what a revoked device carried is forgotten except its own versions,
+  which hold nothing back and survive a replay. `stashUnsaved` makes a sync after a crash replay the log. A critical
+  kind stops the stream at the object, skips nothing and sets `requiresNewerVersion`. Never let a stashed entry reach
+  the store or a merger except through `processStashed`, which drops any critical kind (only A8 can plant one).
 - Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
   `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
 
