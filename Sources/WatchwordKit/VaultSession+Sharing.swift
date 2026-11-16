@@ -63,6 +63,10 @@ public struct SharedVaultStatus: Sendable, Hashable {
     /// through the chain only (shown as unverified).
     public let substitutedMembers: [UUID]
     public let unverifiedMembers: [UUID]
+    /// Members other than this account whose keys in the chain are the ones this device pinned, from a comparison made
+    /// on the current head; `nil` when no such comparison could be made (the vault is locked, or the contacts could not
+    /// be read). Only these are shown as verified: an empty `unverifiedMembers` is not evidence of anything.
+    public let verifiedMembers: [UUID]?
     /// "Pending rotation" (F4.3).
     public let pendingRotation: [PendingRotation]
     /// Writes held aside because they do not count (docs/02-architecture.md §8.7), for the person to look at.
@@ -188,6 +192,10 @@ extension VaultSession {
                 vault.needsReconcile = true
                 vault.indexRebuilding = true
             }
+            // The comparison of the chain's member keys with the pins is made again for the restored head, not left
+            // to the next sync: until it is, nothing would be reported as substituted, here (D17, SEC3) or to the
+            // sync keyring (S39).
+            vault.keyCheck = try? await ledger.checkMemberKeys(against: contacts)
             loaded[vaultID] = vault
         }
         guard epoch == lockEpoch, !sharing.loaded else { return }
@@ -795,10 +803,22 @@ extension VaultSession {
         let pending = vault.ledger.pendingRotation(
             plan: plan, leaveRequests: leaveRequests, inventory: try await sharedInventory(vaultID), heldKeyIDs: held)
         let heldAside = try await syncSettings?.state.quarantined(vaultID: vaultID).count ?? 0
+        // Only a comparison made on the current head says anything; one is made now if the keys allow.
+        if vault.keyCheck?.head != vault.ledger.state.hash, let settings = sharing.settings,
+            let contacts = try? verifiedContacts(settings)
+        {
+            sharing.vaults[vaultID]?.keyCheck = try? await vault.ledger.checkMemberKeys(against: contacts)
+        }
+        let check = sharing.vaults[vaultID]?.keyCheck.flatMap { $0.head == vault.ledger.state.hash ? $0 : nil }
         return SharedVaultStatus(
             vaultID: vaultID, membership: vault.ledger.state, role: vault.ledger.state.member(account.accountID)?.role,
             writePermission: vault.ledger.writePermission(for: account.accountID),
-            substitutedMembers: vault.keyCheck?.substituted ?? [], unverifiedMembers: vault.keyCheck?.unverified ?? [],
+            substitutedMembers: check?.substituted ?? [], unverifiedMembers: check?.unverified ?? [],
+            verifiedMembers: check.map { check in
+                vault.ledger.state.members.map(\.accountID).filter {
+                    $0 != account.accountID && !check.substituted.contains($0) && !check.unverified.contains($0)
+                }
+            },
             pendingRotation: pending, heldAside: heldAside,
             requiresNewerVersion: vault.ledger.continuesInLaterFormat)
     }
