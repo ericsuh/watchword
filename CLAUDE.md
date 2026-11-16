@@ -182,6 +182,11 @@ still open (CloudKit and iCloud Drive transports, enrolment, sync in production 
   `ItemMerge.resolve` (an explicit choice) discards them.
 - Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
   counts as an erasure while merging. The outbox compares rows with `SyncState.published`, not `known`.
+- A record can be erased more than once. A device remembers the join of every erasure of a record
+  (`RecordMerger.joinErasureSummaries`) and judges versions against that, so arrival order decides nothing. A pending
+  deletion is done only when this device published a deletion at or after its stamp *and* the join already holds
+  what it had seen; never skip one because another device's erasure, or this device's own earlier one, is stamped
+  later (W13, W18).
 - The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;
   a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.

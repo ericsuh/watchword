@@ -268,8 +268,14 @@ public struct FakeItemMerger: RecordMerger {
         try await base.erasureSummary(of: record)
     }
 
-    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
-        try await base.resolveErasure(summary, of: record)
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above version: UInt64) async throws
+        -> ErasureDecision
+    {
+        try await base.resolveErasure(summary, of: record, above: version)
+    }
+
+    public func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8] {
+        try await base.joinErasureSummaries(first, second, kind: kind)
     }
 }
 

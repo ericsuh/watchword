@@ -78,8 +78,15 @@ public struct KindRoutingMerger: RecordMerger {
         try await merger(for: record).erasureSummary(of: record)
     }
 
-    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
-        try await merger(for: record).resolveErasure(summary, of: record)
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above version: UInt64) async throws
+        -> ErasureDecision
+    {
+        try await merger(for: record).resolveErasure(summary, of: record, above: version)
+    }
+
+    public func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8] {
+        guard let merger = mergers[kind] else { throw NoMerger(kind: kind) }
+        return try await merger.joinErasureSummaries(first, second, kind: kind)
     }
 }
 
@@ -115,8 +122,18 @@ public protocol RecordMerger: Sendable {
 
     /// A version of an erased record — the local one when an erasure arrives, or one arriving after the erasure is
     /// known. If its author had seen everything in it, it is erased; otherwise it holds an edit the erasure's author
-    /// never saw, and is kept, in the trash, with that edit as its latest version (PRD F7.6).
-    func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision
+    /// never saw, and is kept, in the trash, with that edit as its latest version (PRD F7.6). A replacement must be
+    /// written above `version`: the erasure's own stamp and the version in question, which the engine knows and a
+    /// summary does not say (a record's versions climb with every merge, its edits do not).
+    func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above version: UInt64) async throws
+        -> ErasureDecision
+
+    /// The summary of two erasures of one record taken together: everything either author had seen. A record can be
+    /// erased more than once — on two devices, each having seen something the other had not — and which erasure a
+    /// device learns of first must not decide what it keeps, so the engine remembers their join. Commutative,
+    /// associative and idempotent, with one canonical encoding; a summary that does not decode counts as having
+    /// seen nothing.
+    func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8]
 }
 
 /// What to do with a version of a record that has been erased.

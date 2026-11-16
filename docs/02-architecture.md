@@ -377,7 +377,19 @@ validly signed segment), and acknowledgement and coverage values must be plausib
 - Moving to the trash is the `trashedAt` group, so trashing and a concurrent edit give a trashed item that contains
   the edit. A permanent deletion is a tombstone carrying an *erasure summary*: the version vector of what its author
   had seen. A version it covers is erased; a version holding an edit its author never saw is kept, in the trash, with
-  that edit as its last version and `keptAfterDeletion` set — on the deleting device as on every other.
+  that edit as its last version and `keptAfterDeletion` set — on the deleting device as on every other. A record can
+  be erased more than once, on devices that had each seen something the other had not; a device remembers the *join*
+  of every erasure of a record it knows (`RecordMerger.joinErasureSummaries`: for items the pointwise maximum of the
+  vectors), and judges a version against that, so which erasure arrives first decides nothing. A device publishes its
+  own deletion even when it already knows a later erasure of the same record by another device: that one's author may
+  have seen less. The same holds for its own earlier erasure: the person may delete a version that erasure kept, and a
+  kept version keeps its own number, so the second deletion's stamp can be the lower. A pending deletion counts as
+  published only once this device has published a deletion of the record at or after its stamp *and* the join it holds
+  already contains everything this one had seen. An erasure a device already holds is not applied to its local version
+  a second time (a later snapshot may carry it again): it erased the version or the version was kept, and applied
+  again it would put back in the trash an item the person has since restored. Only a reconciling sync judges again. A
+  version kept after an erasure is written above the erasure's own stamp, which the engine passes to the merger (a
+  record's versions climb with every merge; its edits, which are all a summary names, do not).
 - The 30-day purge (F1.5) removes only what the person who trashed an item had seen, as a deletion does, and never
   splits an item: it skips one kept after a deletion, one whose `trashedAt` group holds a conflicting restore, and one
   whose version vector holds an edit the trash's `GroupStamp.seen` does not (`Item.isTrashedByPerson`, F7.7). Those

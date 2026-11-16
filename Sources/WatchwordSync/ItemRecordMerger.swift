@@ -1,4 +1,5 @@
 import Foundation
+import WatchwordEnvelope
 import WatchwordModel
 import WatchwordStore
 
@@ -57,14 +58,19 @@ public struct ItemRecordMerger: RecordMerger {
         return Array(try encoder.encode(ItemMerge.effectiveClock(item, origin: Self.origin(record))))
     }
 
-    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above floor: UInt64) async throws
+        -> ErasureDecision
+    {
         let item = try await sealer.openItem(record)
         // A summary that does not decode claims to have seen nothing, so nothing is erased because of it.
         let erased = (try? JSONDecoder().decode(VersionVector.self, from: Data(summary))) ?? VersionVector()
         if ItemMerge.isCovered(item, origin: Self.origin(record), byErasure: erased) { return .erase }
         if item.isTrashed { return .keep }
-        // Above the record and above any erasure of what the erased vector names (an erasure is one past the row).
-        let version = max(record.version, erased.entries.values.max() ?? 0) + 2
+        // Above the record, above the erasure the engine names, and above any erasure of what the erased vector
+        // names (an erasure is one past the row).
+        let base = max(record.version, floor, erased.entries.values.max() ?? 0)
+        guard base < UInt64.max - 2 else { return .keep }
+        let version = base + 2
         var trashed = item
         trashed.trashedAt = item.modifiedAt
         trashed.keptAfterDeletion = true
@@ -73,6 +79,16 @@ public struct ItemRecordMerger: RecordMerger {
             revision: Revision(version: version, device: deviceID))
         trashed.version = version
         return .replace(try await sealer.sealItem(trashed))
+    }
+
+    /// The pointwise maximum of the two version vectors, as JSON with sorted keys.
+    public func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8] {
+        func decoded(_ summary: [UInt8]) -> VersionVector {
+            (try? JSONDecoder().decode(VersionVector.self, from: Data(summary))) ?? VersionVector()
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return Array(try encoder.encode(decoded(first).merging(decoded(second))))
     }
 
     static func origin(_ record: StoredRecord) -> Revision {

@@ -188,3 +188,107 @@ struct SyncRetirementTests {
         }
     }
 }
+
+/// A record can be erased more than once, by devices that had each seen something the other had not. Found by the
+/// vault simulation (review findings W13, W9): which erasure a device learns of first must decide nothing.
+@Suite("Sync engine: several erasures of one record")
+struct SyncErasureJoinTests {
+    /// The item is in the trash everywhere but on C, which never heard of the trashing; C renames it after a lot of
+    /// other work — so its versions are high — and deletes it for good. C's erasure had not seen the trashing, so the
+    /// others keep the trashed item as it is. Then the person on B, who sees all of it, deletes it for good. B's
+    /// deletion has an earlier stamp than C's, and used to be dropped as "already published": B erased the item,
+    /// nobody else ever did.
+    @Test("a deletion is published even when another device's later-stamped erasure of the record is known")
+    func deletionAfterAnotherDevicesErasure() async throws {
+        let home = await Household.make(3)
+        let (a, b, c) = (home.devices[0], home.devices[1], home.devices[2])
+        let item = try await a.save(Household.login(title: "Printer"))
+        try await home.settle()
+        try await a.edit(item.id) { $0.trashedAt = Date(timeIntervalSince1970: 1_800_000_100) }
+        try await a.sync()
+        try await b.sync()
+
+        for index in 0..<4 { try await c.save(Household.login(title: "C \(index)")) }
+        try await c.edit(item.id) { $0.title = "Renamed on C" }
+        try await c.delete(item.id)
+        try await c.sync()
+        try await b.sync()
+        #expect(try await b.items()[item.id]?.isTrashed == true, "kept: C's erasure had not seen the trashing")
+
+        try await b.delete(item.id)
+        try await home.settle()
+        for device in home.devices {
+            #expect(try await device.items()[item.id] == nil, "B had seen all of it, and deleted it")
+        }
+        try await home.expectConverged()
+    }
+
+    /// A deletes the item after editing it several times (its deletion's stamp is high); B, concurrently, had put it
+    /// in the trash (a version with a low number). A's deletion had not seen B's trashing, so the trashed version
+    /// is kept everywhere, at its own low version — below A's earlier deletion. The person on A, who now sees it,
+    /// deletes it again. That second deletion's stamp is lower than A's first, and used to be dropped as "already
+    /// published by this device": the item was gone on A and kept on every other device.
+    @Test("a second deletion by the same device, of a version kept after its first, is published")
+    func secondDeletionBySameDevice() async throws {
+        let home = await Household.make(3)
+        let (a, b) = (home.devices[0], home.devices[1])
+        let item = try await a.save(Household.login(title: "Printer"))
+        try await home.settle()
+        for index in 0..<5 { try await a.edit(item.id) { $0.notes = "note \(index)" } }
+        try await b.edit(item.id) { $0.trashedAt = Date(timeIntervalSince1970: 1_800_000_100) }
+        try await a.delete(item.id)
+        try await a.sync()
+        try await b.sync()
+        try await a.sync()
+        let kept = try #require(try await a.items()[item.id], "kept: A's deletion had not seen B's trashing")
+        #expect(kept.isTrashed)
+
+        try await a.delete(item.id)
+        try await home.settle()
+        for device in home.devices {
+            #expect(try await device.items()[item.id] == nil, "A had seen all of it, and deleted it")
+        }
+        try await home.expectConverged()
+    }
+
+    /// An erasure that had not seen an edit leaves the item in the trash, kept. The person restores it. The same
+    /// erasure then arrives again, in a snapshot written by a device that never held the kept item. It has had its
+    /// say: the restored item stays restored.
+    @Test("an erasure already applied does not put a restored item back in the trash")
+    func restoredItemStaysRestored() async throws {
+        let transport = InMemorySyncTransport()
+        let home = await Household.make(3, transport: transport)
+        let (a, b, c) = (home.devices[0], home.devices[1], home.devices[2])
+        let item = try await a.save(Household.login(title: "Printer"))
+        try await home.settle()
+        try await b.edit(item.id) { $0.notes = "typed on B" }
+        try await a.delete(item.id)
+        try await a.sync()
+        try await b.sync()
+        let kept = try #require(try await b.items()[item.id])
+        #expect(kept.isTrashed && kept.keptAfterDeletion && kept.notes == "typed on B")
+        try await b.edit(item.id) {
+            $0.trashedAt = nil
+            $0.keptAfterDeletion = false
+        }
+
+        // The erasure once more, as a snapshot from C would carry it.
+        let key = RecordKey(recordID: item.id, kind: .item)
+        let erasure = try #require(await b.state()?.erasures[key])
+        let location = SyncObjectLocation.snapshot(vaultID: Household.vault, author: await c.deviceID, lamport: 500)
+        let payload = SyncPayload(
+            kind: .snapshot, vaultID: Household.vault, author: location.author, number: location.number, vector: [:],
+            entries: [.tombstone(key, stamp: erasure.stamp, erasure: erasure.summary)])
+        let envelope = try await c.keyring.seal(payload.encoded(), at: location)
+        let signature = try await c.keyring.sign(envelope, at: location)
+        try await transport.create(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+
+        let report = try await b.sync()
+        #expect(report.rejected.isEmpty && report.staleSnapshots == 1)
+        let after = try #require(try await b.items()[item.id])
+        #expect(!after.isTrashed && after.notes == "typed on B")
+        try await home.settle()
+        try await home.expectConverged()
+    }
+}

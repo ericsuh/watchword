@@ -212,7 +212,7 @@ public actor SyncEngine {
             report.transportUnavailable = true
         }
         do {
-            try await mergeStaged(state: &state, retired: retired, report: &report)
+            try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             try await syncState.saveState(state)
             if !report.transportUnavailable {
@@ -312,7 +312,9 @@ public actor SyncEngine {
 
     // MARK: - Merge
 
-    private func mergeStaged(state: inout SyncState, retired: Set<UUID>, report: inout SyncReport) async throws {
+    private func mergeStaged(
+        state: inout SyncState, retired: Set<UUID>, reconciling: Bool, report: inout SyncReport
+    ) async throws {
         var staged = try await syncState.staged(vaultID: vaultID)
         // Staged before its author was revoked: dropped unmerged, like anything else that device wrote.
         let fromRetired = staged.filter { retired.contains($0.location.author) }
@@ -341,7 +343,8 @@ public actor SyncEngine {
                 if Self.covers(state.merged, payload.vector) { report.staleSnapshots += 1 }
                 for entry in payload.entries {
                     try await apply(
-                        entry, pending: pending[entry.key], state: &state, highWater: &highWater, report: &report)
+                        entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                        highWater: &highWater, report: &report)
                 }
                 state.snapshots[snapshot.location] = payload.vector
                 state.snapshotCoverage.merge(payload.vector, uniquingKeysWith: max)
@@ -385,7 +388,8 @@ public actor SyncEngine {
                     try validate(payload, at: object.location)
                     for entry in payload.entries {
                         try await apply(
-                            entry, pending: pending[entry.key], state: &state, highWater: &highWater, report: &report)
+                            entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                            highWater: &highWater, report: &report)
                     }
                     acknowledgement = payload.vector
                 } catch let error where Self.isFatal(error) {
@@ -457,8 +461,8 @@ public actor SyncEngine {
     }
 
     private func apply(
-        _ entry: SyncEntry, pending: PendingDeletion?, state: inout SyncState, highWater: inout UInt64,
-        report: inout SyncReport
+        _ entry: SyncEntry, pending: PendingDeletion?, reconciling: Bool, state: inout SyncState,
+        highWater: inout UInt64, report: inout SyncReport
     ) async throws {
         let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
         guard entry.version <= configuration.maximumVersion, overflow || entry.version <= ceiling else {
@@ -468,12 +472,26 @@ public actor SyncEngine {
             return
         }
         highWater = max(highWater, entry.version)
+        // Every erasure of the record this device knows of, taken together: the ones it merged, and its own if it
+        // has one that is not published yet.
         var erasure = state.erasures[entry.key]
-        if let pending, erasure.map({ $0.stamp < pending.stamp }) ?? true {
-            erasure = Erasure(stamp: pending.stamp, summary: try await summary(of: pending.record))
+        if let pending {
+            erasure = try await join(
+                erasure, Erasure(stamp: pending.stamp, summary: try await summary(of: pending.record)),
+                kind: entry.kind)
+        }
+        // An erasure this device already holds — the same one again in a later snapshot, or one that adds nothing to
+        // what it knows — has had its say about the local version: it erased it, or it was kept. Applied a second
+        // time it would put back in the trash an item the person has since restored. Only a reconciling sync judges
+        // again, because it does not trust the local file.
+        var alreadyJudged = false
+        if entry.isDeletion, !reconciling, let known = state.erasures[entry.key], known.stamp >= entry.stamp {
+            let joined = try await join(
+                known, Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
+            alreadyJudged = joined.summary == known.summary
         }
         var attempt = 0
-        while true {
+        while !alreadyJudged {
             do {
                 if try await applyOnce(entry, erasure: erasure) { report.applied += 1 }
                 break
@@ -483,8 +501,9 @@ public actor SyncEngine {
             }
         }
         state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
-        if entry.isDeletion, state.erasures[entry.key].map({ $0.stamp < entry.stamp }) ?? true {
-            state.erasures[entry.key] = Erasure(stamp: entry.stamp, summary: entry.erasure)
+        if entry.isDeletion {
+            state.erasures[entry.key] = try await join(
+                state.erasures[entry.key], Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
         }
         if entry.device == deviceID {
             state.published[entry.key] = max(state.published[entry.key] ?? entry.stamp, entry.stamp)
@@ -502,7 +521,10 @@ public actor SyncEngine {
             // An erasure removes the local version only if its author had seen all of it; an edit it never saw is
             // kept, in the trash (PRD F7.6).
             guard let local else { return false }
-            let erasure = Erasure(stamp: entry.stamp, summary: entry.erasure)
+            // Judged against this erasure together with every other one known: which of two erasures of a record a
+            // device learns of first must not decide what it keeps.
+            let erasure = try await join(
+                erasure, Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
             switch try await resolve(erasure, of: local) {
             case .erase:
                 try await store.commit(StoreChange(conditionalDeletions: [key: local.version]))
@@ -559,11 +581,30 @@ public actor SyncEngine {
 
     private func resolve(_ erasure: Erasure, of record: StoredRecord) async throws -> ErasureDecision {
         do {
-            return try await merger.resolveErasure(erasure.summary, of: record)
+            return try await merger.resolveErasure(
+                erasure.summary, of: record, above: max(record.version, erasure.stamp.version))
         } catch let error where Self.isFatal(error) {
             throw error
         } catch {
             throw Rejection(reason: .mergeFailed(record.recordID))
+        }
+    }
+
+    /// Two erasures of one record as one: the later stamp, and everything either author had seen.
+    private func join(_ known: Erasure?, _ other: Erasure, kind: EnvelopeKind) async throws -> Erasure {
+        guard let known else { return other }
+        guard known.summary != other.summary else {
+            return Erasure(stamp: max(known.stamp, other.stamp), summary: known.summary)
+        }
+        do {
+            return Erasure(
+                stamp: max(known.stamp, other.stamp),
+                summary: try await merger.joinErasureSummaries(known.summary, other.summary, kind: kind))
+        } catch let error where Self.isFatal(error) {
+            throw error
+        } catch {
+            // Undecidable: the one with the later stamp, as before either was joined. Nothing is erased on a guess.
+            return known.stamp < other.stamp ? other : known
         }
     }
 
@@ -610,8 +651,8 @@ public actor SyncEngine {
         // the deletion in a later segment, so every device applies them in that order.
         var later: [SyncEntry] = []
         for (key, deletion) in pending {
-            if let erasure = state.erasures[key], erasure.stamp >= deletion.stamp {
-                obsolete[key] = deletion.stamp  // Already published.
+            if try await isPublished(deletion, key: key, state: state) {
+                obsolete[key] = deletion.stamp
                 continue
             }
             if let row = entries.removeValue(forKey: key) { later.append(row) }
@@ -656,7 +697,9 @@ public actor SyncEngine {
                 state.published[entry.key] = max(state.published[entry.key] ?? entry.stamp, entry.stamp)
                 if entry.isDeletion {
                     published[entry.key] = entry.stamp
-                    state.erasures[entry.key] = Erasure(stamp: entry.stamp, summary: entry.erasure)
+                    state.erasures[entry.key] = try await join(
+                        state.erasures[entry.key], Erasure(stamp: entry.stamp, summary: entry.erasure),
+                        kind: entry.kind)
                 }
             }
             state.publishedAcknowledgement = vector
@@ -668,14 +711,31 @@ public actor SyncEngine {
         try await syncState.removePendingDeletions(obsolete, vaultID: vaultID)
     }
 
+    /// Whether a pending deletion is on the transport already: this device published a deletion of the record at or
+    /// after its stamp, and the erasures it knows of hold everything this one had seen. Another device's erasure of
+    /// the same record, however late its stamp, is not this one: its author may have seen less (W13). Nor is this
+    /// device's own earlier erasure, when the person deletes a version that erasure had kept: a kept version keeps
+    /// its own number, so the second deletion's stamp can be the lower of the two (W18). Both found by the vault
+    /// simulation.
+    private func isPublished(_ deletion: PendingDeletion, key: RecordKey, state: SyncState) async throws -> Bool {
+        guard let published = state.published[key], published.deleted, published >= deletion.stamp,
+            let known = state.erasures[key]
+        else { return false }
+        let joined = try await join(
+            known, Erasure(stamp: deletion.stamp, summary: try await summary(of: deletion.record)), kind: key.kind)
+        return joined.summary == known.summary
+    }
+
     /// A row that came back while its deletion was being made — merged from another device between the session's
     /// read and its delete — is settled the way the deletion will settle it on every other device, so this device does
     /// not keep a record everyone else erases.
     private func settlePendingDeletions(state: SyncState) async throws {
-        for (key, deletion) in try await syncState.pendingDeletions(vaultID: vaultID)
-        where state.erasures[key].map({ $0.stamp < deletion.stamp }) ?? true {
+        for (key, deletion) in try await syncState.pendingDeletions(vaultID: vaultID) {
+            if try await isPublished(deletion, key: key, state: state) { continue }
             guard let row = try await store.record(key), row.vaultID == vaultID else { continue }
-            let erasure = Erasure(stamp: deletion.stamp, summary: try await summary(of: deletion.record))
+            let erasure = try await join(
+                state.erasures[key], Erasure(stamp: deletion.stamp, summary: try await summary(of: deletion.record)),
+                kind: key.kind)
             let decision: ErasureDecision
             do {
                 decision = try await resolve(erasure, of: row)
