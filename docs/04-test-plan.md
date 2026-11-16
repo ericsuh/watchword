@@ -454,7 +454,8 @@ read-only writes refused by the transport fake), and anything that depends on th
 
 ### 6.5 Interchange (milestone 7)
 - Zip-slip entry names, nested zip bombs beyond the ratio cap, 1PUX with 10^6 items, CSV cells
-  starting with `=`, `+`, `-`, `@` (export neutralises; import preserves), rows with embedded
+  starting with `=`, `+`, `-`, `@`, a tab or a carriage return (imported and exported byte for byte,
+  never neutralised: owner decision, 2026-11-16), rows with embedded
   newlines/quotes, invalid UTF-8, BOMs, and a 2 GB declared size → bounded time and memory, no
   crash, clear error.
 - CXF payloads with unknown types, duplicate IDs, and oversized blobs.
@@ -475,7 +476,8 @@ every case above and the attacks a parser author would add to them:
   before the start of output, reserved symbols, too many codes, missing, incomplete and over-subscribed code
   sets, a repeat with nothing to repeat, a run past the declared lengths, a block that cannot end), every
   prefix of valid streams, and seeded random damage.
-- CSV: formula payloads imported exactly and exported inert; record structure hidden inside quoted cells;
+- CSV: formula payloads (and values with an apostrophe already in front) imported, exported and imported
+  again byte for byte (`formulaInjection`, `formulaCellsAreExact`); record structure hidden inside quoted cells;
   invalid UTF-8 and UTF-16; a byte-order mark before the header; an unterminated quote, an over-long row, too
   many columns and 50,001 rows, each stopped at its limit; a file over 100 MB refused in every format before
   it is parsed.

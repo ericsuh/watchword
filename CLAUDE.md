@@ -303,8 +303,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   archive without an adversarial test for what the leniency admits.
 - JSON is walked one item at a time (`JSONReader.readBoundedValue`); don't materialise a document. No
   `JSONSerialization`: its behaviour differs between Linux and Apple platforms.
-- Invalid UTF-8 is refused, never repaired. Cells and fields are data on import; only CSV *export* neutralises
-  formulas.
+- Invalid UTF-8 is refused, never repaired. Cells and fields are data in both directions: an import takes a cell
+  exactly as written and every export writes the stored value unaltered (RFC 4180 quoting only). Nothing
+  neutralises spreadsheet formulas, on export or import (owner decision, 2026-11-16: the CSV is not for spreadsheets;
+  `InterchangeGuide` warns instead). Don't add an apostrophe, and don't strip one.
 - Checks on names, cells and URLs work on bytes or Unicode scalars, never on `Character`s and never through
   Foundation's string searches or white-space sets: to `split` and `hasPrefix`, a slash followed by a combining mark
   is not a slash (`../` + U+0301 passed as a name until review caught it), and `whitespacesAndNewlines` differs

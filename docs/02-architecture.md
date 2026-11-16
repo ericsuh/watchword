@@ -1961,9 +1961,14 @@ NUL, and a quote that never closes (which the per-cell and per-row caps stop fro
 header row decides the mapping: 1Password 8 (`Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,
 Notes`), 1Password 7 (`URL`) and Apple Passwords (`Title,URL,Username,Password,Notes,OTPAuth`) are detected
 from it, unknown columns become concealed custom fields, and a first row naming fewer than two known columns
-is refused rather than guessed at. Cells are data on import, formula characters included. On export to
-Apple Passwords CSV, a cell beginning with `=`, `+`, `-`, `@`, tab or carriage return is prefixed with an
-apostrophe (`CSVWriter.FormulaPolicy.neutralise`, the default; SEC7) and each changed cell is reported.
+is refused rather than guessed at. Cells are data in both directions, formula characters included: an
+import takes each cell exactly as written (an apostrophe in front of `=` is part of the value, not a mark
+to remove), and the Apple Passwords CSV export writes every stored value unaltered, with RFC 4180 quoting
+only (`CSVWriter`), so a file reads back byte for byte. Nothing neutralises spreadsheet formulas: the file
+is for another password manager's importer, not a spreadsheet, and an apostrophe in front of a password
+that begins with `-` is a different password there (owner decision, 2026-11-16; SEC7). What a spreadsheet
+might do with such a file is answered by the export screen's warning instead (`InterchangeGuide`'s
+`notForSpreadsheets` caveat: every password in plain text, not meant for spreadsheets).
 That prefix is part of the value to whatever imports the file, and generated passwords often begin with `-`
 or `+`, so `.preserve` exists for a file that goes straight into another password manager; which to offer,
 and how to warn, is the UI's decision. A passkey is left out of a CSV export and reported; fields with no
@@ -2055,8 +2060,8 @@ exporters' own rule above is the second barrier: an item that came to hold such 
 still exports no URL for a host it is not scoped to.
 
 **Export reports (`ExportReport`).** An export never fails over one item, and never leaves something behind
-without a line: the person deletes this app's copy on the strength of the report. Beyond passkeys, moved
-fields and neutralised cells, each exporter reports a scope limited to its host or with exclusions (no
+without a line: the person deletes this app's copy on the strength of the report. Beyond passkeys and moved
+fields, each exporter reports a scope limited to its host or with exclusions (no
 format can say so, and whatever imports the file will offer the item on subdomains), history a format
 cannot hold (all of it in CXF and CSV, everything but earlier passwords in 1PUX), the archived mark (CXF,
 CSV), tags (CSV), a website written as an ordinary field because the item is not scoped to its host, and

@@ -101,9 +101,6 @@ public enum ImportWarning: Equatable, Sendable {
     case urlsNotConsidered(count: Int)
     /// The entry was scoped to Android apps, which have no place in a Watchword item; `count` were left out.
     case androidAppsNotImported(count: Int)
-    /// A cell looks like one this app's own export made inert (an apostrophe before `=`, `+`, `-` or `@`). It was
-    /// imported as written, apostrophe included.
-    case possiblyNeutralisedFormula(column: String)
     /// The entry carried no title; one was derived from its first URL or login name.
     case titleDerived
 }

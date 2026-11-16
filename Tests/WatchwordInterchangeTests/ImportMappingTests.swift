@@ -573,7 +573,7 @@ struct InterchangeGuideTests {
         #expect(fromApple.routes[0].caveats.map(\.kind).contains(.wifiNotInCredentialExchange))
         let intoApple = InterchangeGuide.guide(.importIntoApplePasswords)
         #expect(
-            Set(intoApple.routes[1].caveats.map(\.kind)).isSuperset(of: [.fieldsMovedToNotes, .formulaCellsChanged]))
+            Set(intoApple.routes[1].caveats.map(\.kind)).isSuperset(of: [.fieldsMovedToNotes, .notForSpreadsheets]))
         #expect(InterchangeGuide.guide(.exportFrom1Password).routes[2].caveats.map(\.kind).contains(.limitedCSV))
     }
 
@@ -648,7 +648,7 @@ struct InterchangeGuideTests {
         ! The CSV file is not encrypted: anyone who can read it can read every password in it. Save it to a folder on this device that is not synced or shared, and delete it as soon as the import is done.
         ! Passkeys cannot be written to a CSV file. Move them with Export to Another App, or sign in and create new passkeys afterwards.
         ! Passwords keeps one username, one password, one verification code and notes for each website. Security questions, PINs, recovery codes and other fields are written into the notes, and an item with several websites becomes one entry for each.
-        ! A value that begins with =, +, - or @ is written with an apostrophe in front, so that a spreadsheet opening the file cannot run it as a formula. Passwords imports the apostrophe as part of the value. The export report lists each value changed: correct them in Passwords afterwards, or choose to write values unchanged if the file will only ever be opened by Passwords.
+        ! The file holds every password in plain text, exactly as you saved it, and is meant only for importing into Passwords. Do not open it in Excel, Numbers or another spreadsheet: nothing in it is changed to stop a spreadsheet from running a value that begins with =, +, - or @ as a formula.
         ! Watchword's export report lists what the file or transfer could not carry as it was: earlier versions of an item, tags and archived marks where the other app has no place for them, an item limited to one host or with hosts excluded, and values still waiting for you to choose between. Read it before you delete anything from Watchword.
         """
     static let from1Password = """

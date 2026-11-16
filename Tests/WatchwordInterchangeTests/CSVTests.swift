@@ -160,15 +160,19 @@ struct CSVTests {
         }
     }
 
+    /// Owner decision, 2026-11-16: the CSV is for another password manager's importer, never a spreadsheet, so
+    /// exported values are exact. A cell that begins with a formula character, a tab or a carriage return is written
+    /// as it is, with RFC 4180 quoting only, and reads back byte for byte.
     @Test(
-        "Formula-like cells are made inert on export",
+        "Formula-like cells are written exactly, with RFC 4180 quoting only",
         arguments: zip(
-            ["=1+1", "+1", "-1", "@SUM(A1)", "\tcmd", "\rcmd", "safe", "", "'already", "a=b"],
-            ["'=1+1", "'+1", "'-1", "'@SUM(A1)", "'\tcmd", "'\rcmd", "safe", "", "'already", "a=b"]))
-    func neutralisation(_ cell: String, _ expected: String) {
-        #expect(CSVWriter.neutralised(cell) == expected)
-        #expect(CSVWriter.neutralised(cell, policy: .preserve) == cell)
-        #expect(CSVWriter.isFormulaLike(cell) == (cell != expected))
+            ["=cmd|' /C calc'!A0", "+1", "-1", "@x", "\tcmd", "\rcmd", "'already", "a=b"],
+            ["=cmd|' /C calc'!A0", "+1", "-1", "@x", "\"\tcmd\"", "\"\rcmd\"", "'already", "a=b"]))
+    func formulaCellsAreExact(_ cell: String, _ written: String) throws {
+        let encoded = CSVWriter.encode([[cell, "y"]])
+        #expect(Array(encoded.utf8) == Array("\(written),y\r\n".utf8))
+        let parsed = try CSVReader.parse(Array(encoded.utf8)).map { $0.fields.map { Array($0.utf8) } }
+        #expect(parsed == [[Array(cell.utf8), Array("y".utf8)]])
     }
 }
 
@@ -301,7 +305,7 @@ struct PasswordCSVTests {
     @Test("Exports Apple Passwords CSV that reads back")
     func exportRoundTrip() throws {
         let imported = try importCSV(Fixtures.applePasswordsCSV)
-        let exported = PasswordCSV.exportApplePasswords(imported.entries.map(\.item), formulaPolicy: .preserve)
+        let exported = PasswordCSV.exportApplePasswords(imported.entries.map(\.item))
         #expect(exported.report.exportedCount == 3)
         #expect(exported.report.warnings.isEmpty)
         let text = String(decoding: exported.bytes, as: UTF8.self)
@@ -333,22 +337,21 @@ struct PasswordCSVTests {
         let exported = PasswordCSV.exportApplePasswords([item, trashed])
         let rows = try CSVReader.parse(exported.bytes).map(\.fields)
         #expect(rows.count == 3)
-        #expect(rows[1][0...3] == ["Bank", "https://bank.example/", "wendy", "'-starts-with-dash"])
+        #expect(rows[1][0...3] == ["Bank", "https://bank.example/", "wendy", "-starts-with-dash"])
         #expect(rows[2][1] == "https://cards.bank.example/")
-        #expect(rows[1][4] == "'=HYPERLINK(\"http://evil.example\")\nFirst pet?: Fluffy\nPIN: 0420")
+        #expect(rows[1][4] == "=HYPERLINK(\"http://evil.example\")\nFirst pet?: Fluffy\nPIN: 0420")
         #expect(!String(decoding: exported.bytes, as: UTF8.self).contains("privateKey"))
         #expect(exported.report.exportedCount == 1)
         #expect(
             Set(exported.report.warnings) == [
                 .passkeyOmitted(itemID: item.id), .fieldsMovedToNotes(itemID: item.id, count: 2),
-                .cellNeutralised(itemID: item.id, column: "Password"),
-                .cellNeutralised(itemID: item.id, column: "Notes"),
                 .trashedItemOmitted(itemID: trashed.id),
             ])
-        // Importing the neutralised file keeps the apostrophe, as data, and says what it probably is.
+        // The file reads back as exactly the values stored, and an import takes a cell exactly as written.
         var generator = SeededGenerator(seed: 3)
         let again = try PasswordCSV.importFile(exported.bytes, into: Fixtures.vaultID, using: &generator)
-        #expect(again.entries.first?.item.values(.password) == ["'-starts-with-dash"])
-        #expect(again.report.warnings.map(\.warning).contains(.possiblyNeutralisedFormula(column: "Password")))
+        #expect(again.entries.first?.item.values(.password) == ["-starts-with-dash"])
+        #expect(again.entries.first?.item.notes.hasPrefix("=HYPERLINK(") == true)
+        #expect(again.report.warnings.isEmpty)
     }
 }

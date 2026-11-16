@@ -324,8 +324,12 @@ exactly what the attacker wants.
 - SEC6. The AutoFill extension never returns a credential to a service identifier the item is not
   scoped to. Enforced by type (matching accepts only a normalised host) and by a single
   authorization chokepoint, not by convention across view controllers.
-- SEC7. Import parsers treat input as hostile (size limits, zip-slip and zip-bomb protection,
-  CSV formula-injection neutralisation on export).
+- SEC7. Import parsers treat input as hostile (size limits, zip-slip and zip-bomb protection).
+  Values are data in both directions: an import takes each CSV cell exactly as written, and an
+  export writes every stored value unaltered, with RFC 4180 quoting only. The exported CSV is for
+  another password manager's importer, not a spreadsheet, so nothing neutralises formulas in it; the
+  export screen says the file holds every password in plain text and is not meant for spreadsheets
+  (decided by the owner on 2026-11-16, `06-adversarial-review.md` §K, K2).
 - SEC8. Host normalisation and scope policy fail closed: an input that cannot be unambiguously
   resolved to a hostname, or a scope that spans unrelated owners, is rejected rather than
   interpreted generously.

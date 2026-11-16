@@ -68,13 +68,11 @@ public enum PasswordCSV {
         options: ImportOptions = ImportOptions(), using generator: inout some RandomNumberGenerator
     ) throws -> ImportResult {
         // Row by row: the file's rows are never held beside the drafts made from them (PRD SEC7).
-        var header: CSVRecord?
         var columns: [Column] = []
         var assembler: ImportAssembler?
         try CSVReader.forEachRecord(bytes, limits: limits) { row in
-            guard let header, var current = assembler else {
+            guard var current = assembler else {
                 let (format, mapped) = try self.columns(of: row)
-                header = row
                 columns = mapped
                 assembler = ImportAssembler(format: format, vaultID: vaultID, limits: limits, options: options)
                 return
@@ -94,9 +92,6 @@ public enum PasswordCSV {
                 return
             }
             for (position, cell) in row.fields.enumerated() {
-                if isNeutralisedFormula(cell) {
-                    record.warnings.append(.possiblyNeutralisedFormula(column: header.fields[position]))
-                }
                 switch columns[position] {
                 case .title:
                     record.title = cell
@@ -154,22 +149,15 @@ public enum PasswordCSV {
         ["true", "1", "yes"].contains(UTF8Text.trimmed(cell).lowercased())
     }
 
-    /// Whether a cell looks like the output of `CSVWriter.neutralised`: an apostrophe, then a formula character.
-    private static func isNeutralisedFormula(_ cell: String) -> Bool {
-        guard cell.hasPrefix("'") else { return false }
-        return CSVWriter.isFormulaLike(String(cell.dropFirst()))
-    }
-
     /// Exports `items` as an Apple Passwords CSV file (PRD F8.4): one row per website, since Apple Passwords keeps
     /// one entry per website.
     ///
     /// The format has six columns. What does not fit is not lost quietly: a passkey is left out and reported
     /// (passkeys do not survive CSV, docs/00-research.md §1.3), and every other field without a column is written
-    /// into the notes as a `label: value` line and reported. Cells a spreadsheet would run are made inert under
-    /// `formulaPolicy`, and each one changed is reported.
-    public static func exportApplePasswords(
-        _ items: [Item], formulaPolicy: CSVWriter.FormulaPolicy = .neutralise
-    ) -> ExportResult {
+    /// into the notes as a `label: value` line and reported. Every cell is the stored value, unaltered: a value that
+    /// begins with `=`, `+`, `-` or `@` is written as it is, because the file is for an importer, not a spreadsheet
+    /// (`CSVWriter`).
+    public static func exportApplePasswords(_ items: [Item]) -> ExportResult {
         var report = ExportReport()
         var rows = [applePasswordsHeader]
         for item in items {
@@ -221,13 +209,7 @@ public enum PasswordCSV {
                 let cells = [
                     item.title, url, username?.value ?? "", password?.value ?? "", notes, oneTimePassword?.value ?? "",
                 ]
-                var row: [String] = []
-                for (column, cell) in zip(applePasswordsHeader, cells) {
-                    let written = CSVWriter.neutralised(cell, policy: formulaPolicy)
-                    if written != cell { report.warnings.append(.cellNeutralised(itemID: item.id, column: column)) }
-                    row.append(written)
-                }
-                rows.append(row)
+                rows.append(cells)
             }
             report.exportedCount += 1
         }
