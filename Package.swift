@@ -30,6 +30,7 @@ let package = Package(
         .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
         .library(name: "WatchwordAutoFill", targets: ["WatchwordAutoFill"]),
         .library(name: "WatchwordInterchange", targets: ["WatchwordInterchange"]),
+        .library(name: "WatchwordPresentation", targets: ["WatchwordPresentation"]),
     ],
     dependencies: [
         // Exact version, and Package.resolved pins the commit (ADR 0006).
@@ -112,6 +113,18 @@ let package = Package(
         // pure functions from hostile bytes to item drafts and a report, so all of it runs under `swift test` on Linux.
         .target(name: "WatchwordInterchange", dependencies: ["WatchwordModel", "WatchwordMatching"]),
 
+        // What the apps' screens show and do, as view models over `VaultSession`: vaults, devices, the quarantine,
+        // sharing, the security report, import and export (§15). Portable, so the screens' logic runs under `swift test`
+        // on Linux against real sessions; the SwiftUI views in Apps/ only lay it out. Decides nothing about security:
+        // every refusal is the session's, and the models word it.
+        .target(
+            name: "WatchwordPresentation",
+            dependencies: [
+                "WatchwordKit", "WatchwordModel", "WatchwordSync", "WatchwordStore", "WatchwordEnvelope",
+                "WatchwordCrypto", "WatchwordSharing", "WatchwordHygiene", "WatchwordInterchange",
+            ]
+        ),
+
         // Seeded and deliberately broken generators and vector helpers, for test targets only (§15). Not a product,
         // and no production target may depend on it.
         .target(
@@ -185,6 +198,15 @@ let package = Package(
         .testTarget(
             name: "WatchwordInterchangeTests",
             dependencies: ["WatchwordInterchange", "WatchwordModel", "WatchwordMatching", "WatchwordTestSupport"]
+        ),
+
+        .testTarget(
+            name: "WatchwordPresentationTests",
+            dependencies: [
+                "WatchwordPresentation", "WatchwordKit", "WatchwordModel", "WatchwordSync", "WatchwordStore",
+                "WatchwordCrypto", "WatchwordSharing", "WatchwordHygiene", "WatchwordInterchange",
+                "WatchwordTestSupport",
+            ]
         ),
 
         // Adversarial security suite (Swift Testing, tag .adversarial, run as its own CI job).
