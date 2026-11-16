@@ -10,6 +10,10 @@ public enum FillRefusal: Error, Hashable, Sendable {
     /// The caller asked to fill an item that is not scoped to this host. This is the
     /// defence-in-depth case: a UI bug or a tampered record must not become a wrong-site fill.
     case itemNotScopedToHost(PhishingAssessment)
+    /// The page was loaded over plain `http` (PRD F6.9). Nothing is filled into it, whatever is scoped to its host
+    /// and whatever the person chose: the page's content, its scripts and the form's destination are all open to
+    /// anyone on the network path. Carries the host so the UI can name it.
+    case insecurePage(NormalizedHost)
 }
 
 /// What the AutoFill extension is permitted to do for one request.
@@ -33,16 +37,33 @@ public enum FillDecision: Hashable, Sendable {
 /// PRD SEC6 says the extension never returns a credential for a service identifier the item is
 /// not scoped to. Routing every response through `authorize(_:for:among:)` makes that a property
 /// of one testable function rather than a convention spread across view controllers.
+///
+/// Both entry points refuse a page loaded over plain `http` before anything is matched (PRD F6.9, owner decision
+/// 2026-11-16): `insecurePage`, for every request that would put a secret into a page, an explicit choice included.
+/// A domain identifier, which carries no scheme, is judged on its host as before.
 public enum AutoFillGate {
-    /// What to offer for an incoming request.
-    public static func decide(for identifier: ServiceIdentifier, among items: [Item]) -> FillDecision {
+    /// The host of a page the gate may fill: the identifier normalised, and not a page loaded over plain `http`.
+    /// Every decision starts here, and so does any request that puts something into a page without releasing an
+    /// item (generating a password for it).
+    public static func page(_ identifier: ServiceIdentifier) -> Result<NormalizedHost, FillRefusal> {
         let host: NormalizedHost
         do {
             host = try HostNormalizer.normalize(identifier)
         } catch let error as HostNormalizationError {
-            return .refuse(.unusableIdentifier(error))
+            return .failure(.unusableIdentifier(error))
         } catch {
-            return .refuse(.unusableIdentifier(.invalidHost(identifier.identifier)))
+            return .failure(.unusableIdentifier(.invalidHost(identifier.identifier)))
+        }
+        guard !HostNormalizer.isPlainHTTPPage(identifier) else { return .failure(.insecurePage(host)) }
+        return .success(host)
+    }
+
+    /// What to offer for an incoming request.
+    public static func decide(for identifier: ServiceIdentifier, among items: [Item]) -> FillDecision {
+        let host: NormalizedHost
+        switch page(identifier) {
+        case .success(let found): host = found
+        case .failure(let refusal): return .refuse(refusal)
         }
 
         let ranking = ItemRanker.rank(items: items, host: host)
@@ -64,12 +85,9 @@ public enum AutoFillGate {
         among items: [Item]
     ) -> Result<NormalizedHost, FillRefusal> {
         let host: NormalizedHost
-        do {
-            host = try HostNormalizer.normalize(identifier)
-        } catch let error as HostNormalizationError {
-            return .failure(.unusableIdentifier(error))
-        } catch {
-            return .failure(.unusableIdentifier(.invalidHost(identifier.identifier)))
+        switch page(identifier) {
+        case .success(let found): host = found
+        case .failure(let refusal): return .failure(refusal)
         }
 
         guard ItemRanker.isSelectable(item, for: host, among: items) else {

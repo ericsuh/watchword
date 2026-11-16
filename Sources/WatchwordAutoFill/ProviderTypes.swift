@@ -14,8 +14,9 @@ import WatchwordModel
 public enum ProviderRefusal: Error, Equatable, Sendable {
     /// The system named no site or app, so there is no host to authorise a release for.
     case noServiceIdentifier
-    /// `AutoFillGate` refused: the identifier is not a usable hostname, nothing is scoped to the host, or the chosen
-    /// item is not for it. Carries the look-alike assessment, so the extension can say why.
+    /// `AutoFillGate` refused: the identifier is not a usable hostname, the page was loaded over plain `http`, nothing
+    /// is scoped to the host, or the chosen item is not for it. Carries the look-alike assessment, so the extension
+    /// can say why.
     case gate(FillRefusal)
     /// The identity or choice names no item or field the vault holds: a stale identity store, or a made-up one.
     case unknownRecord
@@ -594,9 +595,13 @@ public struct SavedPassword: Hashable, Sendable {
 public struct GeneratePasswordRequest: Hashable, Sendable {
     /// The site's `passwordrules`, if it declared any.
     public var passwordRules: String?
+    /// The page the password is for, when the system names one (`ASGeneratePasswordsRequest.serviceIdentifier`).
+    /// A page loaded over plain `http` is refused (PRD F6.9).
+    public var serviceIdentifier: ServiceIdentifier?
 
-    public init(passwordRules: String? = nil) {
+    public init(passwordRules: String? = nil, serviceIdentifier: ServiceIdentifier? = nil) {
         self.passwordRules = passwordRules
+        self.serviceIdentifier = serviceIdentifier
     }
 }
 

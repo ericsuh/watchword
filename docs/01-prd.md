@@ -198,6 +198,15 @@ Requirement IDs are stable and referenced from the test plan.
   item's host and username to the OS-managed credential identity store, which is a disclosure
   surface outside the app's control; items the person marks sensitive are reachable only by opening
   the app.
+- F6.9 Fill only on `https` pages. A request whose service identifier is a URL with the scheme
+  `http` is refused, whatever is scoped to its host and even when the person chooses the item:
+  passwords, one-time codes, text insertion, credential list suggestions, and save and generate
+  password. App identifiers (domains, with no scheme) and passkeys (WebAuthn needs a secure context
+  anyway) are unchanged. Whether a form *submits* to an `http` address cannot be enforced: the
+  system tells the extension the page, not the form's action. A QuickType suggestion the system
+  offers on an `http` page cannot be refused either, as a tap hands back the published identity and
+  not the page; the hygiene report flags saved `http://` addresses (F9.3). Decided by the owner on
+  2026-11-16 (`06-adversarial-review.md` §K, K3).
 
 ### 5.7 Sync (F7)
 

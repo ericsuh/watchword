@@ -65,12 +65,7 @@ public enum HostNormalizer {
     private static let asciiWhitespace: Set<Character> = [" ", "\t", "\r", "\n"]
 
     public static func normalize(_ identifier: ServiceIdentifier) throws -> NormalizedHost {
-        let trimmed = String(
-            identifier.identifier
-                .drop(while: { asciiWhitespace.contains($0) })
-                .reversed()
-                .drop(while: { asciiWhitespace.contains($0) })
-                .reversed())
+        let trimmed = trimmedText(of: identifier)
         guard !trimmed.isEmpty else { throw HostNormalizationError.empty }
 
         switch identifier.kind {
@@ -98,6 +93,25 @@ public enum HostNormalizer {
             }
             return try validate(host: host)
         }
+    }
+
+    /// Whether `identifier` names a web page loaded over plain `http`: a URL whose scheme is `http`, in any case. A
+    /// domain identifier (an app's associated domain, a published identity) carries no scheme and is never one. Read
+    /// with the same trimming and parsing as `normalize`, so the two cannot disagree about which URL this is.
+    public static func isPlainHTTPPage(_ identifier: ServiceIdentifier) -> Bool {
+        guard identifier.kind == .url, let components = URLComponents(string: trimmedText(of: identifier)) else {
+            return false
+        }
+        return components.scheme?.lowercased() == "http"
+    }
+
+    private static func trimmedText(of identifier: ServiceIdentifier) -> String {
+        String(
+            identifier.identifier
+                .drop(while: { asciiWhitespace.contains($0) })
+                .reversed()
+                .drop(while: { asciiWhitespace.contains($0) })
+                .reversed())
     }
 
     /// A domain identifier normalises to exactly what the same host gives as a URL, `https://<domain>/`.

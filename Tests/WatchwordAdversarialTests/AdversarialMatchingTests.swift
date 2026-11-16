@@ -36,6 +36,31 @@ struct AdversarialMatchingTests {
         #expect(error != nil)
     }
 
+    /// A2 on the network path serves a page of the right site over plain `http`, where it can read whatever is
+    /// filled. The gate refuses it before matching, for the decision and for an explicit choice alike (PRD F6.9);
+    /// the same host over `https`, or as an app's domain, is matched as before.
+    @Test(
+        "an http page is refused by decide and by authorize, whatever is scoped to it",
+        arguments: ["http://amazon.com/", "HTTP://www.amazon.com/ap/signin", "http://signin.aws.amazon.com:80/"])
+    func plainHTTP(_ url: String) {
+        let identifier = ServiceIdentifier(url, kind: .url)
+        guard case .refuse(.insecurePage) = AutoFillGate.decide(for: identifier, among: Self.items) else {
+            Issue.record("\(url) was not refused as insecure")
+            return
+        }
+        for item in Self.items {
+            guard case .failure(.insecurePage) = AutoFillGate.authorize(item, for: identifier, among: Self.items) else {
+                Issue.record("\(url) authorised \(item.title)")
+                continue
+            }
+        }
+        let secure = ServiceIdentifier(
+            url.lowercased().replacingOccurrences(of: "http://", with: "https://"), kind: .url)
+        if case .refuse(let refusal) = AutoFillGate.decide(for: secure, among: Self.items) {
+            Issue.record("\(secure.identifier) was refused: \(refusal)")
+        }
+    }
+
     static let lookAlikeHosts = [
         "amazon.com.evil.example",
         "evil-amazon.com",

@@ -59,6 +59,11 @@ authorize(item, for: identifier, among: items) -> Result<NormalizedHost, FillRef
 "did they choose it" but "is this item for this site". A UI bug, a tampered record, or a mis-ranked
 list cannot become a wrong-site fill without going through a function whose refusal is tested.
 
+Both refuse a page loaded over plain `http` first (`FillRefusal.insecurePage`, PRD F6.9, owner decision
+2026-11-16): the host may be right, but on such a page an attacker on the network path can read what is
+filled and rewrite the form. The person's explicit choice does not get past it, and no login is saved from
+such a page.
+
 `.chooseAmong` exists because two accounts can legitimately tie on one host (scenario S1 at
 `amazon.com`). The extension must present both and fill neither automatically: auto-filling the
 first of an ambiguous set is how the AWS root password ends up in a retail login form.
@@ -195,3 +200,9 @@ matched scope. Nothing pre-selected.
   two Amazon accounts of S1, a login saved for one exact host, and a tenant of a shared host are reached
   through the extension's list instead. What the system really matches on is unverified until
   milestone 5's on-device QA; the rule assumes the widest case.
+- Plain `http` (F6.9). The gate refuses a page loaded over `http`, but two cases cannot be refused in the
+  extension. A form on an `https` page that *submits* to an `http` address is filled: the credential
+  provider API names the page, not the form's action. And a QuickType suggestion the system offers on an
+  `http` page is filled when tapped, because the tap hands back the published identity (a domain, with no
+  scheme) and not the page; a scope records no scheme, so there is nothing to withhold the identity on. The
+  hygiene report flags every saved `http://` address, and no login is saved from an `http` page.

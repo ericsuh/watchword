@@ -551,6 +551,7 @@ A credential may only reach the OS through one path, and each stage fails closed
 ServiceIdentifier (OS-supplied, attacker-influenced)
   → HostNormalizer.normalize   rejects user-info, non-http(s) schemes, ASCII percent-escapes,
                                structural characters, over-long labels → NormalizedHost
+  → AutoFillGate.page          a URL whose scheme is http → .insecurePage (F6.9); domains pass
   → ScopeMatcher.match         exclusions first; exact = 2·labels+1, subdomain = 2·labels
   → ItemRanker.rank            top specificity wins; less specific matches are *shadowed*
                                (keeps Amazon retail off the AWS console), ties are ambiguous
@@ -558,11 +559,16 @@ ServiceIdentifier (OS-supplied, attacker-influenced)
   → AutoFillGate.authorize     re-checks scope even for an explicit user choice (SEC6)
 ```
 
-Two invariants to preserve when touching this module:
+Three invariants to preserve when touching this module:
 
 - Comparison functions take `NormalizedHost`, never `String`, so an un-normalised identifier cannot
   reach a match. Keep that typing.
 - Normalisation may never *invent* a match. If an input is not unambiguously a hostname, throw.
+- Only `https` pages are filled (PRD F6.9, owner decision 2026-11-16). `decide` and `authorize` both start with
+  `AutoFillGate.page`, which refuses an `http` URL as `FillRefusal.insecurePage` before matching, so no choice gets
+  past it; anything in `WatchwordAutoFill` that lists, saves or generates for a page reads it through `page` too.
+  Domain identifiers carry no scheme and are unchanged. The form's action and the page behind a QuickType tap are
+  not visible to the extension, so those two cases are not refused (architecture §9): don't claim otherwise.
 
 `PhishingDetector` exists because the above is silent by design: on `аmazon.com` (Cyrillic а) nothing
 matches, the UI shows nothing, and the person types the password by hand. It turns that silence into

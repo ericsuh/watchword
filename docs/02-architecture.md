@@ -1293,6 +1293,26 @@ initializer is internal to the module, so the only way to obtain one is through 
 `AutoFillGate` is the single function through which a secret may reach the OS, and it re-checks
 `isSelectable` even when the person chose the item explicitly.
 
+**Only `https` pages (F6.9, owner decision 2026-11-16).** Before anything is matched, the gate refuses a
+URL identifier whose scheme is `http` (`AutoFillGate.page`, `HostNormalizer.isPlainHTTPPage`), with
+`FillRefusal.insecurePage(host)`, in `decide` and in `authorize`, so an explicit choice cannot get past it.
+What it stops: a person on a network an attacker controls (adversary A2 on the path) being given a fill
+into a page whose content, scripts and form the attacker can read and rewrite. A domain identifier carries
+no scheme (an app's associated domain, a published identity) and is judged on its host as before. Two
+halves of the owner's request cannot be enforced in the extension, and are stated plainly rather than
+approximated:
+
+- *Forms that submit to `http`.* The credential provider API gives the extension the page's service
+  identifier, never the form's action, so an `https` page whose form posts to `http://` is filled like any
+  other. The browser's own mixed-form warning is the only control there.
+- *QuickType on an `http` page.* A tap hands back the identity Watchword published, which is a domain, and
+  not the page (§9.2, "The page, or nothing"). `ServiceScope` records no scheme: a scope is a host. An
+  imported item does keep an `http://` URL it came with, as a website field beside the scope, but that is
+  not evidence about the page the system offers the identity on (an item saved from `https` is offered on
+  that site's `http` pages too), so identities are published as before and such a fill is not refused. The
+  hygiene report flags every saved `http://` address (`ItemAnalysis.insecureURLFields`, §13.5), and a
+  login made on an `http` page is never saved, so nothing would offer it there again.
+
 ### 9.1 Anti-phishing
 
 Full design in `05-anti-phishing.md`. Three additions beyond matching:
@@ -1417,7 +1437,7 @@ names neither, so both keep ranking and neither is listed, released, written or 
 | Passkey registration | `passkeyRegistrationOptions`, `registerPasskey` | attestation object, and where the credential was stored |
 | Conditional registration (iOS 18) | `registerPasskeyWithoutInteraction` | as above, or `noItemToUpgrade` |
 | Save password | `savePasswordPlan`, `savePassword`, `savePasswordWithoutInteraction` | create (alone, or beside the accounts already there), offer an update, or already saved |
-| Generate password | `generatePassword(for:)` | a password obeying the site's `passwordrules`, with its entropy |
+| Generate password | `generatePassword(for:)` | a password obeying the site's `passwordrules`, with its entropy; refused for a page loaded over `http` when the request names one |
 | Credential-update reports | `handle(_:)` | which fields were flagged or renamed |
 | Identity publishing | `publishAllIdentities()`, and after every write | through `CredentialIdentityPublisher` |
 
@@ -1433,6 +1453,12 @@ What holds across all of them:
   evidence (SEC6, F11.1).
 - **No override.** There is no parameter, mode or second call that releases after a refusal
   (F11.4, F11.7). A look-alike host gets a `LookAlikeWarning` *instead of* a list (F11.3).
+- **Only `https` pages (F6.9).** A page loaded over plain `http` gets nothing: lists name nothing for
+  it (and with nothing else named are `refused(.gate(.insecurePage))`), a password, code or text is
+  refused even when chosen, no login is saved from it, and no password is generated for it. The gate
+  decides it (§9 above); the lists read the page through `AutoFillGate.page`, as a release does. Domain
+  identifiers and passkeys are unchanged, and a QuickType fill on an `http` page cannot be refused,
+  since the tap does not name the page.
 - **Shadowed accounts are shown, not released.** `otherAccounts` lists items that match the host
   less specifically (F6.6). The gate refuses them even when chosen, as it always has; to use one
   on that host the person adds the host to the item, in the app.
