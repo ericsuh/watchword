@@ -128,8 +128,12 @@ with password re-entry, import of 1PUX/CSV fixtures.
   their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS. The macOS window
   (820×600) and every sheet fit a 1024×768 screen with the menu bar, as the CI runners have: content scrolls, and
   Done, Cancel and confirm buttons are toolbar items, always in view (a 780-point window put Settings' Done below the
-  runner's screen). An element that exists but cannot be hit fails at once, with the element tree, the window's frame
-  and a screenshot attached.
+  runner's screen). `reveal` decides by an element's frame before asking whether it is hittable
+  (which fails outright for an iOS row scrolled out of view): above the visible area it scrolls back, below it
+  scrolls on, not there yet it scrolls the way the caller says, and on screen it waits; on macOS it scrolls only a
+  scroll view no sheet covers and learns which way the wheel moves the form. Only after its bounded scrolls does it
+  fail, with the element tree, the window's frame and a screenshot attached. A text expected below the fold (an
+  export's report) is scrolled to as well.
 - Their logic is tested on Linux without a simulator: every account screen's state and decisions are a model in
   `WatchwordPresentation` (`02-architecture.md` §15), and `WatchwordPresentationTests` drives those models over real
   `VaultSession`s ("Screen models: vaults", "… devices", "… a password changed by someone else", "… held-aside

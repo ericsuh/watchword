@@ -68,8 +68,9 @@ final class ImportExportTests: XCTestCase {
         app.enter(password, into: AccessibilityID.Export.password)
         app.tap(AccessibilityID.Export.run)
         app.waitForText("item(s) in the file", in: AccessibilityID.Export.count)
-        XCTAssertTrue(app.element(AccessibilityID.Export.save).exists)
-        XCTAssertTrue(app.element(AccessibilityID.Export.warning).exists, "the warning went once the file existed")
+        app.reveal(AccessibilityID.Export.save, at: .below)
+        // Scrolled back to: rows out of view leave the hierarchy, so the warning is checked where it stands.
+        app.reveal(AccessibilityID.Export.warning, at: .top)
         app.tap(AccessibilityID.Debug.lockNow)
         XCTAssertTrue(unlock.waitForExistence(timeout: 10), app.debugDescription)
         unlock.click()

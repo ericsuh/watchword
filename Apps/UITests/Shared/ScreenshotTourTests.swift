@@ -162,8 +162,10 @@ final class ScreenshotTourTests: XCTestCase {
             app.descendants(matching: .any)["detail.conflicts"].firstMatch.waitForNonExistence(timeout: 10),
             "the conflict is still shown")
 
-        tourVaultsAndSharing(app)
+        // The quarantine before sharing, as in QuarantineTests: the other device then writes into the Personal vault
+        // alone.
         tourQuarantine(app)
+        tourVaultsAndSharing(app)
         tourSecurityReport(app)
         tourImportExportAndRestore(app)
         tourPasswordChangeAndDevices(app, password: password)

@@ -1,5 +1,10 @@
 import XCTest
 
+#if os(macOS)
+    /// The sign of a scroll-wheel delta that moves a form towards its end, as `scroll` has found it.
+    @MainActor private var macScrollSign: CGFloat = 1
+#endif
+
 /// Steps the account-screen UI tests and the screenshot tour share. Elements are found by the identifiers in
 /// `AccessibilityID` (Apps/Shared/AccessibilityID.swift, compiled into these bundles too).
 extension XCUIApplication {
@@ -18,25 +23,36 @@ extension XCUIApplication {
         case anywhere
     }
 
-    /// The element with `identifier`, scrolled to if it is not on screen yet: a form's rows out of view are not in the
-    /// hierarchy until they have been shown, and on macOS a row that is in the hierarchy may still be clipped. Bounded:
-    /// a few short waits and at most eight scrolls, so a missing element fails in seconds, with the tree attached.
+    /// The element with `identifier`, scrolled to if it is not on screen yet. A form's rows out of view are either not
+    /// in the hierarchy or in it with a frame outside the visible area (iOS), and asking such an element whether it is
+    /// hittable can itself fail ("activation point invalid"); so the frame decides first. An element above the visible
+    /// area scrolls the form back, one below scrolls it on, one not there yet scrolls the way `position` says, and one
+    /// on screen but not yet hittable (a sheet still animating in) is waited for, not scrolled past. Bounded: at most
+    /// eight scrolls and short waits, then a failure with the tree and a screenshot attached.
     @discardableResult
     func reveal(
         _ identifier: String, at position: FormPosition = .anywhere, mayBeDisabled: Bool = false,
         file: StaticString = #filePath, line: UInt = #line
     ) -> XCUIElement {
         let target = element(identifier)
-        if !(target.waitForExistence(timeout: 2) && target.isHittable) {
-            let steps: [Bool]
-            switch position {
-            case .top: steps = Array(repeating: false, count: 6)
-            case .below: steps = Array(repeating: true, count: 6)
-            case .anywhere: steps = [true, true, true, false, false, false, false, false]
-            }
-            for towardsEnd in steps where !(target.exists && target.isHittable) {
+        _ = target.waitForExistence(timeout: 2)
+        let defaults: [Bool]
+        switch position {
+        case .top: defaults = Array(repeating: false, count: 8)
+        case .below: defaults = Array(repeating: true, count: 8)
+        case .anywhere: defaults = [true, true, true, false, false, false, false, false]
+        }
+        var scrolls = 0
+        while scrolls < defaults.count, !isReachable(target) {
+            if target.exists, let towardsEnd = direction(toward: target) {
                 scroll(towardsEnd: towardsEnd, to: identifier)
+            } else if target.exists, isOnScreen(target) {
+                if waitUntilHittable(target, timeout: 2) || mayBeDisabled { break }
+                scroll(towardsEnd: defaults[scrolls], to: identifier)
+            } else {
+                scroll(towardsEnd: defaults[scrolls], to: identifier)
             }
+            scrolls += 1
         }
         if !target.waitForExistence(timeout: 2) {
             attachTree("reveal \(identifier)")
@@ -49,6 +65,45 @@ extension XCUIApplication {
         return target
     }
 
+    /// The part of the screen the frontmost form shows: on macOS the frontmost sheet's scroll view (a row behind the
+    /// sheet's toolbar at its foot is not clickable), else the window.
+    private var visibleFrame: CGRect {
+        #if os(macOS)
+            if let sheet = sheets.allElementsBoundByIndex.last {
+                let form = sheet.scrollViews.firstMatch
+                return form.exists ? form.frame : sheet.frame
+            }
+        #endif
+        return windows.firstMatch.exists ? windows.firstMatch.frame : .zero
+    }
+
+    /// Keeps clear of a bar along an edge of the visible area (a toolbar, the home indicator).
+    private static let edgeMargin: CGFloat = 36
+
+    /// Whether `element`'s middle is well inside the visible area. Asks nothing of an element not there.
+    func isOnScreen(_ element: XCUIElement) -> Bool {
+        guard element.exists else { return false }
+        let frame = element.frame
+        let visible = visibleFrame.insetBy(dx: 0, dy: Self.edgeMargin)
+        return !frame.isEmpty && !visible.isEmpty && visible.contains(CGPoint(x: frame.midX, y: frame.midY))
+    }
+
+    /// Which way to scroll to bring `element` into view: towards the end if it is below, back if it is above, `nil`
+    /// if it is in view or has no frame.
+    private func direction(toward element: XCUIElement) -> Bool? {
+        let frame = element.frame
+        let visible = visibleFrame.insetBy(dx: 0, dy: Self.edgeMargin)
+        guard !frame.isEmpty, !visible.isEmpty else { return nil }
+        if frame.midY > visible.maxY { return true }
+        if frame.midY < visible.minY { return false }
+        return nil
+    }
+
+    /// On screen and hittable; `isHittable` is asked only of an element on screen.
+    func isReachable(_ element: XCUIElement) -> Bool {
+        isOnScreen(element) && element.isHittable
+    }
+
     /// One step of scrolling the frontmost form. On iOS a swipe, which lands on whatever is on top (a sheet included).
     /// On macOS a scroll-wheel event, which needs a scroll view the pointer can reach: the one holding the target if it
     /// is in the hierarchy, else the frontmost sheet's (sheets nest, so the last one listed is on top), never one a
@@ -59,9 +114,19 @@ extension XCUIApplication {
         #else
             let holding = scrollViews.containing(.any, identifier: identifier).allElementsBoundByIndex.last
             let frontmost = sheets.allElementsBoundByIndex.last?.scrollViews.firstMatch
-            for candidate in [holding, frontmost, windows.firstMatch.scrollViews.firstMatch].compactMap({ $0 })
-            where candidate.exists && candidate.isHittable {
-                candidate.scroll(byDeltaX: 0, deltaY: towardsEnd ? -240 : 240)
+            let target = element(identifier)
+            let before = target.exists ? target.frame.midY : nil
+            // The window's own list only when no sheet covers it.
+            let window = frontmost == nil ? windows.firstMatch.scrollViews.firstMatch : nil
+            for candidate in [holding, frontmost, window].compactMap({ $0 })
+            where candidate.exists && isOnScreen(candidate) {
+                candidate.scroll(byDeltaX: 0, deltaY: (towardsEnd ? -240 : 240) * macScrollSign)
+                // Which sign of deltaY moves a form on is learnt from the first scroll that moved the target: had
+                // it moved the wrong way, the sign is turned round for every scroll after.
+                if let before, target.exists {
+                    let moved = target.frame.midY - before
+                    if moved != 0, (moved > 0) == towardsEnd { macScrollSign = -macScrollSign }
+                }
                 return
             }
         #endif
@@ -84,12 +149,17 @@ extension XCUIApplication {
         }
     }
 
-    /// Waits until `element` can be clicked: it exists and nothing (a sheet still closing, say) covers it.
+    /// Waits until `element` can be clicked: on screen, and nothing (a sheet still closing, say) covers it. Polls in
+    /// quarter-second waits rather than through a predicate on `hittable`, which fails outright for an element whose
+    /// frame is off the screen.
     @discardableResult
     func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
-        let hittable = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
-        return XCTWaiter().wait(for: [hittable], timeout: timeout) == .completed
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if isReachable(element) { return true }
+            _ = XCTWaiter().wait(for: [XCTestExpectation(description: "a quarter of a second")], timeout: 0.25)
+        } while Date() < deadline
+        return false
     }
 
     /// Settings, from wherever the test is: an account screen's sheet is closed first, and Settings opened if it is
@@ -176,7 +246,17 @@ extension XCUIApplication {
         let match = descendants(matching: .any).matching(identifier: identifier).matching(
             NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)
         ).firstMatch
-        XCTAssertTrue(match.waitForExistence(timeout: timeout), debugDescription, file: file, line: line)
+        // A text that appears below the fold of a form (an export's report) is not in the hierarchy until shown: if
+        // nothing with the identifier is there after a moment, the form is scrolled on, at most four times.
+        if !match.waitForExistence(timeout: min(3, timeout)) {
+            for _ in 0..<4 where !element(identifier).exists {
+                scroll(towardsEnd: true, to: identifier)
+            }
+            if !match.waitForExistence(timeout: max(1, timeout - 3)) {
+                attachTree("text \(text) in \(identifier)")
+                XCTFail("no \(identifier) containing \(text)", file: file, line: line)
+            }
+        }
     }
 
     /// Runs one of the Settings section's UI-test hooks (`UITestPeer`) and waits for its own report, which names what
