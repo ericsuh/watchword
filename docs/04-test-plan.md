@@ -407,7 +407,11 @@ back-dated to its author's in-cut revision (S36); a late rename stored again by 
 permanent deletion merged before the removal was known (S40); an invitation whose key ID is another vault's (S38); two
 vaults listing one account with different keys (S39); a replay asked for by a late stream, cut short by a lock and
 run after a relaunch (S41). Scenarios S3 and S4 through the session are
-`SharedVaultScenarioTests` (`WatchwordKitTests`).
+`SharedVaultScenarioTests` (`WatchwordKitTests`). A chain stopped at a later format (§8.9) through the session is
+"Vault session: a shared vault in a later format" (`WatchwordKitTests`): the vault read-only and reported, nothing
+published, planned or left, the owner's device stopped too, a member who may still write merged; and, in this suite
+(`AdversarialSharedVaultLaterFormatTests.swift`), a later record the store shows before the record it follows, offered
+again until it stops the chain, and later records signed by a member or by nobody, which leave the vault writable.
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

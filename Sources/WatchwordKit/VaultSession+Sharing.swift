@@ -67,6 +67,10 @@ public struct SharedVaultStatus: Sendable, Hashable {
     public let pendingRotation: [PendingRotation]
     /// Writes held aside because they do not count (docs/02-architecture.md §8.7), for the person to look at.
     public let heldAside: Int
+    /// The vault has gone on in a format this version cannot read (`MembershipLedger.continuesInLaterFormat`,
+    /// docs/02-architecture.md §8.9): it is read-only on this device, which proposes, plans, publishes and seals
+    /// nothing there, and the person is told to update the app.
+    public let requiresNewerVersion: Bool
 }
 
 /// What the sharing half of one sync did for one vault.
@@ -76,6 +80,9 @@ public struct SharedVaultSyncReport: Sendable, Equatable {
     public var keyReceived = false
     public var rotation: RotationStatus?
     public var resealed = 0
+    /// The vault's chain stopped at a later format (§8.9): only membership was ingested and the log downloaded and
+    /// merged; nothing was proposed, planned, published or sealed again.
+    public var requiresNewerVersion = false
     /// Why a step stopped, for diagnostics; the next sync tries again.
     public var failure: String?
 
@@ -257,6 +264,13 @@ extension VaultSession {
         let report = vault.ledger.ingest(offered.map(\.contents))
         for rejection in report.rejected {
             switch rejection.reason {
+            case .malformed(.unsupportedFormatVersion), .malformed(.unknownOperation):
+                // Perhaps a later format (§8.8 step 1, §8.9): offered again until the ledger holds it, since one that
+                // arrives before the record it follows stops the chain only once that record is here.
+                let contents = offered[rejection.index].contents
+                if vault.ledger.laterFormatRecords.contains(contents) {
+                    vault.refusedNames.insert(offered[rejection.index].name)
+                }
             case .malformed, .invalid: vault.refusedNames.insert(offered[rejection.index].name)
             case .unconnected: break
             }
@@ -291,6 +305,9 @@ extension VaultSession {
     /// proposed again on the new head if still wanted and possible (§8.3, S27). Returns whether anything was published.
     func settleProposals(in vaultID: UUID) async throws -> Bool {
         _ = try requireKeys()
+        // A chain stopped at a later format (§8.9) takes nothing from this version: proposals are kept, unpublished,
+        // for the updated app to judge.
+        guard !(try sharedVault(vaultID).ledger.continuesInLaterFormat) else { return false }
         var published = false
         var remaining: [MembershipRecord] = []
         for record in try sharedVault(vaultID).proposals {
@@ -552,6 +569,8 @@ extension VaultSession {
         try await ingestMembership(vaultID)
         let state = try sharedVault(vaultID).ledger.state
         guard state.owner.accountID != keys.keyset.accountID else { throw SharingError.ownerCannotLeave }
+        // Read-only past a later format (§8.9): nothing is published for the vault until the app is updated.
+        guard !(try sharedVault(vaultID).ledger.continuesInLaterFormat) else { throw SharingError.requiresNewerVersion }
         let request = try LeaveRequest.make(leaving: state, as: try requireKeys().keyset)
         try await publishSharingObject(SharingObject(request))
     }
@@ -635,6 +654,9 @@ extension VaultSession {
     /// Continues a saved plan (`RotationPlan.steps(in:)`); each step is safe to repeat. A superseded removal or
     /// departure is planned again, once per call.
     func resumeRotation(in vaultID: UUID) async throws -> RotationStatus {
+        // A saved plan is not carried on past a later format (§8.9): it would publish and seal on a chain this
+        // version no longer follows.
+        guard !(try sharedVault(vaultID).ledger.continuesInLaterFormat) else { throw SharingError.requiresNewerVersion }
         var status = RotationStatus.complete
         for _ in 0..<2 {
             let keys = try requireKeys()
@@ -769,7 +791,8 @@ extension VaultSession {
             vaultID: vaultID, membership: vault.ledger.state, role: vault.ledger.state.member(account.accountID)?.role,
             writePermission: vault.ledger.writePermission(for: account.accountID),
             substitutedMembers: vault.keyCheck?.substituted ?? [], unverifiedMembers: vault.keyCheck?.unverified ?? [],
-            pendingRotation: pending, heldAside: heldAside)
+            pendingRotation: pending, heldAside: heldAside,
+            requiresNewerVersion: vault.ledger.continuesInLaterFormat)
     }
 
     // MARK: - Hooks the rest of the session calls

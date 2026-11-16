@@ -1415,6 +1415,19 @@ merged, never published by the device and discarded only by the person; the obje
 on every replay of the log, so a write made while read-only counts once its author may write. A version that cannot be merged because the join would be
 over the payload limit is quarantined the same way (Y37).
 
+**A chain stopped at a later format** (§8.9) makes the vault read-only on this device, whatever its role, and says so:
+`SharedVaultStatus.requiresNewerVersion` for the UI (the person is told to update the app) and
+`SharedVaultSyncReport.requiresNewerVersion` for each sync. The ledger already refuses proposals, plans and the
+device's own writes (`writePermission` is `.refused(.requiresNewerVersion)`, so every write path and the engine's
+publishing stop); the session adds what the ledger cannot see: waiting proposals are kept and not published again, a
+saved rotation plan is not carried on (`resumeRotation` throws `SharingError.requiresNewerVersion`), nothing is
+planned or sealed again after the logs, and no leave request is published. Membership is still ingested, the log
+downloaded, and the writes of members who may write on the stopped chain judged and merged. A membership object
+refused as `malformed(.unsupportedFormatVersion)` or `malformed(.unknownOperation)` is not remembered as refused until
+the ledger holds it in `laterFormatRecords` (§8.8 step 1): one that arrives before the record it follows stops the
+chain once that record is here. Tests: "Vault session: a shared vault in a later format", and
+`laterFormatBeforeItsParent` and `laterFormatImpostorsThroughTheSession` in "shared vaults through the session".
+
 **Limits** (also `06-adversarial-review.md` §I, S32 to S35 and S42, S43):
 
 - A note line's removal carries no revision, so a former member's late removal of a line, merged by a device before it

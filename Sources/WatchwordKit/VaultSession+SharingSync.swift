@@ -30,6 +30,7 @@ extension VaultSession {
                     report.keyReceived = try await fetchCurrentKey(vaultID)
                 }
                 report.membershipChanged = try sharedVault(vaultID).ledger.state.hash != before
+                report.requiresNewerVersion = try sharedVault(vaultID).ledger.continuesInLaterFormat
             } catch {
                 report.failure = String(describing: error)
             }
@@ -103,6 +104,13 @@ extension VaultSession {
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var report = reports[vaultID] ?? SharedVaultSyncReport()
             do {
+                // Read-only past a later format (§8.9): no plan carried on or made, nothing sealed again.
+                if try sharedVault(vaultID).ledger.continuesInLaterFormat {
+                    report.requiresNewerVersion = true
+                    try await saveSharedVault(vaultID)
+                    reports[vaultID] = report
+                    continue
+                }
                 if try sharedVault(vaultID).plan != nil {
                     report.rotation = try await resumeRotation(in: vaultID)
                 }

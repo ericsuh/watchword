@@ -301,8 +301,9 @@ down.
   unverified members shown as such (D17), "pending rotation" (F4.3), held-aside writes, and the wording F4.3 and F4.5
   require.
 - The manual CloudKit run of S3 and S4.
-- The session's answer to `MembershipLedger.continuesInLaterFormat` (`02-architecture.md` §8.9): the vault read-only,
-  and the person told to update. The ledger already refuses proposals, plans and the device's own writes.
+- The screen that tells the person to update when a shared vault has gone on in a later format
+  (`SharedVaultStatus.requiresNewerVersion`; the session's side, the vault read-only, is delivered, `02-architecture.md`
+  §8.10).
 
 ## Milestone 5 — AutoFill
 
