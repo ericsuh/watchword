@@ -276,7 +276,9 @@ milestone 2 stores full item records only.
   suite "sync log"). A vault that has never synced has no log to restore from.
 - File protection: `completeUntilFirstUserAuthentication` for the ciphertext store (needed so the
   AutoFill extension and background sync can read ciphertext while the device is locked after first
-  unlock); key material is never in this file.
+  unlock); key material is never in this file. The device's own sealed, unsynced records (the hygiene ledger and
+  prefix cache, §13.8) are files beside it, in `DeviceLocal/` (`FileDeviceLocalStore`): the same protection class on
+  iOS, excluded from backup, written atomically, and read only as regular files within a size limit.
 - Keychain (access group shared with the extension):
   - `secretKey` — `WhenPasscodeSetThisDeviceOnly`, no access-control prompt (unlock already requires
     the password).
@@ -342,6 +344,26 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   person.
 - Observed cost: encrypted fields cannot be queried, which is fine because the change-log model
   only needs ordered fetches by zone.
+- **As built** (`WatchwordPlatform.CloudKitTransport`, milestone 3; not yet run against CloudKit, and not wired into
+  the app): one custom zone, `Watchword`, in the private database for the whole account. Each object is a `WWObject`
+  record whose record name is the object's name with `/` written `.` (an exact mapping both ways), with two fields: a
+  plain, queryable `name` — no more than the record name says — and the bytes in `encryptedValues["payload"]`, or in a
+  `CKAsset` (`payloadAsset`) above 512 KiB, since a record's own fields are capped near 1 MB. The `kind`, `lamport`
+  and `deviceID` fields above are not written: the name carries them and nothing queries them. A record is saved only
+  new, with `.ifServerRecordUnchanged`, so an existing one fails with `serverRecordChanged` (`objectExists`); nothing
+  fetched is saved back. A listing queries `name BEGINSWITH` the prefix, fetching the name only, follows the cursor
+  and is capped; a record counts only if its ID and `name` agree, and a read takes exactly one payload within the
+  reader's limit, never a plain field. The zone is created by the first create, never by a read; `userDeletedZone`
+  and a reset encryption key are `SyncTransportError.storeReset`, never silently recreated. Errors map to the
+  transport's typed errors (`CloudKitErrors`): throttling with CloudKit's `retryAfterSeconds` (`rateLimited`, which
+  `AutoSyncPolicy` honours within its bounds, §7.9), `quotaExceeded`, `notAuthenticated`, the network
+  (`unavailable`); each stops a sync as being offline does, and the report says which (`transportFailure`). The
+  transport reaches CloudKit through `CloudKitDatabase`, a seam over `CKDatabase` that `SystemCloudKitDatabase` only
+  forwards, so every decision is tested against a fake. Not built: `CKSyncEngine` (pushes reach the app's
+  `AutoSyncDriver` as remote-change hints), per-shared-vault zones and the shared database (milestone 4), the
+  re-upload after a reset the bullet above describes (today a reset stops sync until the person acts, and nothing
+  re-publishes what the zone held), and the manual integration workflow; an opt-in test runs the transport contract
+  against a development container from a signed host (`WATCHWORD_CLOUDKIT_CONTAINER`).
 
 ### 7.3 Transport B: files (iCloud Drive or any Files-app provider)
 
@@ -356,6 +378,18 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   is stored; polling on foreground and a `BGAppRefreshTask`/`NSBackgroundActivityScheduler` cadence.
 - Sharing uses the provider's shared folder; members exchange public keys through the same folder
   (`members/<accountID>.pub`, self-signed) and verify fingerprints out of band as in CloudKit.
+- **As built for iCloud Drive** (`WatchwordPlatform.CoordinatedFileSyncTransport`, milestone 3; not yet run in a
+  ubiquity container, and not wired into the app): the portable `FileSyncTransport`, whose rules (names, no links,
+  sizes, create-once by hard link) run inside `NSFileCoordinator` accessors through its synchronous forms. A listing is
+  a metadata-only coordinated read of the directory it walks; a fetch a coordinated read without changes; a create a
+  coordinated write; a delete one for deleting. Its root is `<ubiquity container>/Watchword/<accountID>`, outside
+  `Documents`. A file iCloud has not downloaded — a legacy `.<name>.icloud` placeholder, or a dataless or evicted file
+  (`ubiquitousItemDownloadingStatus` `notDownloaded`) — is listed, fetched as absent after
+  `startDownloadingUbiquitousItem`, and counts as existing for a create; absence is safe, as a stream waits at its gap.
+  `SyncFolderPresenter` (`NSFilePresenter` on the root) turns changes into remote-change hints. An object with
+  unresolved `NSFileVersion` conflicts is refused (`conflictingVersions`) rather than resolved: keeping "the copy that
+  verifies", as above, needs the engine's signature check, and is not built. Not built either: other providers with a
+  security-scoped bookmark, and their polling.
 
 ### 7.4 Sync while locked
 
@@ -369,8 +403,8 @@ VK, so merge is deferred until unlock. The AutoFill extension works from the las
 `WatchwordTestSupport`, so the whole engine — including the N-device partition simulation and the adversarial
 suite "sync log" — runs under `swift test` on Linux. The production keyring, the persistent state store and the
 app's conflict UI are described in §7.6, the account's own objects and enrolment in §7.7, the device registry in
-§7.8 and automatic syncing in §7.9; the CloudKit and iCloud Drive transports are still to come
-(`03-implementation-plan.md`, milestone 3). One engine runs per vault; a vault's log carries its items, its
+§7.8 and automatic syncing in §7.9; the CloudKit and iCloud Drive transports are in §7.2 and §7.3, built but not yet
+run against iCloud or wired into the app (`03-implementation-plan.md`, milestone 3). One engine runs per vault; a vault's log carries its items, its
 description (`vaultMetadata`) and its items' synced breach-check results (`scanStatus`, §13.9), each kind merged by
 its own merger (`KindRoutingMerger`).
 
@@ -584,8 +618,8 @@ vault: a pending deletion counts only for the vault it is filed under.
 
 **App.** Settings has Sync Now and the last report in words; a list row with conflicting values shows a badge, and
 the item's detail lists each conflicting group with the shown value first and each alternative after it, every one
-behind its own Keep button, secrets hidden until shown. Production builds are built without `SyncSettings` until a
-transport exists. UI-test launches (`--uitest`) sync over an in-memory transport with `UITestPeer`, a second session
+behind its own Keep button, secrets hidden until shown. Production builds are built without `SyncSettings`: the
+transports exist (§7.2, §7.3), but choosing one, enrolment and the settings for it are a product step not taken yet. UI-test launches (`--uitest`) sync over an in-memory transport with `UITestPeer`, a second session
 of the same account in the process, so XCUITest drives a concurrent rename through the real keyring
 (`SyncConflictTests`).
 
@@ -851,7 +885,15 @@ a `.wait(until:)` names. The rules (defaults in `AutoSyncSettings`):
 - never two automatic syncs within 10 s of each other;
 - after a failure nothing until a backoff has passed (30 s, doubling per failure in a row, capped at an hour),
   then a retry; any success clears it;
-- while locked every sync is download-only (F7.5, §7.4), and local changes wait for the unlock.
+- while locked every sync is download-only (F7.5, §7.4), and local changes wait for the unlock;
+- a transport that asks for a wait (`syncThrottled(retryAfter:)`, from `SyncTransportError.rateLimited`) makes that
+  failure's backoff at least the wait, never more than the backoff's cap: the store's word is a claim (A1), and a
+  stated wait of years must not switch sync off.
+
+`WatchwordPlatform.AutoSyncDriver` is the timer: it records the app's events, asks the policy, starts the sync it
+calls for, records the outcome (`AutoSyncOutcome`, from the report or the error), and arms one task for the next date.
+It adds no rule, and takes its clock and its sleep as parameters. Remote-change hints come from `SyncFolderPresenter`
+and, once the app registers for them, CloudKit pushes. The app does not create one yet.
 
 A clock that moved backwards cannot show that an interval has not passed, so such a wait is treated as over:
 syncing early costs a request, waiting for ever would cost the data.
@@ -2240,14 +2282,24 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
 - **What the UI calls:** `hygieneReport()`, `itemsUsingPassword(_:)` for the editor's reuse warning, and
   `runHygieneStep()`. All throw `locked` while locked and `hygieneNotConfigured` without settings.
 
+**Adapters, as built** (`WatchwordPlatform`; not yet compiled or run on a Mac, and not yet configured by the app,
+which builds its session without `HygieneSettings`):
+
+- **`URLSessionHTTPClient`**: an ephemeral session with no cookie, credential or cache storage, cookies neither sent
+  nor accepted, the system's TLS validation with TLS 1.2 at least; every redirect refused by the session's and the
+  task's delegate, so the 3xx is the answer, and a response from any URL but the one asked refused; the decoded body
+  counted as it arrives and cut one byte past `maximumResponseBytes`; an idle timeout, a resource timeout and an
+  overall deadline of its own; nothing logged, and errors carry no URL.
+- **`FileDeviceLocalStore`**: one file per record in `DeviceLocal/` beside the database (`AppContainer.
+  deviceLocalStoreURL`), owner-only, excluded from backup (the directory and every file),
+  `completeUntilFirstUserAuthentication` on iOS (macOS has no per-file class for this; FileVault protects it), atomic
+  writes. Reads fail closed against A8: only a regular file, never through a link (a link planted under a record's
+  name is removed before a write), never past the size limit, checked before reading; a store directory replaced by a
+  link is refused, and `deleteAll` removes the link without touching its target. Portable apart from the backup flag
+  and protection class, so it is tested on Linux too.
+
 Still to come:
 
-- **`URLSessionHTTPClient`** in `WatchwordPlatform`: an ephemeral session, no cookies or cache, redirects
-  refused, the response cut off at `maximumResponseBytes` of decoded body, a timeout, nothing logged (the
-  port's documentation is the contract).
-- **A file adapter for `DeviceLocalStore`** in the App Group container, excluded from backup and with
-  `completeUntilFirstUserAuthentication` protection; `InMemoryDeviceLocalStore` is all there is today, so the
-  ledger and cache do not yet outlive the process.
 - **Background glue**: `BGProcessingTask` (iOS) and `NSBackgroundActivityScheduler` (macOS) only wake the
   loop; whether anything runs is `next(now:)`'s decision, so a wake while locked does nothing.
 - **The report UI** and its snapshot tests, and the settings for the site directory and the API key.
@@ -2677,7 +2729,7 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/SecureMemory          SecureBytes (only unsafe code)                      [milestone 1, done]
   Sources/WatchwordStore        record-store port, in-memory and SQLite stores     [milestone 2, done]
   Sources/WatchwordSync         change log, merge, SyncTransport protocol,
-                                SQLite sync state                                  [milestone 3; transports open]
+                                SQLite sync state                                  [milestone 3; transports in Platform]
   Sources/WatchwordAutoFill     credential provider request model, TOTP, passkey
                                 authenticator, identity planner (§9.2)             [milestone 5; extension adapter open]
   Sources/WatchwordSharing      membership chain, verified contacts, invitations,
@@ -2693,6 +2745,9 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
                                 ports (KeychainStore, BiometricGate, WallClock)     [milestone 2, done]
   Sources/WatchwordPlatform     Apple adapters: SystemKeychainStore,
                                 LocalAuthenticationGate, Emergency Kit PDF          [milestone 2, done]
+                                CloudKitTransport, CoordinatedFileSyncTransport,
+                                AutoSyncDriver                                      [milestone 3; not run on a Mac]
+                                URLSessionHTTPClient, FileDeviceLocalStore          [milestone 6; not run on a Mac]
   Sources/WatchwordTestSupport  seeded/broken generators (milestone 1); fakes for every port and
                                 scenario builders as the ports arrive
 Apps/ (Xcode project generated with XcodeGen from project.yml)
@@ -2722,6 +2777,11 @@ Milestone 6 adds `HTTPClient`, `PwnedRangeCache` (with `InMemoryPwnedRangeCache`
 `SimulatedPwnedPasswords`. Hygiene takes the time as a parameter and randomness as a generator, so it needs no clock
 port of its own. The session adds `DeviceLocalStore` (§13.8), with `InMemoryDeviceLocalStore` in `WatchwordKit` and
 `HygieneSessionFixture` in `WatchwordTestSupport`.
+
+The Apple adapters of those ports are in `WatchwordPlatform`: `URLSessionHTTPClient` (`HTTPClient`),
+`FileDeviceLocalStore` (`DeviceLocalStore`), `CoordinatedFileSyncTransport` and `CloudKitTransport` (`SyncTransport`;
+the latter over its own `CloudKitDatabase` seam, faked in the tests), and `AutoSyncDriver`. The transport contract is
+`SyncTransportContract` in `WatchwordTestSupport`, run against every transport.
 
 Milestone 4 adds `KeyBundleDirectory` and `VerifiedContactStore` (§8.4), each with an in-memory implementation in
 `WatchwordSharing`, and in `WatchwordTestSupport` the hostile store and simulated members of the sharing tests

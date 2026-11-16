@@ -9,10 +9,11 @@ synced through the user's own iCloud (or any file-based cloud). The repository i
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
 `WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and in `VaultSession` the production keyring, multiple
-vaults, the device registry and enrolment over the transport) short of its CloudKit and iCloud Drive transports,
+vaults, the device registry and enrolment over the transport), whose CloudKit and iCloud Drive transports and sync driver
+are drafted in `WatchwordPlatform` but not yet compiled on a Mac nor wired into the app,
 milestone 4's sharing protocol core (`WatchwordSharing`) and its wiring into `VaultSession` and `SyncEngine`, milestone 5's portable AutoFill core
-(`WatchwordAutoFill`) short of the extension adapter, milestone 6's hygiene core (`WatchwordHygiene`), driven by the session, short
-of its network adapter, background glue and UI, and milestone 7's import and export parsers (`WatchwordInterchange`),
+(`WatchwordAutoFill`) short of the extension adapter, milestone 6's hygiene core (`WatchwordHygiene`), driven by the session, with its
+device-local file store and (not yet compiled on a Mac) `URLSession` adapter, short of background glue and UI, and milestone 7's import and export parsers (`WatchwordInterchange`),
 wired into the session with the encrypted Watchword archive, short of the apps' screens and Credential Exchange calls. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
@@ -127,8 +128,10 @@ property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` an
 imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
 policies and ports are portable too, and so are `WatchwordCrypto`, `WatchwordSharing`, `VaultSession` and `WatchwordAutoFill` through
 swift-crypto (ADR 0006);
-`SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and all of
-`WatchwordPlatform` are not. `WatchwordHygiene` is wholly portable: it imports `Foundation`, `Crypto`, `SecureMemory`
+`SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and
+`WatchwordPlatform` are not, except `FileDeviceLocalStore` (its backup flag and protection class aside) and
+`AutoSyncDriver`, which build and test on Linux; every other file there is guarded (`#if canImport(Darwin)`,
+`canImport(CloudKit)`, ...), so on Linux its suites are absent, not green. `WatchwordHygiene` is wholly portable: it imports `Foundation`, `Crypto`, `SecureMemory`
 and `WatchwordModel`, and its only way to the network is the `HTTPClient` port, so the day it imports `URLSession`
 its tests stop being able to say what leaves the device.
 
@@ -211,7 +214,11 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   `WatchwordMatching`, `WatchwordGenerator`, `SecureMemory` and `Crypto`; not on `WatchwordKit` (`VaultSession`
   conforms to its port) and never on AuthenticationServices.
 - **`WatchwordPlatform`** — Apple adapters: `SystemKeychainStore`, `LocalAuthenticationGate`, the Emergency Kit
-  PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
+  PDF, the App Group paths; `FileDeviceLocalStore` (the `DeviceLocalStore` port's files, §13.8); `URLSessionHTTPClient`
+  (hygiene's `HTTPClient`); `CoordinatedFileSyncTransport` with `SyncFolderPresenter` (iCloud Drive, §7.3) and
+  `CloudKitTransport` over the `CloudKitDatabase` seam (`SystemCloudKitDatabase` forwards to `CKDatabase`; §7.2);
+  `AutoSyncDriver` (the timer for `AutoSyncPolicy`, §7.9). In the package rather than `Apps/` so every CI gate covers
+  them. Depends on `WatchwordKit`, `WatchwordStore`, `WatchwordSync`, `WatchwordHygiene` and `SecureMemory`.
 - **`WatchwordInterchange`** — import and export of other password managers' formats (milestone 7): `CSVReader`/
   `CSVWriter` and `PasswordCSV` (1Password and Apple Passwords CSV), `OnePUX`, `CredentialExchange` (CXF 1.0), the
   `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `ArchivedItems` (an archive's decrypted items into
@@ -221,7 +228,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `FakeDeviceKeyStore`, `TestVault`, whose
   `enrolledDevice` enrols a real second device over the transport; `RegistryFixture` for hand-built registry
   entries; for sync `FakeSyncKeyring` over a keyed checksum that is not cryptography, `FakeItemMerger`,
-  `SyncTestClient`, `SimulatedServer`; for AutoFill `FakeCredentialVault`, `FakeCredentialIdentityPublisher`,
+  `SyncTestClient`, `SimulatedServer`, and `SyncTransportContract` (the transport contract, run against every
+  transport); for AutoFill `FakeCredentialVault`, `FakeCredentialIdentityPublisher`,
   `AutoFillHarness` and the S1 to S4 items in `AutoFillFixtures`; for hygiene `FakeHTTPClient`, which records every
   request, `RecordingPwnedRangeCache`, `SimulatedPwnedPasswords`, and `HygieneSessionFixture` (a session with hygiene
   on); for sharing, with real keys, `HostileSharingStore`,
@@ -234,11 +242,11 @@ Fourteen shipped modules, dependency-ordered, plus test support:
 describes sync as built, §7.6 the vault side (keyring, saves, state, conflict UI), §7.7 vaults, the account's objects
 on the transport and enrolment, §7.8 the device registry (and what revocation does not do), §7.9 automatic syncing;
 `docs/10-sync-correctness.md` is the model of an item as a CRDT and the argument that sync converges;
-`docs/03-implementation-plan.md` milestone 3 lists what is still open (CloudKit and iCloud Drive transports, the
-Secure Enclave device key, sync in production builds, `UITestPeer`). §8 describes sharing as built, and milestone 4
+`docs/03-implementation-plan.md` milestone 3 lists what is still open (a Mac run of the transports, sync in production
+builds, `CKSyncEngine`, re-upload after a CloudKit reset, the Secure Enclave device key, `UITestPeer`). §8 describes sharing as built, and milestone 4
 what is open there (`CKShare`, the key directory's adapter, the UI). §13 describes hygiene as built, and
-milestone 6 what is still open (the `URLSession` adapter, the device-local store's file adapter, background glue, the
-report UI). §14.1 describes import and export through the session and the encrypted archive as built; milestone 7
+milestone 6 what is still open (a Mac run of the `URLSession` adapter, configuring hygiene in the app, background glue,
+the report UI). §14.1 describes import and export through the session and the encrypted archive as built; milestone 7
 lists what is open (file protection and the screens, Credential Exchange, restoring an archive's vaults as vaults).
 
 ### `WatchwordHygiene` invariants
@@ -362,7 +370,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 ### `SyncEngine` invariants
 
 - Objects are created, never overwritten; each device writes only its own stream. Never add an "update" to
-  `SyncTransport`.
+  `SyncTransport`. Transports stay thin (§7.2, §7.3): they map names to storage and the provider's failures to
+  `SyncTransportError`, and decide nothing about trust. CloudKit saves only new records with
+  `.ifServerRecordUnchanged`; the iCloud Drive transport creates under file coordination, counts a not-downloaded
+  placeholder as existing, and refuses (never resolves) `NSFileVersion` conflicts. An error with `stopsSync` stops a
+  sync where it stands like `unavailable` (catch `let error as SyncTransportError where error.stopsSync`, never
+  `.unavailable` alone), and the report carries it (`transportFailure`).
 - Download needs no keys and checks signatures before staging; merge re-verifies staged objects and checks kind,
   context, AEAD, then payload, in that order. A stream is merged strictly in sequence: never skip a gap.
 - A segment carries only its author's versions, and each record envelope's own context must match its entry
@@ -794,9 +807,11 @@ directions are tested; keep both when adjusting constants.
   `"hygiene and breach checks"`, `"sharing and membership"`, `"import parsers"`,
   `"account enrolment and device registry"`, `"hygiene in the vault session"`,
   `"shared vaults through the session"`, `"encrypted Watchword archive"`, `"interchange through the session"`,
-  `"synced breach-check results"`), so **renaming a suite breaks CI deliberately** — update
+  `"synced breach-check results"`, `"device-local store files"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
-  (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
+  (which adversary from `docs/02-architecture.md` §2, with what access) it checks. The Mac-only adapter suites
+  (`"Apple adapters: HTTP client"`, `"…: iCloud Drive transport"`, `"…: CloudKit transport"`) are deliberately not in the
+  list, which Linux checks too; `docs/04-test-plan.md` §6.10 says so.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
   adapter must add or update an adversarial test (`docs/03-implementation-plan.md`, working
   agreements).

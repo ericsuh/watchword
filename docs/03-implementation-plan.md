@@ -23,10 +23,10 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 0 — repository, toolchain, CI (done) | Yes; this is why cloud sessions work on this package at all | — |
 | 1 — cryptographic core (done) | Yes since ADR 0006: every crypto suite runs, against swift-crypto's BoringSSL | The implementation that ships (CryptoKit, CommonCrypto), Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
-| 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port; multiple vaults, the device registry, enrolment over the transport and the automatic sync policy — done, portable, against swift-crypto | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow, the Secure Enclave device-key adapter, and a macOS run of everything the sync-core work added |
+| 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port; multiple vaults, the device registry, enrolment over the transport and the automatic sync policy — done, portable, against swift-crypto | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; drafted, not yet compiled on a Mac: `CloudKitTransport`, the coordinated iCloud Drive transport and the sync driver; open: a macOS run of those and of everything the sync-core work added, `CKSyncEngine`, sync in production builds, the manual CloudKit workflow, the Secure Enclave device-key adapter |
 | 4 — sharing (protocol core done) | The protocol core — membership chain, verified contacts, invitations, key grants, rotation plans — with real Ed25519 and HPKE through swift-crypto (ADR 0006), and its adversarial suite | the implementation that ships (CryptoKit); wiring into `VaultSession` and sync; `CKShare`, `UICloudSharingController`/`NSSharingService`, the folder-share flow; the sharing UI |
 | 5 — AutoFill (portable core done) | The request model, TOTP, the passkey authenticator and identity planning — done, behind a vault port with fakes | AuthenticationServices, app-extension targets, `VaultSession`'s conformance, simulator and device QA |
-| 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done | open: the `URLSession` adapter, the wiring into `VaultSession`, background-task glue, the Watchtower-style report UI and its snapshot tests |
+| 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done; the device-local file store, tested here too | drafted, not yet compiled on a Mac: the `URLSession` adapter; open: a macOS run of it, configuring hygiene in the app, background-task glue, the Watchtower-style report UI and its snapshot tests |
 | 7 — interchange (parsers, exporters, fuzz targets, session wiring and the encrypted archive done) | Parsers, adversarial parser tests, and the fuzz targets — a better host for them; the session wiring and the encrypted archive, portable through swift-crypto; done | open: Credential Exchange on iOS 26/macOS 26, file protection and the screens, and a macOS run of the archive against CryptoKit and CommonCrypto |
 | 8 — hardening and release | Reading the source for external review | performance and accessibility passes, privacy manifest, TestFlight |
 
@@ -219,11 +219,32 @@ half delivered** on a Mac; the transports are open.
     code over the shared in-memory transport, after the app's session has synced once (`SyncConflictTests` does).
     The app still needs UI for vaults, devices, a changed password (`passwordChangedOnAnotherDevice`,
     `ignoringPasswordChange`) and revocation.
-- **Still open (Mac):** `CloudKitTransport` and the coordinated iCloud Drive wrapper around `FileSyncTransport`, and
-  with them sync in production builds (until then the app is built without `SyncSettings`) and a driver for
-  `AutoSyncPolicy` (timers, push and file-presenter hints); the manual CloudKit workflow; the Secure Enclave
-  `DeviceKeyStore` adapter; a quarantine list in the UI; and item history in records of its own, so the never-pruned
-  history (F1.4) no longer counts against an item's 1 MiB payload.
+- **Transports and the sync driver, drafted (remote session; `WatchwordPlatform`, architecture §7.2, §7.3, §7.9).**
+  Written on Linux, where only the portable parts compile: **none of the Apple code has been compiled or run yet.**
+  - Portable, run on Linux: `SyncTransportError` gained `rateLimited(retryAfter:)`, `quotaExceeded`,
+    `notAuthenticated`, `storeReset` and `conflictingVersions`, and `stopsSync`; the engine and the session stop a sync
+    on each stopping error as they always did on `unavailable`, and the reports carry the reason
+    (`transportFailure`); `AutoSyncPolicy.syncThrottled(retryAfter:)` lengthens the backoff to the wait asked, within
+    its cap; `FileSyncTransport` exposes synchronous forms for coordinated callers and lists iCloud placeholders;
+    the transport contract moved to `WatchwordTestSupport` (`SyncTransportContract`); `AutoSyncDriver`, the timer,
+    with an injected clock. Tests: "Sync transport failures", "File sync transport: iCloud placeholders", "Automatic
+    sync policy" (throttling), "Automatic sync driver".
+  - Mac only: `CoordinatedFileSyncTransport` (file coordination, placeholders and evicted files, conflicts refused)
+    with `SyncFolderPresenter`; `CloudKitTransport` (private database, custom zone, create-only saves, typed errors)
+    over the `CloudKitDatabase` seam. Tests: "Coordinated iCloud Drive transport", "CloudKit transport" (the contract
+    over a fake database with CloudKit's save-policy semantics; a real-container test only with
+    `WATCHWORD_CLOUDKIT_CONTAINER` in a signed host), and the adversarial suites "Apple adapters: iCloud Drive
+    transport" and "Apple adapters: CloudKit transport".
+  - **Before relying on any of it:** dispatch `mac-run.yml` (package tests, adversarial, strict) on the branch, then
+    run the CloudKit test from a signed host against a development container (its schema needs `WWObject.name`
+    queryable) and the coordinated transport in a real ubiquity container (downloads and evictions by iCloud itself
+    are not exercised by any test).
+- **Still open (Mac):** sync in production builds (choosing a transport, enrolment and settings; until then the app is
+  built without `SyncSettings`), with the app creating an `AutoSyncDriver` and registering for CloudKit pushes;
+  `CKSyncEngine`, if its scheduling is wanted over the driver; re-uploading after a CloudKit reset (`storeReset` stops
+  sync today); keeping the copy that verifies when iCloud Drive holds conflict versions (refused today); the manual
+  CloudKit workflow; the Secure Enclave `DeviceKeyStore` adapter; a quarantine list in the UI; and item history in
+  records of its own, so the never-pruned history (F1.4) no longer counts against an item's 1 MiB payload.
 - **Still open (design):** an account re-key — new keyset and Secret Key, vault keys rotated — which is what ends a
   revoked device's reading if it held the keyset (architecture §7.8, §16); it belongs with vault-key rotation in
   milestone 4. Collecting a deleted vault's objects from the transport.
@@ -390,15 +411,23 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
 
 **Open:**
 
-- `URLSessionHTTPClient` in `WatchwordPlatform` (ephemeral, no redirects, size and time limits), and a
-  capture of real range responses on a Mac to check the fixtures against.
+- `URLSessionHTTPClient` in `WatchwordPlatform` is **drafted, not yet compiled** (remote session, Darwin only;
+  `02-architecture.md` §13.8): ephemeral, nothing stored, redirects refused, the decoded body cut at the limit, idle,
+  resource and overall time limits. Tests through a real `URLSession` with a URL-loading stub: "URLSession HTTP
+  client" and the adversarial suite "Apple adapters: HTTP client" (oversized, stalled, dripping, redirecting). Open: a
+  Mac run; a compressed body expanding past the limit, which a stub cannot produce (URLSession decodes only what
+  its own HTTP stack received); configuring hygiene in the app; and a capture of real range responses on a Mac to
+  check the fixtures against.
 - Wiring into `VaultSession` is **done** (Linux; `02-architecture.md` §13.8): the reuse key and the device-local
   key derived from `Ksym` under labels of their own, the ledger and the prefix cache as sealed per-device records
   in the `DeviceLocalStore` port, the engine updated on every commit and reconciled with the store before every
   query and after every sync, `unlock`/`lock` in that order around the keyset, and `runHygieneStep()` for the UI or
   a background task to drive. Tests: "Vault session: hygiene" and the adversarial suite "hygiene in the vault
-  session". Still open: the file adapter for `DeviceLocalStore` (App Group, excluded from backup); until then the
-  ledger and cache last as long as the process.
+  session". The file adapter, `FileDeviceLocalStore`, is **done** (portable apart from the backup flag and iOS
+  protection class; run on Linux): App Group, excluded from backup, `completeUntilFirstUserAuthentication` on iOS,
+  atomic writes, fail-closed reads. Tests: "Device-local file store" and the adversarial area "device-local store
+  files" (A8's links, directories, huge and stray files). Still open: the app configuring hygiene with it, and a Mac
+  run of the backup and protection checks.
 - Breach results and scan times synced with the vault is **done** (Linux; owner decision 10, ADR 0005 amendment of
   2026-11-16, `02-architecture.md` §13.9): a `scanStatus` record beside each item, a join per device, results bound to
   each password under a vault-derived key, a synced "not found" only postponing this device's own check (within an
