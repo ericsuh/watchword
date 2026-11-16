@@ -84,6 +84,7 @@
             case .accountSigningKey(let id): return "account-signing-key." + id.uuidString
             case .deviceSigningKey(let id): return "device-signing-key." + id.uuidString
             case .deviceRegistryAnchor(let id): return "device-registry-anchor." + id.uuidString
+            case .deviceLocalSecret(let id): return "device-local-secret." + id.uuidString
             }
         }
 

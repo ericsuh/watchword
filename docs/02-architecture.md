@@ -300,6 +300,9 @@ milestone 2 stores full item records only.
   - `deviceRegistryAnchor` — what this device trusts of the device registry: the genesis entry, the credential
     entry it follows and the newest entries it has applied. Not secret; in the Keychain so that A8 can neither
     substitute a registry nor roll one back to before a revocation.
+  - `deviceLocalSecret` — 32 random bytes this device makes for itself, mixed with the keyset into the key that
+    seals its unsynced local records (the hygiene ledger and prefix cache, §13.8), so that another device of the
+    account, which holds the same keyset, can neither read them nor plant its own.
 
 ## 7. Sync
 
@@ -489,13 +492,13 @@ rest.
 Known limits, tracked in `06-adversarial-review.md` §H: the store can withhold objects (reported, not prevented); an item's history
 lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
 refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
-trusted for the vault, so this is an insider's capability). From the audit of the merge (Y29, Y30, Y36, Y37; Y28, the
-tombstone's version, is fixed): the engine rejects the
+trusted for the vault, so this is an insider's capability). From the audit of the merge (Y36, Y37; Y28, the
+tombstone's version, Y29 and Y30 are fixed): the engine rejects the
 whole object carrying a version whose merge is over the payload limit, stopping that author's stream on that device,
-where it should quarantine the one entry; it does not refuse to publish an over-long erasure summary (the merger no
-longer writes one); the session
-does not yet refuse a draft made from an older version than the one stored; and items are shown as stored rather
-than as the merge reads them.
+where it should quarantine the one entry; and it does not refuse to publish an over-long erasure summary (the merger
+no longer writes one). The session refuses a draft made from another version than the one stored
+(`VaultError.versionConflict`, Y29), and every read it hands out, the UI's included, is `ItemMerge.canonical` of the
+decrypted item (Y30).
 
 ### 7.6 As built in milestone 3 (the vault side, on a Mac)
 
@@ -1600,11 +1603,25 @@ Also in the module: `TOTP` (RFC 6238 over an injected instant), `PasswordRules` 
 for the page's `passwordrules` and its mapping to `RandomPasswordPolicy`; the generated password
 is checked against the parsed rules before it is returned), and `CredentialIdentityPublishing`.
 
-Still open for milestone 5, all on a Mac: the extension targets' adapter over this model,
-`VaultSession`'s conformance to `CredentialVault`, the encrypted index record that lets the
-extension list without decrypting every item, and on-device QA (first, what the system hands back
-for a QuickType tap and on which hosts it offers an identity, §9.1; then what it passes as `prf`
-salts, and how it treats UP = 0 on a conditional registration).
+**`VaultSession` is the `CredentialVault`** (`VaultSession+AutoFill.swift`; `WatchwordKit` depends on
+`WatchwordAutoFill`, never the reverse). `credentialItems()` is every vault's items as `items()`
+presents them (read through their rows, canonical, what a vault's deletion left shown trashed). The
+store keeps one row per item ID whatever its vault and sync refuses a record naming an ID another
+vault holds, so an ID occurs once; a move is a copy under a derived ID and the original trashed in
+one commit, so the original is never fillable beside its copy. `saveCredentialItem` is a
+compare-and-swap inside the session's own `write`: the expectation (absent, or the version read) is
+checked against the row the write read, and the commit is conditional on that row, so a save or a
+merge landing in between is refused with `versionConflict`; the session stamps the edit
+(`ItemMerge.stamped`) and runs every scope through `ScopePolicy`, as `save` does. `isBackedUp()` is
+whether the session syncs. `confirmUnlocked()` is the actor's own check that keys are resident.
+The extension process builds a session over the App Group store and the shared Keychain and
+unlocks it with `quickUnlock(prompt:)` (the Local Unlock Key the Keychain releases after biometric
+authentication, then the AUK, then the keyset) or the password; nothing else is exposed for it.
+
+Still open for milestone 5, all on a Mac: the extension targets' adapter over this model, the
+encrypted index record that lets the extension list without decrypting every item, and on-device
+QA (first, what the system hands back for a QuickType tap and on which hosts it offers an identity,
+§9.1; then what it passes as `prf` salts, and how it treats UP = 0 on a conditional registration).
 
 ## 10. Unlock state machine
 
@@ -1696,8 +1713,8 @@ future flow needs a generated password to outlive a single UI interaction.
 
 ## 13. Hygiene (`WatchwordHygiene`)
 
-The portable core is built (milestone 6); the `URLSession` adapter, the wiring into `VaultSession`, the
-background-task glue and the report UI are not (§13.8). The module depends on `WatchwordModel`,
+The portable core is built (milestone 6), and so is its wiring into `VaultSession` (§13.8); the `URLSession`
+adapter, the file adapter for the device-local store, the background-task glue and the report UI are not. The module depends on `WatchwordModel`,
 `SecureMemory` and `Crypto` (SHA-1 for the range API, HMAC-SHA-256 for reuse) and on nothing else: it does
 not know the session, the store or any Apple framework, takes the time as a parameter and randomness as a
 generator, and reaches the network only through the `HTTPClient` port. Everything below runs under
@@ -1970,20 +1987,72 @@ as an ID and counts) and reads passwords only from the item handed to `scan`. It
 - One scan at a time; a check requested by a save obeys the same rate limit and backoff as the loop.
 - At most 16 passwords per item are analysed and checked, and the report says when there were more.
 
-### 13.8 Still to come, and how it plugs in
+### 13.8 In the session, and what is still to come
+
+**Session wiring, as built** (`VaultSession+Hygiene.swift`). `VaultConfiguration.hygiene` (`HygieneSettings`)
+turns it on and carries the `HTTPClient` port, the user agent, the policies and the `DeviceLocalStore` port;
+there is no host to configure. The session owns one `HygieneEngine` for its lifetime, so pacing survives a lock.
+
+- **Keys.** At every unlock, on the actor, the session derives two keys of its own (`DeviceLocalKeys`, in
+  `WatchwordCrypto`, `package` access): the reuse key, `HKDF-SHA256(Ksym, salt: accountID,
+  "WW-hygiene-reuse-v1")`, handed to the engine, which zeroises it at its lock; and the device-local key,
+  `HKDF-SHA256(Ksym ‖ device secret, salt: accountID ‖ deviceID, "WW-device-local-v1")` (32 bytes of key and 16
+  of key ID), which seals this device's records and never leaves the actor. The **device secret** is 32 random
+  bytes this device makes at its first unlock and keeps in its Keychain (`deviceLocalSecret`, §6): device-only,
+  never synced, never on a transport. It is there because the keyset is not this device's alone: every device of
+  the account holds it, a revoked one included (§7.8), and a device ID is on every row and stream the device
+  writes, so a key derived from those two alone could be derived by any of them, which could then read this
+  device's ledger and plant one of its own (docs/06 L1). With the secret, another device of the account derives a
+  different key even when it claims this device's ID, and the secret alone (someone reading the Keychain without
+  the password) opens nothing either. Neither key is the raw key, and a password change keeps both (the keyset and
+  the secret are kept). A store restored onto other hardware arrives without the secret: its records open as
+  nothing and everything is due again. The secret is read in the engine's unlock task; until it is, and if the
+  Keychain refuses it, there is no local key, so nothing is read or stored and the engine starts from an empty
+  ledger.
+- **Unlock.** The engine's `unlock` runs in a task of its own (utility priority) with the decrypted items and
+  the unsealed ledger, after any engine lock still in flight. Every query waits for it, then reconciles.
+- **Lock.** `lock()` zeroises the keyset, then drops the engine's reuse key and everything derived from a password
+  (`HygieneEngine.dropKeys()`), then zeroises the local key and cancels the unlock task, all before it returns;
+  only the engine's `lock()`, which empties the prefix cache, runs in a task afterwards. The drop is synchronous
+  because the engine runs on the session's own serial executor (both conform to `SecureMemory.SharesExecutor` over
+  one `SerialExecutorOwner`; ADR 0001's amendment of 2026-11-16 says why that lives in `SecureMemory`), so the
+  session's `lock()`, already on that executor, calls it through `assumeIsolated`. With
+  the drop in that task instead, the reuse key, the reuse tokens and every analysis stayed resident for as long as
+  the session was busy after `lock()`, or the process was suspended in the background (docs/06 L2). Nothing the
+  engine does can keep the vault's keys resident. A scan in flight finds the engine locked and records nothing; the
+  engine drops its answers.
+- **Changes.** Every commit of an item (`commitItem`) updates the engine at once, so an edit is due for a check
+  (reason `changed`); a sync, and every query, reconciles the engine with the store first: rows whose version (or
+  whose vault's deletion) changed are decrypted and shown to it, and rows that are gone are removed. So a merge, a
+  deletion or anything a later path writes is in the report the person is shown.
+- **Scans.** Nothing runs by itself: the UI or a background task calls `runHygieneStep()`, which asks
+  `next(now:)` with the session's clock, checks the item it names (fetched through `item(id:)`), and seals and
+  stores `ledger()` after a check that completed **or failed** (§13.3), and returns when to call again. The
+  stored ledger goes to the next `unlock`; a ledger that does not open is an empty one (everything is due).
+- **Persisted only sealed, per device, unsynced.** The ledger and the prefix cache are records in the
+  `DeviceLocalStore` port, never in the record store the sync engine reads and never on a transport: sealed under
+  the device-local key with a context binding the record's name and the account
+  (`EnvelopeKind.accountHeader`, as for quick unlock's wrapped AUK), and named by
+  `HMAC(local key, label ‖ message)`, so a name says nothing about the prefix it holds. The cache
+  (`SealedPwnedRangeCache`) holds nothing in memory: each lookup and store goes through the session, which
+  refuses while locked, so its `lock()` has nothing to drop. One record per prefix (`CachedPwnedRange.encoded()`)
+  and a sealed index (prefix, fetch time, size) bound it to 512 prefixes and 32 MiB, expired ranges first, then
+  the oldest. A record planted from another account, or sealed by another device of this account (which has the
+  keyset and this device's ID but not its secret), does not open and answers nothing. An older ledger of this
+  device's own, put back by someone who can write the files (A8), does open: it is accepted as what it is, an
+  authentic earlier reading, whose every check is older than the one it replaces, so nothing becomes due later than
+  it was (docs/06 L3). Deleting the account erases the store and the secret.
+- **What the UI calls:** `hygieneReport()`, `itemsUsingPassword(_:)` for the editor's reuse warning, and
+  `runHygieneStep()`. All throw `locked` while locked and `hygieneNotConfigured` without settings.
+
+Still to come:
 
 - **`URLSessionHTTPClient`** in `WatchwordPlatform`: an ephemeral session, no cookies or cache, redirects
   refused, the response cut off at `maximumResponseBytes` of decoded body, a timeout, nothing logged (the
   port's documentation is the contract).
-- **Session wiring** in `VaultSession`: derive the reuse key from `Ksym` with its own HKDF label; on unlock,
-  unseal the ledger record and call `unlock` with the decrypted items, in a task of its own at no higher
-  priority than the one that locks; on save, `update` then `scan`, refetching on `.stale`; seal and store
-  `ledger()` after every scan, **failed ones included** (the failure in it is what keeps one refused range
-  from being asked for first at every unlock and every launch, §13.3), and hand the stored ledger to the next
-  `unlock`; back `PwnedRangeCache` with sealed local records. **On lock the session zeroises
-  the keyset first** and does not wait for this actor to do it: it cancels the unlock task if one is running,
-  then calls `lock()`, which returns after at most one item's analysis. The reuse key is the engine's own
-  copy, so nothing here can keep the vault's keys resident.
+- **A file adapter for `DeviceLocalStore`** in the App Group container, excluded from backup and with
+  `completeUntilFirstUserAuthentication` protection; `InMemoryDeviceLocalStore` is all there is today, so the
+  ledger and cache do not yet outlive the process.
 - **Background glue**: `BGProcessingTask` (iOS) and `NSBackgroundActivityScheduler` (macOS) only wake the
   loop; whether anything runs is `next(now:)`'s decision, so a wake while locked does nothing.
 - **The report UI** and its snapshot tests, and the settings for the site directory and the API key.
@@ -2209,7 +2278,7 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
                                 key grants, rotation plans                         [milestone 4; protocol core,
                                                                                     integration open]
   Sources/WatchwordHygiene      HIBP clients, scan schedule, strength estimator,
-                                reuse, report, HygieneEngine                       [milestone 6; adapter, wiring, UI open]
+                                reuse, report, HygieneEngine                       [milestone 6; adapters, UI open]
   Sources/WatchwordInterchange  CSV, 1PUX and CXF import/export, ZIP reader,
                                 DEFLATE inflater, import mapping, instructions      [milestone 7; integration open]
   Sources/WatchwordKit          VaultSession façade, UnlockPolicy, AutoLockPolicy,
@@ -2243,7 +2312,8 @@ and `FakeCredentialIdentityPublisher` beside them.
 Milestone 6 adds `HTTPClient`, `PwnedRangeCache` (with `InMemoryPwnedRangeCache` in the module) and `SiteDirectory`
 (§13); their fakes are `FakeHTTPClient`, which records every request, `RecordingPwnedRangeCache` and
 `SimulatedPwnedPasswords`. Hygiene takes the time as a parameter and randomness as a generator, so it needs no clock
-port of its own.
+port of its own. The session adds `DeviceLocalStore` (§13.8), with `InMemoryDeviceLocalStore` in `WatchwordKit` and
+`HygieneSessionFixture` in `WatchwordTestSupport`.
 
 Milestone 4 adds `KeyBundleDirectory` and `VerifiedContactStore` (§8.4), each with an in-memory implementation in
 `WatchwordSharing`, and in `WatchwordTestSupport` the hostile store and simulated members of the sharing tests

@@ -28,19 +28,23 @@ public struct VaultConfiguration: Sendable {
     /// What this device is called in the account's list of devices ("Eric's iPhone"). Sealed under the keyset before
     /// it is written anywhere; at most 64 characters are kept.
     public var deviceName: String
+    /// Breach checks and the hygiene report (docs/02-architecture.md §13.8); `nil` turns hygiene off.
+    public var hygiene: HygieneSettings?
 
     public init(
         appVersion: String,
         kdf: KDFStrategy = .calibrate,
         quickUnlock: QuickUnlockSettings = .standard,
         autoLock: AutoLockSettings = .platformDefault,
-        deviceName: String = ""
+        deviceName: String = "",
+        hygiene: HygieneSettings? = nil
     ) {
         self.appVersion = appVersion
         self.kdf = kdf
         self.quickUnlock = quickUnlock
         self.autoLock = autoLock
         self.deviceName = deviceName
+        self.hygiene = hygiene
     }
 }
 
@@ -121,7 +125,7 @@ final class UnlockedKeys: Sendable {
 /// epoch before touching key material again: a `lock()` that lands while an unlock or a save is waiting on the
 /// store or the Keychain wins, and the in-flight operation fails with `locked` rather than resurrecting keys or
 /// reading a zeroised buffer.
-public actor VaultSession {
+public actor VaultSession: SharesExecutor {
     let store: any RecordStore
     let keychain: any KeychainStore
     let biometrics: any BiometricGate
@@ -145,6 +149,11 @@ public actor VaultSession {
     /// parent that is not there), not fetched again by this session until a sync keeps something new: a revoked
     /// device that floods the transport costs each of them one fetch (docs/02-architecture.md §7.8).
     var skippedRegistryEntries: Set<ObjectDigest> = []
+    /// The hygiene engine and what drives it (`VaultSession+Hygiene.swift`); built at the first unlock.
+    var hygieneRuntime: HygieneRuntime?
+    /// The serial executor the session shares with its hygiene engine, so that `lock()` drops the engine's keys
+    /// before it returns (`SharesExecutor`; docs/02-architecture.md §13.8).
+    package nonisolated let executorOwner = SerialExecutorOwner()
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(
@@ -697,6 +706,7 @@ public actor VaultSession {
         keys = newKeys
         lastActivity = now
         backgroundedAt = nil
+        startHygiene()
     }
 
     // MARK: - Lock (PRD F5.5)
@@ -708,6 +718,8 @@ public actor VaultSession {
         keys?.zeroise()
         keys = nil
         backgroundedAt = nil
+        // After the keyset is zeroised, never before (§13.8): nothing the engine does can keep the keys resident.
+        stopHygiene()
     }
 
     /// Call on user interaction. Resets the idle timer — unless the timeout has already passed, in which case it
@@ -997,6 +1009,7 @@ public actor VaultSession {
         ).zeroise()
         lock()
         try await writer(for: record).eraseAll()
+        try? await eraseHygieneRecords()
         account = nil
         // Every item is attempted even if one fails, so a Keychain error cannot leave the Secret Key behind just
         // because an earlier deletion threw; anything left over is reported.
@@ -1055,8 +1068,18 @@ public actor VaultSession {
     /// Creates or updates an item. The vault owns `createdAt`, `modifiedAt`, `version`, `history`, `trashedAt` and
     /// `keptAfterDeletion`; whatever the caller put there is replaced. Scopes are checked against the scope policy here, the one place
     /// they can enter the vault from the UI (PRD F11.2).
+    ///
+    /// An update must be made from the stored version: a draft whose `version` is not the stored item's (a sync
+    /// merged another device's edit while the editor was open) is refused with `versionConflict`, and the editor
+    /// reopens the item (Y29).
     @discardableResult
     public func save(_ draft: Item) async throws -> Item {
+        // A draft made from an earlier version than the stored one would be stamped as an edit that had seen
+        // everything since, and replace it (Y29): refused, for the editor to reopen the item.
+        try await save(draft, expecting: .versionIfPresent(draft.version))
+    }
+
+    func save(_ draft: Item, expecting expectation: WriteExpectation) async throws -> Item {
         for scope in draft.scopes {
             do {
                 try ScopePolicy.validate(scope)
@@ -1064,7 +1087,8 @@ public actor VaultSession {
                 throw VaultError.scopeRejected(error)
             }
         }
-        return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft) { item, existing, now in
+        return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft, expecting: expectation) {
+            item, existing, now in
             item = draft
             if let existing {
                 item.createdAt = existing.createdAt
@@ -1155,6 +1179,7 @@ public actor VaultSession {
         vaultID: UUID? = nil,
         creating draft: Item? = nil,
         allowingDeletedVault: Bool = false,
+        expecting expectation: WriteExpectation? = nil,
         _ mutate: (inout Item, Item?, Date) -> Void
     ) async throws -> Item {
         let epoch = lockEpoch
@@ -1163,6 +1188,9 @@ public actor VaultSession {
         let now = await clock.now()
         let existingRow = try await store.record(RecordKey(recordID: id, kind: .item))
         let keys = try requireKeys(since: epoch)
+        // Checked against the row this write replaces, and the commit is conditional on that row: together, a
+        // compare-and-swap.
+        try expectation?.check(existingRow, id: id)
 
         let existing = try existingRow.map { try openItem($0, keys: keys) }
         guard var item = existing ?? draft else { throw VaultError.itemNotFound(id) }
@@ -1207,6 +1235,7 @@ public actor VaultSession {
         change.expectations[sealed.key] = existing.map { .version($0.version) } ?? .absent
         try await writer(for: account).commit(change)
         highestVersionSeen[item.vaultID] = max(highestVersionSeen[item.vaultID] ?? 0, item.version)
+        await noteHygieneWrite(item)
     }
 
     func sealItem(_ item: Item, vaultKey: VaultKey, account: AccountRecord) throws -> StoredRecord {
@@ -1238,7 +1267,9 @@ public actor VaultSession {
             throw VaultError.recordMismatch(row.recordID)
         }
         highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, item.version)
-        return item
+        // Sync metadata is a writer's claim (Y30): every reader, the UI included, gets the one reading every device
+        // makes of it, never counts above the row's version or values under a group they do not belong to.
+        return ItemMerge.canonical(item, origin: Self.origin(row))
     }
 
     /// The context an item record must carry, built from its row: where it was found, never what it says.

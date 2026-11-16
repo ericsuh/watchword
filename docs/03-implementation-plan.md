@@ -171,7 +171,8 @@ half delivered** on a Mac; the transports are open.
   merge tracked with tests recorded as known issues or a named remedy — the engine must pass a tombstone's version to
   the merger (Y28, fixed when the sync-core work merged: the engine passes the joined erasure's stamp, and a record's
   erasures are joined as a set of deletions, `ItemErasures`), `VaultSession.save` must refuse a draft made from an
-  older version (Y29), and the session should show items as the merge reads them (Y30).
+  older version (Y29), and the session should show items as the merge reads them (Y30); both fixed when the session
+  integration merged (`versionConflict`; every read is `ItemMerge.canonical`).
 - Adversarial suite "sync log" (A1, insider and former devices, A8): byte flips anywhere, moved and replayed
   objects, withheld segments, forgeries, record swaps inside a validly signed segment, versions for another device
   or vault, implausible versions (U5), stale snapshots, local rollback, tampered staging, parser mutations and
@@ -313,12 +314,13 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
     the model's value types, shows what the outcome describes, and returns what it carries, plus the
     `ASCredentialIdentityStore` adapter for `CredentialIdentityPublisher`. No security decision belongs in
     it;
-  - `VaultSession`'s conformance to `CredentialVault` (`saveCredentialItem` as a compare-and-swap inside the
-    actor's `write`, `isBackedUp` from whether sync is configured, `confirmUnlocked` as the actor's own lock
-    check), and unlocking from the extension. When shared vaults arrive, an item ID present in two vaults is
-    treated by the model as naming neither item, so a move between vaults must not leave both copies readable.
-    `SessionCredentialVault` in `WatchwordAutoFillTests` is a stand-in over the session's public API that the
-    S1 and S2 tests already run through; it shows the shape and is not atomic;
+  - `VaultSession`'s conformance to `CredentialVault` is **done** (Linux; `02-architecture.md` §9.2): the
+    compare-and-swap inside the actor's `write`, `isBackedUp` from whether sync is configured, `confirmUnlocked`
+    as the actor's own lock check, one ID per item across vaults, and the extension unlocking through quick
+    unlock or the password. S1 and S2 run through it ("Request model over a real vault session"), with the CAS,
+    a lock between read and release, moves between vaults and the extension's unlock in "Vault session as the
+    AutoFill vault". What remains is the extension process itself: building the session over the App Group
+    store and the shared Keychain access group;
   - the encrypted index record, so the extension lists without decrypting every item;
   - on-device QA for S1 and S2, including three things only a device can answer. First, what the system
     hands back for a QuickType tap and on which hosts it offers a stored identity: the core assumes the
@@ -372,8 +374,13 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 
 - `URLSessionHTTPClient` in `WatchwordPlatform` (ephemeral, no redirects, size and time limits), and a
   capture of real range responses on a Mac to check the fixtures against.
-- Wiring into `VaultSession`: the reuse key from `Ksym`, the ledger and the prefix cache as sealed local
-  records, `update`/`scan` on save, `unlock`/`lock`.
+- Wiring into `VaultSession` is **done** (Linux; `02-architecture.md` §13.8): the reuse key and the device-local
+  key derived from `Ksym` under labels of their own, the ledger and the prefix cache as sealed per-device records
+  in the `DeviceLocalStore` port, the engine updated on every commit and reconciled with the store before every
+  query and after every sync, `unlock`/`lock` in that order around the keyset, and `runHygieneStep()` for the UI or
+  a background task to drive. Tests: "Vault session: hygiene" and the adversarial suite "hygiene in the vault
+  session". Still open: the file adapter for `DeviceLocalStore` (App Group, excluded from backup); until then the
+  ledger and cache last as long as the process.
 - `BGProcessingTask` / `NSBackgroundActivityScheduler` glue that wakes the loop.
 - The report UI, per-item badges in the item list, settings for the site directory and the HIBP API key, and
   the UI snapshot tests.

@@ -53,8 +53,16 @@ public enum ScanOutcome: Hashable, Sendable {
 /// to reach a suspension. `unlock` analyses one item and then suspends, every item, and stops as soon as it finds
 /// the vault locked or its task cancelled; every other call does a bounded amount of work on one item (at most
 /// sixteen passwords of at most 64 analysed characters). Even so, the session must not make its own lock wait for
-/// this actor: it zeroises the keyset first and calls `lock()` after, so that nothing here can keep the vault's
+/// this actor: it zeroises the keyset first and locks the engine after, so that nothing here can keep the vault's
 /// keys resident.
+///
+/// **A lock that cannot wait at all.** The session's `lock()` is synchronous, and a lock in a task after it would
+/// leave the reuse key and every analysis resident until that task ran: through the rest of whatever the session is
+/// doing, or for as long as the process stays suspended in the background. So the session builds its engine on its
+/// own serial executor (`init(…, sharingExecutorWith:)`, `SharesExecutor`), and from its `lock()`, already on that
+/// executor, calls
+/// `dropKeys()` synchronously: everything derived from a password is gone before the session's `lock()` returns,
+/// and `lock()` afterwards only has the prefix cache forget what it holds.
 ///
 /// **Stale copies are refused.** The session fetches an item and then calls `update` or `scan`, and the actor is
 /// re-entrant, so a save of the same item can land in between. The engine remembers the highest version of each
@@ -71,8 +79,8 @@ public enum ScanOutcome: Hashable, Sendable {
 ///
 /// **Whenever the engine goes from unlocked to locked, the prefix cache is emptied**, whichever call did it:
 /// `lock()`, an `unlock` over an engine that was already unlocked (which is a lock first), or an `unlock` that was
-/// cancelled.
-public actor HygieneEngine {
+/// cancelled. The one exception is `dropKeys()`, which cannot suspend, and whose caller calls `lock()` next.
+public actor HygieneEngine: SharesExecutor {
     private struct Resident {
         let reuseKey: ReuseKey
         let analyzer: ItemAnalyzer
@@ -105,6 +113,8 @@ public actor HygieneEngine {
     /// Incremented by every `lock()`. A scan compares it before and after each suspension.
     private var epoch: UInt64 = 0
     private var scanning = false
+    /// The owner of the serial executor the engine runs on: the session's, or (by default) one of its own.
+    package nonisolated let executorOwner: SerialExecutorOwner
 
     /// - Parameter random: for the weekly pass's jitter only. Production passes the system generator; tests a seeded
     ///   one.
@@ -115,12 +125,24 @@ public actor HygieneEngine {
         self.init(client: client, policy: policy, scanPolicy: scanPolicy, random: random) { await Task.yield() }
     }
 
+    /// An engine that runs on `owner`'s serial executor, so that an actor sharing it can call `dropKeys()`
+    /// synchronously (`VaultSession`; docs/02-architecture.md §13.8).
+    package init<R: RandomNumberGenerator & Sendable>(
+        client: PwnedPasswordsClient, policy: HygienePolicy, scanPolicy: ScanPolicy, random: R,
+        sharingExecutorWith owner: SerialExecutorOwner
+    ) {
+        self.init(
+            client: client, policy: policy, scanPolicy: scanPolicy, random: random, executorOwner: owner
+        ) { await Task.yield() }
+    }
+
     /// - Parameter checkpoint: what `unlock` awaits between items, so that other calls (`lock()` above all) can
     ///   run. Production yields; a test passes a gate, to put a lock at a known item without sleeping.
     init<R: RandomNumberGenerator & Sendable>(
         client: PwnedPasswordsClient, policy: HygienePolicy, scanPolicy: ScanPolicy, random: R,
-        checkpoint: @escaping @Sendable () async -> Void
+        executorOwner: SerialExecutorOwner? = nil, checkpoint: @escaping @Sendable () async -> Void
     ) {
+        self.executorOwner = executorOwner ?? SerialExecutorOwner()
         self.client = client
         self.policy = policy
         self.scanPolicy = scanPolicy
@@ -205,6 +227,14 @@ public actor HygieneEngine {
     public func lock() async {
         dropResident()
         await client.lockCache()
+    }
+
+    /// The synchronous part of `lock()`, for a caller on the engine's executor that cannot wait (the session's
+    /// `lock()`, through `assumeIsolated`): zeroises the reuse key and drops everything derived from a password. A
+    /// scan or unlock in flight finds the engine locked when it resumes. Call `lock()` afterwards as well, to empty
+    /// the prefix cache.
+    package func dropKeys() {
+        dropResident()
     }
 
     /// The synchronous part of locking: after this, nothing derived from a password is reachable from the engine.
