@@ -151,7 +151,8 @@ struct RangeCacheIndex: Hashable {
 // The session owns one `HygieneEngine` for its lifetime (so the engine's pacing survives a lock). At every unlock it
 // derives the reuse key from the keyset (`DeviceLocalKeys.hygieneReuseKey`, never the raw key) and the device-local
 // key, unseals the scan ledger and starts the engine's `unlock` in a task of its own; `lock()` zeroises the keyset
-// first, then the local key, cancels that task and has the engine lock, never the other way round. Saves update the
+// first, then drops the engine's keys (the engine runs on the session's executor), then the local key, cancels that
+// task and has the engine empty its cache, never the other way round. Saves update the
 // engine; every query reconciles it with the store first, so a sync merge, a deletion or anything else that changed
 // a row is reflected in what the person is shown. Nothing here runs by itself: the UI or a background task calls
 // `runHygieneStep()`, and the engine's schedule decides whether anything is sent.
@@ -170,7 +171,8 @@ extension VaultSession {
                 http: settings.http, cache: SealedPwnedRangeCache(session: self), userAgent: settings.userAgent)
             hygieneRuntime = HygieneRuntime(
                 engine: HygieneEngine(
-                    client: client, policy: settings.policy, scanPolicy: settings.scanPolicy, random: random),
+                    client: client, policy: settings.policy, scanPolicy: settings.scanPolicy, random: random,
+                    sharingExecutorWith: executorOwner),
                 settings: settings)
         }
         guard var runtime = hygieneRuntime else { return }
@@ -189,9 +191,13 @@ extension VaultSession {
         hygieneRuntime = runtime
     }
 
-    /// From `lock()`, after the keyset is zeroised. Synchronous: the lock never waits for the engine.
+    /// From `lock()`, after the keyset is zeroised. Synchronous: the lock never waits for the engine. The engine runs
+    /// on this session's executor (`SharesExecutor`), so its reuse key and analyses are dropped here, before `lock()`
+    /// returns; the task only has it empty the prefix cache. With the drop in that task, everything derived from a
+    /// password stayed resident for as long as the session was busy or the process suspended (review finding K2).
     func stopHygiene() {
         guard var runtime = hygieneRuntime else { return }
+        runtime.engine.assumeIsolated { $0.dropKeys() }
         runtime.localKey?.zeroise()
         runtime.localKey = nil
         runtime.unlockTask?.cancel()

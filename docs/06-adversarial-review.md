@@ -487,3 +487,19 @@ Also recorded: `UITestPeer` (in `Apps/`, not touched by this work) still enrols 
 account header and vault-key wraps, which no longer makes a registered device; it must use `VaultSession.enrol`.
 `SystemKeychainStore` gained the two new Keychain item names without being compiled; the "Keychain item protection"
 suite now iterates `KeychainItem.all`, also uncompiled here.
+
+## K. Integration review (the kit stream: AutoFill and hygiene in the session)
+
+Review date: 2026-11-16. Written and reproduced in a remote Linux session against swift-crypto (ADR 0006); nothing
+below has run on a Mac yet. The review read the session's hygiene wiring (`VaultSession+Hygiene.swift`,
+`DeviceLocalKeys`) against the adversaries of architecture §2 and §13.1, with one added: **another device of the
+same account**, which holds the keyset (a revoked one keeps it, §7.8). Each finding was reproduced by a failing test
+before it was fixed, and the test stays as the regression.
+
+| ID | Severity | Finding and threat | Disposition |
+| --- | --- | --- | --- |
+| K2 | Low | `lock()` zeroised the keyset and the local key but locked the engine in a task it did not wait for, so the reuse key, the reuse tokens and every analysis stayed resident, and the engine answered reuse queries, for as long as the session's current job kept the task out (`deleteAccount` after its `lock()`), or for as long as an iOS process stayed suspended after locking in the background: a memory image (A3, A8) found what the design says is gone at lock. The adversarial test waited for that task before it asserted anything. | **Fixed.** The engine runs on the session's serial executor (both conform to `SharesExecutor` over one `SerialExecutorOwner`, in `SecureMemory` because reading another actor's executor is an unsafe construct; ADR 0001, amendment of 2026-11-16), so `lock()` drops the engine's keys and everything derived from a password synchronously (`HygieneEngine.dropKeys()` through `assumeIsolated`) before it returns; only emptying the prefix cache is left to the task. Engine and session no longer run concurrently, so a lock can never race an engine computation on another thread. Test: `engineIsLockedWhenLockReturns` (twenty lock and unlock cycles, asking the engine before any queued task can run; failed in every cycle before the fix). |
+
+Also recorded: the engine now shares the session's executor, so the analysis an unlock makes runs between the
+session's own jobs rather than beside them (one item at a time, as before); `HygieneEngine`'s public initialiser
+still gives an engine an executor of its own.

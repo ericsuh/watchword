@@ -125,7 +125,7 @@ final class UnlockedKeys: Sendable {
 /// epoch before touching key material again: a `lock()` that lands while an unlock or a save is waiting on the
 /// store or the Keychain wins, and the in-flight operation fails with `locked` rather than resurrecting keys or
 /// reading a zeroised buffer.
-public actor VaultSession {
+public actor VaultSession: SharesExecutor {
     let store: any RecordStore
     let keychain: any KeychainStore
     let biometrics: any BiometricGate
@@ -151,6 +151,9 @@ public actor VaultSession {
     var skippedRegistryEntries: Set<ObjectDigest> = []
     /// The hygiene engine and what drives it (`VaultSession+Hygiene.swift`); built at the first unlock.
     var hygieneRuntime: HygieneRuntime?
+    /// The serial executor the session shares with its hygiene engine, so that `lock()` drops the engine's keys
+    /// before it returns (`SharesExecutor`; docs/02-architecture.md §13.8).
+    package nonisolated let executorOwner = SerialExecutorOwner()
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(

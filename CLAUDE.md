@@ -147,8 +147,9 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   can run before decryption, and KDF parameter validation. Does no cryptography itself.
 - **`SecureMemory`** — `SecureBytes` (zeroising, page-locked key buffers), `ConstantTime`, the
   CommonCrypto PBKDF2 call, and the four system bindings with pointer-typed signatures (SQLite,
-  `SecItemCopyMatching`, `LAContext.canEvaluatePolicy`, the PDF `CGContext`). The only module allowed unsafe
-  code (ADR 0001 and its milestone-2 amendment).
+  `SecItemCopyMatching`, `LAContext.canEvaluatePolicy`, the PDF `CGContext`), and `SharesExecutor`, for actors that
+  run on one serial executor (the session and its hygiene engine). The only module allowed unsafe code (ADR 0001 and
+  its amendments).
 - **`WatchwordCrypto`** — Secret Key, 2SKD, KDF calibration, keyset, vault keys, HPKE grants, signatures,
   fingerprints, record sealing; device keys and signatures (`DevicePublicKey`, `DeviceSignatures`,
   `SoftwareDeviceKey`, `EnrolmentKey`), the device registry (`RegistryEntry`, `DeviceRegistry.evaluate`), the
@@ -471,8 +472,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   absent or the version the model read. Never let a stale editor's draft through `ItemMerge.stamped`.
 - Every read goes through `openItem`, which returns `ItemMerge.canonical` of the decrypted item (Y30): the UI and
   AutoFill never see sync metadata as a writer claimed it.
-- Hygiene keys (`DeviceLocalKeys`) are derived on the actor at unlock and the device-local key never leaves it;
-  `lock()` zeroises the keyset, then that key, then starts the engine's `lock()` without waiting. The ledger and the
+- Hygiene keys (`DeviceLocalKeys`) are derived on the actor at unlock and the device-local key never leaves it.
+  The engine runs on the session's executor (`SharesExecutor`), so `lock()` zeroises the keyset, then drops the
+  engine's keys synchronously (`assumeIsolated { $0.dropKeys() }`, K2), then that key; only emptying the prefix cache
+  is left to a task. The ledger and the
   prefix cache are written only sealed, to the `DeviceLocalStore`, never to the record store or a transport, and
   every hygiene query reconciles the engine with the store first. No timer: the UI or a background task calls
   `runHygieneStep()`.

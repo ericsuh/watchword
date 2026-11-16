@@ -151,6 +151,24 @@ struct AdversarialSessionHygieneTests {
         }
     }
 
+    /// A3 or A8 takes a memory image straight after the lock, before anything else the session queued has run (an
+    /// iOS process suspended as it enters the background): the engine must already hold nothing, and answer nothing.
+    @Test("lock() drops the engine's reuse key and analyses before it returns, not in a task after it")
+    func engineIsLockedWhenLockReturns() async throws {
+        let (fixture, vaultID) = try await Self.unlocked()
+        let item = try await fixture.session.save(
+            Fixture.login(vaultID, title: "Forum", host: "forum.example", password: "password"))
+        try await fixture.scanUntilIdle()
+        #expect(try await fixture.session.itemsUsingPassword("password") == [item.id])
+        for _ in 0..<20 {
+            let probe = await fixture.session.lockThenProbeHygiene("password")
+            #expect(probe.engineUnlocked == false, "the engine is still unlocked after lock() returned")
+            #expect(probe.reuseAnswer == nil, "the engine still answers reuse queries after lock() returned")
+            try await fixture.session.unlock(password: TestVault.password)
+            #expect(try await fixture.session.itemsUsingPassword("password") == [item.id])
+        }
+    }
+
     /// A8 plants another account's sealed ledger and ranges under this device's names, for an item it has given the
     /// same ID and version: if believed, the ledger would say the breached password was checked. It is not believed:
     /// the item is due, and the planted ranges answer nothing.
@@ -189,5 +207,16 @@ struct AdversarialSessionHygieneTests {
         #expect(await victim.http.requests.count == sent + 1)
         let after = try await victim.session.hygieneReport()
         #expect(after.item(planted.id)?.findings.contains { $0.kind == .breachedPassword } == true)
+    }
+}
+
+extension VaultSession {
+    /// Locks, then asks the engine at once, before any task the session queued during `lock()` can run.
+    fileprivate func lockThenProbeHygiene(_ password: String) async -> (engineUnlocked: Bool, reuseAnswer: [UUID]?) {
+        let engine = hygieneEngine
+        lock()
+        let unlocked = await engine?.isUnlocked ?? false
+        let answer = try? await engine?.items(using: password)
+        return (unlocked, answer)
     }
 }

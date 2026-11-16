@@ -561,7 +561,8 @@ a real adapter would have been asked to send:
   control and bidirectional characters and never carries the service's HTML.
 
 **In the session** (`AdversarialSessionHygieneTests`, suite "Adversarial: hygiene in the vault session";
-`02-architecture.md` §13.8): after `lock()` the engine holds nothing (ledger, reuse lookups and report refused), the
+`02-architecture.md` §13.8): after `lock()` the engine holds nothing (ledger, reuse lookups and report refused),
+already when `lock()` returns, before any task it queued has run (K2); the
 session's device-local key and its record of what the engine saw are gone, the sealed cache answers nothing, and
 every byte in the device-local store is ciphertext (no record magic, ledger key, item ID or prefix in hexadecimal),
 under names that are keyed digests; a scan whose response is held until after the lock reports `interrupted`,

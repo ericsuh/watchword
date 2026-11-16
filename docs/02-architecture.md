@@ -1897,9 +1897,16 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   kept).
 - **Unlock.** The engine's `unlock` runs in a task of its own (utility priority) with the decrypted items and
   the unsealed ledger, after any engine lock still in flight. Every query waits for it, then reconciles.
-- **Lock.** `lock()` zeroises the keyset, then the local key, cancels the unlock task and starts the engine's
-  `lock()` in a task, never waiting for it: nothing the engine does can keep the vault's keys resident. A scan in
-  flight finds the session locked and records nothing; the engine drops its answers.
+- **Lock.** `lock()` zeroises the keyset, then drops the engine's reuse key and everything derived from a password
+  (`HygieneEngine.dropKeys()`), then zeroises the local key and cancels the unlock task, all before it returns;
+  only the engine's `lock()`, which empties the prefix cache, runs in a task afterwards. The drop is synchronous
+  because the engine runs on the session's own serial executor (both conform to `SecureMemory.SharesExecutor` over
+  one `SerialExecutorOwner`; ADR 0001's amendment of 2026-11-16 says why that lives in `SecureMemory`), so the
+  session's `lock()`, already on that executor, calls it through `assumeIsolated`. With
+  the drop in that task instead, the reuse key, the reuse tokens and every analysis stayed resident for as long as
+  the session was busy after `lock()`, or the process was suspended in the background (docs/06 K2). Nothing the
+  engine does can keep the vault's keys resident. A scan in flight finds the engine locked and records nothing; the
+  engine drops its answers.
 - **Changes.** Every commit of an item (`commitItem`) updates the engine at once, so an edit is due for a check
   (reason `changed`); a sync, and every query, reconciles the engine with the store first: rows whose version (or
   whose vault's deletion) changed are decrypted and shown to it, and rows that are gone are removed. So a merge, a

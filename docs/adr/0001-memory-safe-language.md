@@ -73,6 +73,25 @@ CryptoKit's API through apple/swift-crypto's `Crypto` module, which re-exports C
 supplies the same API over BoringSSL on Linux, where builds exist only to run the tests. ADR 0006 records why, and
 what it costs: swift-crypto's module ships in the apps, pinned by commit.
 
+## Amendment (2026-11-16): actors that share a serial executor
+
+`VaultSession.lock()` is synchronous, and must drop its hygiene engine's reuse key and everything the engine derived
+from a password before it returns (architecture §13.8; review finding K2 in `06-adversarial-review.md`). The engine
+is an actor of its own, and an actor's state can be changed synchronously only from its own executor; a lock left to a
+task kept that state resident for as long as the session stayed busy or the process stayed suspended. The fix is for
+the two actors to run on one serial executor, so that the session's `lock()` reaches the engine through
+`assumeIsolated`. Naming another actor's executor reads its `unownedExecutor`, an `UnownedSerialExecutor`, which holds
+the executor without owning it, so strict memory safety flags it.
+
+Decision: that one expression lives in `SecureMemory` (`SharedExecutor.swift`), behind a `package` protocol,
+`SharesExecutor`, whose extension supplies `unownedExecutor` from a stored `SerialExecutorOwner`. It is sound because
+every conforming actor stores the owner as a `let`: a job holds its actor, the actor holds the owner, so the executor
+outlives every job enqueued on it. The protocol documents that conformers must not compute it. The alternatives were
+a lock-protected box for the engine's state (an `@unchecked Sendable` class outside `SecureMemory`, or
+`Synchronization.Mutex`, which needs macOS 15 and iOS 18 against the package's macOS 14 and iOS 17) and leaving the
+window documented; the first moves more code under the unsafe rules than this does, the second leaves password-derived
+state in memory after a lock.
+
 ## Consequences
 - Developers must justify any new `unsafe` use in review and place it in `SecureMemory`.
 - Argon2id is unavailable without third-party code; see ADR 0003.
