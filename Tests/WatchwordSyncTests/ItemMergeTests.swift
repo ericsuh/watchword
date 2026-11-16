@@ -43,9 +43,11 @@ enum MergeFixtures {
                 ItemHistoryEntry(replacedAt: item.modifiedAt, version: previous.version, fields: previous.fields), at: 0
             )
         }
+        // The line nonce is drawn as the vault draws it, from a seed so that the test is the same on every run.
+        var generator = SeededGenerator(seed: version ^ 0x4E0C_E5EE_D000_0000)
         return ItemMerge.stamped(
             item, previous: previous, previousOrigin: origin(previous, device),
-            revision: Revision(version: version, device: device))
+            revision: Revision(version: version, device: device), using: &generator)
     }
 
     /// The origin of a version: the version it carries and, for the fixtures, the device given.
@@ -57,18 +59,9 @@ enum MergeFixtures {
         ItemMerge.merge(x.0, origin: origin(x.0, x.1), y.0, origin: origin(y.0, y.1))
     }
 
-    /// Everything that must agree across devices: all but `version` and the history's order.
+    /// Everything that must agree across devices: the whole item as sealed, but for the `version` its writer assigns.
     static func current(_ item: Item) -> Item {
-        var item = item
-        item.version = 0
-        item.history = item.history.sorted(by: ItemMerge.historyOrder)
-        return item
-    }
-
-    static func unordered(_ item: Item) -> Item {
-        var item = current(item)
-        item.fields.sort { $0.id.precedes($1.id) }
-        return item
+        ItemMerge.written(item, as: Revision(version: 0, device: a))
     }
 
     static func conflictValues(_ item: Item, _ group: ItemGroup) -> [ItemGroupValue] {
@@ -369,34 +362,8 @@ struct ItemMergeTests {
         #expect(legacy.notes == "a\nb")
     }
 
-    /// The property convergence rests on: merging is a join, so order, grouping and repetition do not matter.
-    @Test("merging is commutative, idempotent, and associative up to field order, under random concurrent edits")
-    func joinProperties() {
-        var generator = SeededGenerator(seed: TestEnvironment.seed(fallback: 0xC0FFEE))
-        for _ in 0..<TestEnvironment.iterations(standard: 300, long: 20_000) {
-            var versions: [(Item, UUID)] = []
-            for device in [F.a, F.b, F.c] {
-                var item = F.base(notes: "one\ntwo\nthree")
-                var version: UInt64 = 1
-                for _ in 0..<Int.random(in: 1...4, using: &generator) {
-                    version += UInt64.random(in: 1...3, using: &generator)
-                    item = F.edit(item, by: device, at: version) { Self.randomEdit(&$0, using: &generator) }
-                }
-                versions.append((item, device))
-            }
-            let (x, y, z) = (versions[0], versions[1], versions[2])
-            // A merge result fed back in claims no write of its own (version 0): its origins are already in its clock.
-            let xy = ItemMerge.merge(x.0, origin: F.origin(x.0, x.1), y.0, origin: F.origin(y.0, y.1))
-            let none = Revision(version: 0, device: F.a)
-            #expect(F.current(xy) == F.current(F.merge(y, x)))
-            let yz = ItemMerge.merge(y.0, origin: F.origin(y.0, y.1), z.0, origin: F.origin(z.0, z.1))
-            let left = ItemMerge.merge(xy, origin: none, z.0, origin: F.origin(z.0, z.1))
-            let right = ItemMerge.merge(x.0, origin: F.origin(x.0, x.1), yz, origin: none)
-            #expect(F.unordered(left) == F.unordered(right))
-            #expect(F.current(F.merge(x, x)) == F.current(x.0))
-            #expect(F.current(ItemMerge.merge(xy, origin: none, x.0, origin: F.origin(x.0, x.1))) == F.current(xy))
-        }
-    }
+    // The laws convergence rests on (the merge is a join; every update is inflationary) are checked under random
+    // histories in `LongRunningItemMergeLawTests` and exhaustively for small ones in `LongRunningItemMergeExhaustiveTests`.
 
     static func randomEdit(_ item: inout Item, using generator: inout SeededGenerator) {
         let word = ["alpha", "beta", "gamma", "delta"].randomElement(using: &generator)!

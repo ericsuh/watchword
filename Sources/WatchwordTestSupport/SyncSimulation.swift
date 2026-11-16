@@ -20,6 +20,8 @@ public actor SyncTestClient {
     public let keyring: FakeSyncKeyring
     public let engine: SyncEngine
     private var tick: TimeInterval = 0
+    /// For the note-line nonces `ItemMerge.stamped` draws, seeded from the device so that a simulation replays.
+    private var generator: SeededGenerator
 
     public init(
         deviceID: UUID, vaultID: UUID, keys: FakeAccountKeys, transport: any SyncTransport,
@@ -28,6 +30,7 @@ public actor SyncTestClient {
     ) {
         self.deviceID = deviceID
         self.vaultID = vaultID
+        generator = SeededGenerator(seed: deviceID.byteArray.reduce(0x17E3) { $0 &* 31 &+ UInt64($1) })
         self.store = store
         self.syncState = syncState
         sessionStore = DeletionRecordingStore(base: store, syncState: syncState, deviceID: deviceID)
@@ -69,7 +72,7 @@ public actor SyncTestClient {
         item = ItemMerge.stamped(
             item, previous: existing,
             previousOrigin: existingRow.map { Revision(version: $0.version, device: $0.deviceID) },
-            revision: Revision(version: item.version, device: deviceID))
+            revision: Revision(version: item.version, device: deviceID), using: &generator)
         let row = try await keyring.sealItem(item)
         var change = StoreChange(upserts: [row])
         change.expectations[row.key] = existingRow.map { .version($0.version) } ?? .absent

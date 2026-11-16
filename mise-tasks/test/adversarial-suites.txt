@@ -11,6 +11,7 @@ unlock and quick unlock
 local vault store
 Keychain item protection
 sync log
+sync log, item metadata
 sync with real keys
 hygiene and breach checks
 sharing and membership
