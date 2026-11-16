@@ -45,8 +45,9 @@ extension VaultSession {
         do {
             try await startRegistryIfAccountPredatesIt(account: record, transport: syncSettings.transport)
             report.account = try await syncAccountObjects(account: record, transport: syncSettings.transport)
-        } catch SyncTransportError.unavailable {
+        } catch let error as SyncTransportError where error.stopsSync {
             report.transportUnavailable = true
+            report.transportFailure = report.transportFailure ?? error
         } catch SyncKeyringError.locked {
             // Locked while vouching for the directory: the rest of the sync is a download.
         }
@@ -575,6 +576,9 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// transport is refused until a sync restores it.
     public var registryUnavailable = false
     public var transportUnavailable = false
+    /// Why the transport could not be used, when it said (`SyncTransportError.stopsSync`): from the account's own
+    /// objects, or else the first vault's that names one.
+    public var transportFailure: SyncTransportError?
     /// What the sharing pass did for each shared vault (docs/02-architecture.md §8.8).
     public var sharing: [UUID: SharedVaultSyncReport] = [:]
 
@@ -584,6 +588,7 @@ public struct AccountSyncReport: Sendable, Equatable {
     public var combined: SyncReport {
         var total = SyncReport()
         total.transportUnavailable = transportUnavailable
+        total.transportFailure = transportFailure
         total.awaitingNewPassword = awaitingNewPassword
         total.deviceRevoked = deviceStanding == .revoked
         total.deviceNotRegistered = deviceStanding == .unknown
@@ -608,6 +613,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.deletionsDeferred += report.deletionsDeferred
             total.deferredUntilUnlock = total.deferredUntilUnlock || report.deferredUntilUnlock
             total.transportUnavailable = total.transportUnavailable || report.transportUnavailable
+            total.transportFailure = total.transportFailure ?? report.transportFailure
             total.ownStreamConflict = total.ownStreamConflict ?? report.ownStreamConflict
             total.requiresNewerVersion = total.requiresNewerVersion || report.requiresNewerVersion
             total.unknownEntriesKept += report.unknownEntriesKept

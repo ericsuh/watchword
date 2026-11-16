@@ -99,3 +99,45 @@ struct FileSyncTransportTests {
         }
     }
 }
+
+@Suite("File sync transport: iCloud placeholders")
+struct FileSyncTransportPlaceholderTests {
+    static func placeholder(for name: String, in root: URL) throws -> URL {
+        let url = try FileSyncTransport(root: root).fileURL(for: name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        return FileSyncTransport.placeholderURL(for: url)
+    }
+
+    @Test("a placeholder is listed as its object only when asked, and fetching it finds no file yet")
+    func placeholderListed() async throws {
+        let root = TransportFixtures.temporaryRoot()
+        try Data([1]).write(to: try Self.placeholder(for: TransportFixtures.name, in: root))
+        #expect(try await FileSyncTransport(root: root).list(prefix: TransportFixtures.prefix).isEmpty)
+        let ubiquitous = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+        #expect(try await ubiquitous.list(prefix: TransportFixtures.prefix) == [TransportFixtures.name])
+        #expect(try await ubiquitous.fetch(TransportFixtures.name, maximumLength: 100) == nil)
+    }
+
+    @Test("a placeholder beside its downloaded file is one object")
+    func placeholderAndFile() async throws {
+        let root = TransportFixtures.temporaryRoot()
+        let ubiquitous = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+        try await ubiquitous.create(TransportFixtures.name, contents: [1])
+        try Data([1]).write(to: try Self.placeholder(for: TransportFixtures.name, in: root))
+        #expect(try await ubiquitous.list(prefix: TransportFixtures.prefix) == [TransportFixtures.name])
+    }
+
+    @Test(
+        "placeholder names outside the layout are not objects",
+        arguments: [".x y.wwe.icloud", "..wwe.icloud", ".a.wwe.icloud.icloud", "x.wwe.icloud", ".a.wwe", ".a.icloud"])
+    func strangePlaceholders(_ entry: String) {
+        #expect(FileSyncTransport.placeholderStem(entry) == nil)
+    }
+
+    @Test("the placeholder of an object is the dot-file iCloud Drive keeps beside it")
+    func placeholderName() {
+        #expect(FileSyncTransport.placeholderStem(".7.wwe.icloud") == "7")
+        let url = URL(fileURLWithPath: "/r/vault/v/log/d/7.wwe")
+        #expect(FileSyncTransport.placeholderURL(for: url).lastPathComponent == ".7.wwe.icloud")
+    }
+}

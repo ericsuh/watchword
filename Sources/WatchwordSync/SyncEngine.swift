@@ -119,6 +119,9 @@ public struct SyncReport: Sendable, Equatable {
     public var deferredUntilUnlock = false
     /// The transport could not be reached. Objects downloaded earlier were still merged; nothing was published.
     public var transportUnavailable = false
+    /// Why, when the transport said: offline (`unavailable`), throttled with the wait it asked for, out of storage,
+    /// signed out, or reset (`SyncTransportError.stopsSync`).
+    public var transportFailure: SyncTransportError?
     /// This device's next sequence number was already taken: a crash after publishing, or another installation using
     /// this device ID (a restored backup). The object is merged on the next sync and nothing is overwritten.
     public var ownStreamConflict: UInt64?
@@ -159,6 +162,12 @@ public struct SyncReport: Sendable, Equatable {
     public var replayNeeded = false
 
     public init() {}
+
+    /// Records that the transport could not be used, and why. The first reason in a sync is kept.
+    public mutating func noteTransportFailure(_ error: SyncTransportError) {
+        transportUnavailable = true
+        if transportFailure == nil { transportFailure = error }
+    }
 }
 
 /// The sync engine for one vault on one device (docs/02-architecture.md §7, PRD F7.2–F7.5).
@@ -292,9 +301,9 @@ public actor SyncEngine {
             if let highest = listing.segments[deviceID]?.max() {
                 state.nextSequence = max(state.nextSequence, highest + 1)
             }
-        } catch SyncTransportError.unavailable {
-            // Offline (PRD N3): still merge what was downloaded earlier, perhaps while locked.
-            report.transportUnavailable = true
+        } catch let error as SyncTransportError where error.stopsSync {
+            // Offline (PRD N3), throttled, signed out: still merge what was downloaded earlier, perhaps while locked.
+            report.noteTransportFailure(error)
         }
         do {
             try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
@@ -309,8 +318,8 @@ public actor SyncEngine {
             }
         } catch SyncKeyringError.locked {
             report.deferredUntilUnlock = true
-        } catch SyncTransportError.unavailable {
-            report.transportUnavailable = true
+        } catch let error as SyncTransportError where error.stopsSync {
+            report.noteTransportFailure(error)
         }
         // The stash once per sync, under the next generation, then the state that names it. Locked, the session
         // cannot sign it: a stash changed only by forgetting what revoked devices carried is worked out again next
@@ -360,8 +369,8 @@ public actor SyncEngine {
         do {
             _ = try await pull(
                 state: state, retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
-        } catch SyncTransportError.unavailable {
-            report.transportUnavailable = true
+        } catch let error as SyncTransportError where error.stopsSync {
+            report.noteTransportFailure(error)
         }
         return report
     }
@@ -424,8 +433,8 @@ public actor SyncEngine {
                 let object = try SignedObject.parse(bytes)
                 try await keyring.verify(object.signature, over: object.envelope, at: location)
                 try await syncState.stage(StagedObject(location: location, object: object))
-            } catch SyncTransportError.unavailable {
-                throw SyncTransportError.unavailable
+            } catch let error as SyncTransportError where error.stopsSync {
+                throw error
             } catch {
                 report.rejected.append(SyncRejection(name: location.name, reason: Self.reason(error)))
                 if location.kind == .segment {
@@ -1321,7 +1330,8 @@ public actor SyncEngine {
     /// local store failed.
     static func isFatal(_ error: any Error) -> Bool {
         switch error {
-        case SyncKeyringError.locked, SyncTransportError.unavailable: return true
+        case SyncKeyringError.locked: return true
+        case let error as SyncTransportError: return error.stopsSync
         case is RecordStoreError: return true
         default: return false
         }

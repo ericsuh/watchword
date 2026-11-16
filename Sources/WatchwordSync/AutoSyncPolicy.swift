@@ -51,6 +51,9 @@ public enum AutoSyncEvent: Sendable, Hashable {
     case syncSucceeded
     /// The sync threw, or its report says the transport was unavailable.
     case syncFailed
+    /// A failed sync whose transport asked the client to wait (`SyncTransportError.rateLimited`): a failure, whose
+    /// backoff is at least the wait asked for, held to `backoffMaximum` (the store's word is a claim, A1).
+    case syncThrottled(retryAfter: TimeInterval?)
 }
 
 public enum AutoSyncMode: Sendable, Hashable {
@@ -89,6 +92,8 @@ public struct AutoSyncState: Sendable, Hashable {
     public var lastStartedAt: Date?
     public var lastFailedAt: Date?
     public var consecutiveFailures = 0
+    /// The wait the transport asked for after the last failure, already held within the policy's bounds.
+    public var requestedWait: TimeInterval?
 
     public init() {}
 }
@@ -106,6 +111,8 @@ public struct AutoSyncState: Sendable, Hashable {
 /// - After a failure: nothing until the backoff passes, then a retry; the backoff doubles with each failure in a row
 ///   up to `backoffMaximum`, and any success clears it.
 /// - While locked, every sync is download-only: merging and publishing need keys (§7.4).
+/// - A transport that asks for a wait (CloudKit's `retryAfterSeconds`) lengthens that backoff to the wait, never
+///   beyond `backoffMaximum`. An unlock still syncs at once: the person is waiting, and it is one request.
 ///
 /// A clock that moved backwards cannot show that an interval has *not* passed, so every wait measured from a time
 /// in the future is treated as over. Syncing early costs a request; waiting for ever would cost the data.
@@ -138,10 +145,17 @@ public enum AutoSyncPolicy {
             state.inFlight = false
             state.consecutiveFailures = 0
             state.lastFailedAt = nil
+            state.requestedWait = nil
         case .syncFailed:
             state.inFlight = false
             state.consecutiveFailures += 1
             state.lastFailedAt = now
+            state.requestedWait = nil
+        case .syncThrottled(let retryAfter):
+            state.inFlight = false
+            state.consecutiveFailures += 1
+            state.lastFailedAt = now
+            state.requestedWait = retryAfter.map { $0.isFinite ? max(0, $0) : 0 }
         }
     }
 
@@ -161,7 +175,7 @@ public enum AutoSyncPolicy {
         if state.consecutiveFailures > 0, let failed = state.lastFailedAt {
             notBefore = max(
                 notBefore,
-                elapsed(since: failed, now: now, interval: backoff(after: state.consecutiveFailures, settings)))
+                elapsed(since: failed, now: now, interval: backoff(after: state, settings)))
         }
 
         var candidates: [(Date, AutoSyncReason)] = []
@@ -188,6 +202,14 @@ public enum AutoSyncPolicy {
         let (due, reason) = candidates.min { $0.0 < $1.0 }!
         let at = max(due, notBefore)
         return at <= now ? .sync(mode, reason) : .wait(until: at)
+    }
+
+    /// The backoff for `state`: the doubling backoff, or the transport's requested wait if that is longer, capped at
+    /// `backoffMaximum` either way.
+    public static func backoff(after state: AutoSyncState, _ settings: AutoSyncSettings) -> TimeInterval {
+        let doubling = backoff(after: state.consecutiveFailures, settings)
+        guard let requested = state.requestedWait else { return doubling }
+        return min(settings.backoffMaximum, max(doubling, requested))
     }
 
     /// The backoff after `failures` failures in a row: `backoffBase` doubled each time, capped.

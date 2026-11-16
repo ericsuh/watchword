@@ -255,3 +255,36 @@ struct AccountObjectLocationTests {
         }
     }
 }
+
+extension AutoSyncPolicyTests {
+    @Test("a transport's requested wait lengthens the backoff, held to the policy's maximum, and a success clears it")
+    func throttled() {
+        var state = Self.synced()
+        AutoSyncPolicy.record(.syncStarted, at: at(100), in: &state)
+        AutoSyncPolicy.record(.syncThrottled(retryAfter: 300), at: at(101), in: &state)
+        #expect(AutoSyncPolicy.decide(now: at(200), state: state, settings: settings) == .wait(until: at(401)))
+        #expect(AutoSyncPolicy.decide(now: at(401), state: state, settings: settings) == .sync(.full, .retry))
+
+        // A wait of a year is a claim by the store (A1): an hour at most.
+        AutoSyncPolicy.record(.syncStarted, at: at(500), in: &state)
+        AutoSyncPolicy.record(.syncThrottled(retryAfter: 365 * 86_400), at: at(501), in: &state)
+        let capped = at(501).addingTimeInterval(settings.backoffMaximum)
+        #expect(AutoSyncPolicy.decide(now: at(600), state: state, settings: settings) == .wait(until: capped))
+
+        // No wait named, or a shorter one than the doubling backoff: the doubling backoff.
+        AutoSyncPolicy.record(.syncStarted, at: at(5000), in: &state)
+        AutoSyncPolicy.record(.syncThrottled(retryAfter: nil), at: at(5001), in: &state)
+        let doubling = AutoSyncPolicy.backoff(after: state.consecutiveFailures, settings)
+        #expect(AutoSyncPolicy.backoff(after: state, settings) == doubling)
+        AutoSyncPolicy.record(.syncStarted, at: at(9000), in: &state)
+        AutoSyncPolicy.record(.syncThrottled(retryAfter: -.infinity), at: at(9001), in: &state)
+        #expect(
+            AutoSyncPolicy.backoff(after: state, settings)
+                == AutoSyncPolicy.backoff(after: state.consecutiveFailures, settings))
+
+        AutoSyncPolicy.record(.syncStarted, at: at(20000), in: &state)
+        AutoSyncPolicy.record(.syncSucceeded, at: at(20001), in: &state)
+        #expect(state.requestedWait == nil)
+        #expect(AutoSyncPolicy.backoff(after: state, settings) == 0)
+    }
+}

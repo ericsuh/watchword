@@ -1064,8 +1064,8 @@ extension VaultSession {
                     }
                     pool[digest] = bytes
                     fetched[digest] = bytes
-                } catch SyncTransportError.unavailable {
-                    throw SyncTransportError.unavailable
+                } catch let error as SyncTransportError where error.stopsSync {
+                    throw error
                 } catch {
                     report.rejected.append(listed[digest]!)
                 }
@@ -1181,8 +1181,8 @@ extension VaultSession {
                 default:
                     break
                 }
-            } catch SyncTransportError.unavailable {
-                throw SyncTransportError.unavailable
+            } catch let error as SyncTransportError where error.stopsSync {
+                throw error
             } catch SyncKeyringError.locked {
                 throw SyncKeyringError.locked
             } catch {
