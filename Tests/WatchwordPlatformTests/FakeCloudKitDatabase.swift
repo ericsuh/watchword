@@ -1,13 +1,16 @@
 #if canImport(CloudKit)
     import CloudKit
     import Foundation
+    import Testing
     import WatchwordPlatform
 
     /// An in-memory private database with CloudKit's semantics where the transport depends on them: zones must exist
     /// before records are saved in them (a per-record `zoneNotFound` inside a partial failure), a new record saved with
     /// `.ifServerRecordUnchanged` over an existing one fails with `serverRecordChanged` while any other policy
-    /// overwrites (so a transport that chose the wrong one would fail the contract), queries evaluate their predicate
-    /// and page by an integer cursor, `desiredKeys` limits the fields returned, and assets are copied at save. Every
+    /// overwrites (so a transport that chose the wrong one would fail the contract), queries are read (a CKQuery's
+    /// predicate cannot be evaluated on Apple platforms: only `TRUEPREDICATE` and `name BEGINSWITH <string>` are
+    /// understood, and any other shape records an issue and throws, so a transport that changes its query cannot pass
+    /// unnoticed) and page by an integer cursor, `desiredKeys` limits the fields returned, and assets are copied at save. Every
     /// save's policy is recorded, and an error can be injected for the next call. (A copy lives in each test target
     /// that needs one; test code only.)
     final class FakeCloudKitDatabase: CloudKitDatabase, @unchecked Sendable {
@@ -21,9 +24,33 @@
         private(set) var savedChangeTags: [String?] = []
         private(set) var queriedKeys: [[CKRecord.FieldKey]] = []
         let pageLimit: Int
+        /// A1 answering without end: every page repeats the same records and offers another.
+        var endless = false
+
+        struct UnsupportedQuery: Error {}
 
         init(pageLimit: Int = 3) {
             self.pageLimit = pageLimit
+        }
+
+        /// Deletes a zone and everything in it, as the person's "delete data" in iCloud settings does.
+        func purgeZone(_ zoneName: String) {
+            lock.withLock {
+                zones.remove(zoneName)
+                stored = stored.filter { $0.key.zoneID.zoneName != zoneName }
+            }
+        }
+
+        /// The prefix a query asks for: `""` for `TRUEPREDICATE`, the constant of `name BEGINSWITH <string>`, or `nil`
+        /// for anything else.
+        static func prefix(of predicate: NSPredicate) -> String? {
+            if predicate.predicateFormat == "TRUEPREDICATE" { return "" }
+            guard let comparison = predicate as? NSComparisonPredicate,
+                comparison.predicateOperatorType == .beginsWith, comparison.comparisonPredicateModifier == .direct,
+                comparison.leftExpression.expressionType == .keyPath, comparison.leftExpression.keyPath == "name",
+                comparison.rightExpression.expressionType == .constantValue
+            else { return nil }
+            return comparison.rightExpression.constantValue as? String
         }
 
         /// The next call throws `error` instead of doing anything.
@@ -55,15 +82,25 @@
             resultsLimit: Int, continuing cursor: Int?
         ) async throws -> (matchResults: [(CKRecord.ID, Result<CKRecord, any Error>)], cursor: Int?) {
             try takeInjected()
+            guard let prefix = Self.prefix(of: query.predicate) else {
+                Issue.record("the fake database does not understand the query \(query.predicate.predicateFormat)")
+                throw UnsupportedQuery()
+            }
             return try lock.withLock {
                 queriedKeys.append(desiredKeys)
                 guard zones.contains(zoneID.zoneName) else { throw CKError(.zoneNotFound) }
                 let matching = stored.values.filter {
                     $0.recordID.zoneID == zoneID && $0.recordType == query.recordType
-                        && query.predicate.evaluate(with: ["name": $0["name"] as? String ?? ""])
+                        && ($0["name"] as? String ?? "").hasPrefix(prefix)
                 }.sorted { $0.recordID.recordName < $1.recordID.recordName }
-                let start = cursor ?? 0
                 let limit = min(resultsLimit, pageLimit)
+                if endless {
+                    let page = matching.prefix(limit).map { record in
+                        (record.recordID, Result<CKRecord, any Error>.success(Self.copy(record, keys: desiredKeys)))
+                    }
+                    return (Array(page), (cursor ?? 0) + 1)
+                }
+                let start = cursor ?? 0
                 let page = matching.dropFirst(start).prefix(limit).map { record in
                     (record.recordID, Result<CKRecord, any Error>.success(Self.copy(record, keys: desiredKeys)))
                 }

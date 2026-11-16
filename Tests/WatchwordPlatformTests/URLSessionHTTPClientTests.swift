@@ -72,6 +72,15 @@
             #expect(response.body.count == 4096)
         }
 
+        @Test("a request that names no User-Agent is sent as Watchword, not as CFNetwork and the device")
+        func defaultUserAgent() throws {
+            let bare = HTTPRequest(
+                url: .pwnedRange(PwnedRangePrefix("D0002")!), headers: [:], maximumResponseBytes: 1024)
+            let request = try URLSessionHTTPClient.urlRequest(for: bare, timeout: 5)
+            #expect(request.value(forHTTPHeaderField: "User-Agent") == "Watchword")
+            #expect(request.value(forHTTPHeaderField: "Accept-Language") == "*")
+        }
+
         @Test("the session stores nothing: ephemeral, no cookies, credentials or cache, TLS 1.2 at least, bounded")
         func configuration() {
             let limits = URLSessionHTTPClient.Limits(idleTimeout: 9, totalTimeout: 21)
@@ -94,7 +103,9 @@
                 for: HTTPFixtures.rangeRequest("D0001"), timeout: 5)
             #expect(request.url?.scheme == "https")
             #expect(request.url?.host(percentEncoded: false) == "api.pwnedpasswords.com")
-            #expect(request.allHTTPHeaderFields?.keys.sorted() == ["Add-Padding", "User-Agent"])
+            #expect(request.allHTTPHeaderFields?.keys.sorted() == ["Accept-Language", "Add-Padding", "User-Agent"])
+            #expect(request.value(forHTTPHeaderField: "Accept-Language") == "*")
+            #expect(request.value(forHTTPHeaderField: "User-Agent") == "Watchword/1.0")
             #expect(request.httpBody == nil)
             #expect(request.timeoutInterval == 5)
         }

@@ -2,8 +2,10 @@
     import CloudKit
     import Foundation
     import Testing
+    import WatchwordModel
     import WatchwordPlatform
     import WatchwordSync
+    import WatchwordTestSupport
 
     /// `CloudKitTransport` against a hostile store (docs/02-architecture.md §7.2), through the fake database.
     ///
@@ -32,7 +34,7 @@
         @Test("records that are not what their name says are neither listed nor read")
         func mislabelled() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = Transport(database: database)
+            let transport = Transport(database: database, marker: InMemorySyncStoreMarker())
             let recordName = try Transport.recordName(for: Self.name)
             let other = Self.prefix + "log/" + UUID().uuidString + "/2"
             database.plant(Self.record(recordName, in: transport) { $0["name"] = other })
@@ -49,7 +51,7 @@
         @Test("payloads in a plain field, two payloads, or oversized ones are refused")
         func payloads() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = Transport(database: database)
+            let transport = Transport(database: database, marker: InMemorySyncStoreMarker())
             let recordName = try Transport.recordName(for: Self.name)
             database.plant(
                 Self.record(recordName, in: transport) {
@@ -84,14 +86,70 @@
         @Test("a listing larger than the cap is refused")
         func listingCap() async throws {
             let database = FakeCloudKitDatabase(pageLimit: 5)
-            let transport = Transport(database: database, maximumListedObjects: 8)
+            let transport = Transport(database: database, marker: InMemorySyncStoreMarker(), maximumListedObjects: 8)
             for sequence in 1...12 {
                 let name = Self.prefix + "log/" + UUID().uuidString + "/\(sequence)"
                 database.plant(Self.record(try Transport.recordName(for: name), in: transport) { $0["name"] = name })
             }
-            await #expect(throws: SyncTransportError.objectTooLarge(Self.prefix)) {
+            await #expect(throws: SyncTransportError.listingTooLarge(Self.prefix)) {
                 try await transport.list(prefix: Self.prefix)
             }
+        }
+
+        /// A1 answers every page with the same records, or with records that are not the layout's, and always offers
+        /// another page: the listing ends at its page and result caps, so the sync stops and the driver's sync ends
+        /// (review of the adapters, finding 3).
+        @Test("endless cursors of duplicate or invalid records end at the caps")
+        func endlessCursor() async throws {
+            for invalid in [false, true] {
+                let database = FakeCloudKitDatabase(pageLimit: 4)
+                database.endless = true
+                let transport = Transport(
+                    database: database, marker: InMemorySyncStoreMarker(), maximumListedObjects: 50, pageSize: 4)
+                for sequence in 1...4 {
+                    let name = Self.prefix + "log/" + UUID().uuidString + "/\(sequence)"
+                    let recordName = invalid ? "_junk\(sequence)" : try Transport.recordName(for: name)
+                    database.plant(Self.record(recordName, in: transport) { $0["name"] = name })
+                }
+                await #expect(throws: SyncTransportError.listingTooLarge(Self.prefix)) {
+                    try await transport.list(prefix: Self.prefix)
+                }
+                #expect(database.queriedKeys.count <= transport.maximumPages)
+            }
+        }
+
+        /// A1 plants one record in another device's stream whose asset is gone, hoping the error stops this device's
+        /// sync and so keeps it from ever publishing (review of the adapters, finding 4): refused alone, the stream
+        /// waits, and this device publishes.
+        @Test("one record with a missing asset is refused alone; the device still publishes")
+        func brokenRecord() async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = Transport(database: database, marker: InMemorySyncStoreMarker())
+            let keys = FakeAccountKeys(seed: 21)
+            let vault = UUID()
+            let (writer, other) = (UUID(), UUID())
+            await keys.addVaultKey(vaultID: vault)
+            await keys.trust(device: writer)
+            await keys.trust(device: other)
+            let planted = SyncObjectLocation.segment(vaultID: vault, author: other, sequence: 1).name
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("ww-gone-\(UUID().uuidString)")
+            try Data([1]).write(to: file)
+            let record = Self.record(try Transport.recordName(for: planted), in: transport) {
+                $0["name"] = planted
+                $0["payloadAsset"] = CKAsset(fileURL: file)
+            }
+            try FileManager.default.removeItem(at: file)
+            database.plant(record)
+
+            let client = SyncTestClient(deviceID: writer, vaultID: vault, keys: keys, transport: transport)
+            _ = try await client.save(
+                Item(
+                    id: UUID(), vaultID: vault, title: "Bank", scopes: [ServiceScope(host: "firstbank.co.uk")],
+                    fields: [Field(kind: .password, label: "Password", value: "hunter22")]))
+            let report = try await client.sync()
+            #expect(!report.transportUnavailable)
+            #expect(report.rejected.map(\.reason) == [.transport(.objectUnreadable(planted))])
+            #expect(report.segmentsWritten == 1)
         }
 
         /// A1 asks the client to wait for years: the transport passes the claim on, and the policy holds it to its
@@ -113,7 +171,7 @@
         @Test("a refused create is objectExists, and no save ever overwrites")
         func refusedCreate() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = Transport(database: database)
+            let transport = Transport(database: database, marker: InMemorySyncStoreMarker())
             try await transport.create(Self.name, contents: [1])
             database.injectFailure(
                 CKError(

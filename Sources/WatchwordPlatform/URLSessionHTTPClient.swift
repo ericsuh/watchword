@@ -29,38 +29,74 @@
     /// - **Bounded**: the decoded body is counted as it arrives and reading stops one byte past
     ///   `maximumResponseBytes` (URLSession decodes `Content-Encoding`, so a compressed response cannot expand past it);
     ///   an idle timeout, a resource timeout and an overall deadline of its own bound the time a server can hold a scan.
+    /// - **Minimal headers**: exactly the request's, plus a `User-Agent` of `Watchword` if it names none, and
+    ///   `Accept-Language: *` in place of the device's languages, which URLSession would otherwise add (it cannot be
+    ///   told to send none). URLSession still adds `Accept` and `Accept-Encoding`.
     /// - **Quiet**: nothing is logged, and errors carry no URL.
+    ///
+    /// A proxy the system or a device-management profile configures is used, as for any app: it sees the host, and,
+    /// if it is trusted to intercept TLS, the five-character prefix (§13.8). The decompression limit is enforced on the
+    /// decoded bytes URLSession hands over, but no test shows it against a compressed body: a URL-loading stub's bytes
+    /// are not decoded by URLSession's HTTP stack.
     ///
     /// A thin adapter on purpose: what is asked, how often, and what an answer means are `WatchwordHygiene`'s, tested
     /// on Linux against `FakeHTTPClient`; this file only moves bytes. The A1 cases (oversized, slow, redirecting
     /// servers) are the adversarial suite "Apple adapters: HTTP client", run on a Mac.
     public final class URLSessionHTTPClient: HTTPClient, Sendable {
         public struct Limits: Sendable, Hashable {
+            /// Every time limit is held to this range: a limit of zero, a negative one, NaN or infinity must neither
+            /// trap converting it nor switch the limit off.
+            public static let range: ClosedRange<TimeInterval> = 0.001...600
+
             /// The longest a response may go without a byte (`timeoutIntervalForRequest`).
             public var idleTimeout: TimeInterval
             /// The longest one exchange may take, connection to last byte.
             public var totalTimeout: TimeInterval
 
             public init(idleTimeout: TimeInterval = 15, totalTimeout: TimeInterval = 30) {
-                self.idleTimeout = idleTimeout
-                self.totalTimeout = totalTimeout
+                self.idleTimeout = Self.clamped(idleTimeout)
+                self.totalTimeout = Self.clamped(totalTimeout)
+            }
+
+            /// `seconds` within `range`; NaN is the upper bound.
+            public static func clamped(_ seconds: TimeInterval) -> TimeInterval {
+                guard !seconds.isNaN else { return range.upperBound }
+                return min(max(seconds, range.lowerBound), range.upperBound)
+            }
+
+            /// `totalTimeout` in nanoseconds, which cannot overflow: at most 600 s.
+            public var totalNanoseconds: UInt64 {
+                UInt64(Self.clamped(totalTimeout) * 1_000_000_000)
             }
 
             public static let standard = Limits()
         }
 
+        /// Returns when the exchange's overall time is up. The default sleeps for `Limits.totalTimeout`; tests pass one
+        /// that returns when they say.
+        public typealias Deadline = @Sendable (Limits) async -> Void
+
+        public static let standardDeadline: Deadline = { limits in
+            try? await Task.sleep(nanoseconds: limits.totalNanoseconds)
+        }
+
         public let limits: Limits
         let session: URLSession
         private let redirects: RedirectRefusal
+        private let deadline: Deadline
 
         public convenience init(limits: Limits = .standard) {
             self.init(limits: limits, protocolClasses: [])
         }
 
         /// `protocolClasses` puts URL-loading stubs in front of the network, for tests: they see exactly what would be
-        /// sent, and answer as a hostile server would.
-        package init(limits: Limits, protocolClasses: [AnyClass]) {
+        /// sent, and answer as a hostile server would. `deadline` replaces the overall timer.
+        package init(
+            limits: Limits, protocolClasses: [AnyClass],
+            deadline: @escaping Deadline = URLSessionHTTPClient.standardDeadline
+        ) {
             self.limits = limits
+            self.deadline = deadline
             redirects = RedirectRefusal()
             session = URLSession(
                 configuration: Self.configuration(limits: limits, protocolClasses: protocolClasses),
@@ -80,8 +116,8 @@
             configuration.urlCredentialStorage = nil
             configuration.urlCache = nil
             configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            configuration.timeoutIntervalForRequest = limits.idleTimeout
-            configuration.timeoutIntervalForResource = limits.totalTimeout
+            configuration.timeoutIntervalForRequest = Limits.clamped(limits.idleTimeout)
+            configuration.timeoutIntervalForResource = Limits.clamped(limits.totalTimeout)
             configuration.waitsForConnectivity = false
             configuration.httpShouldUsePipelining = false
             configuration.httpMaximumConnectionsPerHost = 2
@@ -93,14 +129,15 @@
         }
 
         public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-            let urlRequest = try Self.urlRequest(for: request, timeout: limits.idleTimeout)
+            let urlRequest = try Self.urlRequest(for: request, timeout: Limits.clamped(limits.idleTimeout))
             let host = request.url.host.name
             let maximum = max(0, request.maximumResponseBytes)
-            let deadline = UInt64(max(0, limits.totalTimeout) * 1_000_000_000)
+            let (deadline, limits) = (deadline, limits)
             return try await withThrowingTaskGroup(of: HTTPResponse.self) { group in
                 group.addTask { try await self.exchange(urlRequest, host: host, maximumBytes: maximum) }
                 group.addTask {
-                    try await Task.sleep(nanoseconds: deadline)
+                    await deadline(limits)
+                    try Task.checkCancellation()
                     throw URLSessionHTTPClientError.timedOut
                 }
                 defer { group.cancelAll() }
@@ -121,6 +158,12 @@
             urlRequest.httpShouldUsePipelining = false
             for (name, value) in request.headers.fields {
                 urlRequest.setValue(value, forHTTPHeaderField: name)
+            }
+            if urlRequest.value(forHTTPHeaderField: "User-Agent") == nil {
+                urlRequest.setValue("Watchword", forHTTPHeaderField: "User-Agent")
+            }
+            if urlRequest.value(forHTTPHeaderField: "Accept-Language") == nil {
+                urlRequest.setValue("*", forHTTPHeaderField: "Accept-Language")
             }
             return urlRequest
         }

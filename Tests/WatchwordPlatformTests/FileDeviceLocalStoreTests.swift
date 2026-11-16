@@ -82,6 +82,28 @@ struct FileDeviceLocalStoreTests {
         #expect(mode?.intValue == 0o700)
     }
 
+    @Test("an existing directory is made owner-only again before a write")
+    func permissionsReasserted() async throws {
+        let directory = Self.temporaryDirectory()
+        let store = FileDeviceLocalStore(directory: directory)
+        try await store.write([1], as: UUID())
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: directory.path)
+        try await store.write([2], as: UUID())
+        let mode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.intValue == 0o700)
+    }
+
+    @Test("a store below a container creates the whole path, and reads and writes there")
+    func belowContainer() async throws {
+        let container = Self.temporaryDirectory().deletingLastPathComponent()
+        let store = FileDeviceLocalStore(ancestor: container, components: ["Library", "Watchword", "DeviceLocal"])
+        let name = UUID()
+        try await store.write([3], as: name)
+        #expect(try await store.read(name) == [3])
+        #expect(store.directory.lastPathComponent == "DeviceLocal")
+        #expect(FileManager.default.fileExists(atPath: store.fileURL(for: name).path))
+    }
+
     #if canImport(Darwin)
         @Test("the directory and every record are excluded from backup")
         func excludedFromBackup() async throws {

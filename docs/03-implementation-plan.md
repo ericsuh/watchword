@@ -234,6 +234,18 @@ half delivered** on a Mac; the transports are open.
     over a fake database with CloudKit's save-policy semantics; a real-container test only with
     `WATCHWORD_CLOUDKIT_CONTAINER` in a signed host), and the adversarial suites "Apple adapters: iCloud Drive
     transport" and "Apple adapters: CloudKit transport".
+  - *After the adapters' review* (`06-adversarial-review.md` §P, AD1 to AD10): the sync outcome is read from every
+    vault and shared vault, and one sync asks a stopped transport once (`transportStopped`); CloudKit never recreates a
+    zone this device has seen (`SyncStoreMarker`), caps listings (`listingTooLarge`) and refuses one broken record alone
+    (`objectUnreadable`); the coordinated transport gives up at a deadline and re-checks downloads inside the read;
+    the HTTP client clamps its limits and sends minimal headers; the device-local store checks its whole path and
+    never writes through a link. The first macOS run (Xcode 27) compiled the adapters and found two test faults (AD9,
+    AD10), fixed. Linux tests: "Automatic sync outcome", "Sync transport failures", "Sync store marker", the
+    device-local store's suites and "sync log"; the rest are Mac only.
+  - **Decisions for the owner:** what to do with an iCloud Drive object that has conflict versions (refused today,
+    so its stream waits for good) and with iCloud's `N 2.wwe` copy of a duplicate create (ignored): keeping "the copy
+    that verifies" (§7.3) needs the engine; and the flow to start CloudKit again after a `storeReset`, which is also
+    where the person's choice forgets the `SyncStoreMarker`.
   - **Before relying on any of it:** dispatch `mac-run.yml` (package tests, adversarial, strict) on the branch, then
     run the CloudKit test from a signed host against a development container (its schema needs `WWObject.name`
     queryable) and the coordinated transport in a real ubiquity container (downloads and evictions by iCloud itself
@@ -432,9 +444,10 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
 
 - `URLSessionHTTPClient` in `WatchwordPlatform` is **drafted, not yet compiled** (remote session, Darwin only;
   `02-architecture.md` §13.8): ephemeral, nothing stored, redirects refused, the decoded body cut at the limit, idle,
-  resource and overall time limits. Tests through a real `URLSession` with a URL-loading stub: "URLSession HTTP
-  client" and the adversarial suite "Apple adapters: HTTP client" (oversized, stalled, dripping, redirecting). Open: a
-  Mac run; a compressed body expanding past the limit, which a stub cannot produce (URLSession decodes only what
+  resource and overall time limits, each clamped, `User-Agent: Watchword` by default and a fixed `Accept-Language`.
+  Tests through a real `URLSession` with a URL-loading stub: "URLSession HTTP client" and the adversarial suite "Apple
+  adapters: HTTP client" (oversized, stalled and dripping against an injected deadline, redirecting, clamped limits).
+  Open: a passing Mac run; a compressed body expanding past the limit, which a stub cannot produce (URLSession decodes only what
   its own HTTP stack received); configuring hygiene in the app; and a capture of real range responses on a Mac to
   check the fixtures against.
 - Wiring into `VaultSession` is **done** (Linux; `02-architecture.md` §13.8): the reuse key and the device-local

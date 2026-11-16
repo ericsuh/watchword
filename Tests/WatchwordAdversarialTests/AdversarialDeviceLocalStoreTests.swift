@@ -87,22 +87,73 @@ struct AdversarialDeviceLocalStoreTests {
         #expect(try await store.read(name) == nil)
     }
 
+    /// Whether `directory`'s volume treats names differently by case, tried with a probe file rather than read from
+    /// volume attributes (which Linux does not report): APFS on a Mac is case-insensitive by default.
+    static func isCaseSensitive(_ directory: URL) throws -> Bool {
+        let probe = directory.appendingPathComponent("Case-Probe")
+        try Data([0]).write(to: probe)
+        defer { try? FileManager.default.removeItem(at: probe) }
+        return !FileManager.default.fileExists(atPath: directory.appendingPathComponent("case-probe").path)
+    }
+
     /// A8 fills the directory with files of other names (temporaries, look-alike names, hidden files): none is ever
-    /// read as a record, and erasing the account removes them all.
+    /// read as a record, and erasing the account removes them all. A name differing only in case is another file
+    /// only where the volume is case-sensitive; elsewhere it is the record's own file (the next test).
     @Test("files of other names are never records, and erasing the account removes them")
     func strayFiles() async throws {
         let (store, directory, _) = try Self.fixture()
         let name = UUID()
         try await store.write([1], as: name)
-        for stray in [
-            name.uuidString.lowercased() + ".wwl", name.uuidString, "." + name.uuidString + ".wwl",
-            name.uuidString + ".wwl.tmp",
-        ] {
+        var strays = [name.uuidString, "." + name.uuidString + ".wwl", name.uuidString + ".wwl.tmp"]
+        if try Self.isCaseSensitive(directory) { strays.append(name.uuidString.lowercased() + ".wwl") }
+        for stray in strays {
             try Data([6]).write(to: directory.appendingPathComponent(stray))
         }
         #expect(try await store.read(name) == [1])
         try await store.deleteAll()
         #expect(!FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    /// On a case-insensitive volume a name differing only in case is the same file: A8 writing through it replaces
+    /// the record, which is what A8 could do under the canonical name anyway. The store must never treat the two
+    /// spellings as two records, so it names every file from `uuidString` alone, in its one canonical case.
+    @Test("one record has one file name, in one case, whatever the volume")
+    func caseVariants() async throws {
+        let (store, directory, _) = try Self.fixture()
+        let name = UUID()
+        try await store.write([1], as: name)
+        let canonical = store.fileURL(for: name).lastPathComponent
+        #expect(canonical == name.uuidString + ".wwl")
+        #expect(canonical == canonical.uppercased().replacingOccurrences(of: ".WWL", with: ".wwl"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == [canonical])
+        let variant = directory.appendingPathComponent(name.uuidString.lowercased() + ".wwl")
+        try Data([2]).write(to: variant)
+        if try Self.isCaseSensitive(directory) {
+            #expect(try await store.read(name) == [1])
+        } else {
+            #expect(try await store.read(name) == [2])
+            #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 1)
+        }
+    }
+
+    /// A8 replaces a directory *above* the store's (its parent, say, inside the App Group container) with a link to
+    /// a folder of their choosing: the store refuses to read or write through it, and creates nothing there.
+    @Test("a link anywhere on the path below the container is refused, not only the store's own directory")
+    func linkedAncestor() async throws {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("watchword-adversarial-ancestor-\(UUID().uuidString)", isDirectory: true)
+        let outside = base.appendingPathComponent("outside", isDirectory: true)
+        let container = base.appendingPathComponent("container", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        let store = FileDeviceLocalStore(ancestor: container, components: ["Library", "Watchword", "DeviceLocal"])
+        try FileManager.default.createSymbolicLink(
+            at: container.appendingPathComponent("Library"), withDestinationURL: outside)
+
+        let name = UUID()
+        await #expect(throws: DeviceLocalFileError.directoryReplaced) { try await store.write([1], as: name) }
+        await #expect(throws: DeviceLocalFileError.directoryReplaced) { try await store.read(name) }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
     }
 
     /// The session's own reading of whatever the adapter returns: a planted record under the ledger's name, or one

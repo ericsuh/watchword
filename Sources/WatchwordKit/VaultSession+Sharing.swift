@@ -89,6 +89,9 @@ public struct SharedVaultSyncReport: Sendable, Equatable {
     public var requiresNewerVersion = false
     /// Why a step stopped, for diagnostics; the next sync tries again.
     public var failure: String?
+    /// The transport stopped the pass (`SyncTransportError.stopsSync`: offline, throttled with the wait it asked,
+    /// signed out). The rest of the sync asks the transport no more (`AutoSyncOutcome` reads it).
+    public var transportFailure: SyncTransportError?
 
     public init() {}
 }

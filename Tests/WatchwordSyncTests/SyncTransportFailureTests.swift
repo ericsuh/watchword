@@ -49,8 +49,7 @@ struct SyncTransportFailureTests {
         "throttling, a full store, a signed-out account and a reset store stop the sync like being offline",
         arguments: [
             SyncTransportError.unavailable, .rateLimited(retryAfter: 30), .rateLimited(retryAfter: nil),
-            .notAuthenticated,
-            .storeReset,
+            .notAuthenticated, .storeReset, .listingTooLarge("vault/"),
         ])
     func stopping(_ error: SyncTransportError) async throws {
         #expect(error.stopsSync)
@@ -98,7 +97,7 @@ struct SyncTransportFailureTests {
         "errors about one object refuse that object and do not stop the sync",
         arguments: [
             SyncTransportError.objectExists("n"), .forbidden("n"), .objectTooLarge("n"), .invalidName("n"),
-            .conflictingVersions("n"),
+            .conflictingVersions("n"), .objectUnreadable("n"),
         ])
     func perObject(_ error: SyncTransportError) {
         #expect(!error.stopsSync)
@@ -111,5 +110,64 @@ struct SyncTransportFailureTests {
         #expect(SyncTransportError.rateLimited(retryAfter: 12).retryAfter == 12)
         #expect(SyncTransportError.rateLimited(retryAfter: nil).retryAfter == nil)
         #expect(SyncTransportError.notAuthenticated.retryAfter == nil)
+    }
+}
+
+/// Counts every call a transport receives.
+actor CountingTransport: SyncTransport {
+    let base: InMemorySyncTransport
+    private(set) var calls = 0
+
+    init(base: InMemorySyncTransport) {
+        self.base = base
+    }
+
+    func list(prefix: String) async throws -> [String] {
+        calls += 1
+        return await base.list(prefix: prefix)
+    }
+
+    func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
+        calls += 1
+        return try await base.fetch(name, maximumLength: maximumLength)
+    }
+
+    func create(_ name: String, contents: [UInt8]) async throws {
+        calls += 1
+        try await base.create(name, contents: contents)
+    }
+
+    func delete(_ name: String) async throws {
+        calls += 1
+        await base.delete(name)
+    }
+}
+
+extension SyncTransportFailureTests {
+    /// The session stops asking a transport that said to stop (review of the adapters, finding 1): the engines of the
+    /// remaining vaults merge what they had downloaded and do not call the transport at all.
+    @Test("a sync told the transport has stopped makes no call, merges what was staged, and says why")
+    func transportStopped() async throws {
+        let shared = InMemorySyncTransport()
+        let counting = CountingTransport(base: shared)
+        let home = await Household.make(2, transport: shared)
+        let a = home.devices[0]
+        let b = SyncTestClient(
+            deviceID: SyncFixtures.deviceB, vaultID: Household.vault, keys: home.keys, transport: counting)
+        let item = try await a.save(Household.login())
+        try await a.sync()
+        await b.keyring.lock()
+        try await b.sync()
+        await b.keyring.unlock()
+        let before = await counting.calls
+
+        _ = try await b.save(Household.login(title: "Mine"))
+        let report = try await b.engine.sync(transportStopped: .rateLimited(retryAfter: 7))
+        #expect(await counting.calls == before)
+        #expect(report.transportFailure == .rateLimited(retryAfter: 7))
+        #expect(report.applied == 1)
+        #expect(try await b.item(item.id) == item)
+        #expect(try await b.engine.download(transportStopped: .notAuthenticated).transportFailure == .notAuthenticated)
+        #expect(await counting.calls == before)
     }
 }

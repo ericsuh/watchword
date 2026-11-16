@@ -105,6 +105,32 @@
             #expect(await CoordinatedFixtures.firstEvent(stream, within: .seconds(10)))
         }
 
+        /// Another writer holds coordination of a file for as long as it likes (the iCloud daemon, another app, a
+        /// hostile presenter): the read is given up at its deadline, with the coordinator cancelled, and is that
+        /// object's failure alone (review of the adapters, finding 5). The deadline here returns at once, so the test
+        /// waits on nothing but the held write.
+        @Test("a read not granted coordination before its deadline is given up, as that object's failure alone")
+        func deadline() async throws {
+            let root = CoordinatedFixtures.temporaryRoot()
+            let name = SyncTransportContract.name
+            try await CoordinatedFileSyncTransport(root: root).create(name, contents: [1])
+            let url = try FileSyncTransport(root: root).fileURL(for: name)
+            let (held, holding) = AsyncStream.makeStream(of: Void.self)
+            let release = DispatchSemaphore(value: 0)
+            let holder = NSFileCoordinator(filePresenter: nil)
+            holder.coordinate(with: [.writingIntent(with: url, options: [])], queue: OperationQueue()) { _ in
+                holding.yield()
+                release.wait()
+            }
+            #expect(await CoordinatedFixtures.firstEvent(held, within: .seconds(10)))
+            let impatient = CoordinatedFileSyncTransport(root: root, coordinationDeadline: {})
+            await #expect(throws: SyncTransportError.objectUnreadable(name)) {
+                try await impatient.fetch(name, maximumLength: 10)
+            }
+            release.signal()
+            #expect(try await CoordinatedFileSyncTransport(root: root).fetch(name, maximumLength: 10) == [1])
+        }
+
         @Test("two sync engines exchange an item through the coordinated folder")
         func engines() async throws {
             let transport = CoordinatedFileSyncTransport(root: CoordinatedFixtures.temporaryRoot())

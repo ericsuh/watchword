@@ -28,14 +28,21 @@ public enum SyncTransportError: Error, Equatable, Sendable {
     /// The provider holds more than one version of one object (an iCloud Drive conflict, `NSFileVersion`): an
     /// immutable object was written twice. The transport chooses neither; the object is refused like a damaged one.
     case conflictingVersions(String)
+    /// One object cannot be read now (a CloudKit asset that is missing or not available, a coordinated read of one
+    /// file that failed or timed out). Refused like a damaged object: its stream waits at it, everything else syncs.
+    case objectUnreadable(String)
+    /// A listing went past the transport's bounds (pages, raw results, or names): a store answering without end (A1)
+    /// must not keep a sync running for ever. Stops the sync like `unavailable`.
+    case listingTooLarge(String)
 
     /// Whether the error stops a sync where it stands, as `unavailable` always has, rather than refusing one object:
     /// the transport as a whole cannot be used now. The engine then still merges what it downloaded earlier and
     /// publishes nothing (`SyncReport.transportUnavailable`, with the reason in `transportFailure`).
     public var stopsSync: Bool {
         switch self {
-        case .unavailable, .rateLimited, .quotaExceeded, .notAuthenticated, .storeReset: return true
-        case .objectExists, .forbidden, .objectTooLarge, .invalidName, .conflictingVersions: return false
+        case .unavailable, .rateLimited, .quotaExceeded, .notAuthenticated, .storeReset, .listingTooLarge: return true
+        case .objectExists, .forbidden, .objectTooLarge, .invalidName, .conflictingVersions, .objectUnreadable:
+            return false
         }
     }
 
