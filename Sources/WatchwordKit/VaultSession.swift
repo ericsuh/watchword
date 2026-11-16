@@ -154,6 +154,8 @@ public actor VaultSession: SharesExecutor {
     /// The serial executor the session shares with its hygiene engine, so that `lock()` drops the engine's keys
     /// before it returns (`SharesExecutor`; docs/02-architecture.md §13.8).
     package nonisolated let executorOwner = SerialExecutorOwner()
+    /// Shared vaults: settings, ledgers, plans, proposals and stream indexes (VaultSession+Sharing.swift).
+    var sharing = SharingRuntime()
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(

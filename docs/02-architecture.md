@@ -475,8 +475,10 @@ other known stream has acknowledged merging it and some listed snapshot covers i
 deletes one of its own snapshots only when another listed snapshot covers everything it does. A snapshot's contents
 are trusted only as far as their signature: existing devices never delete anything because a snapshot omits it.
 
-**Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and replays the log. On a
-healthy device it changes nothing; on one whose file was rolled back it restores the newest versions.
+**Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and the erasures it has merged,
+and replays the log. On a healthy device it changes nothing; on one whose file was rolled back it restores the newest
+versions. A shared vault's engine, which has a judge and a whole log, rebuilds the erasures from the log as well
+(§8.10, S40).
 
 **Revoked devices.** The keyring tells the engine which devices are revoked (`SyncKeyring.retiredAuthors`, §7.8).
 From then on the engine does not read their objects at all (`SyncReport.retiredObjects`; staged ones are dropped
@@ -492,13 +494,12 @@ rest.
 Known limits, tracked in `06-adversarial-review.md` §H: the store can withhold objects (reported, not prevented); an item's history
 lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
 refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
-trusted for the vault, so this is an insider's capability). From the audit of the merge (Y36, Y37; Y28, the
-tombstone's version, Y29 and Y30 are fixed): the engine rejects the
-whole object carrying a version whose merge is over the payload limit, stopping that author's stream on that device,
-where it should quarantine the one entry; and it does not refuse to publish an over-long erasure summary (the merger
-no longer writes one). The session refuses a draft made from another version than the one stored
-(`VaultError.versionConflict`, Y29), and every read it hands out, the UI's included, is `ItemMerge.canonical` of the
-decrypted item (Y30).
+trusted for the vault, so this is an insider's capability). From the audit of the merge (Y36; Y28, the
+tombstone's version, Y29, Y30 and Y37 are fixed): the engine does not refuse to publish an over-long erasure
+summary (the merger no longer writes one). A version whose merge with the local one is over the payload limit is
+quarantined, the local version kept, and the stream goes on (Y37). The session refuses a draft made from another
+version than the one stored (`VaultError.versionConflict`, Y29), and every read it hands out, the UI's included, is
+`ItemMerge.canonical` of the decrypted item (Y30).
 
 ### 7.6 As built in milestone 3 (the vault side, on a Mac)
 
@@ -822,8 +823,9 @@ syncing early costs a request, waiting for ever would cost the data.
 
 As built in milestone 4's protocol core, `WatchwordSharing`. The module is portable (real cryptography through
 `WatchwordCrypto`, the key directory and the contacts store behind ports) and is exercised in-process by simulated
-members with real keysets over a hostile store. It is **not yet wired into `VaultSession`, `SyncEngine` or a
-transport's own sharing** (CloudKit `CKShare`, a shared folder); §8.8 says what that integration calls.
+members with real keysets over a hostile store. §8.8 says what an integration calls; §8.10 describes the integration
+into `VaultSession` and `SyncEngine` as built. A transport's own sharing (CloudKit `CKShare`, a shared folder) is not
+wired yet.
 
 ### 8.1 Model
 
@@ -1221,9 +1223,8 @@ integration has to give the same three properties over `SyncEngine`'s objects an
   longer count, and those values held aside for the person.
 
 These are conditions of wiring sharing into sync, not refinements of it. The module signs the cut, gives every
-device the same one and says whose writes it governs; the reference loop shows the rest for its own item model. Over
-`SyncEngine` and `ItemMerge` the rest is integration work, and until it is done S28 is closed here and open in the
-product.
+device the same one and says whose writes it governs; the reference loop shows the rest for its own item model, and
+§8.10 how the integration gives the three properties over `SyncEngine` and `ItemMerge`.
 
 Not solved here, and to be decided with integration:
 
@@ -1319,6 +1320,121 @@ a later-format object again until the ledger holds it. The adversarial tests are
 genesis-to-current-owner check; the UI (offer, accept, and what each member is told); and a minimum version, so that
 a transfer is offered only once the version that fails closed (this one) is what members run, which it is from the
 first release with sharing.
+
+### 8.10 As integrated (`VaultSession`, `SyncEngine`)
+
+`VaultSession+Sharing.swift` holds the session's side and `VaultSession+SharingSync.swift` the sync pass and the
+judge; `SyncEngine` asks a `WriteJudge` port (`WriteJudge.swift`) and stays free of cryptography. Everything here was
+built and tested on Linux against swift-crypto; the SQLite adapter (`SQLiteSharingStore`) compiles only on a Mac and
+has not been run.
+
+**What the session keeps** per shared vault: the `MembershipLedger`, at most one saved `RotationPlan`, the records it
+proposed and has not seen adopted, and a **stream index** (`SharedStreamIndex`): for every segment of every device's
+stream in the vault, the digest of the object (SHA-256 of its name and envelope), the account whose keys signed it,
+the record versions it carried, and the digest of every value it carried that its stream had not carried before and
+whose stamp names that stream's device (format 2, S36); and the devices a version is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
+account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
+account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
+anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Pins live behind `VerifiedContactStore`.
+In-memory implementations serve tests; `SQLiteSharingStore` (`sharing.sqlite`, both ports) is the production one.
+A vault key received through a grant is stored like any other, as a `vaultKeyWrap` row under the keyset, with a
+directory row when the vault is new on the device; a key whose ID the device already holds for another vault is
+refused (`keyIDInUse`, S38), because key IDs are public and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
+chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission` (in
+`writableVaultKey`, so every write path asks: save, move, copy, rename, conflict resolution). Deleting a shared vault
+is the owner's and also proposes `deleteVault`; a member leaves instead.
+
+**The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
+own safety number), `contactCandidate` and `verifyContact` (fingerprint by typed number, scanned code or comparison;
+a different pinned bundle is `keySubstituted` unless the person replaces the pin), `shareVault` (the genesis
+record), `invite` (needs a verified contact: wraps the current key and proposes the addition), `acceptInvitation`
+(confirms the owner's fingerprint if not pinned, continues any ledger the device ever held for the vault, S26, and
+passes the owner it knows for the vault ID, the account itself for its own vaults, S6), `leaveSharedVault`,
+`changeRole`, `removeMember`, `rotateVaultKey`, `sharedVaultIDs` and `sharedVaultStatus`. Each is checked by
+`MembershipRules` (through the ledger's proposing functions and `RotationPlanner`) before anything is signed.
+
+**One sync** (`syncAll`) runs §8.8's pass around the logs. Before any vault's log: membership ingested (names first,
+refused names remembered), member keys compared with the pins, proposals settled, the current key fetched if the
+chain entitles this account to it, and the device registry of every account the chains list or listed fetched from
+`account/<id>/registry/` and evaluated from the one genesis entry signed by the key the chain gives for that account,
+following its newest password change. A registry is evaluated once per signing key the chains give an account, and
+each vault uses the one its own chain anchors (S39). Then each shared vault's log runs with the judge, publishing only if this
+account may write (a read-only or former member merges and publishes nothing, `sync(publishing:)`), and with
+`maintainsLog` off: a shared vault writes no snapshots and collects no segments, because a cut is judged against the
+departing account's own segments (§8.8, "a departed account's log"). After the logs: a saved plan continued, owed
+removals this account may sign planned, leave requests turned into rotations by an administrator, and what
+`recordsToReseal` lists sealed again through `ItemMerge.written`. While locked only membership is ingested and the
+logs download.
+
+**Verifying** (`SyncKeyring.verify`, `sharedVerify`): an object of a shared vault must carry the dual signature of a
+device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
+whose permission ended, the key in the record that ended it), and that account's standing must not be
+`nothingCounts`, nor that account one whose chain keys differ from this device's pin (`MemberKeyCheck.substituted`).
+A snapshot needs an account that may write now. Devices revoked from a member's account, as the vault's chain anchors
+it, are not read.
+
+**The write cut over sync's objects** (S28). The cut a removal, departure or demotion carries is, for each device
+whose segments the departing account's keys signed, the furthest sequence through which the signing device holds every
+segment of that stream and the chain `H_n = SHA-256("WW-cut-v1" ‖ H_{n-1} ‖ n ‖ digest_n)` through it
+(`SyncWriteCut`: at most 36 devices in 2,018 bytes; a cut that does not parse holds nothing). It is taken after a
+sync, from the stream index and the vault's merged positions. The judge then gives the three properties:
+
+- *Bound to objects.* Before a pass judges anything, every segment it is about to merge is recorded in the index
+  (`WriteJudge.record`; a device's own segments as it publishes them), the first copy of a name kept. A segment of an
+  account whose permission ended is merged only if it is inside the cut: at or below the cut's sequence for its device,
+  with the chain through that sequence equal to the cut's. One beyond it is held aside; one whose chain cannot be
+  checked yet (the stream is not all here) makes the stream wait, as at a gap.
+- *Applied to work.* Every remote version, from a segment or a snapshot and whoever sealed it, is admitted only if
+  its own revision counts (the segment of its writer's stream that first carried it, for the account that signed
+  that segment) and every value it holds counts: each group's values, kept and retained values, the field order and
+  each note line, read through `ItemMerge.canonical`, and the vault's description, attributed to the write that chose
+  it (`VaultMetadata.writtenBy`, kept by every re-seal, S37). A value is judged by its **bytes, stamp included**
+  (`ItemMerge.attributedValues`), never by the revision its stamp names, which its writer chose (S36): it counts
+  through a segment of the stream of the device its stamp names that carried those exact bytes, if that segment
+  counts (its signer may write, or it is inside the cut). A value naming this device that none of its segments
+  carried counts only if its own copy of the record holds it: a device knows what it wrote, so a value relabelled
+  with its revision is refused there at once. A value carried by no segment held here waits: the version is held
+  aside and the device its stamp names is remembered (`SharedStreamIndex.awaiting`), and a new segment of that
+  device's stream replays the log. The one exception is a member who joined after a rotation, who cannot open the
+  segments that carried older values: for them a version sealed under a key introduced at or after the latest record
+  that ended anyone's permission to write vouches for such values (its sealer held that record and every earlier
+  segment, and judged them), provided the device is listed by an account whose work can count. Segments sealed under a
+  key this account was never entitled to are passed over for that reason (`WriteJudge.passesOverSegment`). A tombstone's
+  segment carries what applying it writes (`ItemMerge.attributedSettlement`), so a version kept after a deletion is
+  judged like any other.
+- *Taken out.* When the head changes, every local version of the vault that no longer counts is held aside and taken
+  out of the store, and the log is replayed with the judge (a reconciling sync), so that each record is rebuilt from
+  the versions that count. The replay rebuilds the engine's erasures from the log too, so a deletion whose segment no
+  longer counts erases nothing (S40). Receiving a key, a segment inside a cut that was missing, or a new segment of a
+  device a version is waiting on replays it again; the need is written down by clearing the saved index's head, and the
+  index is saved before anything a recorded segment lets count is merged, so a restart in between still replays (S41).
+  An index refused on load is rebuilt by a replay before anything is taken out against it.
+
+What is held aside is kept in the sync state's quarantine (`quarantinedVersions`, `SyncReport.heldAside`), never
+merged, never published by the device and discarded only by the person; the objects it came from are judged again
+on every replay of the log, so a write made while read-only counts once its author may write. A version that cannot be merged because the join would be
+over the payload limit is quarantined the same way (Y37).
+
+**Limits** (also `06-adversarial-review.md` §I, S32 to S35 and S42, S43):
+
+- A note line's removal carries no revision, so a former member's late removal of a line, merged by a device before it
+  knew and published in that device's own version, is not told apart from the device's own (S32).
+- A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
+  through vouching count only while every listing account's work can count (S33, insider denial of service like S11).
+- Vouching is for a member who joined after a rotation, and only under a key introduced at or after the latest record
+  that ended a permission: a member invited after a demotion, with no rotation since, holds aside versions carrying
+  values from before the last rotation until the next one seals them again, and a store withholding one device's
+  stream from another delays every version carrying that device's values there (S42). Rotate after a demotion before
+  inviting.
+- An item's `history` and `discards` name no writer, so a former member's late discard, merged by a device before it
+  knew, removes retained values (values already superseded by an edit) from that device's copy (S43, beside S32).
+- A member who joined after a rotation reads records sealed before it only once a device that holds the old key has
+  sealed them again (rotation does so for every record a member who may write holds), and a version of a shared vault
+  that does not open here is held aside, not merged (S34).
+- Another device of a member's account receives the vault's keys through the account's own vault directory but no
+  ledger and no pins: it accepts the invitation itself. The ledger, pins and plans are per device (S35).
+- The transports' own sharing (`ShareAccessControl` is the port), the key directory's adapter, and the UI are open
+  (`03-implementation-plan.md` milestone 4).
 
 ## 9. AutoFill and service matching (`WatchwordMatching`)
 
@@ -2275,8 +2391,9 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordAutoFill     credential provider request model, TOTP, passkey
                                 authenticator, identity planner (§9.2)             [milestone 5; extension adapter open]
   Sources/WatchwordSharing      membership chain, verified contacts, invitations,
-                                key grants, rotation plans                         [milestone 4; protocol core,
-                                                                                    integration open]
+                                key grants, rotation plans                         [milestone 4; protocol core
+                                                                                    and session wiring done;
+                                                                                    transports, UI open]
   Sources/WatchwordHygiene      HIBP clients, scan schedule, strength estimator,
                                 reuse, report, HygieneEngine                       [milestone 6; adapters, UI open]
   Sources/WatchwordInterchange  CSV, 1PUX and CXF import/export, ZIP reader,
@@ -2317,7 +2434,10 @@ port of its own. The session adds `DeviceLocalStore` (§13.8), with `InMemoryDev
 
 Milestone 4 adds `KeyBundleDirectory` and `VerifiedContactStore` (§8.4), each with an in-memory implementation in
 `WatchwordSharing`, and in `WatchwordTestSupport` the hostile store and simulated members of the sharing tests
-(`HostileSharingStore`, `SimulatedMember`, `SharingHousehold`, `ForgedRecord`).
+(`HostileSharingStore`, `SimulatedMember`, `SharingHousehold`, `ForgedRecord`). Its integration (§8.10) adds
+`SharingStateStore` and `ShareAccessControl` in `WatchwordKit` (with `InMemorySharingStateStore` and
+`SQLiteSharingStore`) and `WriteJudge` in `WatchwordSync`; the fixtures are `SharingAccount`, `SharedVaultHousehold`,
+`WithholdingTransport` and `RecordingShareAccess`.
 
 ## 16. Open questions tracked as ADR candidates
 

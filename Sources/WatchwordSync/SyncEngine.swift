@@ -21,6 +21,10 @@ public struct SyncConfiguration: Sendable {
     /// Sequence numbers and acknowledgement values above this are refused (a stream would need trillions of segments
     /// to reach it), so no arithmetic on them can overflow.
     public var maximumSequence: UInt64 = 1 << 48
+    /// Whether this device writes snapshots and collects its own segments. Off for a shared vault: a write cut is
+    /// judged against the departing account's own segments, so they must stay on the transport for every device
+    /// that has yet to judge it (docs/02-architecture.md §8.8, "a departed account's log").
+    public var maintainsLog = true
 
     public init(schemaVersions: [EnvelopeKind: UInt64]) {
         self.schemaVersions = schemaVersions
@@ -88,9 +92,12 @@ public struct SyncReport: Sendable, Equatable {
     /// This device's superseded segments and snapshots deleted.
     public var collected = 0
     public var rejected: [SyncRejection] = []
-    /// Remote versions refused as implausible (U5). Kept in `SyncStateStore.quarantined` until the person discards
-    /// them (PRD F7.7).
+    /// Remote versions refused as implausible (U5), or whose merge with the local version cannot be sealed (Y37).
+    /// Kept in `SyncStateStore.quarantined` until the person discards them (PRD F7.7).
     public var quarantined: [RecordKey] = []
+    /// Remote versions held aside because they carry work that does not count in a shared vault (a write outside
+    /// its author's write cut, docs/02-architecture.md §8.7). Kept in the quarantine like the others.
+    public var heldAside: [RecordKey] = []
     /// Streams stopped at a missing or rejected segment: the next sequence number each is waiting for. Later segments
     /// are never applied over a gap.
     public var waiting: [UUID: UInt64] = [:]
@@ -153,6 +160,7 @@ public actor SyncEngine {
     let keyring: any SyncKeyring
     let merger: any RecordMerger
     let configuration: SyncConfiguration
+    let judge: (any WriteJudge)?
     private var running = false
 
     /// `store` is the underlying record store; the session writes through a `DeletionRecordingStore` around the same
@@ -165,7 +173,8 @@ public actor SyncEngine {
         transport: any SyncTransport,
         keyring: any SyncKeyring,
         merger: any RecordMerger,
-        configuration: SyncConfiguration
+        configuration: SyncConfiguration,
+        judge: (any WriteJudge)? = nil
     ) {
         self.vaultID = vaultID
         self.deviceID = deviceID
@@ -175,6 +184,7 @@ public actor SyncEngine {
         self.keyring = keyring
         self.merger = merger
         self.configuration = configuration
+        self.judge = judge
     }
 
     // MARK: - Entry points
@@ -185,7 +195,12 @@ public actor SyncEngine {
     /// one of them (which must follow its deletion): they stay pending, count as erasures here as before, and go out
     /// at a later sync. The session uses it so that a deletion in one vault is never on the transport before what
     /// this device wrote in another — a move's copy before its original's deletion (docs/02-architecture.md §7.7).
-    public func sync(reconcile: Bool = false, deferringDeletions: Bool = false) async throws -> SyncReport {
+    ///
+    /// `publishing: false` downloads and merges and publishes nothing: a member of a shared vault who may not write
+    /// keeps a merged copy and writes nothing other devices would refuse (docs/02-architecture.md §8.7).
+    public func sync(reconcile: Bool = false, deferringDeletions: Bool = false, publishing: Bool = true)
+        async throws -> SyncReport
+    {
         guard !running else { throw SyncError.syncInProgress }
         running = true
         defer { running = false }
@@ -198,13 +213,15 @@ public actor SyncEngine {
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
-            // are facts the log also holds, and keeping them stops a replay from putting an erased record back.
+            // are facts the log also holds, and keeping them stops a replay from putting an erased record back. Not
+            // in a vault with a judge: its log is whole (no snapshots, no collection), and an erasure merged before
+            // its author's work stopped counting must not outlive the replay that holds its segment aside (S40).
             let kept = state
             state = SyncState(vaultID: vaultID)
             state.nextSequence = kept.nextSequence
             state.publishedAcknowledgement = kept.publishedAcknowledgement
             state.lastPublishedSequence = kept.lastPublishedSequence
-            state.erasures = kept.erasures
+            if judge == nil { state.erasures = kept.erasures }
         }
         state.nextSequence = max(state.nextSequence, 1)
         var listing = Listing()
@@ -223,10 +240,10 @@ public actor SyncEngine {
             try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             try await syncState.saveState(state)
-            if !report.transportUnavailable {
+            if !report.transportUnavailable, publishing {
                 try await push(
                     state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
-                if report.ownStreamConflict == nil {
+                if report.ownStreamConflict == nil, configuration.maintainsLog {
                     try await maintain(state: &state, listing: listing, retired: retired, report: &report)
                 }
             }
@@ -374,6 +391,18 @@ public actor SyncEngine {
             }
         }
 
+        // A shared vault's judge sees every segment of the pass before it judges any: which stream first carried a
+        // version decides whose work it is, and a write cut binds a run of segments (docs/02-architecture.md §8.8).
+        if let judge {
+            for object in segments.values.joined().sorted(by: { $0.location.name < $1.location.name }) {
+                guard let payload = try? await open(object), (try? validate(payload, at: object.location)) != nil
+                else { continue }
+                try await judge.record(
+                    segment: object.location, signature: object.object.signature,
+                    envelope: object.object.envelope, entries: payload.entries)
+            }
+        }
+
         for author in segments.keys.sorted(by: { $0.precedes($1) }) {
             var next = (state.merged[author] ?? 0) + 1
             for object in segments[author]!.sorted(by: { $0.location.number < $1.location.number }) {
@@ -392,9 +421,34 @@ public actor SyncEngine {
                     break
                 }
                 let acknowledgement: [UUID: UInt64]
+                var waitsForJudge = false
                 do {
                     let payload = try await open(object)
                     try validate(payload, at: object.location)
+                    switch try await judge?.admitsSegment(
+                        object.location, signature: object.object.signature, envelope: object.object.envelope)
+                        ?? .apply
+                    {
+                    case .apply:
+                        break
+                    case .wait:
+                        // The write cut cannot be checked yet: wait here, as at a gap.
+                        report.waiting[author] = next
+                        waitsForJudge = true
+                    case .holdAside:
+                        // Kept for the person, never merged, never published on; the stream carries on past it and
+                        // its acknowledgements count for nothing (docs/02-architecture.md §8.7).
+                        for entry in payload.entries {
+                            report.heldAside.append(entry.key)
+                            try await syncState.quarantine(entry, vaultID: vaultID)
+                        }
+                        state.merged[author] = sequence
+                        next = sequence + 1
+                        try await syncState.saveState(state)
+                        try await syncState.unstage([object.location])
+                        continue
+                    }
+                    if waitsForJudge { break }
                     for entry in payload.entries {
                         try await apply(
                             entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
@@ -404,6 +458,18 @@ public actor SyncEngine {
                 } catch let error where Self.isFatal(error) {
                     throw error
                 } catch {
+                    if case SyncKeyringError.unknownKey(let keyID) = error, let judge,
+                        await judge.passesOverSegment(sealedUnder: keyID, vaultID: vaultID)
+                    {
+                        // Sealed under a key this account was never entitled to (a shared vault's member who joined
+                        // after a rotation): it never opens here, and rotation sealed what it carried again under a
+                        // later key.
+                        state.merged[author] = sequence
+                        next = sequence + 1
+                        try await syncState.saveState(state)
+                        try await syncState.unstage([object.location])
+                        continue
+                    }
                     report.rejected.append(SyncRejection(name: object.location.name, reason: Self.reason(error)))
                     // Unstaged, so the next sync fetches it again: a partially visible file may since have completed.
                     try await syncState.unstage([object.location])
@@ -507,6 +573,19 @@ public actor SyncEngine {
             } catch RecordStoreError.versionConflict where attempt < 4 {
                 // The session wrote the same record while the merger ran: merge against the new local version.
                 attempt += 1
+            } catch ItemMergeError.resultNotSealable {
+                // The two versions are each valid and their join does not fit in one record (review finding Y37):
+                // the local version stays, the remote one is kept for the person (PRD F7.7), and the stream goes on
+                // to the entries and segments after it instead of waiting here for good.
+                report.quarantined.append(entry.key)
+                try await syncState.quarantine(entry, vaultID: vaultID)
+                return
+            } catch is HeldAside {
+                // Carries work that does not count in this shared vault (docs/02-architecture.md §8.7): kept for the
+                // person, never merged, never published on.
+                report.heldAside.append(entry.key)
+                try await syncState.quarantine(entry, vaultID: vaultID)
+                return
             }
         }
         state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
@@ -526,6 +605,9 @@ public actor SyncEngine {
         let local = try await store.record(key)
         if let local, local.vaultID != vaultID { throw Rejection(reason: .recordInAnotherVault(entry.recordID)) }
 
+        if let remote = entry.record(in: vaultID), let judge, !(try await judge.admits(remote)) {
+            throw HeldAside()
+        }
         guard let remote = entry.record(in: vaultID) else {
             // An erasure removes the local version only if its author had seen all of it; an edit it never saw is
             // kept, in the trash (PRD F7.6).
@@ -570,6 +652,8 @@ public actor SyncEngine {
             decision = try await merger.merge(local: local, remote: remote)
         } catch let error where Self.isFatal(error) {
             throw error
+        } catch ItemMergeError.resultNotSealable(let id) {
+            throw ItemMergeError.resultNotSealable(id)
         } catch {
             throw Rejection(reason: .mergeFailed(entry.recordID))
         }
@@ -720,6 +804,7 @@ public actor SyncEngine {
                 }
             }
             state.publishedAcknowledgement = vector
+            try await judge?.record(segment: location, signature: signature, envelope: envelope, entries: chunk)
             report.segmentsWritten += 1
             report.pushedEntries += chunk.count
             try await syncState.saveState(state)
@@ -921,6 +1006,9 @@ public actor SyncEngine {
     struct Rejection: Error {
         let reason: SyncRejectionReason
     }
+
+    /// A version the judge did not admit.
+    struct HeldAside: Error {}
 
     /// Errors that stop the sync rather than reject one object: the vault locked, the transport went away, or the
     /// local store failed.

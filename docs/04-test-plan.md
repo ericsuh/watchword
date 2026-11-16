@@ -46,7 +46,7 @@ that a test target may contain both as long as a single test does not mix their 
 | --- | --- |
 | F1.x items/fields | Codable round trips; property test "any item survives encode→decode"; history kept whatever its age or length, with `FakeClock`, and an edit past the payload limit refused rather than pruned |
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
-| F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes (protocol core, milestone 4, `WatchwordSharingTests`: "Membership record format", "Sharing formats: known answers", "Membership chain rules", "Membership ledger", "Fingerprint verification and invitations", "Key grants and rotation", and "Shared vault simulation" — two and three members with real keysets over a hostile store: create, invite, verify, accept, write, role change, removal with rotation, leaving, an interrupted rotation, concurrent administrators, deletion; through `VaultSession` and a real transport: open) |
+| F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes (protocol core, milestone 4, `WatchwordSharingTests`: "Membership record format", "Sharing formats: known answers", "Membership chain rules", "Membership ledger", "Fingerprint verification and invitations", "Key grants and rotation", and "Shared vault simulation" — two and three members with real keysets over a hostile store: create, invite, verify, accept, write, role change, removal with rotation, leaving, an interrupted rotation, concurrent administrators, deletion; through `VaultSession`s of different accounts over `InMemorySyncTransport`: `WatchwordKitTests` "Shared vaults through VaultSession", S3 and S4 with invitation, verification, read-only refusal, promotion, removal with rotation; over CloudKit: open) |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "… pages loaded over plain http" (F6.9: every list, release, save and generate request refused for an `http` URL, by choice too; `https` pages and domains unchanged; identities unaffected, and an `http` URL in an identity's place refused), "Scenarios S1 and S2 through the request model", "Request model over a real vault session" — S1 and S2 again over a `VaultSession` as the model's `CredentialVault` —, and "Vault session as the AutoFill vault" in `WatchwordKitTests` — the compare-and-swap, including a save landing between the session's read and its commit, a lock between the model's read and its release, one ID per item across vaults after a move, `isBackedUp`, and the extension's quick unlock; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Item merge audit regressions", "Item merge laws under random histories" and "Item merge, every small history" — the merge as a CRDT (`10-sync-correctness.md` §7): the specification of a multi-value register at every step, the semilattice laws on whole items, every update inflationary, the same versions in any order with repeats, convergence and nothing typed lost, with the number of histories explored asserted —, "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
@@ -358,8 +358,8 @@ other; records at the payload limit full of mutually incomparable values, or of 
 time limit; a clock naming thousands of devices, deleted (the tombstone must still be accepted); the semilattice laws
 and "no honest value dropped unless a value of its group claims to supersede it" on randomly corrupted records
 (widened nightly); erasure summaries that overflow, lie or do not decode; and records that open to different items.
-One test is recorded as a known issue until the engine quarantines a version it cannot merge instead of stopping
-the stream (Y37). The other, a tombstone whose summary names a far higher row (Y28), passes since the engine gives
+`mergeOverThePayloadLimit` checks that the engine quarantines a version it cannot merge and carries on with the
+stream (Y37). A tombstone whose summary names a far higher row (Y28), passes since the engine gives
 the merger the tombstone's stamp.
 
 **Implemented in milestone 3, with real keys** (`AdversarialVaultSyncTests`, suite "Adversarial: sync with real
@@ -393,6 +393,21 @@ real sessions over the eventually consistent server, several vaults, moves and c
 enrolling mid-run and a device revoked mid-run with or without a password change; every device left in the
 account converges, a device enrolling afterwards sees the same, no value anyone typed is lost unless a person
 discarded it, and nothing typed reaches the transport.
+
+**Implemented in milestone 4, session integration** (`AdversarialSharedVaultTests`, suite "Adversarial: shared
+vaults through the session", real `VaultSession`s of different accounts over one `InMemorySyncTransport`): a removed
+member's late writes, merged by a device the store had not shown the removal, taken out again there and counted by no
+device, a member invited afterwards included, while what the cut held counts everywhere (S28); the same for a demoted
+member, with no rotation; a grant of a stranger's key filed under the current key's ID, alone and ahead of the genuine
+one; segments and membership records copied from one shared vault into another; a stream index altered in the sharing
+state, and another account's saved ledger planted there (A8); a removal interrupted by `lock()`
+while publishing its grants, resumed and completed by the next sync. From the integration's review
+(`AdversarialSharedVaultAttributionTests.swift`): a late value relabelled as a remaining member's revision, and one
+back-dated to its author's in-cut revision (S36); a late rename stored again by an unaware member (S37); a late
+permanent deletion merged before the removal was known (S40); an invitation whose key ID is another vault's (S38); two
+vaults listing one account with different keys (S39); a replay asked for by a late stream, cut short by a lock and
+run after a relaunch (S41). Scenarios S3 and S4 through the session are
+`SharedVaultScenarioTests` (`WatchwordKitTests`).
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

@@ -18,3 +18,4 @@ sharing and membership
 import parsers
 account enrolment and device registry
 hygiene in the vault session
+shared vaults through the session

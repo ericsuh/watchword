@@ -10,7 +10,7 @@ phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
 `WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and in `VaultSession` the production keyring, multiple
 vaults, the device registry and enrolment over the transport) short of its CloudKit and iCloud Drive transports,
-milestone 4's sharing protocol core (`WatchwordSharing`), which nothing calls yet, milestone 5's portable AutoFill core
+milestone 4's sharing protocol core (`WatchwordSharing`) and its wiring into `VaultSession` and `SyncEngine`, milestone 5's portable AutoFill core
 (`WatchwordAutoFill`) short of the extension adapter, milestone 6's hygiene core (`WatchwordHygiene`), driven by the session, short
 of its network adapter, background glue and UI, and milestone 7's import and export parsers (`WatchwordInterchange`)
 short of their wiring into the session and the apps. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
@@ -161,7 +161,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   `InMemorySyncTransport` and `FileSyncTransport`, signed sealed segments and snapshots (`SyncPayload`,
   `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, conflict-keeping `ItemMerge` over
   `ItemState` (the item as a state-based CRDT, `docs/10-sync-correctness.md`) and line-level `NoteText`,
-  `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `KindRoutingMerger`, `SyncEngine`,
+  `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `KindRoutingMerger`, `SyncEngine`, the `WriteJudge`
+  port a shared vault's engine asks before it applies anything,
   `DeletionRecordingStore`, `AccountObjectLocation` (names of the account's own objects), `AutoSyncPolicy` (when to
   sync, pure), and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
@@ -172,8 +173,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   of an invitation, key grants (`KeyGrantCodec`, `grantSender`/`openGrant`), `LeaveRequest`, and rotation as data
   (`RotationPlanner`, `RotationPlan`, `PendingRotation`, `recordsToReseal`). Ports: `KeyBundleDirectory`,
   `VerifiedContactStore`. Depends on `WatchwordEnvelope`, `WatchwordCrypto` and `SecureMemory`; not on
-  `WatchwordSync` or `WatchwordKit`, and nothing depends on it yet (`docs/02-architecture.md` §8.8 is what the
-  integration will call).
+  `WatchwordSync` or `WatchwordKit`; `WatchwordKit` depends on it (`docs/02-architecture.md` §8.8 is what an
+  integration calls, §8.10 the integration as built).
 - **`WatchwordHygiene`** — milestone 6's portable core: `PwnedPasswordsClient` (the k-anonymity range API) and
   `BreachedAccountClient` over the `HTTPClient` port, the `PwnedRangeCache` port, `ScanSchedule`/`ScanLedger` (when to
   check, as a value), `StrengthEstimator` (zxcvbn-class, with embedded word lists), `ReuseIndex`, `ItemAnalyzer`,
@@ -189,7 +190,13 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   (`VaultSession+Sync.swift`); the session's conformance to `WatchwordAutoFill`'s `CredentialVault`
   (`VaultSession+AutoFill.swift`); and hygiene (`VaultSession+Hygiene.swift`: `HygieneSettings`, the
   `DeviceLocalStore` port with `InMemoryDeviceLocalStore`, the sealed prefix cache, `runHygieneStep()`,
-  `hygieneReport()`). Depends on `WatchwordAutoFill` and `WatchwordHygiene`, never the reverse.
+  `hygieneReport()`);
+  shared vaults in `VaultSession+Sharing.swift` (the API a UI calls: verify, share,
+  invite, accept, leave, change role, remove, rotate, status) and `VaultSession+SharingSync.swift` (the sync pass of
+  §8.8, `sharedVerify`, and the `WriteJudge` that applies write cuts), over the `SharingStateStore` port
+  (`InMemorySharingStateStore`, `SQLiteSharingStore`) and `ShareAccessControl`; `SharedStreamIndex` and
+  `SyncWriteCut` are the cut's bytes (`SharedVaultState.swift`). Depends on `WatchwordAutoFill`,
+  `WatchwordHygiene` and `WatchwordSharing`, never the reverse.
 - **`WatchwordAutoFill`** — the credential provider extension's portable core (milestone 5): `CredentialProviderModel`
   (one method per request the OS makes: credential list, passwords, one-time codes, text to insert, passkey
   registration and assertion, save and generate password, credential-update reports), `ReleaseGate`, `TOTP`,
@@ -222,7 +229,7 @@ on the transport and enrolment, §7.8 the device registry (and what revocation d
 `docs/10-sync-correctness.md` is the model of an item as a CRDT and the argument that sync converges;
 `docs/03-implementation-plan.md` milestone 3 lists what is still open (CloudKit and iCloud Drive transports, the
 Secure Enclave device key, sync in production builds, `UITestPeer`). §8 describes sharing as built, and milestone 4
-what is open there (wiring into `VaultSession` and sync, `CKShare`, the UI). §13 describes hygiene as built, and
+what is open there (`CKShare`, the key directory's adapter, the UI). §13 describes hygiene as built, and
 milestone 6 what is still open (the `URLSession` adapter, the device-local store's file adapter, background glue, the
 report UI). Milestone 7
 lists what is open for import and export (session wiring, the encrypted archive, Credential Exchange, the screens).
@@ -502,6 +509,29 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
 
+### Shared vaults in the session (`docs/02-architecture.md` §8.10)
+
+- A shared vault's records are sealed under the key its chain names (`currentVaultKey` asks `sharedCurrentKey`), and
+  every write the person makes asks `writePermission` (in `writableVaultKey`). Keys from grants are stored as
+  `vaultKeyWrap` rows like any other; their identity comes from where the grant is filed.
+- A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
+  key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
+- **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
+  (`ItemMerge.attributedValues`; a vault's description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*,
+  through a segment of the stream of the device the stamp names that carried those bytes (`SharedStreamIndex`); never
+  by the revision a stamp names, which its writer chose (S36). A value naming this device that it never published
+  counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
+  does not count is held aside in the quarantine and never published; a change of head takes out what no longer
+  counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
+  (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
+- Member registries are anchored per vault (`memberRegistries`, S39), and a vault key whose ID this device holds for
+  another vault is refused (`keyIDInUse`, S38).
+- A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
+  `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
+  judge a cut.
+- Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`) or re-verified on load; the owner's pin
+  anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from (S26).
+
 ### Device registry and account objects (`docs/02-architecture.md` §7.7, §7.8)
 
 - The registry is a grow-only set of entries named by their SHA-256; `DeviceRegistry.evaluate` is a pure,
@@ -692,7 +722,8 @@ directions are tested; keep both when adjusting constants.
   `"AutoFill request model"`, `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`,
   `"local vault store"`, `"Keychain item protection"`, `"sync log"`, `"sync log, item metadata"`, `"sync with real keys"`,
   `"hygiene and breach checks"`, `"sharing and membership"`, `"import parsers"`,
-  `"account enrolment and device registry"`, `"hygiene in the vault session"`), so **renaming a suite breaks CI deliberately** — update
+  `"account enrolment and device registry"`, `"hygiene in the vault session"`,
+  `"shared vaults through the session"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication

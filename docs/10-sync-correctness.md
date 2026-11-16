@@ -355,13 +355,12 @@ failed each time.
 - **Items were shown as stored** (Y30, fixed). A record adopted when the device held no version of the item is stored
   as written; `VaultSession` now reads every item through `ItemMerge.canonical`, so what a person sees is what every
   merge and save makes of it.
-- **A merge result over the payload limit stops a stream** (Y37). Two versions that each fit the 1 MiB limit can
+- **A merge result over the payload limit is quarantined** (Y37). Two versions that each fit the 1 MiB limit can
   have a join that does not — two long concurrent note edits, or history that only grows — and any writer can arrange
-  it. `ItemRecordMerger` then throws `ItemMergeError.resultNotSealable`, and the engine rejects the whole object that
-  carried the remote version; since a stream is merged strictly in sequence, every later segment from that author is
-  never applied on that device, so unrelated items stop arriving, silently and for good. Neither version is lost. The
-  engine should treat that error like a U5 quarantine — keep the local version, quarantine the one entry (PRD F7.7)
-  and carry on with the stream; recorded as a known issue (`mergeOverThePayloadLimit`) until it does.
+  it. `ItemRecordMerger` then throws `ItemMergeError.resultNotSealable`, and the engine treats it like a U5
+  quarantine: the local version stays, the remote entry is kept for the person (PRD F7.7), and the stream carries on,
+  so unrelated items keep arriving (`mergeOverThePayloadLimit`). On that device the item no longer converges with
+  the others until a person resolves it: the price of a bound on record size.
 - **Growth.** History, note-line tombstones, removed fields' stamps and retained values only grow. An item at the
   payload limit refuses further edits until history moves to records of its own (already tracked), and merges as
   above.
