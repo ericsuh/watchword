@@ -348,8 +348,8 @@ other; records at the payload limit full of mutually incomparable values, or of 
 time limit; a clock naming thousands of devices, deleted (the tombstone must still be accepted); the semilattice laws
 and "no honest value dropped unless a value of its group claims to supersede it" on randomly corrupted records
 (widened nightly); erasure summaries that overflow, lie or do not decode; and records that open to different items.
-One test is recorded as a known issue until the engine quarantines a version it cannot merge instead of stopping
-the stream (Y37). The other, a tombstone whose summary names a far higher row (Y28), passes since the engine gives
+`mergeOverThePayloadLimit` checks that the engine quarantines a version it cannot merge and carries on with the
+stream (Y37). A tombstone whose summary names a far higher row (Y28), passes since the engine gives
 the merger the tombstone's stamp.
 
 **Implemented in milestone 3, with real keys** (`AdversarialVaultSyncTests`, suite "Adversarial: sync with real

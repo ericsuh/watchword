@@ -490,9 +490,9 @@ Known limits, tracked in `06-adversarial-review.md` §H: the store can withhold 
 lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
 refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
 trusted for the vault, so this is an insider's capability). From the audit of the merge (Y29, Y30, Y36, Y37; Y28, the
-tombstone's version, is fixed): the engine rejects the
-whole object carrying a version whose merge is over the payload limit, stopping that author's stream on that device,
-where it should quarantine the one entry; it does not refuse to publish an over-long erasure summary (the merger no
+tombstone's version, and Y37 are fixed: a version whose merge
+with the local one is over the payload limit is quarantined, the local version kept, and the stream goes on): the
+engine does not refuse to publish an over-long erasure summary (the merger no
 longer writes one); the session
 does not yet refuse a draft made from an older version than the one stored; and items are shown as stored rather
 than as the merge reads them.

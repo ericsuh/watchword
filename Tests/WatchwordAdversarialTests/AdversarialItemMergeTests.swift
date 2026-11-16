@@ -894,9 +894,8 @@ struct AdversarialItemMergeTests {
     /// version, and because a stream is merged strictly in sequence, every later segment from that device is never
     /// applied on the device that could not merge: unrelated items stop arriving, silently and for good.
     ///
-    /// The merger now says which failure this is (`ItemMergeError.resultNotSealable`), so that the engine can set
-    /// that one entry aside — keep the local version, quarantine the remote one (PRD F7.7) — and carry on with the
-    /// stream. The engine does not do that yet; recorded as a known issue until it does
+    /// The merger says which failure this is (`ItemMergeError.resultNotSealable`), and the engine sets that one
+    /// entry aside — keeps the local version, quarantines the remote one (PRD F7.7) — and carries on with the stream
     /// (docs/06-adversarial-review.md §H, Y37).
     @Test("two versions whose merge is over the payload limit do not stop the stream that carried one of them")
     func mergeOverThePayloadLimit() async throws {
@@ -927,12 +926,11 @@ struct AdversarialItemMergeTests {
         // Neither version is lost meanwhile: each device still holds its own.
         #expect(try await reader.item(item.id).notes.count == 505_000)
         #expect(try await first.item(item.id).notes.count == 30_000)
-        withKnownIssue(
-            "SyncEngine rejects the object carrying a version it cannot merge, and the author's stream waits there"
-        ) {
-            #expect(report.rejected.isEmpty && report.waiting.isEmpty)
-            #expect(arrived, "an unrelated item written afterwards never arrives")
-        }
+        #expect(report.rejected.isEmpty && report.waiting.isEmpty)
+        #expect(arrived, "an unrelated item written afterwards arrives")
+        // The version that could not be merged is kept, for the person to look at.
+        let kept = try await reader.syncState.quarantined(vaultID: Self.vault)
+        #expect(kept.contains { $0.recordID == item.id && $0.device == Self.honest })
     }
 
     /// Threat: the insider, or a sealer that does not check an item against its row, hands the merger two records
