@@ -156,6 +156,10 @@ public actor VaultSession: SharesExecutor {
     package nonisolated let executorOwner = SerialExecutorOwner()
     /// Shared vaults: settings, ledgers, plans, proposals and stream indexes (VaultSession+Sharing.swift).
     var sharing = SharingRuntime()
+    /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
+    var pendingImport: PendingImport?
+    /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.
+    var importGeneration: UInt64 = 0
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(
@@ -648,7 +652,7 @@ public actor VaultSession: SharesExecutor {
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).
-    private func deriveUnlockKey(password: String, secretKey: SecretKey, account: AccountRecord) throws
+    func deriveUnlockKey(password: String, secretKey: SecretKey, account: AccountRecord) throws
         -> EncryptionKey
     {
         try TwoSecretKeyDerivation.accountUnlockKey(
@@ -719,6 +723,7 @@ public actor VaultSession: SharesExecutor {
         lockEpoch &+= 1
         keys?.zeroise()
         keys = nil
+        pendingImport = nil
         backgroundedAt = nil
         // After the keyset is zeroised, never before (§13.8): nothing the engine does can keep the keys resident.
         stopHygiene()
@@ -1032,7 +1037,7 @@ public actor VaultSession: SharesExecutor {
         if !leftovers.isEmpty { throw VaultError.keychainCleanupIncomplete(leftovers.count) }
     }
 
-    private func storedSecretKey(accountID: UUID) async throws -> SecretKey {
+    func storedSecretKey(accountID: UUID) async throws -> SecretKey {
         guard let bytes = try await keychain.read(.secretKey(accountID: accountID), prompt: "") else {
             throw VaultError.secretKeyMissing
         }
@@ -1300,7 +1305,7 @@ public actor VaultSession: SharesExecutor {
         )
     }
 
-    private func kdfParameters() throws -> KDFParameters {
+    func kdfParameters() throws -> KDFParameters {
         let parameters: KDFParameters
         switch configuration.kdf {
         case .calibrate: parameters = try KDFCalibration.calibrate(clock: ContinuousClock())

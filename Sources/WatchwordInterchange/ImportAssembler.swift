@@ -56,6 +56,25 @@ public enum ScopeDerivation {
         return candidate
     }
 
+    /// A scope read from an encrypted Watchword archive, checked as an imported URL's would be: its host must be what
+    /// `scope(forURL:)` derives from it, unchanged, so the normaliser, the plain-name rule and `ScopePolicy` all
+    /// apply. What it says beyond its host can only narrow it: subdomains stay included only where the derived scope
+    /// includes them, and exclusions are kept (PRD F11.2).
+    static func validated(_ scope: ServiceScope) -> Result<ServiceScope, ScopeRefusal> {
+        switch self.scope(forURL: scope.host) {
+        case .failure(let refusal):
+            return .failure(refusal)
+        case .success(let derived):
+            guard Array(derived.host.utf8) == Array(scope.host.utf8) else {
+                return .failure(.notAHost(.invalidHost(scope.host)))
+            }
+            return .success(
+                ServiceScope(
+                    host: derived.host, includeSubdomains: derived.includeSubdomains && scope.includeSubdomains,
+                    excludedHosts: scope.excludedHosts))
+        }
+    }
+
     /// Whether `host` is a dotted-decimal address: digits and dots only.
     static func isAddress(_ host: String) -> Bool {
         host.utf8.allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) || $0 == UInt8(ascii: ".") }
@@ -143,15 +162,16 @@ struct ImportAssembler {
     let vaultID: UUID
     let limits: InterchangeLimits
     let options: ImportOptions
-    private(set) var entries: [ImportedEntry] = []
-    private(set) var report: ImportReport
-    private var seenIdentifiers = Set<String>()
+    // Internal rather than private so the archive path (`ArchivedItems.swift`) counts against the same budgets.
+    var entries: [ImportedEntry] = []
+    var report: ImportReport
+    var seenIdentifiers = Set<String>()
     /// Every entry and container visited, imported or not: the bound on the work one file can ask for.
     private var visited = 0
     /// Fields, URLs, tags and history entries in the drafts so far, against `maximumTotalFields`.
-    private var totalFields = 0
-    /// URLs handed to `ScopeDerivation` so far, against `maximumScopeDerivations`.
-    private var scopeDerivations = 0
+    var totalFields = 0
+    /// URLs (and, from an archive, scopes) handed to `ScopeDerivation` so far, against `maximumScopeDerivations`.
+    var scopeDerivations = 0
     private(set) var entryIndex = 0
 
     init(format: InterchangeFormat, vaultID: UUID, limits: InterchangeLimits, options: ImportOptions) {

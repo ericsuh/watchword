@@ -12,8 +12,8 @@ milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `Wa
 vaults, the device registry and enrolment over the transport) short of its CloudKit and iCloud Drive transports,
 milestone 4's sharing protocol core (`WatchwordSharing`) and its wiring into `VaultSession` and `SyncEngine`, milestone 5's portable AutoFill core
 (`WatchwordAutoFill`) short of the extension adapter, milestone 6's hygiene core (`WatchwordHygiene`), driven by the session, short
-of its network adapter, background glue and UI, and milestone 7's import and export parsers (`WatchwordInterchange`)
-short of their wiring into the session and the apps. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+of its network adapter, background glue and UI, and milestone 7's import and export parsers (`WatchwordInterchange`),
+wired into the session with the encrypted Watchword archive, short of the apps' screens and Credential Exchange calls. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -153,8 +153,9 @@ Fourteen shipped modules, dependency-ordered, plus test support:
 - **`WatchwordCrypto`** — Secret Key, 2SKD, KDF calibration, keyset, vault keys, HPKE grants, signatures,
   fingerprints, record sealing; device keys and signatures (`DevicePublicKey`, `DeviceSignatures`,
   `SoftwareDeviceKey`, `EnrolmentKey`), the device registry (`RegistryEntry`, `DeviceRegistry.evaluate`), the
-  published account header (`AccountHeaderObject`), and `DeviceLocalKeys` (the hygiene reuse key and the key and
-  record names of a device's unsynced local records). Depends on `SecureMemory` and `WatchwordEnvelope`.
+  published account header (`AccountHeaderObject`), `DeviceLocalKeys` (the hygiene reuse key and the key and
+  record names of a device's unsynced local records), and the encrypted Watchword archive (`AccountArchive`,
+  `ArchiveKeyDerivation`; ADR 0008). Depends on `SecureMemory` and `WatchwordEnvelope`.
 - **`WatchwordStore`** — the `RecordStore` port, `InMemoryRecordStore` and `SQLiteRecordStore` (the App Group
   ciphertext database). Envelopes plus storage locations only; never keys.
 - **`WatchwordSync`** — milestone 3's portable half: object layout, the `SyncTransport` port with
@@ -184,7 +185,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
   history, trash, password change, deletion, `sync()`, conflict resolution; vaults, move, copy and search in
   `VaultSession+Vaults.swift`; enrolment, devices, revocation and the account's objects on the transport in
-  `VaultSession+Account.swift`), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `VaultMetadataCodec`, `ItemSearch`,
+  `VaultSession+Account.swift`; import preview and commit, password-checked export and the archive in
+  `VaultSession+Interchange.swift`), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `VaultMetadataCodec`, `ItemSearch`,
   `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`, `DeviceKeyStore` with the software
   `KeychainDeviceKeyStore`), and `VaultSyncAdapter`, the production `SyncKeyring` and `ItemSealer`
   (`VaultSession+Sync.swift`); the session's conformance to `WatchwordAutoFill`'s `CredentialVault`
@@ -208,8 +210,9 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
 - **`WatchwordInterchange`** — import and export of other password managers' formats (milestone 7): `CSVReader`/
   `CSVWriter` and `PasswordCSV` (1Password and Apple Passwords CSV), `OnePUX`, `CredentialExchange` (CXF 1.0), the
-  `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `StoredItemSize`, `DuplicateDetector`,
-  `InterchangeGuide`. Depends on `WatchwordModel` and `WatchwordMatching`; Foundation only, no keys, files or clocks.
+  `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `ArchivedItems` (an archive's decrypted items into
+  drafts), `StoredItemSize`, `DuplicateDetector`, `InterchangeGuide`. Depends on `WatchwordModel` and
+  `WatchwordMatching`; Foundation only, no keys, files or clocks. `WatchwordKit` depends on it, never the reverse.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `FakeDeviceKeyStore`, `TestVault`, whose
   `enrolledDevice` enrols a real second device over the transport; `RegistryFixture` for hand-built registry
@@ -231,8 +234,8 @@ on the transport and enrolment, §7.8 the device registry (and what revocation d
 Secure Enclave device key, sync in production builds, `UITestPeer`). §8 describes sharing as built, and milestone 4
 what is open there (`CKShare`, the key directory's adapter, the UI). §13 describes hygiene as built, and
 milestone 6 what is still open (the `URLSession` adapter, the device-local store's file adapter, background glue, the
-report UI). Milestone 7
-lists what is open for import and export (session wiring, the encrypted archive, Credential Exchange, the screens).
+report UI). §14.1 describes import and export through the session and the encrypted archive as built; milestone 7
+lists what is open (file protection and the screens, Credential Exchange, restoring an archive's vaults as vaults).
 
 ### `WatchwordHygiene` invariants
 
@@ -498,6 +501,18 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   task. The ledger and the prefix cache are written only sealed, to the `DeviceLocalStore`, never to the record store
   or a transport, and every hygiene query reconciles the engine with the store first. No timer: the UI or a
   background task calls `runHygieneStep()`.
+- Imports are preview then commit (§14.1). The drafts stay in the actor (`pendingImport`) and `lock()` drops them;
+  what leaves the actor before a commit holds no secret but what `importAdditions` hands the duplicate screen. A
+  commit checks every decision before writing, saves new items through `ItemMerge.stamped`, `ScopePolicy` and
+  `commitItem` (keeping the file's history and times, never its IDs, vault or sync metadata), and merges over the
+  item as the write reads it. Never add a path that writes an imported item another way.
+- A plaintext export or an archive needs the account password in the same call, re-derived under the stored
+  header (`verifyAccountPassword`), never a remembered "recently verified". File protection is the app's.
+- The archive is sealed under the archive passphrase *and* the Secret Key (ADR 0008); `AccountArchive.parse`
+  checks everything, KDF bounds and every envelope's place included, before a key is derived, and every failure
+  after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.
+  Its derivation costs what the file says, so it runs off the actor (`awayFromSession`), never on it, and entries are
+  opened and decoded one at a time; only `Item.isTrashedByPerson` comes back as trash.
 - Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
   exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
   signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting
@@ -727,7 +742,7 @@ directions are tested; keep both when adjusting constants.
   `"local vault store"`, `"Keychain item protection"`, `"sync log"`, `"sync log, item metadata"`, `"sync with real keys"`,
   `"hygiene and breach checks"`, `"sharing and membership"`, `"import parsers"`,
   `"account enrolment and device registry"`, `"hygiene in the vault session"`,
-  `"shared vaults through the session"`), so **renaming a suite breaks CI deliberately** — update
+  `"shared vaults through the session"`, `"encrypted Watchword archive"`, `"interchange through the session"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication

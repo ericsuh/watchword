@@ -166,7 +166,8 @@ Envelope v1 (binary, little-endian; also expressible as JSON for debugging)
   magic        "WWE1"
   version      u16   = 1
   kind         u8    (0 = item, 1 = vault-key-wrap, 2 = membership, 3 = account-header, 4 = log-segment,
-                    5 = snapshot, 6 = vault-metadata, 7 = vault-directory, 8 = device-registry)
+                    5 = snapshot, 6 = vault-metadata, 7 = vault-directory, 8 = device-registry,
+                    9 = archive: everything inside an encrypted Watchword archive, §14.1)
   keyID        16 B  (UUID of the key that encrypted this record)
   nonce        12 B
   aadLength    u16, aad bytes  (canonical CBOR map {1: recordID, 2: vaultID, 3: schemaVersion,
@@ -2379,14 +2380,147 @@ counted and left out, since writing a conflicting scope as if it were the item's
 Passwords, as data the UI renders, with the caveats from research: passkeys do not survive CSV, Wi-Fi
 passwords are left out of Credential Exchange, and an exported file is plaintext.
 
-**Still to come (integration).** The module ends at bytes. The session step re-enters the account password
-before any plaintext export exists, writes the file with `completeUnlessOpen` (or stronger) protection to a
-place the person chooses, shows the standing warning, saves drafts through an import path that keeps the
-source's history and timestamps (`VaultSession.save` replaces both), and calls the OS Credential Exchange
-APIs. The duplicate screen must show each of `DuplicateMatch.newHosts` and ask about it by name before it
-puts a host in `MergeChoices`, show each of `MergeAdditions.urlFields` and `signInFields` with its full
-value before it puts a field there, and never pre-select either; the export screen must show the `ExportReport` before the person is told
-the export is complete. The encrypted Watchword archive needs the vault's keys and is built there too.
+**Still to come (integration).** The session step (§14.1) is built. What remains is the apps' part and the
+OS's: writing a file with `completeUnlessOpen` (or stronger) protection to a place the person chooses,
+showing the standing warning, the screens, and the OS Credential Exchange calls. The duplicate screen must
+show each of `DuplicateMatch.newHosts` and ask about it by name before it puts a host in `MergeChoices`, show
+each of `MergeAdditions.urlFields` and `signInFields` with its full value before it puts a field there, and
+never pre-select either; the export screen must show the `ExportReport` before the person is told the export
+is complete.
+
+### 14.1 Through the session, and the encrypted Watchword archive (as built)
+
+`VaultSession+Interchange.swift` is where the module meets the vault's keys and write path. `WatchwordKit`
+depends on `WatchwordInterchange`; the module still knows nothing of the session.
+
+**Import is preview, then commit.** `previewImport(_:format:into:options:)` (CSV, 1PUX, CXF; the CSV variant is
+read off the header) and `previewArchiveImport(_:passphrase:secretKey:into:options:)` parse the bytes, compare
+the drafts with the items of the chosen vault (`DuplicateDetector.matches`) and return an `ImportPreview`: the
+`ImportReport`, a summary per entry (title, kind, state, hosts, login names, and the apex hosts added beside a `www`
+host, `apexScopesAdded`, from the report's `apexScopeAdded` lines: `ImportOptions.matchApexOfWWWHosts`, on unless the
+person turns it off, applies to the other managers' formats; an archive's scopes come back as they were) and the
+matches; for an archive also
+its identifier and creation time (`archiveID`, `archiveCreatedAt`), set only once it has opened, so they are the
+values the manifest authenticated, and the restore screen shows the date: A1 can put an older archive in place of
+the newest, and every archive under the same passphrase and Secret Key opens. **Nothing is written, and the
+preview holds no secret**: the drafts stay inside the actor (`pendingImport`), and `lock()` drops them, as do
+`discardImport()`, the next preview and the commit. Each preview and `discardImport()` advances a generation
+(`importGeneration`), so a preview still awaiting the store when the person cancels, or starts another, drops its
+drafts and throws `noPendingImport` instead of keeping them. The values a merge would add, with every
+value in full for the duplicate screen, come from `importAdditions(preview:importedID:existingID:)` while it is
+shown. `commitImport(_:decisions:)` checks every decision before writing anything: an entry that matches an
+existing item must have one (`decisionRequired`), and a merge may only go into an item it was matched with
+(`unknownMatch`); an entry with no match and no decision is added. Then each entry goes through the vault's own
+write path. A new item is stamped by `ItemMerge.stamped` as this device's write, its scopes checked against
+`ScopePolicy`, and committed on the condition that no row has its ID (`commitItem`), keeping the history and the
+creation and modification times the draft carries (which `save` would replace) and none of the file's sync
+metadata (a draft has none: `ImportAssembler` builds a clean item, and `stamped` with no previous version clears
+whatever a caller put there). A merge is an edit of the existing item, `DuplicateDetector.merged` computed over the
+item as the write reads it, so nothing written since the preview is undone, with only the hosts and fields in
+`MergeChoices`. An entry the source had in its trash (when the person asked for those) is saved, then moved to the
+trash through `trash(id:)`. One item fails alone (`ImportOutcome.failed`); a `lock()` during a commit stops it
+(`importInterrupted(saved:)`) and the preview is gone with the lock. Parsing a plaintext format runs on the session
+actor, bounded by `InterchangeLimits`; a lock waits for a parse in progress. An archive's key derivation does not:
+its cost is the iteration count in the file's cleartext header (up to the 25M ceiling, seconds on a phone) and
+nothing in the file is authenticated until it ends, so on the actor it would hold `lock()`, auto-lock and sync
+behind a file's choice with the vault keys resident. The derivation, decryption and decoding run off the actor
+(`awayFromSession`), touching none of the session's keys, and the lock epoch is checked when they return: a lock
+meanwhile takes effect at once, and the preview throws `locked`. (An unlock's derivation runs on the actor, but
+under the account's own parameters and with no keys resident.)
+
+**Plaintext export needs the account password, in the same call.** `exportPlaintext(_:vaults:password:)`
+re-derives the Account Unlock Key from the password under the stored header's own KDF parameters and opens the
+keyset with it, as `deleteAccount` does; there is no cached "recently verified" state. A wrong password is
+`CryptoError.authenticationFailed`. It is refused while locked, a lock while it runs wins (the epoch is checked
+after every suspension and once more before the bytes are returned), and the items are those of the chosen vaults
+that are not deleted; records that would not open are returned beside the report (`PlaintextExport.unreadable`),
+not left out silently. The standing warning is `InterchangeGuide.plaintextExportWarning`
+(`VaultSession.plaintextExportWarning`). File protection is the app's: the doc comment says
+`FileProtectionType.completeUnlessOpen` or stronger, a place the person chooses, never the App Group container.
+
+**The encrypted Watchword archive (PRD F8.4; ADR 0008).** A versioned, portable, whole-account backup that only
+Watchword reads, made of the vault's own envelope format (`AccountArchive` in `WatchwordCrypto`):
+
+```
+magic "WWAR"  formatVersion u8 = 1
+archiveID 16  accountID 16  createdAt u64
+kdfAlgorithm u8 (1 = PBKDF2-HMAC-SHA256)  iterations u32  salt (u16 length)
+wrapKeyID 16  archiveKeyID 16
+wrappedKey (u16 length)   the archive key under AWK           kind 9, schema 1, record = archiveKeyID, vault = archiveID
+entryCount u32
+── header ──
+manifest (u16 length)     SHA-256(header) ‖ SHA-256(entries)   kind 9, schema 2, record = archiveID, vault = accountID,
+                                                              version = entryCount
+entries                   entryCount × (entryID 16, envelope (u32 length))
+                                                              kind 9, schema 3, record = entryID, vault = archiveID,
+                                                              version = position (from 1)
+```
+
+The archive key is fresh for each archive and wrapped under a key derived from a passphrase the person chooses for
+the archive (at least ten characters) **and the account's Secret Key**, as 2SKD combines the account password with
+it, under its own info strings and salted by the archive ID:
+
+```
+salt' = HKDF-SHA256(ikm: salt, salt: archiveID, info: "WW-archive-salt-v1")
+Kp    = PBKDF2-HMAC-SHA256(NFKD(passphrase), salt', iterations)
+Ks    = HKDF-SHA256(ikm: SK, salt: accountID, info: "WW-archive-2SKD-v1")
+AWK   = HKDF-SHA256(ikm: Kp ‖ Ks, salt: archiveID ‖ accountID, info: "WW-archive-key-v1")
+```
+
+Why the Secret Key and not the passphrase alone (ADR 0008): the likeliest place for a backup file is the cloud drive
+the vault syncs through, adversary A1's. The account's ciphertext there resists offline guessing because of the
+Secret Key; an archive protected by the passphrase alone would be the one object beside it that A1 could guess at.
+The price is that restoring an archive needs the Emergency Kit, which restoring an account needs anyway. The
+iterations are the session's (`KDFStrategy`: calibrated, at least the floor).
+
+Each entry's plaintext is a type byte and its content: `1` a vault (its ID and name, so an import can say which vault
+an item came from), `2` an item exactly as `ItemCodec` stores it, history, trash, archived mark and unresolved
+values included. `exportArchive(vaults:passphrase:password:)` requires the account password like a plaintext export
+(someone holding an unlocked device must not be able to take the vault away under a passphrase of their own).
+
+**Reading one checks everything before decrypting anything.** `AccountArchive.parse` bounds the file (256 MiB),
+the entry count (200,000, and against the bytes that could hold it, before anything is allocated), every length,
+the creation time, and the KDF parameters on both sides (the floor against a downgrade, the ceiling against an
+archive that turns a restore into a hang, `KDFParameters.validate`), and checks every envelope's kind, key and
+authenticated data against its place: an entry moved to another position, relabelled with another entry's ID or
+taken from another archive, and a header relabelled with another account, all fail here, before any key is
+derived. Then `open` derives AWK, opens the archive key (a wrong passphrase, a wrong Secret Key, and a header
+altered in any field the key depends on, all fail as one `CryptoError.authenticationFailed`), opens the manifest and
+compares its digests with every byte of the header and the entries, and only then decrypts the entries, in order,
+handing each plaintext to the caller and zeroising it as soon as it is decoded. Sealing likewise asks for one
+entry's plaintext at a time. Every `SecureBytes` is page-rounded (16 KiB on arm64 Darwin), so holding them all
+would cost the entry count times a page, about 3 GiB at the format's 200,000-entry limit; held one at a time, a
+restore's memory grows with the items it decodes. A truncated, extended, reordered or spliced archive that got that
+far fails at the manifest, as the same error.
+
+An archive names its account in the clear. `previewArchiveImport` with no `secretKey` uses this account's Secret Key
+and refuses an archive of another account by name (`archiveFromAnotherAccount`), so the person can be asked for that
+account's Emergency Kit; given one (a restore into a new account after the old one is gone), it uses it. Either way
+the items are hostile input (A7: whoever hands over an archive and its Kit chose every byte) and go through
+`ArchivedItems.importEntries`, the archive's road through `ImportAssembler`: fresh item and field IDs from the
+injected generator (an earlier version's field keeps the new ID of the current one), the caller's vault, every
+scope checked again (`ScopeDerivation.validated`: the normaliser must give back the same host, then the plain-name
+rule and `ScopePolicy`; subdomains stay included only where the derived scope includes them, exclusions are kept,
+and a refused scope is kept as a website field and reported), one-time passwords through `OTPParameters`,
+passkeys through `PasskeyCredential`, the import's budgets (history fields count) and the stored-size bound, and no
+sync metadata. Values sync was holding for the person to choose between come back as fields labelled
+"(unresolved value)" and are reported (`unresolvedValuesKept`): a field's other text, another title, another set of
+scopes' hosts (as `url` fields without `InterchangeMeta.websiteType`, so text and never a scope or an exported
+website) and other tags; only flags (archived, trash, exclusion, field order), which settle to the value shown, and
+passkeys are counted as omitted (`unresolvedValuesOmitted`). Only the person's own trash is trash on restore
+(`Item.isTrashedByPerson`): an item sync left in the trash (kept after a deletion that had not seen it, trashed
+without seeing every edit, or over a concurrent restore) comes back live, with `restoredFromSyncTrash`, because
+restored as trash `trash(id:)` would make it the person's and the 30-day purge would remove it, and skipped as
+`trashedAtSource` the report would call it the person's (PRD F1.5, F7.7). An entry that is neither a vault nor an
+item that decodes is listed as skipped. Everything else a Watchword item holds is kept: every field's kind, label and
+metadata, the whole history, the times, the archived mark and the exclusion from suggestions. What an archive does
+not restore is the vaults themselves: the items of every archived vault go into the one vault the person chooses,
+each listing the vault it came from (`ImportEntryReference.container`).
+
+Known-answer vectors for the derivation (one of a passphrase that NFKD changes, a precomposed "é" and the U+FB01
+ligature, so a missing or different normalisation fails), and a whole archive written by an independent Python
+implementation of this section (fixed keys and nonces), are in `AccountArchiveTests`; the archive is also the seed of the `archive`
+fuzz target. The adversarial areas are "encrypted Watchword archive" and "interchange through the session".
 
 ## 15. Module and target layout
 
@@ -2397,6 +2531,7 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordGenerator    password / passphrase / PIN generation, entropy
   Sources/WatchwordEnvelope     envelope format, AAD context, KDF parameter validation
   Sources/WatchwordCrypto       2SKD, keyset, vault keys, HPKE wrap  (CryptoKit)   [milestone 1, done]
+                                encrypted Watchword archive (§14.1)                [milestone 7]
   Sources/SecureMemory          SecureBytes (only unsafe code)                      [milestone 1, done]
   Sources/WatchwordStore        record-store port, in-memory and SQLite stores     [milestone 2, done]
   Sources/WatchwordSync         change log, merge, SyncTransport protocol,
@@ -2410,7 +2545,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordHygiene      HIBP clients, scan schedule, strength estimator,
                                 reuse, report, HygieneEngine                       [milestone 6; adapters, UI open]
   Sources/WatchwordInterchange  CSV, 1PUX and CXF import/export, ZIP reader,
-                                DEFLATE inflater, import mapping, instructions      [milestone 7; integration open]
+                                DEFLATE inflater, import mapping, instructions      [milestone 7; session wiring
+                                                                                    done (§14.1), apps open]
   Sources/WatchwordKit          VaultSession façade, UnlockPolicy, AutoLockPolicy,
                                 ports (KeychainStore, BiometricGate, WallClock)     [milestone 2, done]
   Sources/WatchwordPlatform     Apple adapters: SystemKeychainStore,

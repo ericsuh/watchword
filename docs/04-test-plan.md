@@ -53,7 +53,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F2.x vaults | `WatchwordKitTests`: "Vault session: vaults" — create, list, rename; each vault its own key and a sealed name; items per vault and across; copy; move, and a move interrupted at each commit (never neither, never falsely moved); vault deletion confirmed by item count, the Personal vault undeletable; search over decrypted items, never a secret (F2.3); directory rows edited in the file. "Vault session: vaults across devices" — a vault, its name and items reaching another device; concurrent renames; a move against an unseen edit (kept, in the trash: F7.6); the same move on two devices; unresolved values refused; a vault deleted against concurrent work (what the deletion had not seen is kept: F7.7); a vault deletion outliving the revocation of the device that made it; a move whose copy could not be published (the original stays on the other devices, never neither); a locked device learning of a vault. "Vault session: a lock during the account's objects" — a lock landing in a vault-key fetch or in the reconciliation after an unlock wins, and traps nothing |
 | F5.2, F10.1, F10.2 enrolment and devices | `WatchwordKitTests`: "Vault session: enrolment from the transport (F5.2)" — a device joining from the transport, password and Secret Key alone; wrong credentials one failure, leaving nothing behind; an approved device; an account from before the registry; a store restored onto other hardware, and the edits and deletions its old device had not synced reaching the others. "Vault session: devices, revocation and password changes" — a password change reaching other devices (old password refused, quick unlock destroyed, nothing merged or published until the new one is entered); enrolling after a change; revocation with and without a password change; a password change the person did not make, undone; a registry rolled back in the local file. `WatchwordCryptoTests`: "Device keys and signatures", "Device registry", "Published account header". Section 6.9 |
 | F7.5 automatic sync | `WatchwordSyncTests`: "Automatic sync policy" — unlock, debounced saves and their cap, a save during a sync, coalesced hints, periodic intervals locked and unlocked, backoff and retry, spacing, a clock moved backwards — all with dates, no sleeping |
-| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests (`WatchwordInterchangeTests`: "CSV reader and writer (RFC 4180)", "Password CSV import and export", "1PUX import and export", "Credential Exchange Format import and export", "ZIP reader and writer", "DEFLATE inflater and CRC-32" — against streams from Python's `zlib` and archives from Python's `zipfile` —, "Bounded JSON reader and writer", "Import mapping into the vault", "Duplicate detection", "Interchange instructions"; milestone 7). Still to come with the integration step: the session's password re-entry and file protection, the encrypted archive, and the Credential Exchange calls |
+| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests (`WatchwordInterchangeTests`: "CSV reader and writer (RFC 4180)", "Password CSV import and export", "1PUX import and export", "Credential Exchange Format import and export", "ZIP reader and writer", "DEFLATE inflater and CRC-32" — against streams from Python's `zlib` and archives from Python's `zipfile` —, "Bounded JSON reader and writer", "Import mapping into the vault", "Duplicate detection", "Interchange instructions"; milestone 7). Through the session and the encrypted archive (`02-architecture.md` §14.1): "Vault session: import, export and the encrypted archive" (`WatchwordKitTests`; with `apexOfWWWHosts`: a `www` host gains its apex by default, each addition in the preview, and the opt-out), "Items from an encrypted Watchword archive" (`WatchwordInterchangeTests`), "Encrypted archive key derivation" and "Encrypted archive format" (`WatchwordCryptoTests`, a vector from Python `cryptography` and a whole archive written by an independent Python implementation), and the adversarial areas "encrypted Watchword archive" and "interchange through the session". Still to come: file protection (the app's) and the Credential Exchange calls |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent (`WatchwordHygieneTests`: "Pwned Passwords: digest and prefix", "…: range parser", "…: cache entries", "…: client", "Breach scan scheduling", "Scan ledger", "Strength estimator", "Password reuse", "Item checks", "Hygiene report", "Hygiene engine", "Breached-account lookup"; milestone 6) |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
 | SEC1–SEC10 | Section 6 below |
@@ -548,8 +548,31 @@ every case above and the attacks a parser author would add to them:
   for that host and reports it, in every format, and website fields beyond the per-entry URL count are not
   written as sign-in URLs.
 
-Still to come with the integration step: that a plaintext export cannot be produced without re-entering the
-account password, and that the file is written with the protection class §14 names.
+Done with the session wiring (`02-architecture.md` §14.1), as "Adversarial: encrypted Watchword archive"
+(`AdversarialArchiveTests`; adversaries A1, holding the archive file, and A7, handing one over) and
+"Adversarial: interchange through the session" (`AdversarialSessionInterchangeTests`; A7 and A3):
+
+- An archive cut anywhere, extended by a byte, shortened by a whole entry with its count rewritten, its
+  entries reordered or relabelled, an entry spliced from another archive, and a vault item record put where an
+  entry goes: each refused by the parser, before any key is derived.
+- KDF parameters below the floor and above the ceiling (and a salt below its minimum) refused before
+  deriving; a count no file could hold refused before anything is allocated; parameters inside the bounds
+  but altered change the key.
+- A wrong passphrase, an empty one, a wrong Secret Key, and one changed byte in the creation time, the salt,
+  the wrapped key, the manifest or an entry: all one `CryptoError.authenticationFailed`.
+- An archive of another account opens only with that account's Secret Key, and cannot be relabelled as this
+  account's.
+- An archive made under the attacker's own account and handed over with its Secret Key, naming an existing
+  item's ID, the victim's vault, huge sync counters, a planted conflict and a scope the policy refuses: imported
+  as a new item, with a new ID, in the chosen vault, scoped as the policy allows, stamped by this device alone,
+  the existing item untouched.
+- A CSV entry matching the bank item, with an attacker's password and a sign-in URL leading to the attacker's
+  site, merged without choices, adds nothing that signs in or is offered anywhere, and a later export names no
+  other host.
+- No plaintext export and no archive without the account password; a preview's drafts gone with a lock, and
+  neither `importAdditions` nor `commitImport` reaching them after the next unlock.
+
+Still to come: that the file is written with the protection class §14 names (the app's part).
 
 ### 6.6 Hygiene (milestone 6)
 - HIBP responses with padding, missing padding, non-hex lines, huge bodies, HTTP 429/5xx; the
@@ -699,10 +722,11 @@ observable from the extension). Milestone 2 enforces F11.2 at the vault boundary
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
   `otpauth://` parser, and `HostMatcher.normalize`.
 
-Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`, with fourteen targets
+Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`, with fifteen targets
 selected by `WATCHWORD_FUZZ_TARGET`: `csv`, `password-csv`, `inflate`, `zip`, `1pux`, `1pux-archive`, `cxf`,
 `amplify`, `envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the
-import's scope derivation), `otpauth` and `passkey`. Each target runs a parser over arbitrary bytes and then checks
+import's scope derivation), `otpauth`, `passkey` and `archive` (`AccountArchive.parse`, everything checked before a key
+is derived; its seed is the archive an independent implementation wrote). Each target runs a parser over arbitrary bytes and then checks
 what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports and names no
 host that no exported item was scoped to, an inflated
 stream is within its caps, every imported scope passes `ScopePolicy`, every one-time-password and passkey

@@ -19,6 +19,10 @@ public enum EnvelopeKind: UInt8, Sendable, Hashable, CaseIterable {
     /// The device registry (docs/02-architecture.md §7.8): a registry entry kept in the local store, and a device's
     /// name sealed under the keyset's symmetric key inside one.
     case deviceRegistry = 8
+    /// Everything sealed inside an encrypted Watchword archive (docs/02-architecture.md §14.1): the wrapped archive
+    /// key, the manifest and every entry. A kind of its own, so nothing from an archive file can be presented as a
+    /// record of the vault, or the reverse.
+    case archive = 9
 }
 
 public enum EnvelopeError: Error, Equatable, Sendable {
