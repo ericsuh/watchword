@@ -78,6 +78,8 @@ extension VaultSession {
             } else {
                 vault.needsReconcile = false
                 vault.index.judgedHead = vault.ledger.state.hash.bytes
+                // What the replay did not rebuild is held aside whole: gone from the vault, for the hygiene engine too.
+                hygieneRuntime?.takenOut = []
             }
             vault.indexChanged = true
             sharing.vaults[vaultID] = vault
@@ -664,6 +666,8 @@ extension VaultSession {
                 try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
                 // The engine's store, not the session's writer: this is not a deletion to publish.
                 try await store.commit(StoreChange(conditionalDeletions: [row.key: row.version]))
+                // Not deleted, to be rebuilt by the replay: the hygiene engine keeps what it knows of it (S47).
+                if kind == .item { hygieneRuntime?.takenOut.insert(row.recordID) }
             }
         }
         sharing.vaults[vaultID]?.needsReconcile = true
