@@ -667,6 +667,65 @@ struct DeviceRegistryTests {
         #expect(fine.retainedEntries == Set((honest + [addD, byD]).map(\.id)))
         #expect(fine.standing(of: RegistryFixture.deviceID(0xE6)) == .active)
     }
+
+    /// Review of the device registry (W27): a key holder — here the revoked device, behind a password change — plants
+    /// thousands of registrations of one device ID, each under a distinct key, in a chain, then thousands of entries
+    /// in that ID's name descending from all of them. Trying every registered key for every entry is millions of
+    /// signature verifications, and every device's evaluation hangs. An entry whose ancestors register its author
+    /// under more than `maximumKeysPerDevice` keys is void unchecked: the verifications stay linear in the entries.
+    @Test("registrations of one device under many keys cost a bounded number of verifications per entry")
+    func manyKeysForOneDevice() throws {
+        var f = RegistryFixture()
+        let x = Self.c
+        let genesis = f.genesis(device: Self.a)
+        let addB = f.add(Self.b, by: Self.a, parents: [genesis])
+        let addX = f.add(x, by: Self.a, parents: [addB])
+        let revokeX = f.revoke(x, by: Self.a, parents: [addX])
+        _ = f.nextUnlockKey()
+        let change = f.credential(generation: 1, previous: genesis, by: Self.a, parents: [revokeX])
+        let byB = f.add(Self.d, by: Self.b, parents: [change])
+        let honest = [genesis, addB, addX, revokeX, change, byB]
+
+        let count = 2048
+        let y = RegistryFixture.deviceID(0xF1)
+        var generator = SeededGenerator(seed: 5)
+        var lastKey = SoftwareDeviceKey.generate(using: &generator)
+        var registrations: [RegistryEntry] = []
+        for _ in 0..<count {
+            lastKey = SoftwareDeviceKey.generate(using: &generator)
+            registrations.append(
+                f.signed(
+                    RegistryEntry(
+                        accountID: f.accountID, parents: [(registrations.last ?? change).id], author: .device(x),
+                        body: .add(RegistryDevice(id: y, key: try lastKey.publicKey(), label: [])))))
+        }
+        var puppets: [RegistryEntry] = []
+        for index in 0..<count {
+            let junk = UUID(
+                uuid: (0x4A, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, UInt8(index >> 8), UInt8(index & 0xFF)))
+            var entry = RegistryEntry(
+                accountID: f.accountID, parents: [registrations[count - 1].id], author: .device(y), body: .revoke(junk))
+            entry.accountSignature = try f.keyset.sign(entry.accountMessage, domain: .deviceRegistry)
+            entry.authorSignature = try lastKey.sign(
+                prepared: DeviceSignatures.signedBytes(
+                    domain: .deviceRegistry, deviceID: y, message: entry.deviceMessage))
+            puppets.append(entry)
+        }
+        let entries = honest + registrations + puppets
+        let admitted = DeviceRegistry.admit(
+            entries.map { $0.serialized() }, accountID: f.accountID, accountSigningKey: f.accountSigningKey)
+        let verifications = DeviceRegistry.VerificationCount()
+        let state = try DeviceRegistry.evaluate(
+            admitted, accountID: f.accountID, accountSigningKey: f.accountSigningKey, genesis: genesis.id,
+            credential: change.id, verifications: verifications)
+
+        #expect(state.retainedEntries == Set(honest.map(\.id)))
+        #expect(state.standing(of: y) == .unknown && state.standing(of: Self.d) == .active)
+        // At most `maximumKeysPerDevice` device signatures per entry, plus the genesis entry's two and the
+        // credential chain's link; the flood's 2,048 × 2,048 key trials never happen.
+        let bound = DeviceRegistry.maximumKeysPerDevice * entries.count + 8
+        #expect(verifications.value <= bound, "\(verifications.value) verifications for \(entries.count) entries")
+    }
 }
 
 @Suite("Published account header")

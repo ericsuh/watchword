@@ -671,6 +671,17 @@ replay: a device writes only once it is registered, so every honest entry does, 
 device but counted for nothing registers nobody. A revoked device's ID and key are never accepted again; a
 registered device's key never changes; no key serves two devices.
 
+*A bounded number of keys per device* (`maximumKeysPerDevice`, 2). An entry whose ancestors register its author
+under more than two distinct keys is void, and no signature of it is checked; otherwise its signature is tried
+against each of those keys once, when the graph is built, and every replay reads the answer. So evaluating costs
+at most two device-signature verifications per entry, plus one per enrolment and one per credential link replayed:
+linear in the entries, whatever a key holder plants (without the bound, thousands of registrations of one ID under
+distinct keys and thousands of entries descending from them all were millions of verifications, and every device's
+evaluation hung; W27). The rule reads ancestry alone, so it is the same whatever order the entries arrived in. An
+honest history registers an ID under one key only (a device's key never changes, and an approved device enrols with
+the key it was approved with); the second key is margin. Several keys for one ID reach an honest device's ancestry
+only through an entry a registered device wrote while it counted — a device that could as well have revoked it.
+
 **What can never count is not kept.** Some entries are void whatever arrives later: past the last checkpoint, one
 whose author was revoked before it; one by a device that nothing it descends from registered under a key that
 verifies it; one by an enrolment key it does not descend from, that does not verify it, or whose generation was

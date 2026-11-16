@@ -358,7 +358,9 @@ Registry rules themselves, including the back-dating case the suite found, are i
 "Device registry" (among them `puppets`: entries relying on a registration that can never count — forged, by the
 revoked device, sealed as void by a checkpoint, two puppets deep, or an enrolment under the revoked device's own
 password change — are void and not retained, at the size limit too, while an honest device added after the
-change still writes); P-256 device signatures (low-S only) and the enrolment key have known answers from Python
+change still writes; and `manyKeysForOneDevice`: 2,048 registrations of one device ID under distinct keys and
+2,048 entries descending from them all are void, and the evaluation's signature verifications, counted through
+`DeviceRegistry.VerificationCount`, stay within two per entry, W27); P-256 device signatures (low-S only) and the enrolment key have known answers from Python
 `cryptography`.
 
 ## 7. CI implementation

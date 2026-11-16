@@ -346,6 +346,12 @@ public enum DeviceRegistry {
     public static let maximumEntries = 4096
     /// The most entries evaluated at once, kept or not: what a device holds plus one batch from the transport.
     public static let maximumEvaluated = 2 * maximumEntries
+    /// The most distinct keys an entry's ancestors may register its author under. An honest history registers a
+    /// device ID under one key only (a registered device's key never changes, and an approved device enrols with the
+    /// key it was approved with); one more is margin. An entry whose ancestors name more is void without any
+    /// signature being checked, so evaluating costs at most this many device-signature verifications per entry,
+    /// however many registrations of one ID a key holder plants (review of the device registry, W27).
+    public static let maximumKeysPerDevice = 2
 
     /// Parses and admits entries: an entry that does not parse, belongs to another account, or is not signed by the
     /// account key is dropped here, before it can count for anything. Needs public keys only.
@@ -384,7 +390,28 @@ public enum DeviceRegistry {
         genesis: ObjectDigest,
         credential: ObjectDigest
     ) throws -> DeviceRegistryState {
-        let graph = try prepare(entries, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis)
+        try evaluate(
+            entries, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis,
+            credential: credential, verifications: VerificationCount())
+    }
+
+    /// Counts the signature verifications an evaluation makes, so a test can hold them to a bound linear in the
+    /// entries (W27).
+    final class VerificationCount {
+        var value = 0
+    }
+
+    static func evaluate(
+        _ entries: [ObjectDigest: RegistryEntry],
+        accountID: UUID,
+        accountSigningKey: [UInt8],
+        genesis: ObjectDigest,
+        credential: ObjectDigest,
+        verifications: VerificationCount
+    ) throws -> DeviceRegistryState {
+        let graph = try prepare(
+            entries, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis,
+            verifications: verifications)
         var state = try replay(
             entries, graph: graph, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis,
             credential: credential)
@@ -428,9 +455,11 @@ public enum DeviceRegistry {
 
     /// Checks the genesis entry and builds the graph of everything that descends from it.
     private static func prepare(
-        _ entries: [ObjectDigest: RegistryEntry], accountID: UUID, accountSigningKey: [UInt8], genesis: ObjectDigest
+        _ entries: [ObjectDigest: RegistryEntry], accountID: UUID, accountSigningKey: [UInt8], genesis: ObjectDigest,
+        verifications: VerificationCount
     ) throws -> Graph {
         guard entries.count <= maximumEvaluated else { throw DeviceRegistryError.tooManyEntries(entries.count) }
+        verifications.value += 2
         guard let root = entries[genesis],
             case .genesis(let rootKey, let rootDevice, let rootEnrolmentKey) = root.body,
             root.parents.isEmpty, root.author == .device(rootDevice.id), root.accountID == accountID,
@@ -445,7 +474,7 @@ public enum DeviceRegistry {
         else { throw DeviceRegistryError.genesisUnavailable }
 
         // Entries that descend from the genesis entry, in a causal order, each with a bitset of its ancestors.
-        return Graph(entries, genesis: genesis)
+        return Graph(entries, genesis: genesis, verifications: verifications)
     }
 
     /// Replays the registry along the credential chain that ends at `credential`.
@@ -565,11 +594,10 @@ public enum DeviceRegistry {
                 case .device(let author):
                     guard deviceSigned(entry, id: id, by: author, in: state, graph: graph) else { continue }
                 case .enrolment(let cited):
-                    // Only the generation that is current here, and only an entry written knowing of it.
+                    // Only the generation that is current here, and only an entry written knowing of it and signed
+                    // by its enrolment key (checked once, against the cited entry's key, when the graph was built).
                     guard cited == current.id, graph.isAncestor(cited, of: id),
-                        (try? Signatures.verify(
-                            entry.authorSignature, for: entry.enrolmentMessage, domain: .deviceRegistry,
-                            signingKey: current.enrolmentKey)) != nil
+                        let index = graph.index[id], !graph.unverifiable.contains(index)
                     else { continue }
                 }
                 // A revoked device never returns, under its ID or its key; a registered device's key never changes,
@@ -606,7 +634,7 @@ public enum DeviceRegistry {
                 // device, signed by the enrolment key of the generation before — or the chain is not one to follow.
                 guard case .device(let author) = entry.author,
                     deviceSigned(entry, id: id, by: author, in: state, graph: graph),
-                    previous == state.credential.id, credentialSigned(entry, by: state.credential),
+                    previous == state.credential.id, credentialSigned(entry, by: state.credential, graph: graph),
                     (try? Signatures.validateSigningKey(enrolmentKey)) != nil
                 else { throw DeviceRegistryError.brokenCredentialChain }
                 state.credentialChain.append(chain[next])
@@ -629,10 +657,14 @@ public enum DeviceRegistry {
             })
     }
 
-    private static func credentialSigned(_ entry: RegistryEntry, by previous: DeviceRegistryState.Credential) -> Bool {
-        (try? Signatures.verify(
-            entry.previousCredentialSignature, for: entry.previousCredentialMessage, domain: .deviceRegistry,
-            signingKey: previous.enrolmentKey)) != nil
+    private static func credentialSigned(
+        _ entry: RegistryEntry, by previous: DeviceRegistryState.Credential, graph: Graph
+    ) -> Bool {
+        graph.verifications.value += 1
+        return
+            (try? Signatures.verify(
+                entry.previousCredentialSignature, for: entry.previousCredentialMessage, domain: .deviceRegistry,
+                signingKey: previous.enrolmentKey)) != nil
     }
 
     /// The entries that descend from the genesis entry, with each one's ancestors.
@@ -647,15 +679,20 @@ public enum DeviceRegistry {
         /// names.
         var registrations: [UUID: [(index: Int, key: DevicePublicKey)]] = [:]
         /// For each entry by a device, the keys its ancestors register that device under and that verify the entry's
-        /// author signature: each distinct key is tried once, here, and every replay reads the answer.
+        /// author signature: each distinct key is tried once, here, and every replay reads the answer. Empty when
+        /// the ancestors name more than `maximumKeysPerDevice` keys for the author: then nothing is tried.
         var verifyingKeys: [Set<DevicePublicKey>] = []
         /// Entries no replay can ever apply, whatever else arrives, judged from their ancestors alone: by a device
-        /// that no ancestor registers under a key that verifies the entry, or by an enrolment key that is not an
-        /// ancestor or does not verify it. Whether the registration it relies on can itself count is a question for
-        /// each replay (`DeviceRegistry.replay`, step 2).
+        /// that no ancestor registers under a key that verifies the entry, or that its ancestors register under more
+        /// than `maximumKeysPerDevice` keys; or by an enrolment key that is not an ancestor or does not verify it.
+        /// Whether the registration it relies on can itself count is a question for each replay
+        /// (`DeviceRegistry.replay`, step 2).
         var unverifiable: Set<Int> = []
+        /// Every signature verification of this evaluation, for the bound a test holds it to.
+        let verifications: VerificationCount
 
-        init(_ entries: [ObjectDigest: RegistryEntry], genesis: ObjectDigest) {
+        init(_ entries: [ObjectDigest: RegistryEntry], genesis: ObjectDigest, verifications: VerificationCount) {
+            self.verifications = verifications
             // Connected: the genesis entry, and any other entry whose parents are all connected. An entry with a
             // parent this device has not seen waits; a second genesis entry is never connected.
             var waitingFor: [ObjectDigest: Int] = [:]
@@ -704,16 +741,24 @@ public enum DeviceRegistry {
                 let verifiable: Bool
                 switch entry.author {
                 case .device(let author):
-                    var tried: Set<DevicePublicKey> = []
+                    // The distinct keys its ancestors register the author under, stopping at one too many: past
+                    // `maximumKeysPerDevice` the entry is void and no signature is checked, so a key holder who plants
+                    // thousands of registrations of one ID costs no more verifications than an honest history.
+                    var keys: [DevicePublicKey] = []
                     for registration in registrations[author, default: []]
-                    where isAncestor(index: registration.index, of: position)
-                        && tried.insert(registration.key).inserted
-                    {
-                        if (try? DeviceSignatures.verify(
-                            entry.authorSignature, for: entry.deviceMessage, domain: .deviceRegistry, deviceID: author,
-                            key: registration.key)) != nil
-                        {
-                            verifyingKeys[position].insert(registration.key)
+                    where isAncestor(index: registration.index, of: position) && !keys.contains(registration.key) {
+                        keys.append(registration.key)
+                        if keys.count > DeviceRegistry.maximumKeysPerDevice { break }
+                    }
+                    if keys.count <= DeviceRegistry.maximumKeysPerDevice {
+                        for key in keys {
+                            verifications.value += 1
+                            if (try? DeviceSignatures.verify(
+                                entry.authorSignature, for: entry.deviceMessage, domain: .deviceRegistry,
+                                deviceID: author, key: key)) != nil
+                            {
+                                verifyingKeys[position].insert(key)
+                            }
                         }
                     }
                     verifiable = !verifyingKeys[position].isEmpty
@@ -723,6 +768,7 @@ public enum DeviceRegistry {
                     case .genesis(_, _, let enrolmentKey)?, .credential(_, let enrolmentKey, _)?: key = enrolmentKey
                     default: key = nil
                     }
+                    if key != nil && isAncestor(cited, of: id) { verifications.value += 1 }
                     verifiable =
                         isAncestor(cited, of: id)
                         && key.map { key in
