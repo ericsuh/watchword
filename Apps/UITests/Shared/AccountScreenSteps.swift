@@ -71,13 +71,10 @@ extension XCUIApplication {
         field.typeText(text)
     }
 
-    /// Clicks the button labelled `label` that is not `excluding`: a confirmation dialog's action, whose label
-    /// repeats the button that opened it.
-    func confirm(_ label: String, excluding identifier: String = "", file: StaticString = #filePath, line: UInt = #line)
-    {
-        let button = buttons.matching(
-            NSPredicate(format: "label == %@ AND identifier != %@", label, identifier)
-        ).firstMatch
+    /// Clicks a confirmation dialog's button labelled `label`. The button that opened the dialog is labelled
+    /// differently ("Share This Vault…", "Discard…"), so the label alone finds the dialog's.
+    func confirm(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        let button = buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 10), debugDescription, file: file, line: line)
         button.click()
     }

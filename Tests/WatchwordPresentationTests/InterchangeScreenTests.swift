@@ -51,7 +51,7 @@ struct InterchangeScreenTests {
         let review = try #require(model.merges[duplicate.id])
         #expect(review.hosts == ["www.citylibrary.org"])
         let password = try #require(review.signInFields.first { $0.isSecret })
-        #expect(password.value == "imported-Library-9!")
+        #expect(password.value == "imported-Library-9!" && password.label == "Password")
         #expect(!review.urlFields.isEmpty)
         #expect(model.accepted[duplicate.id] == MergeChoices.none, "never pre-filled")
         #expect(!model.isAccepted(host: "www.citylibrary.org", for: duplicate.id))
