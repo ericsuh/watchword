@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #MISE description="Run the screenshot tour and write every screen to Screenshots/<set>/<name>.png, with an index and a contact sheet"
+#MISE depends=["app:generate"]
 #USAGE arg "[platform]" default="all" help="Which app to tour; with `all`, both run even if the first fails" {
 #USAGE   choices "ios" "macos" "all"
 #USAGE }
 #USAGE flag "--appearance <appearance>" default="light" help="The appearance the app is drawn in, whatever the machine's is; `dark` writes to Screenshots/<platform>-dark" {
 #USAGE   choices "light" "dark"
 #USAGE }
-#USAGE flag "--device <family>" default="iphone" help="iOS only: `ipad` tours on the first available iPad simulator, in landscape, and writes to Screenshots/ios-ipad" {
+#USAGE flag "--device <family>" default="iphone" help="iOS only: `ipad` tours on an iPad simulator on the newest iOS the scheme supports, in landscape, and writes to Screenshots/ios-ipad" {
 #USAGE   choices "iphone" "ipad"
 #USAGE }
 #USAGE flag "--output <dir>" default="Screenshots" help="Where the sets go; each run replaces the sets it captures"
@@ -51,13 +52,6 @@ if [ -z "$source_text" ]; then
   source_text="Commit $(git rev-parse HEAD)."
 fi
 
-first_simulator() { # first_simulator <name prefix>: the UDID of the first available iOS simulator so named
-  xcrun simctl list devices available --json | python3 -c 'import json, sys
-prefix = sys.argv[1]
-devices = json.load(sys.stdin)["devices"]
-print(next(d["udid"] for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith(prefix)))' "$1"
-}
-
 capture() { # capture <ios|macos>: tour one app and write its set; non-zero if the tour or the extraction failed
   local os="$1" set="$1" title target bundle test_args=() index_args=() status=0
   if [ "$os" = ios ]; then
@@ -72,9 +66,9 @@ capture() { # capture <ios|macos>: tour one app and write its set; non-zero if t
       test_args+=("--simulator=$usage_simulator")
     elif [ "$device" = ipad ]; then
       local udid
-      udid=$(first_simulator iPad) || udid=""
+      udid=$(.github/scripts/pick-simulator.sh iPad) || udid=""
       if [ -z "$udid" ]; then
-        echo "::error::No available iPad simulator; \`xcrun simctl list devices available\` shows what there is"
+        echo "::error::No iPad simulator the Watchword-iOS scheme can run on; \`xcodebuild -showdestinations\` shows what there is"
         return 1
       fi
       test_args+=("--simulator=$udid")

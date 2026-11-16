@@ -46,9 +46,8 @@ fi
 if [ "$platform" = ios ] || [ "$platform" = all ]; then
   udid="${usage_simulator:-}"
   if [ -z "$udid" ]; then
-    udid=$(xcrun simctl list devices available --json | python3 -c 'import json, sys
-devices = json.load(sys.stdin)["devices"]
-print(next(d["udid"] for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")))')
+    udid=$(.github/scripts/pick-simulator.sh iPhone) || udid=""
+    echo "iOS Simulator: $udid"
   fi
   destination="platform=iOS Simulator,id=$udid"
   # Build first, with the simulator still shut down, then boot it, then test what was built. Booted before a build,
