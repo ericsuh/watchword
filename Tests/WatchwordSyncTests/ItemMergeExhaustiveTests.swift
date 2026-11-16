@@ -7,8 +7,9 @@ import WatchwordTestSupport
 
 /// Every history of a small configuration (docs/10-sync-correctness.md §7, docs/04-test-plan.md §3): random testing
 /// misses corners, so here nothing is sampled. From a starting point, every sequence of up to `depth` steps is
-/// explored — each step one device performing one operation of the alphabet, or receiving another device's version —
-/// and at every node of that tree:
+/// explored — each step one device performing one operation of the alphabet *on each thing it could act on* (each
+/// field, each line, each spelling, each value of each conflict), or receiving another device's version — and at
+/// every node of that tree:
 ///
 /// - the copy just written matches the specification of a multi-value register, and every update contains the version
 ///   it was made on (`MergeModel`);
@@ -138,12 +139,17 @@ struct LongRunningItemMergeExhaustiveTests {
 
             for device in model.replicas.indices {
                 for operation in alphabet {
-                    var next = model
-                    // Where an operation has a choice it takes the first: the others are other histories' firsts.
-                    // A step that does nothing (resolving where nothing conflicts, deleting what is not in the trash)
-                    // is not a history of its own.
-                    guard next.perform(operation, by: device, pick: { _ in 0 }) else { continue }
-                    explore(next, depth: depth - 1, path: path + " \(device):\(operation)", known: stored.count)
+                    // Every choice the operation has is a history of its own: which field or line it acts on, and
+                    // for a resolution which conflict and which of its values is kept — the one shown or another
+                    // (review finding Y35: taking the first each time never resolved in favour of a value that was
+                    // not shown). A step that does nothing (resolving where nothing conflicts, deleting what is not
+                    // in the trash) is not a history.
+                    for (next, choice) in LongRunningItemMergeExhaustiveTests.outcomes(
+                        of: operation, by: device, in: model)
+                    {
+                        let step = " \(device):\(operation)" + choice.map { "/\($0)" }.joined()
+                        explore(next, depth: depth - 1, path: path + step, known: stored.count)
+                    }
                 }
                 for source in model.replicas.indices where source != device {
                     var next = model
@@ -154,13 +160,39 @@ struct LongRunningItemMergeExhaustiveTests {
         }
     }
 
+    /// Every way `device` can perform `operation` on `model`: one outcome per combination of the choices the operation
+    /// asks for, found by running it with each in turn (the choices an operation asks for can depend on the ones
+    /// before, so they are enumerated like an odometer).
+    static func outcomes(of operation: MergeModel.Operation, by device: Int, in model: MergeModel)
+        -> [(model: MergeModel, choice: [Int])]
+    {
+        var outcomes: [(model: MergeModel, choice: [Int])] = []
+        var prefix: [Int] = []
+        while true {
+            var next = model
+            var bounds: [Int] = []
+            let wrote = next.perform(operation, by: device) { count in
+                let choice = bounds.count < prefix.count ? prefix[bounds.count] : 0
+                bounds.append(count)
+                return choice
+            }
+            let taken = bounds.indices.map { $0 < prefix.count ? prefix[$0] : 0 }
+            if wrote { outcomes.append((next, taken)) }
+            guard let last = taken.indices.last(where: { taken[$0] + 1 < bounds[$0] }) else { break }
+            prefix = Array(taken[..<last]) + [taken[last] + 1]
+        }
+        return outcomes
+    }
+
     /// Explores and compares with the totals recorded when the test was written. A change to the merge that alters
     /// what small histories reach shows up here as a different count, to be understood before the number is changed.
     ///
-    /// Review finding Y33 changed three standard totals: the lines an edit inserts now carry a nonce, drawn here from
-    /// a generator seeded by the step so that counts repeat, so two histories that insert the same line at the same
-    /// revision by different paths store two versions where they stored one. Drawing a constant nonce gives the old
-    /// totals exactly.
+    /// The totals were last changed for two stated reasons. Review finding Y35: exploring every choice of each
+    /// operation (which field or line, which value a resolution keeps) instead of only the first made each tree wider,
+    /// so every count grew. And Y33: the lines an edit inserts now carry a nonce, drawn here from a generator seeded by
+    /// the step so that counts repeat, so two histories that insert the same line at the same revision by different
+    /// paths store two versions where they stored one. On the old exploration that alone added two versions (and the
+    /// pairs and triples they form) to three starting points; drawing a constant nonce gives the old totals exactly.
     static func check(
         _ start: MergeModel, alphabet: [MergeModel.Operation], depth: Int, expecting expected: Totals,
         sourceLocation: SourceLocation = #_sourceLocation
@@ -191,11 +223,11 @@ struct LongRunningItemMergeExhaustiveTests {
             MergeModel(devices: 2), alphabet: Self.alphabet, depth: Self.depth,
             expecting: TestEnvironment.isLongRun
                 ? Totals(
-                    histories: 32083, conflicts: 7324, resolutions: 20, erased: 376, kept: 1148, versions: 9077,
-                    pairs: 65141, triples: 230823)
+                    histories: 121733, conflicts: 25568, resolutions: 64, erased: 694, kept: 2414,
+                    versions: 29193, pairs: 231687, triples: 853571)
                 : Totals(
-                    histories: 2321, conflicts: 324, resolutions: 0, erased: 30, kept: 36, versions: 885, pairs: 4643,
-                    triples: 13145))
+                    histories: 6569, conflicts: 792, resolutions: 0, erased: 42, kept: 54, versions: 2201,
+                    pairs: 12559, triples: 36741))
     }
 
     @Test("two devices that already disagree about one field, every history from there")
@@ -207,11 +239,11 @@ struct LongRunningItemMergeExhaustiveTests {
             start, alphabet: Self.alphabet, depth: Self.depth,
             expecting: TestEnvironment.isLongRun
                 ? Totals(
-                    histories: 43593, conflicts: 42449, resolutions: 2134, erased: 208, kept: 1644, versions: 13277,
-                    pairs: 121045, triples: 564263)
+                    histories: 155757, conflicts: 150733, resolutions: 8236, erased: 300, kept: 3286,
+                    versions: 41279, pairs: 400578, triples: 1924816)
                 : Totals(
-                    histories: 3037, conflicts: 2979, resolutions: 80, erased: 6, kept: 68, versions: 1283, pairs: 9244,
-                    triples: 36086))
+                    histories: 8079, conflicts: 7901, resolutions: 224, erased: 6, kept: 98, versions: 3039,
+                    pairs: 22984, triples: 92000))
     }
 
     @Test("two devices, one of which has trashed the item, every history from there")
@@ -221,8 +253,8 @@ struct LongRunningItemMergeExhaustiveTests {
         Self.check(
             start, alphabet: Self.alphabet, depth: 3,
             expecting: Totals(
-                histories: 3514, conflicts: 968, resolutions: 2, erased: 95, kept: 322, versions: 1238, pairs: 7692,
-                triples: 25867))
+                histories: 8984, conflicts: 2050, resolutions: 4, erased: 159, kept: 625, versions: 2894,
+                pairs: 19142, triples: 66287))
     }
 
     /// The start `resolutionDiscardsEverywhere` needs: both devices edited a field while it held a conflict, so each
@@ -239,8 +271,25 @@ struct LongRunningItemMergeExhaustiveTests {
         Self.check(
             start, alphabet: [.setField, .removeField, .setTitle, .resolve], depth: 3,
             expecting: Totals(
-                histories: 585, conflicts: 585, resolutions: 44, erased: 0, kept: 0, versions: 302, pairs: 2905,
-                triples: 15316))
+                histories: 1673, conflicts: 1673, resolutions: 128, erased: 0, kept: 0, versions: 736,
+                pairs: 7431, triples: 40356))
+    }
+
+    /// The start `oneStampTwoSpellings` and `twoSpellingsAreAConflict` need (review finding Y31): each device has
+    /// saved a different spelling of the same password — equal as `String`s, different bytes. Every history of
+    /// respelling a field or a note line and of resolving, each with every choice.
+    @Test("two devices holding two spellings of one password, every history of respelling and resolving")
+    func twoDevicesWithTwoSpellings() {
+        var start = MergeModel(devices: 2)
+        // The password (the second field), in the first spelling on one device and the second on the other.
+        var choices = [1, 0, 1, 1]
+        start.perform(.respellField, by: 0) { _ in choices.removeFirst() }
+        start.perform(.respellField, by: 1) { _ in choices.removeFirst() }
+        Self.check(
+            start, alphabet: [.respellField, .respellLine, .resolve], depth: 3,
+            expecting: Totals(
+                histories: 3897, conflicts: 2915, resolutions: 172, erased: 0, kept: 0, versions: 1561, pairs: 11546,
+                triples: 45682))
     }
 
     @Test("three devices, two of which hold the item in the trash, every history of edits, removals and deletion")
@@ -251,7 +300,7 @@ struct LongRunningItemMergeExhaustiveTests {
         Self.check(
             start, alphabet: [.setField, .removeField, .restore, .resolve, .delete], depth: 3,
             expecting: Totals(
-                histories: 1891, conflicts: 572, resolutions: 0, erased: 142, kept: 448, versions: 332, pairs: 1993,
-                triples: 6622))
+                histories: 5731, conflicts: 1664, resolutions: 0, erased: 226, kept: 1080, versions: 888,
+                pairs: 6139, triples: 21968))
     }
 }
