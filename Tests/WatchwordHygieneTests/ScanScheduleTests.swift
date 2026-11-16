@@ -237,7 +237,7 @@ struct ScanScheduleTests {
         let now = await clock.now()
         guard case .scan(let item, _) = schedule.decide(candidates: all, keysResident: true, now: now) else { return }
         schedule.recordFailure(
-            item: item, error: .rateLimited(retryAfter: 900), networkRequests: 1, now: now, jitter: 0)
+            item: item, version: 1, error: .rateLimited(retryAfter: 900), networkRequests: 1, now: now, jitter: 0)
         #expect(
             schedule.decide(candidates: all, keysResident: true, now: now)
                 == .wait(until: now.addingTimeInterval(900), .backoff))
@@ -266,7 +266,7 @@ struct ScanScheduleTests {
             case .scan(let item, _) where item == bad:
                 attemptsOnBad += 1
                 schedule.recordFailure(
-                    item: item, error: .serverUnavailable(status: 503, retryAfter: 300), networkRequests: 1,
+                    item: item, version: 1, error: .serverUnavailable(status: 503, retryAfter: 300), networkRequests: 1,
                     now: now, jitter: 0)
             case .scan(let item, _):
                 schedule.recordScan(item: item, version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
@@ -288,6 +288,174 @@ struct ScanScheduleTests {
         #expect(schedule.decide(candidates: all, keysResident: true, now: now) == .scan(item: bad, reason: .created))
     }
 
+    /// The reviewer's case, as the schedule sees it: a vault unlocked for twenty seconds every ten minutes, where one
+    /// item's range is refused every time. Each unlock is a new `ScanSchedule` over the ledger the session stored.
+    /// With the pacing handed on it is the same process; without, a new one (the app was terminated in between).
+    @Test(
+        "one refused range does not stall the vault across locks, or across restarts",
+        arguments: [true, false])
+    func failingItemDoesNotStallAcrossLocks(sameProcess: Bool) async {
+        let clock = FakeClock()
+        let start = await clock.now()
+        let all = Self.candidates(8)
+        let bad = Self.id(1)
+        var ledger = ScanLedger()
+        var pacing: ScanPacing?
+        var scanned: Set<UUID> = []
+        var attemptsOnBad = 0
+        var periodsUntilDone: Int?
+        for period in 0..<36 {
+            let unlockedAt = start.addingTimeInterval(Double(period) * 600)
+            await clock.set(unlockedAt)
+            var schedule = ScanSchedule(ledger: ledger, pacing: sameProcess ? pacing : nil)
+            unlocked: while true {
+                let now = await clock.now()
+                switch schedule.decide(candidates: all, keysResident: true, now: now) {
+                case .scan(let item, _) where item == bad:
+                    attemptsOnBad += 1
+                    schedule.recordFailure(
+                        item: item, version: 1, error: .serverUnavailable(status: 503, retryAfter: 300),
+                        networkRequests: 1, now: now, jitter: 0)
+                case .scan(let item, _):
+                    schedule.recordScan(item: item, version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
+                    scanned.insert(item)
+                case .wait(let until, _):
+                    guard until < unlockedAt.addingTimeInterval(20) else { break unlocked }
+                    await clock.set(until)
+                case .idle, .locked:
+                    break unlocked
+                }
+            }
+            // The vault locks. The ledger is what the session sealed; the pacing is what the engine kept.
+            ledger = schedule.ledger
+            pacing = schedule.pacing
+            if scanned.count == 7, periodsUntilDone == nil { periodsUntilDone = period + 1 }
+        }
+        #expect(scanned == Set(all.map(\.id)).subtracting([bad]))
+        // The first unlock is spent on the refused range and its backoff; the second reaches everything else.
+        #expect(periodsUntilDone == 2)
+        // And the refused range is asked for at most once per unlock.
+        #expect(attemptsOnBad <= 36)
+        #expect(ledger.failures.keys.map { $0 } == [bad])
+        #expect(ledger.entries[bad] == nil)
+    }
+
+    @Test("a completed check clears the item's failure; pruning and forgetting drop it")
+    func failureIsCleared() async {
+        let clock = FakeClock()
+        let now = await clock.now()
+        var schedule = ScanSchedule()
+        for number in 1...3 {
+            schedule.recordFailure(
+                item: Self.id(number), version: 1, error: .transport, networkRequests: 1, now: now, jitter: 0)
+        }
+        #expect(schedule.ledger.failures.count == 3)
+        #expect(schedule.ledger.failures[Self.id(1)] == .init(itemVersion: 1, count: 1, failedAt: now))
+        schedule.recordScan(item: Self.id(1), version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
+        #expect(schedule.ledger.failures[Self.id(1)] == nil)
+        schedule.forget(Self.id(2))
+        #expect(schedule.ledger.failures[Self.id(2)] == nil)
+        schedule.prune(keeping: [Self.id(1)])
+        #expect(schedule.ledger.failures.isEmpty)
+    }
+
+    @Test("a time of its own holds for the version that failed; an edited item still waits its turn, but only that")
+    func setAsideIsPerVersion() async {
+        let clock = FakeClock()
+        let policy = ScanPolicy(initialBackoff: 10, maximumBackoff: 10, itemRetryInitial: 3600)
+        var schedule = ScanSchedule(policy: policy)
+        let start = await clock.now()
+        schedule.recordFailure(
+            item: Self.id(1), version: 1, error: .malformedResponse, networkRequests: 1, now: start, jitter: 0)
+        await clock.advance(by: 10)
+        let now = await clock.now()
+        // The version that failed is set aside for an hour.
+        #expect(
+            schedule.decide(candidates: Self.candidates(1), keysResident: true, now: now)
+                == .wait(until: start.addingTimeInterval(3600), .retry))
+        // Edited, it may hold a different password, so the hour does not apply: it is due now.
+        let edited = [ScanCandidate(id: Self.id(1), version: 2)]
+        #expect(
+            schedule.decide(candidates: edited, keysResident: true, now: now)
+                == .scan(item: Self.id(1), reason: .created))
+        // But it does not jump the queue: an item that has not failed goes first.
+        let both = edited + [ScanCandidate(id: Self.id(2), version: 1)]
+        #expect(
+            schedule.decide(candidates: both, keysResident: true, now: now) == .scan(item: Self.id(2), reason: .created)
+        )
+        // A failure of the new version starts its own count: an hour again, not two.
+        schedule.recordFailure(
+            item: Self.id(1), version: 2, error: .malformedResponse, networkRequests: 1, now: now, jitter: 0)
+        #expect(schedule.ledger.failures[Self.id(1)]?.count == 1)
+        #expect(schedule.ledger.failures[Self.id(1)]?.notBefore == now.addingTimeInterval(3600))
+    }
+
+    @Test("the failures kept never outgrow what a ledger may hold: at the bound, the oldest goes")
+    func failuresAreBounded() async {
+        let clock = FakeClock()
+        let now = await clock.now()
+        var failures: [UUID: ScanLedger.Failure] = [:]
+        for number in 0..<ScanLedger.maximumEntries {
+            let id = UUID(
+                uuid: (
+                    0xEE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, UInt8(truncatingIfNeeded: number >> 24),
+                    UInt8(truncatingIfNeeded: number >> 16), UInt8(truncatingIfNeeded: number >> 8),
+                    UInt8(truncatingIfNeeded: number)
+                ))
+            // The first is the oldest.
+            failures[id] = .init(itemVersion: 1, count: 1, failedAt: now.addingTimeInterval(Double(number) - 1e6))
+        }
+        let oldest = UUID(uuid: (0xEE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        #expect(failures[oldest] != nil)
+        var schedule = ScanSchedule(ledger: ScanLedger(failures: failures))
+        schedule.recordFailure(
+            item: Self.id(1), version: 1, error: .transport, networkRequests: 1, now: now, jitter: 0)
+        #expect(schedule.ledger.failures.count == ScanLedger.maximumEntries)
+        #expect(schedule.ledger.failures[Self.id(1)] != nil)
+        #expect(schedule.ledger.failures[oldest] == nil)
+    }
+
+    @Test("a scan a lock interrupted pays for its requests, and a refusal it met backs off; nothing else is recorded")
+    func interruptedScanPays() async {
+        let clock = FakeClock()
+        let now = await clock.now()
+        let policy = ScanPolicy(requestSpacing: 2, burst: 3, maximumJitter: 0)
+        var schedule = ScanSchedule(policy: policy)
+        let before = schedule.ledger
+        schedule.recordInterrupted(networkRequests: 3, error: nil, now: now, jitter: 0)
+        #expect(schedule.ledger == before)
+        #expect(
+            schedule.decide(candidates: Self.candidates(2), keysResident: true, now: now)
+                == .wait(until: now.addingTimeInterval(2), .pacing))
+        schedule.recordInterrupted(
+            networkRequests: 1, error: .rateLimited(retryAfter: 900), now: now, jitter: 0)
+        #expect(schedule.earliestStart(for: Self.id(1), now: now) == now.addingTimeInterval(900))
+        // A lock is not a refusal.
+        var other = ScanSchedule(policy: policy)
+        other.recordInterrupted(networkRequests: 1, error: .interrupted, now: now, jitter: 0)
+        #expect(other.earliestStart(for: Self.id(1), now: now) == nil)
+        #expect(other.ledger.failures.isEmpty)
+    }
+
+    @Test("a Retry-After beyond any the client would pass on is held to the longest one honoured")
+    func retryAfterIsBoundedHere() async {
+        let clock = FakeClock()
+        let now = await clock.now()
+        var schedule = ScanSchedule()
+        schedule.recordFailure(
+            item: Self.id(1), version: 1, error: .rateLimited(retryAfter: 1e12), networkRequests: 1, now: now,
+            jitter: 0)
+        #expect(schedule.earliestStart(for: Self.id(2), now: now) == now.addingTimeInterval(3600))
+        // And one longer than the policy's own maximum backoff, but within that bound, is honoured in full.
+        var brisk = ScanSchedule(policy: ScanPolicy(initialBackoff: 10, maximumBackoff: 10))
+        brisk.recordFailure(
+            item: Self.id(1), version: 1, error: .rateLimited(retryAfter: 1800), networkRequests: 1, now: now,
+            jitter: 0)
+        #expect(brisk.earliestStart(for: Self.id(2), now: now) == now.addingTimeInterval(1800))
+        #expect(brisk.earliestStart(for: Self.id(2), now: now.addingTimeInterval(1799)) == now.addingTimeInterval(1800))
+        #expect(brisk.earliestStart(for: Self.id(2), now: now.addingTimeInterval(1800)) == nil)
+    }
+
     @Test("of two items that failed, the one that failed longer ago is tried first")
     func failedLongestAgoFirst() async {
         let clock = FakeClock()
@@ -301,7 +469,7 @@ struct ScanScheduleTests {
                 return
             }
             order.append(item)
-            schedule.recordFailure(item: item, error: .transport, networkRequests: 1, now: now, jitter: 0)
+            schedule.recordFailure(item: item, version: 1, error: .transport, networkRequests: 1, now: now, jitter: 0)
             await clock.advance(by: 10)
         }
         #expect(order == [Self.id(1), Self.id(2), Self.id(1), Self.id(2), Self.id(1), Self.id(2)])
@@ -320,7 +488,8 @@ struct ScanScheduleTests {
             let now = await clock.now()
             switch schedule.decide(candidates: all, keysResident: true, now: now) {
             case .scan(let item, _) where item == bad:
-                schedule.recordFailure(item: item, error: .malformedResponse, networkRequests: 1, now: now, jitter: 0)
+                schedule.recordFailure(
+                    item: item, version: 1, error: .malformedResponse, networkRequests: 1, now: now, jitter: 0)
             case .scan(let item, _):
                 schedule.recordScan(item: item, version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
                 if item == Self.id(2) { healthyScans.append(now) }
@@ -359,7 +528,8 @@ struct ScanScheduleTests {
                 Issue.record("expected a scan")
                 return
             }
-            schedule.recordFailure(item: item, error: .responseTooLarge, networkRequests: 1, now: now, jitter: 0)
+            schedule.recordFailure(
+                item: item, version: 1, error: .responseTooLarge, networkRequests: 1, now: now, jitter: 0)
             await clock.advance(by: 6 * 86400)
         }
         await clock.set(start.addingTimeInterval(6 * 86400 + 60))
@@ -422,7 +592,8 @@ struct ScanScheduleTests {
         }
 
         schedule.recordFailure(
-            item: Self.id(6), error: .rateLimited(retryAfter: 3600), networkRequests: 1, now: now, jitter: 0)
+            item: Self.id(6), version: 1, error: .rateLimited(retryAfter: 3600), networkRequests: 1, now: now, jitter: 0
+        )
         relocked = ScanSchedule(ledger: schedule.ledger, policy: policy, pacing: schedule.pacing)
         let later = now.addingTimeInterval(10)
         #expect(
@@ -455,7 +626,7 @@ struct ScanScheduleTests {
                 Issue.record("expected a scan")
                 return
             }
-            schedule.recordFailure(item: item, error: .transport, networkRequests: 1, now: now, jitter: 0)
+            schedule.recordFailure(item: item, version: 1, error: .transport, networkRequests: 1, now: now, jitter: 0)
             guard case .wait(let until, .backoff) = schedule.decide(candidates: all, keysResident: true, now: now)
             else {
                 Issue.record("expected a backoff")
@@ -467,7 +638,7 @@ struct ScanScheduleTests {
         #expect(waits == [60, 120, 240, 480, 600, 600])
         let now = await clock.now()
         schedule.recordScan(item: Self.id(1), version: 1, results: [:], networkRequests: 1, now: now, jitter: 0)
-        schedule.recordFailure(item: Self.id(1), error: .transport, networkRequests: 1, now: now, jitter: 0)
+        schedule.recordFailure(item: Self.id(1), version: 1, error: .transport, networkRequests: 1, now: now, jitter: 0)
         #expect(schedule.earliestStart(for: Self.id(1), now: now) == now.addingTimeInterval(60))
     }
 
@@ -479,7 +650,8 @@ struct ScanScheduleTests {
         let all = Self.candidates(3)
         let start = await clock.now()
         guard case .scan(let bad, _) = schedule.decide(candidates: all, keysResident: true, now: start) else { return }
-        schedule.recordFailure(item: bad, error: .malformedResponse, networkRequests: 1, now: start, jitter: 0)
+        schedule.recordFailure(
+            item: bad, version: 1, error: .malformedResponse, networkRequests: 1, now: start, jitter: 0)
         await clock.advance(by: 10)
         var scanned: [UUID] = []
         for _ in 0..<10 {
@@ -506,7 +678,8 @@ struct ScanScheduleTests {
         let clock = FakeClock()
         var schedule = ScanSchedule()
         let now = await clock.now()
-        schedule.recordFailure(item: Self.id(1), error: .interrupted, networkRequests: 0, now: now, jitter: 0)
+        schedule.recordFailure(
+            item: Self.id(1), version: 1, error: .interrupted, networkRequests: 0, now: now, jitter: 0)
         #expect(
             schedule.decide(candidates: Self.candidates(1), keysResident: true, now: now)
                 == .scan(item: Self.id(1), reason: .created))
@@ -520,7 +693,8 @@ struct ScanScheduleTests {
         _ = await Self.drain(&schedule, all, clock: clock)
         let now = await clock.now()
         schedule.recordFailure(
-            item: Self.id(1), error: .rateLimited(retryAfter: 3600), networkRequests: 1, now: now, jitter: 0)
+            item: Self.id(1), version: 1, error: .rateLimited(retryAfter: 3600), networkRequests: 1, now: now, jitter: 0
+        )
         // The clock goes back a year.
         await clock.set(now.addingTimeInterval(-365 * 86400))
         let past = await clock.now()
@@ -537,6 +711,113 @@ struct ScanScheduleTests {
             return
         }
         #expect(until <= past.addingTimeInterval(ScanPolicy.standard.maximumBackoff))
+    }
+
+    /// Follows the schedule's waits until it asks for a scan, and returns how long that took.
+    static func timeToNextScan(
+        _ schedule: inout ScanSchedule, _ candidates: [ScanCandidate], clock: FakeClock, limit: Int = 100_000
+    ) async -> (waited: TimeInterval, waits: Int, item: UUID)? {
+        let start = await clock.now()
+        for waits in 0..<limit {
+            let now = await clock.now()
+            switch schedule.decide(candidates: candidates, keysResident: true, now: now) {
+            case .scan(let item, _): return (now.timeIntervalSince(start), waits, item)
+            case .wait(let until, _):
+                guard until > now else { return nil }
+                await clock.set(until)
+            case .idle, .locked: return nil
+            }
+        }
+        return nil
+    }
+
+    @Test("after a clock is put back, a backoff is waited for once, for no longer than one could be, and not again")
+    func clockRollbackBackoffInTotal() async {
+        let clock = FakeClock()
+        var schedule = ScanSchedule()
+        let all = Self.candidates(2)
+        let now = await clock.now()
+        schedule.recordFailure(
+            item: Self.id(1), version: 1, error: .rateLimited(retryAfter: 3600), networkRequests: 1, now: now,
+            jitter: 0)
+        // The clock goes back thirty days. The backoff, an hour ahead of the old time, is thirty days away.
+        await clock.set(now.addingTimeInterval(-30 * 86400))
+        let next = await Self.timeToNextScan(&schedule, all, clock: clock)
+        #expect(next?.waited == 3600)
+        #expect(next?.waits == 1)
+        #expect(next?.item == Self.id(2))
+        // The same for a check a save asks for directly.
+        var direct = ScanSchedule()
+        direct.recordFailure(
+            item: Self.id(1), version: 1, error: .rateLimited(retryAfter: 3600), networkRequests: 1, now: now,
+            jitter: 0)
+        let past = now.addingTimeInterval(-30 * 86400)
+        #expect(direct.earliestStart(for: Self.id(2), now: past) == past.addingTimeInterval(3600))
+        #expect(direct.earliestStart(for: Self.id(2), now: past.addingTimeInterval(3600)) == nil)
+    }
+
+    @Test("after a clock is put back, the weekly pass's jitter holds it for one spacing, not for the difference")
+    func clockRollbackWeeklyJitter() async {
+        let clock = FakeClock()
+        var schedule = ScanSchedule()
+        let all = Self.candidates(3)
+        _ = await Self.drain(&schedule, all, clock: clock)
+        await clock.advance(by: Self.week)
+        let now = await clock.now()
+        guard case .scan(let item, .weekly) = schedule.decide(candidates: all, keysResident: true, now: now) else {
+            Issue.record("expected a weekly scan")
+            return
+        }
+        schedule.recordScan(item: item, version: 1, results: [:], networkRequests: 1, now: now, jitter: 1)
+        // The clock goes back a day. The jitter's time, five seconds after the old "now", is a day away.
+        await clock.set(now.addingTimeInterval(-86400))
+        let policy = ScanPolicy.standard
+        let next = await Self.timeToNextScan(&schedule, all, clock: clock)
+        #expect(next != nil)
+        #expect((next?.waited ?? .infinity) <= policy.requestSpacing + policy.maximumJitter)
+        #expect((next?.waits ?? .max) <= 1)
+    }
+
+    @Test("after a clock is put back, an item set aside is retried within the longest time one can be set aside")
+    func clockRollbackItemRetry() async {
+        let clock = FakeClock()
+        let policy = ScanPolicy(initialBackoff: 10, maximumBackoff: 10, itemRetryInitial: 600, itemRetryMaximum: 3600)
+        var schedule = ScanSchedule(policy: policy)
+        let all = Self.candidates(1)
+        let now = await clock.now()
+        schedule.recordFailure(
+            item: Self.id(1), version: 1, error: .malformedResponse, networkRequests: 1, now: now, jitter: 0)
+        await clock.set(now.addingTimeInterval(-30 * 86400))
+        // A new process with the stored ledger: the failure, and its time, came from the sealed record.
+        var resumed = ScanSchedule(ledger: schedule.ledger, policy: policy)
+        let next = await Self.timeToNextScan(&resumed, all, clock: clock)
+        #expect(next?.item == Self.id(1))
+        #expect((next?.waited ?? .infinity) <= 3600)
+        #expect((next?.waits ?? .max) <= 2)
+    }
+
+    @Test("a failure dated ahead of the clock does not keep its item at the back for good")
+    func clockRollbackFailureOrder() async {
+        let clock = FakeClock()
+        var schedule = ScanSchedule(policy: ScanPolicy(initialBackoff: 10, maximumBackoff: 10))
+        let all = Self.candidates(2)
+        let now = await clock.now()
+        // Item 1 failed, and then the clock went back thirty days. Item 2 keeps failing from here on.
+        schedule.recordFailure(item: Self.id(1), version: 1, error: .transport, networkRequests: 1, now: now, jitter: 0)
+        await clock.set(now.addingTimeInterval(-30 * 86400))
+        var order: [UUID] = []
+        for _ in 0..<6 {
+            guard let next = await Self.timeToNextScan(&schedule, all, clock: clock) else {
+                Issue.record("expected a scan")
+                return
+            }
+            order.append(next.item)
+            schedule.recordFailure(
+                item: next.item, version: 1, error: .transport, networkRequests: 1, now: await clock.now(), jitter: 0)
+        }
+        // Item 2 has never failed, so it goes first; after that they alternate. Left dated thirty days ahead, item
+        // 1's failure would have been "the most recent" every time, and item 2 would have been asked for alone.
+        #expect(order == [Self.id(2), Self.id(1), Self.id(2), Self.id(1), Self.id(2), Self.id(1)])
     }
 
     @Test("pruning drops entries for items that are gone")
@@ -591,6 +872,83 @@ struct ScanLedgerTests {
         let data = try encoder.encode(Self.ledger())
         #expect(try JSONDecoder().decode(ScanLedger.self, from: data) == Self.ledger())
         #expect(try encoder.encode(Self.ledger()) == data)
+    }
+
+    static func ledgerWithFailures() -> ScanLedger {
+        var ledger = ledger()
+        ledger.failures = [
+            ScanScheduleTests.id(3): .init(
+                itemVersion: 4, count: 2, failedAt: Date(timeIntervalSince1970: 1_800_000_300),
+                notBefore: Date(timeIntervalSince1970: 1_800_001_500)),
+            ScanScheduleTests.id(2): .init(
+                itemVersion: 1, count: 1, failedAt: Date(timeIntervalSince1970: 1_800_000_250)),
+        ]
+        return ledger
+    }
+
+    @Test("failed checks survive encoding too, as an item, a version, a count and times")
+    func failuresRoundTrip() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(Self.ledgerWithFailures())
+        let decoded = try JSONDecoder().decode(ScanLedger.self, from: data)
+        #expect(decoded == Self.ledgerWithFailures())
+        #expect(decoded.failures.count == 2)
+        #expect(try encoder.encode(Self.ledgerWithFailures()) == data)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(
+            text.contains(
+                """
+                "failures":[{"count":1,"failedAt":1800000250,"item":"00000000-0000-0000-0000-000000000002",\
+                "version":1},{"count":2,"failedAt":1800000300,"item":"00000000-0000-0000-0000-000000000003",\
+                "notBefore":1800001500,"version":4}]
+                """))
+        // A ledger with no failures encodes as it did before there were any, and one without the key decodes.
+        #expect(!String(decoding: try encoder.encode(Self.ledger()), as: UTF8.self).contains("failures"))
+    }
+
+    static func failureJSON(
+        item: String = "00000000-0000-0000-0000-000000000001", version: Int = 1, count: Int = 1, failedAt: Int = 5,
+        notBefore: Int? = nil
+    ) -> String {
+        let until = notBefore.map { ",\"notBefore\":\($0)" } ?? ""
+        return "{\"item\":\"\(item)\",\"version\":\(version),\"count\":\(count),\"failedAt\":\(failedAt)\(until)}"
+    }
+
+    @Test(
+        "a ledger with a damaged failure is a decoding error",
+        arguments: [
+            // The same item twice.
+            "\(failureJSON()),\(failureJSON(failedAt: 6))",
+            // A count no schedule writes.
+            failureJSON(count: 0),
+            failureJSON(count: 31),
+            failureJSON(count: -1),
+            // Times before 1970 and beyond any date.
+            failureJSON(failedAt: -5),
+            failureJSON(notBefore: -5),
+            failureJSON(notBefore: 99_999_999_999_999_999),
+            failureJSON(item: "not-a-uuid"),
+            failureJSON(version: -1),
+        ])
+    func damagedFailure(_ failures: String) {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ScanLedger.self, from: Data("{\"entries\":[],\"failures\":[\(failures)]}".utf8))
+        }
+    }
+
+    @Test("a well-formed failure of the same shape decodes, so the cases above fail for the reason given")
+    func wellFormedFailure() throws {
+        let json = "{\"entries\":[],\"failures\":[\(Self.failureJSON(count: 30, notBefore: 9))]}"
+        let ledger = try JSONDecoder().decode(ScanLedger.self, from: Data(json.utf8))
+        #expect(
+            ledger.failures[ScanScheduleTests.id(1)]
+                == .init(
+                    itemVersion: 1, count: 30, failedAt: Date(timeIntervalSince1970: 5),
+                    notBefore: Date(timeIntervalSince1970: 9)))
+        // A count out of range cannot be built in memory either.
+        #expect(ScanLedger.Failure(itemVersion: 1, count: 1000, failedAt: .distantPast).count == 30)
+        #expect(ScanLedger.Failure(itemVersion: 1, count: -3, failedAt: .distantPast).count == 1)
     }
 
     @Test("the encoding holds nothing but IDs, versions, times and counts")

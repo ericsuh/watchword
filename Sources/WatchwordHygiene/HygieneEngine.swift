@@ -24,7 +24,8 @@ public enum ScanOutcome: Hashable, Sendable {
     case scanned(breachedPasswords: Int, networkRequests: Int)
     /// A check did not complete; the item stays due and the schedule has backed off.
     case failed(PwnedPasswordsError)
-    /// The vault locked while the scan was in flight. The response, if any, was dropped: nothing was stored.
+    /// The vault locked while the scan was in flight. The response, if any, was dropped: nothing was stored. The
+    /// requests it had sent still count against the rate limit, and a refusal's `Retry-After` still stands.
     case interrupted
     /// The copy handed in is not the item as the engine knows it: an older version than one it has analysed, or a
     /// copy from before the item was trashed or deleted, or the item was saved again while its ranges were being
@@ -37,8 +38,8 @@ public enum ScanOutcome: Hashable, Sendable {
 ///
 /// It owns no timer and starts nothing by itself. The session calls `unlock` with the items it has decrypted, then
 /// loops on `next(now:)`: scan the item it names (fetching that item's plaintext for the call), or wait until the
-/// time it gives; calls `update` and `scan` when an item is saved; persists `ledger()` (sealed) when it changes; and
-/// calls `lock()` when the vault locks.
+/// time it gives; calls `update` and `scan` when an item is saved; persists `ledger()` (sealed) when it changes,
+/// which a failed scan does as well as a completed one; and calls `lock()` when the vault locks.
 ///
 /// **Only while keys are resident.** Everything derived from a password (analyses, reuse tokens, the ledger, the
 /// report) lives in one optional that `lock()` sets to `nil` after zeroising the reuse key, and `lock()` then tells
@@ -61,7 +62,16 @@ public enum ScanOutcome: Hashable, Sendable {
 /// can neither replace a newer analysis nor mark a newer password as checked.
 ///
 /// What survives a lock is `ScanPacing` and nothing else: the rate limit and the server's `Retry-After` are not
-/// derived from a password, and forgetting them at every unlock would turn each unlock into a burst of requests.
+/// derived from a password, and forgetting them at every unlock would turn each unlock into a burst of requests. A
+/// scan that a lock interrupts still pays into it for the requests it sent. Which items' checks failed is not kept
+/// here across a lock: it is in the ledger (`ScanLedger.Failure`), so **the session must seal and store `ledger()`
+/// after a scan that fails as well as after one that succeeds**, and hand the stored ledger to the next `unlock`.
+/// That is what keeps one refused range from being asked for first at every unlock (and every launch), with the
+/// rest of the vault never reached.
+///
+/// **Whenever the engine goes from unlocked to locked, the prefix cache is emptied**, whichever call did it:
+/// `lock()`, an `unlock` over an engine that was already unlocked (which is a lock first), or an `unlock` that was
+/// cancelled.
 public actor HygieneEngine {
     private struct Resident {
         let reuseKey: ReuseKey
@@ -136,27 +146,41 @@ public actor HygieneEngine {
     /// .analysing)`, `scan` answers `.busy` and `report` throws `.analysing`. Call it from a task of no higher
     /// priority than the one that locks.
     ///
+    /// If the engine is already unlocked, this is a lock first, exactly as `lock()` does it: the previous reuse key
+    /// is zeroised, everything derived under it is dropped and the prefix cache is emptied, before anything of the
+    /// new unlock exists. So an unlock that then fails or is cancelled leaves what a lock leaves.
+    ///
     /// - Parameters:
     ///   - reuseKey: at least 32 bytes derived from the keyset for this purpose. The engine takes it over and
     ///     zeroises it on `lock()`.
-    ///   - ledger: the scan ledger the session unsealed, or an empty one.
+    ///   - ledger: the scan ledger the session unsealed (the one it stored after the last scan, failed ones
+    ///     included), or an empty one.
     ///   - items: every item in every unlocked vault, decrypted. Trashed items are ignored. The engine keeps an
     ///     analysis of each, not the item.
     /// - Throws: `ReuseKeyError` for a key that is not one; `HygieneEngineError.locked` if `lock()` (or another
     ///   `unlock`) ran before this one finished; `CancellationError` if the task was cancelled, in which case the
-    ///   engine is left locked.
+    ///   engine is left locked and the prefix cache empty.
     public func unlock(reuseKey: SecureBytes, ledger: ScanLedger, items: [Item], now: Date) async throws {
         let key = try ReuseKey(reuseKey)
-        dropResident()
+        // `lock()` suspends on the cache, and another `unlock` can get in meanwhile; it is locked out in its turn.
+        // When the loop ends nothing is resident and every state that was has had its cache emptied (or is having
+        // it emptied by the `lock()` that dropped it), and nothing suspends between here and the new state.
+        while resident != nil {
+            await lock()
+        }
         // Locking zeroised the previous key. If the caller handed that same buffer in again, it is not a key now.
         guard !reuseKey.isZeroised else { throw ReuseKeyError.zeroised }
+        try Task.checkCancellation()
+        epoch &+= 1
         resident = Resident(
             reuseKey: key, analyzer: ItemAnalyzer(estimator: StrengthEstimator(now: now), policy: policy),
             schedule: ScanSchedule(ledger: ledger, policy: scanPolicy, pacing: pacing))
         let started = epoch
         for item in items {
             guard !Task.isCancelled else {
-                if isCurrent(started) { dropResident() }
+                // Nothing can have been cached since this unlock began (`scan` is `.busy` until it returns), but
+                // "locked" means "cache empty" on every path, without that argument.
+                if isCurrent(started) { await lock() }
                 throw CancellationError()
             }
             withResident { state in
@@ -315,7 +339,10 @@ public actor HygieneEngine {
         var breached = 0
         for field in ItemAnalyzer.passwordFields(of: item) {
             // Hashing happens here and nowhere earlier, and only if the vault is still unlocked.
-            guard isCurrent(started) else { return .interrupted }
+            guard isCurrent(started) else {
+                settleInterrupted(requests: requests, failure: nil, now: now)
+                return .interrupted
+            }
             let digest = PasswordDigest(utf8Of: field.value)
             do {
                 let check = try await client.check(digest, now: now, freshAfter: freshAfter) { [weak self] in
@@ -328,15 +355,22 @@ public actor HygieneEngine {
                 // overwritten by the clean one that happens to follow it.
                 results[field.id] = Self.worse(results[field.id], check.result)
             } catch {
-                guard isCurrent(started) else { return .interrupted }
                 let failure = error as? PwnedPasswordsError ?? .transport
-                guard failure != .interrupted else { return .interrupted }
+                // The client throws only after it has made its request, so that request is paid for either way.
+                guard isCurrent(started), failure != .interrupted else {
+                    settleInterrupted(requests: requests + 1, failure: failure, now: now)
+                    return .interrupted
+                }
                 resident?.schedule.recordFailure(
-                    item: item.id, error: failure, networkRequests: requests + 1, now: now, jitter: jitter())
+                    item: item.id, version: item.version, error: failure, networkRequests: requests + 1, now: now,
+                    jitter: jitter())
                 return .failed(failure)
             }
         }
-        guard isCurrent(started) else { return .interrupted }
+        guard isCurrent(started) else {
+            settleInterrupted(requests: requests, failure: nil, now: now)
+            return .interrupted
+        }
         // The actor was free while the requests were in flight. If the item was saved, trashed or deleted
         // meanwhile, these answers are about passwords it no longer has.
         let unchanged = withResident { state in
@@ -350,6 +384,23 @@ public actor HygieneEngine {
             item: item.id, version: item.version, results: results, networkRequests: requests, now: now,
             jitter: jitter())
         return .scanned(breachedPasswords: breached, networkRequests: requests)
+    }
+
+    /// A lock interrupted a scan. Its answers are dropped, but the requests it sent were sent: they are charged to
+    /// the rate limit, and a refusal's backoff is kept, wherever the pacing now lives (with the engine while locked,
+    /// with the new schedule if the vault has been unlocked again). Without this, locking during each request
+    /// would let any number of requests go at once, and drop a `Retry-After` that arrived just after a lock.
+    /// Nothing else is written: not the ledger, and nothing about the item.
+    private func settleInterrupted(requests: Int, failure: PwnedPasswordsError?, now: Date) {
+        let refusal = failure == .interrupted ? nil : failure
+        guard requests > 0 || refusal != nil else { return }
+        let jitter = jitter()
+        if resident != nil {
+            resident?.schedule.recordInterrupted(networkRequests: requests, error: refusal, now: now, jitter: jitter)
+        } else {
+            pacing?.recordInterrupted(
+                networkRequests: requests, error: refusal, now: now, jitter: jitter, policy: scanPolicy)
+        }
     }
 
     private static func worse(_ earlier: PwnedPasswordResult?, _ later: PwnedPasswordResult) -> PwnedPasswordResult {

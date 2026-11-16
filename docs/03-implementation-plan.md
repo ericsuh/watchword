@@ -242,6 +242,10 @@ half delivered** on a Mac; the transports are open.
   emptied at lock, `unlock` is interruptible, pacing survives a lock), stale item copies, the estimator's cost on
   non-ASCII input and its rating of cheap patterns in a row, a failing range no longer stalling the scan, the
   report never calling a partly checked item clear, the breached-account parser's bound, and what prints.
+  After the second: failed checks are remembered in the ledger, so a refused range no longer stalls the scan
+  across locks and restarts either; a clock put back is waited out once, within the policy's bounds, not for
+  the difference; a scan a lock interrupts pays for the requests it sent; and an unlock over an unlocked
+  engine, failed or cancelled, leaves the prefix cache empty.
   The fixtures are written to the API's documented format; the live service is not reachable from a cloud
   session and is never called by a test.
 

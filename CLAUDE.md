@@ -183,7 +183,12 @@ built, and milestone 6 what is still open (the `URLSession` adapter, session wir
   again after its cache write), so a lock during a request wins and nothing is cached or recorded. `PasswordDigest`,
   `ReuseToken`, `ReuseIndex`, `ItemAnalysis` and the report are not `Codable`: keep them that way.
 - What survives a lock is `ScanPacing` (token bucket, backoff) and nothing else: it is not password-derived, and
-  dropping it would let each unlock forget `Retry-After` and start a new burst.
+  dropping it would let each unlock forget `Retry-After` and start a new burst. It names no item. A scan that a
+  lock interrupts writes to it and to nothing else (`recordInterrupted`): requests sent are charged, and a refusal
+  that came back after the lock still backs off.
+- Unlocked to locked always empties the prefix cache, whichever call did it: `unlock` over an unlocked engine is
+  `lock()` first, and a cancelled `unlock` ends in `lock()`. Do not add a path that drops the resident state
+  without `client.lockCache()`.
 - **`lock()` must never queue behind the vault.** `unlock` is `async`, analyses one item per turn and stops when it
   finds the engine locked or its task cancelled; until it returns, `next` waits, `scan` is `.busy` and `report`
   throws. Do not add a synchronous loop over every item to the actor. The session zeroises the keyset *before*
@@ -203,7 +208,11 @@ built, and milestone 6 what is still open (the `URLSession` adapter, session wir
 - Time is a parameter and jitter an injected generator: no timers, no `Date()`, no sleeping, in the module or its
   tests. Every request is paid for in `ScanSchedule`'s token bucket, including the several an item with several
   passwords makes. An item whose check failed goes to the back of the queue, and a new weekly pass begins a week
-  after the last began whether or not it finished: one range the server refuses must not stall the rest.
+  after the last began whether or not it finished: one range the server refuses must not stall the rest. Which
+  items failed is in the ledger (`ScanLedger.Failure`), never in memory only: it must outlast the backoff, across
+  locks and restarts, so the session stores `ledger()` after a failed scan too. A remembered time further ahead
+  than the policy could have set it (a clock put back) is overwritten in `distrustFutureTimes`, not merely
+  bounded when read; a new stored time needs a line there.
 - The estimator analyses 64 scalars, keeps one match per stretch, and looks words up by walking a sorted table of
   scalar arrays (`WordTable`): never build or hash a `String` per stretch (hashing non-ASCII text normalises it, a
   denial-of-service on a shared vault), and anything that makes its cost depend on the password's full length is

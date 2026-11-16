@@ -711,21 +711,36 @@ It owns no timer, thread or clock.
 - The rate limit and the backoff are a value, `ScanPacing`, that **outlives a lock**: none of it is derived
   from a password, and a phone locks and unlocks many times a day, so a scanner that forgot a `Retry-After`
   or was handed a fresh burst at each unlock would hammer the API exactly when asked not to. The engine keeps
-  it across `lock()` and `unlock()`; it is not persisted, so a new process starts with a full burst.
+  it across `lock()` and `unlock()`; it is not persisted, so a new process starts with a full burst. A scan
+  that a lock interrupts still pays into it: the requests it sent are charged, and a refusal that came back
+  after the lock still backs the scanner off (`recordInterrupted`), so locking during each request buys
+  neither extra requests nor a way round `Retry-After`. It names no item.
 - No item blocks the rest. An item whose check failed goes to the back of the queue, behind every item that
   has not failed and those that failed longer ago, so the backoff paces requests but the next one is for a
   different item; otherwise whoever controls the path could stop the whole vault being checked by refusing
   one range. An item whose range cannot be used at all (too large, malformed, an unexpected status) is also
   set aside for a time of its own (ten minutes, doubling to a day), and a wait for such an item never sleeps
-  past the start of the next pass.
-- Times ahead of the clock (a clock put back) are treated as wrong, not waited for. A pass in progress whose
-  start is ahead of the clock by any amount is taken to have begun now: left in the future, every scan would
-  predate the pass and every item would be due again the moment it was scanned.
+  past the start of the next pass. **Which items failed, and when, is in the ledger** (`ScanLedger.Failure`:
+  item, version, count, time), not in the schedule's memory, so it lasts as long as the results do: across a
+  lock, and across a restart. It has to outlast the backoff it goes with. Kept only for the unlocked period,
+  it left the refused item the most urgent again at every unlock; it was asked for first, failed, and set a
+  backoff longer than the unlock, so a vault unlocked for twenty seconds every ten minutes never had another
+  item checked. Keeping it in the ledger also means no item ID stays in memory while the vault is locked. The
+  time of its own holds for the version that failed (an edit may have changed the password); the place at
+  the back of the queue holds whatever the version, so an edit cannot buy the front.
+- Times ahead of the clock (a clock put back) are treated as wrong, not waited for, and that is true of the
+  total wait and not only of each answer: a backoff, the weekly pass's jitter time, or an item's time of its
+  own that is further ahead than this policy could have set it is *overwritten* with the furthest it could
+  have set, once (an hour, five seconds and a day with the standard policy), and a failure dated after now
+  is dated now, since otherwise it would sort behind every later failure and its item would never come round.
+  A pass in progress whose start is ahead of the clock by any amount is taken to have begun now: left in the
+  future, every scan would predate the pass and every item would be due again the moment it was scanned.
 
-`ScanLedger` records, per item, the version scanned, when, and the result per password field, plus the pass
-times. It is `Codable` with explicit, bounded shapes, and it is **derived from passwords** (a breach count
-all but names one): the session persists it only sealed, as a local record that is not synced. It holds no
-hash, prefix or token.
+`ScanLedger` records, per item, the version scanned, when, and the result per password field; per item whose
+last check failed, the version, when and how often in a row; and the pass times. It is `Codable` with
+explicit, bounded shapes (a ledger with no failures encodes without the key), and it is **derived from
+passwords** (a breach count all but names one): the session persists it only sealed, as a local record that
+is not synced. It holds no hash, prefix or token.
 
 ### 13.4 Strength (F9.3)
 
@@ -858,13 +873,18 @@ as an ID and counts) and reads passwords only from the item handed to `scan`. It
   key, and `lock()` then has the prefix cache forget what it holds (§13.2). Every entry point that hashes
   checks the optional first; while locked `scan` returns `.locked`, and `update`, `report`, `ledger` and
   `items(using:)` throw. What survives a lock is `ScanPacing` and nothing else (§13.3).
+- **Unlocked to locked always empties the prefix cache**, whichever call did it. An `unlock` over an engine
+  that is already unlocked is a lock first, exactly as `lock()` does it (old reuse key zeroised, state
+  dropped, cache emptied), before anything of the new unlock exists; so an unlock that then fails (the same
+  key buffer handed in again is zeroised by then) or is cancelled leaves what a lock leaves, and a caller
+  need not follow it with `lock()` for the cache's sake.
 - A scan re-checks the lock epoch after every suspension, and the client asks again before storing and
   after: a lock that lands while a request, or a cache write, is in flight wins. The response is dropped,
   nothing stays cached, the ledger is untouched, and a scan from before a lock cannot write into the session
-  after it.
+  after it. The one thing an interrupted scan does write is the pacing (§13.3): requests sent are paid for.
 - **`lock()` never waits long.** An actor runs one call at a time. `unlock` is `async`: it analyses one item,
   suspends, and stops as soon as it finds the vault locked or its task cancelled (a cancelled unlock leaves
-  the engine locked). Until it returns, `next` answers `.wait(…, .analysing)`, `scan` answers `.busy` and
+  the engine locked and the cache empty). Until it returns, `next` answers `.wait(…, .analysing)`, `scan` answers `.busy` and
   `report` throws `.analysing`, because deciding or reporting on part of a vault would call it cleaner than
   it is; `update` and `remove` work, and what they say about an item outranks unlock's older copy of it.
   Every other call does a bounded amount of work on one item.
@@ -885,7 +905,9 @@ as an ID and counts) and reads passwords only from the item handed to `scan`. It
 - **Session wiring** in `VaultSession`: derive the reuse key from `Ksym` with its own HKDF label; on unlock,
   unseal the ledger record and call `unlock` with the decrypted items, in a task of its own at no higher
   priority than the one that locks; on save, `update` then `scan`, refetching on `.stale`; seal and store
-  `ledger()` after scans; back `PwnedRangeCache` with sealed local records. **On lock the session zeroises
+  `ledger()` after every scan, **failed ones included** (the failure in it is what keeps one refused range
+  from being asked for first at every unlock and every launch, §13.3), and hand the stored ledger to the next
+  `unlock`; back `PwnedRangeCache` with sealed local records. **On lock the session zeroises
   the keyset first** and does not wait for this actor to do it: it cancels the unlock task if one is running,
   then calls `lock()`, which returns after at most one item's analysis. The reuse key is the engine's own
   copy, so nothing here can keep the vault's keys resident.

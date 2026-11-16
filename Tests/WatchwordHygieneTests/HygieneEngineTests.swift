@@ -395,6 +395,139 @@ struct HygieneEngineTests {
         #expect(await rig.http.requests.count == 5)
     }
 
+    /// Twenty times over, at one instant: a scan is started, the vault locks while its request is in flight, and
+    /// the vault is unlocked again. Each of those requests was sent, so each is paid for.
+    @Test(
+        "requests made by scans that a lock interrupts are charged to the rate limit",
+        arguments: [true, false])
+    func interruptedScansPay(unlockBeforeTheResponse: Bool) async throws {
+        let rig = await EngineRig()
+        let items = (1...20).map { HygieneFixtures.item($0) }
+        try await rig.unlock(items)
+        let now = await rig.clock.now()
+        var interrupted = 0
+        for _ in 0..<20 {
+            guard case .scan(let id, _) = await rig.engine.next(now: now) else { break }
+            let item = try #require(items.first { $0.id == id })
+            await rig.http.hold()
+            async let outcome = rig.engine.scan(item, now: now)
+            await rig.http.waitForHeldRequest()
+            let ledger = try await rig.engine.ledger()
+            await rig.engine.lock()
+            if unlockBeforeTheResponse { try await rig.unlock(items, ledger: ledger) }
+            await rig.http.release()
+            #expect(await outcome == .interrupted)
+            if !unlockBeforeTheResponse { try await rig.unlock(items, ledger: ledger) }
+            interrupted += 1
+        }
+        // The burst, and then the scanner is told to wait like any other.
+        #expect(interrupted == ScanPolicy.standard.burst)
+        #expect(await rig.http.requests.count == ScanPolicy.standard.burst)
+        #expect(await rig.engine.next(now: now) == .wait(until: now.addingTimeInterval(2), .pacing))
+        #expect(await rig.engine.scan(items[0], now: now) == .deferred(until: now.addingTimeInterval(2)))
+        // Nothing but the pacing was written: no result, and no failure held against an item.
+        let ledger = try await rig.engine.ledger()
+        #expect(ledger.entries.isEmpty)
+        #expect(ledger.failures.isEmpty)
+    }
+
+    @Test(
+        "a Retry-After that arrives just after a lock is still honoured after the unlock",
+        arguments: [true, false])
+    func refusalAfterLockStands(unlockBeforeTheResponse: Bool) async throws {
+        let rig = await EngineRig()
+        let items = (1...3).map { HygieneFixtures.item($0) }
+        try await rig.unlock(items)
+        let now = await rig.clock.now()
+        await rig.http.hold()
+        await rig.http.enqueue(status: 429, headers: ["Retry-After": "900"])
+        async let outcome = rig.engine.scan(items[0], now: now)
+        await rig.http.waitForHeldRequest()
+        await rig.engine.lock()
+        if unlockBeforeTheResponse { try await rig.unlock(items) }
+        await rig.http.release()
+        #expect(await outcome == .interrupted)
+        if !unlockBeforeTheResponse { try await rig.unlock(items) }
+        #expect(await rig.engine.next(now: now) == .wait(until: now.addingTimeInterval(900), .backoff))
+        #expect(await rig.engine.scan(items[1], now: now) == .deferred(until: now.addingTimeInterval(900)))
+        #expect(await rig.http.requests.count == 1)
+        // The item is not held to have failed: its check was interrupted, not refused, as far as the ledger goes.
+        #expect(try await rig.engine.ledger().failures.isEmpty)
+    }
+
+    @Test("a failed check is in the ledger the session stores, and a completed one takes it out again")
+    func failureIsInTheLedger() async throws {
+        let rig = await EngineRig()
+        let items = [HygieneFixtures.item(1, version: 4), HygieneFixtures.item(2)]
+        try await rig.unlock(items)
+        await rig.http.enqueue(status: 503)
+        let now = await rig.clock.now()
+        #expect(await rig.engine.scan(items[0], now: now) == .failed(.serverUnavailable(status: 503, retryAfter: 300)))
+        var ledger = try await rig.engine.ledger()
+        #expect(ledger.failures == [items[0].id: .init(itemVersion: 4, count: 1, failedAt: now)])
+        #expect(ledger.entries.isEmpty)
+        // Carried across a lock by the session, it sends the item to the back at the next unlock.
+        await rig.engine.lock()
+        await rig.clock.advance(by: 600)
+        try await rig.unlock(items, ledger: ledger)
+        let later = await rig.clock.now()
+        #expect(await rig.engine.next(now: later) == .scan(item: items[1].id, reason: .created))
+        #expect(await rig.engine.scan(items[0], now: later) == .scanned(breachedPasswords: 0, networkRequests: 1))
+        ledger = try await rig.engine.ledger()
+        #expect(ledger.failures.isEmpty)
+        // A failure for an item that has since gone does not come back with the ledger.
+        await rig.http.enqueue(status: 503)
+        #expect(
+            await rig.engine.scan(items[1], now: later) == .failed(.serverUnavailable(status: 503, retryAfter: 300)))
+        ledger = try await rig.engine.ledger()
+        #expect(ledger.failures.count == 1)
+        await rig.engine.lock()
+        try await rig.unlock([items[0]], ledger: ledger)
+        #expect(try await rig.engine.ledger().failures.isEmpty)
+    }
+
+    @Test("an unlock over an unlocked engine is a lock first: the old key is zeroised and the cache emptied")
+    func reunlockLocksFirst() async throws {
+        let rig = await EngineRig()
+        let items = (1...3).map { HygieneFixtures.item($0) }
+        let first = SecureBytes(copying: [UInt8](repeating: 7, count: 32))
+        try await rig.engine.unlock(reuseKey: first, ledger: ScanLedger(), items: items, now: HygieneFixtures.now)
+        await rig.runUntilIdle(items)
+        #expect(await rig.cache.entries.count == 3)
+
+        try await rig.unlock(items)
+        #expect(first.isZeroised)
+        #expect(await rig.cache.locks == 1)
+        #expect(await rig.cache.entries.isEmpty)
+        #expect(await rig.engine.isUnlocked)
+    }
+
+    @Test("an unlock that fails over an unlocked engine leaves it locked, with the cache emptied")
+    func failedReunlock() async throws {
+        let rig = await EngineRig()
+        let items = (1...3).map { HygieneFixtures.item($0) }
+        let key = SecureBytes(copying: [UInt8](repeating: 7, count: 32))
+        try await rig.engine.unlock(reuseKey: key, ledger: ScanLedger(), items: items, now: HygieneFixtures.now)
+        await rig.runUntilIdle(items)
+        #expect(await rig.cache.entries.count == 3)
+        // The same buffer again: the lock that an unlock begins with zeroises it, so it is no key.
+        await #expect(throws: ReuseKeyError.zeroised) {
+            try await rig.engine.unlock(reuseKey: key, ledger: ScanLedger(), items: items, now: HygieneFixtures.now)
+        }
+        #expect(await rig.engine.isUnlocked == false)
+        #expect(await rig.cache.entries.isEmpty)
+        #expect(await rig.cache.locks == 1)
+        // A key that is not one is refused before anything is touched: the engine stays as it was.
+        try await rig.unlock(items)
+        await rig.runUntilIdle(items)
+        await #expect(throws: ReuseKeyError.tooShort) {
+            try await rig.engine.unlock(
+                reuseKey: SecureBytes(copying: [1, 2, 3]), ledger: ScanLedger(), items: [], now: HygieneFixtures.now)
+        }
+        #expect(await rig.engine.isUnlocked)
+        #expect(await rig.cache.entries.count == 3)
+    }
+
     @Test("while unlock is still analysing, nothing is decided or reported, and a save made meanwhile is kept")
     func analysing() async throws {
         let gate = CheckpointGate(holdingAfter: 2)

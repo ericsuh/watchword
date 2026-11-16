@@ -272,7 +272,9 @@ a real adapter would have been asked to send:
   spins the scanner nor stops it. An hour of locking and unlocking every minute after a 429 with
   `Retry-After: 3600` sends nothing more, and a lock does not buy a new burst; refusing one range (503, or a
   dropped connection, every time) does not stop the other items being checked, and the refused range is retried
-  at the backoff's pace; a breached-account response of 160,000 tiny breaches is refused at entry 2,001, without
+  at the backoff's pace, and the same holds for a vault unlocked for 20, 45 or 300 seconds every ten minutes
+  for a day, with the ledger carried by the session and the process either kept or new at each unlock (503, a
+  dropped connection, or a page of HTML with status 200): every other item is checked by the second unlock; a breached-account response of 160,000 tiny breaches is refused at entry 2,001, without
   decoding what follows.
 - *Readers of the device at rest (A2, A3, A8).* With keys absent the schedule answers `.locked` for any ledger and
   items and does not touch the ledger; the engine refuses every entry point that hashes or hands out derived
@@ -285,7 +287,8 @@ a real adapter would have been asked to send:
   stale is not believed. After a lock the default prefix cache holds no prefix, including when the lock lands
   while a range is on its way into the cache. A lock during `unlock` completes after one item's analysis, not
   the vault's (asserted with a gate between items, three items into five hundred), and a cancelled unlock
-  leaves the engine locked with the reuse key zeroised.
+  leaves the engine locked with the reuse key zeroised; cancelled over an engine that was unlocked, it leaves
+  no prefix in the cache either.
 - *A malicious household member (A4).* Two thousand new items produce at most the burst and then one request per
   spacing, and a save cannot bypass the limit; one item with 3,000 password fields, megabyte passwords and a
   megabyte title costs sixteen checks and is paid for at the usual rate, and is reported `incomplete`, never
@@ -300,14 +303,22 @@ vectors from Python's `hashlib`/`hmac`; the parser on padded, unpadded, malforme
 line-limit responses; cache expiry, `freshAfter`, the cache codec and its damage cases; every status class;
 the schedule's table (create, edit, changed since last scan, weekly, resume after a lock, pacing, jitter,
 backoff, per-item retry, clock rollback, a failing item going to the back of the queue, a pass that cannot
-finish not blocking the next, a pass start slightly ahead of the clock, pacing handed on across a lock) with
-`FakeClock`; the estimator on known-weak and known-strong passwords (including a word, a year and a symbol,
+finish not blocking the next, a pass start slightly ahead of the clock, pacing handed on across a lock, a
+refused range across locks and across restarts, a failure's time of its own holding for its version only, the
+bound on failures kept, an interrupted scan paying for its requests, `Retry-After` bounded in the schedule
+itself, and after a clock is put back thirty days: a backoff, the weekly jitter and an item's own time each
+waited for once and within the policy's bound, and a failure dated ahead not keeping its item at the back) with
+`FakeClock`; the ledger's codec, with failures, and its damage cases; the estimator on known-weak and known-strong passwords (including a word, a year and a symbol,
 and keyboard columns and zigzags, none of which may score strong), generated passwords and passphrases, each
 pattern's explanation, the embedded lists' counts and uniqueness, the word table, and bounded time and
 bounded dictionary steps on hostile input; reuse, age, `http` addresses, the site directory; the report's
 severities, ordering, determinism and totals, and `incomplete`; the breached-account parser's leniency and
 its bounds; and the engine end to end, including stale copies, a save during a scan, a copy from before a
-trash or deletion, an unlock still analysing, and a second unlock superseding the first.
+trash or deletion, an unlock still analysing, a second unlock superseding the first, a failed check in the
+ledger and out again, twenty scans each interrupted by a lock at one instant sending no more than the burst
+(whether the vault is unlocked again before or after the response), a `Retry-After` that arrives just after a
+lock still honoured, and an unlock over an unlocked engine locking first (and leaving the engine locked with
+an empty cache when it then fails).
 
 The regression tests added after the first review of this module for the scheduling, locking, staleness,
 report, parser and rating faults were each checked by putting the fault back and seeing the test fail; the

@@ -41,10 +41,16 @@ than its own reasoning, and one where it was more expensive than it needed to be
   weekly edit of every item: a new version, a new log segment and a merge for each, on every device. The
   ledger is one sealed, per-device, unsynced record holding, per item, the version scanned, the time and the
   per-field result. The report still shows when each item was last checked, and the oldest check overall.
+  The ledger also holds which items' checks *failed*, and when. That is not derived from a password, but it
+  is kept there, and not in memory, on purpose: it must last across a lock and a restart (or one refused
+  range is asked for first at every unlock and nothing else is ever checked), and in the sealed record it
+  does so without an item ID staying in memory while the vault is locked.
 
 What does survive a lock is the scanner's rate limit and backoff (`ScanPacing`): a count of requests and
-three times, none derived from a password. Dropping them at lock would let every unlock forget the server's
-`Retry-After` and start a new burst.
+three times, none derived from a password, naming no item. Dropping them at lock would let every unlock
+forget the server's `Retry-After` and start a new burst. For the same reason a scan that a lock interrupts
+still writes to it, and to nothing else: the requests it sent are charged, and a refusal that arrived after
+the lock still backs the scanner off.
 
 Unchanged: scanning needs the plaintext, so it runs only while keys are resident; a scan a lock interrupts
 resumes at the next unlock; with keys absent nothing is hashed, and a response that arrives after a lock is

@@ -427,6 +427,35 @@ struct AdversarialHygieneTests {
         #expect(key.isZeroised)
     }
 
+    /// A reader of the device's memory after a lock (A2, A3), where the lock was a second `unlock` that the session
+    /// cancelled: the engine was unlocked, with the prefixes of the person's passwords in its cache, and a new
+    /// unlock began and was cancelled. "Locked" must mean what `lock()` means, cache included; otherwise the set of
+    /// prefixes (twenty bits of each password's hash) outlives the keys in memory.
+    @Test("a cancelled unlock over an unlocked engine leaves it locked with no prefix in the cache")
+    func cancelledReunlockEmptiesTheCache() async throws {
+        // Three passes for the first unlock; the second is held after its second item.
+        let gate = CheckpointGate(holdingAfter: 5)
+        let rig = await Rig(gate: gate)
+        let items = (1...3).map { Self.item($0, passwords: ["pw-\($0)-Zq7!"]) }
+        let first = try await rig.unlock(items)
+        _ = await rig.runUntilIdle(items)
+        #expect(await rig.cache.entries.count == 3)
+
+        let key = SecureBytes(copying: [UInt8](repeating: 0x6B, count: 32))
+        let unlocking = Task {
+            try await rig.engine.unlock(reuseKey: key, ledger: ScanLedger(), items: items, now: Self.now)
+        }
+        await gate.waitUntilHeld()
+        unlocking.cancel()
+        await gate.release()
+        await #expect(throws: CancellationError.self) { try await unlocking.value }
+        #expect(await rig.engine.isUnlocked == false)
+        #expect(first.isZeroised)
+        #expect(key.isZeroised)
+        #expect(await rig.cache.entries.isEmpty)
+        #expect(await rig.cache.locks >= 1)
+    }
+
     /// The service and the network path, which answer the server's side of the rate limit. A phone locks and
     /// unlocks many times a day; if each unlock forgot `Retry-After` and refilled the burst, the service would see
     /// a burst of range requests at every unlock, while asking for quiet.
@@ -485,6 +514,77 @@ struct AdversarialHygieneTests {
             #expect(paths.prefix(6).filter { $0.hasSuffix("/F3BBB") }.count == 1)
             // And the refused range is retried at the backoff's pace, not hammered: about once an hour.
             #expect(paths.filter { $0.hasSuffix("/F3BBB") }.count <= 30)
+        }
+    }
+
+    /// The same adversary, against the vault as it is really used: unlocked for a short while every ten minutes,
+    /// for a day. One range is refused every time (a 503, a dropped connection, or a page of HTML with status 200).
+    /// The refusal's backoff outlasts each unlock, so if the scanner forgot at each lock which item had failed, it
+    /// would ask for that same range first at every unlock and never reach another item. The session carries the
+    /// ledger across the lock; in the second arrangement the process is also new each time (the app was terminated
+    /// while locked), so nothing but the ledger is carried.
+    @Test(
+        "refusing one range does not stop the rest of the vault being checked across locks and restarts",
+        arguments: [20.0, 45, 300])
+    func oneRefusedRangeDoesNotStallAcrossLocks(unlockedFor: TimeInterval) async throws {
+        let html = FakeHTTPClient.Reply.response(
+            HTTPResponse(status: 200, headers: [:], body: Array("<html><body>Please sign in</body></html>".utf8)))
+        for refusal in [FakeHTTPClient.Reply.response(HTTPResponse(status: 503)), .failure, html] {
+            for newProcessEachUnlock in [false, true] {
+                let http = FakeHTTPClient()
+                let server = SimulatedPwnedPasswords(breached: ["letmein": 4])
+                // F3BBB is the range of "hunter2", which the most urgent item holds.
+                await http.respond { $0.url.path.hasSuffix("/F3BBB") ? refusal : server.reply(to: $0) }
+                func engine() -> HygieneEngine {
+                    HygieneEngine(
+                        client: PwnedPasswordsClient(
+                            http: http, cache: InMemoryPwnedRangeCache(), userAgent: HygieneUserAgent(version: "1.0")!),
+                        random: SeededGenerator(seed: 3))
+                }
+                let passwords = ["hunter2", "letmein"] + (3...8).map { "pw-\($0)-Zq7!" }
+                let items = passwords.enumerated().map { Self.item($0.offset + 1, passwords: [$0.element]) }
+                let clock = FakeClock(Self.now)
+                var current = engine()
+                var ledger = ScanLedger()
+                var unlocksUntilChecked: Int?
+                for unlock in 0..<144 {
+                    let unlockedAt = Self.now.addingTimeInterval(Double(unlock) * 600)
+                    await clock.set(unlockedAt)
+                    if newProcessEachUnlock { current = engine() }
+                    let key = SecureBytes(copying: [UInt8](repeating: 0x5A, count: 32))
+                    try await current.unlock(reuseKey: key, ledger: ledger, items: items, now: unlockedAt)
+                    unlocked: while true {
+                        let now = await clock.now()
+                        switch await current.next(now: now) {
+                        case .scan(let id, _):
+                            _ = await current.scan(items.first { $0.id == id }!, now: now)
+                            // What the session does after every scan, failed or not: seal and store the ledger.
+                            ledger = try await current.ledger()
+                        case .wait(let until, _):
+                            guard until < unlockedAt.addingTimeInterval(unlockedFor) else { break unlocked }
+                            await clock.set(max(until, now.addingTimeInterval(1)))
+                        case .idle, .locked:
+                            Issue.record("the refused item is still due")
+                            break unlocked
+                        }
+                    }
+                    if unlocksUntilChecked == nil {
+                        let report = try await current.report(now: await clock.now())
+                        if report.totals.itemsAwaitingBreachCheck == 1 { unlocksUntilChecked = unlock + 1 }
+                    }
+                    await current.lock()
+                }
+                // At worst the first unlock is spent on the refused range, and the second reaches every other item.
+                #expect((unlocksUntilChecked ?? .max) <= 2, "new process each unlock: \(newProcessEachUnlock)")
+                let paths = await http.requests.map(\.url.path)
+                #expect(Set(paths).count == 8)
+                let refused = paths.filter { $0.hasSuffix("/F3BBB") }.count
+                // Asked for again, since it may recover, but never more than the backoff allows within an unlock.
+                #expect(refused >= 2)
+                #expect(refused <= 144 * Int(1 + unlockedFor / 60))
+                #expect(ledger.failures.count == 1)
+                #expect(ledger.failures[items[0].id] != nil)
+            }
         }
     }
 
