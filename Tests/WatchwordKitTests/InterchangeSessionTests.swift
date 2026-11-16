@@ -92,6 +92,44 @@ struct InterchangeSessionTests {
         }
     }
 
+    /// Saves are compare-and-swap (Y29), and an import's merge is computed over the item as the write reads it: an
+    /// edit made after the preview is kept and merged over, never refused as a stale draft, and an item deleted
+    /// after the preview is not brought back by a merge into it.
+    @Test("a merge after the preview goes over a newer edit, and does not revive an item deleted since")
+    func mergeAfterThePreview() async throws {
+        let (vault, personal) = try await Self.unlockedVault()
+        let file = Array(
+            """
+            Title,URL,Username,Password,Notes,OTPAuth
+            Bank,https://bank.example/,wendy,a-different-pw,from the old manager,
+            """.utf8)
+        let existing = try await vault.session.save(Self.bankItem(personal))
+        let preview = try await vault.session.previewImport(file, format: .passwordCSV, into: personal)
+        let match = try #require(preview.matches.first)
+        var edited = existing
+        edited.title = "Bank, edited after the preview"
+        let newer = try await vault.session.save(edited)
+        let outcome = try await vault.session.commitImport(
+            preview.id, decisions: [match.importedID: .merge(into: existing.id)])
+        #expect(outcome.merged == [existing.id] && outcome.failed.isEmpty)
+        let merged = try await vault.session.item(id: existing.id)
+        #expect(merged.title == "Bank, edited after the preview")
+        #expect(merged.version > newer.version)
+
+        let again = try await vault.session.previewImport(file, format: .passwordCSV, into: personal)
+        let second = try #require(again.matches.first)
+        try await vault.session.trash(id: existing.id)
+        try await vault.session.deletePermanently(id: existing.id)
+        let late = try await vault.session.commitImport(
+            again.id, decisions: [second.importedID: .merge(into: existing.id)])
+        #expect(late.merged.isEmpty)
+        #expect(late.failed.map(\.reason) == [.vault(.itemNotFound(existing.id))])
+        await #expect(throws: VaultError.itemNotFound(existing.id)) {
+            try await vault.session.item(id: existing.id)
+        }
+        #expect(try await vault.session.items().items.isEmpty)
+    }
+
     @Test("a duplicate needs the person's decision, and a merge adds only what they accepted")
     func duplicates() async throws {
         let (vault, personal) = try await Self.unlockedVault()
