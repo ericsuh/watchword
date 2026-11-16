@@ -518,6 +518,8 @@ extension VaultSession {
         } else if view.state.standing(of: account.deviceID) == .unknown {
             try await registerThisDevice(account: account, keys: keys, asNewDevice: false)
         }
+        // Deletions fetched while locked become this device's own now that it can sign.
+        try? await adoptVerifiedDeletions(account: (try? await loadAccount()) ?? account)
     }
 
     /// For an account created before the device registry existed — no registry entries, no published header, no
@@ -681,6 +683,8 @@ extension VaultSession {
         guard try await registry(account).state.devices[deviceID] != nil else {
             throw VaultError.unknownDevice(deviceID)
         }
+        // A vault deletion the device made, which this device has checked, must outlive the device's standing.
+        try await adoptVerifiedDeletions(account: account)
         switch password {
         case .keepPassword(let current):
             try await rotateCredentials(current: current, new: nil, revoking: deviceID)
@@ -1041,6 +1045,10 @@ extension VaultSession {
         let accountID = account.accountID
         guard let accountKey = await trustedAccountSigningKey(account) else { return report }
 
+        // 0. Before the registry moves on (a revocation may arrive with it), every vault deletion this device has
+        //    verified becomes its own.
+        try? await adoptVerifiedDeletions(account: account)
+
         // 1. The registry: a grow-only set of entries, merged by union in both directions.
         let localRows = try await store.records(in: accountID, kind: .deviceRegistry)
         let local = Set(localRows.map { ObjectDigest(hashing: $0.envelope) })
@@ -1196,6 +1204,7 @@ extension VaultSession {
         }
         if !change.upserts.isEmpty { try await store.commit(change) }
         if report.vaultKeysFetched > 0 { try await adoptNewVaultKeys(account: account) }
+        if report.vaultDeletionsFetched > 0 { try? await adoptVerifiedDeletions(account: account) }
 
         // Vouch for what this device holds and has checked: every vault key it has opened, every deletion it has
         // verified. A directory object then never depends on the signature of a device that is later revoked.

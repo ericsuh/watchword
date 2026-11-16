@@ -573,7 +573,12 @@ account/<accountID>/vault/<vaultID>/deleted/<deviceID>         the vault was del
 - **The vault directory** is a pair of grow-only sets: wraps and deletions, each object a `SignedObject` whose
   two signatures (domain `vaultDirectory`) cover its name and body. A deletion wins for good; vault IDs are never
   reused. Every device vouches, under its own name, for each vault key it has opened and each deletion it has
-  verified, so a directory object never depends on the signature of a device that is later revoked. A wrap is
+  verified, so a directory object never depends on the signature of a device that is later revoked. The local
+  copy follows the same rule: once a device has verified a deletion and can sign (unlocked, registered), it
+  replaces the local row with the deletion signed by itself — at the next sync, at the next unlock, and before it
+  revokes a device — so revoking the device that deleted a vault does not bring the vault back there. A deletion
+  seen only while locked rests on its author's signature, and on other devices' copies on the transport, until
+  then. A wrap is
   accepted only if a registered device vouched for it under that exact name *and* its envelope's own context
   names that vault and key; when unlocked, also only if it opens under the keyset. A wrap row in the local store
   that does not open (edited in the file, A8: moved under another vault, corrupted) counts as missing while

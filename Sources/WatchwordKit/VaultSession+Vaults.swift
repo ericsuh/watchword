@@ -125,22 +125,62 @@ extension VaultSession {
         guard !rows.isEmpty else { return result }
         let view = try? await registry(account)
         for row in rows where row.recordID != account.personalVaultID {
-            var isDeleted = false
-            if row.envelope.first == 0x02, let view,
-                let object = try? SignedObject.parse(Array(row.envelope.dropFirst())),
-                object.envelope == Self.deletionMarker
-            {
-                let name = AccountObjectLocation.vaultDeletion(
-                    accountID: account.accountID, vaultID: row.recordID, author: row.deviceID
-                ).name
-                isDeleted =
-                    (try? Self.verifyDual(
-                        object.signature, over: Self.directoryMessage(name: name, body: object.envelope),
-                        domain: .vaultDirectory, author: row.deviceID, view: view)) != nil
-            }
+            let isDeleted = view.map { Self.isVerifiedDeletion(row, accountID: account.accountID, view: $0) } ?? false
             result[row.recordID] = DirectoryEntry(isDeleted: isDeleted)
         }
         return result
+    }
+
+    /// Whether a directory row carries a deletion of its vault signed by the account key and by the row's device,
+    /// which the registry holds as registered and not revoked.
+    static func isVerifiedDeletion(_ row: StoredRecord, accountID: UUID, view: RegistryView) -> Bool {
+        guard row.kind == .vaultDirectory, row.vaultID == accountID, row.envelope.first == 0x02,
+            let object = try? SignedObject.parse(Array(row.envelope.dropFirst())),
+            object.envelope == Self.deletionMarker
+        else { return false }
+        let name = AccountObjectLocation.vaultDeletion(
+            accountID: accountID, vaultID: row.recordID, author: row.deviceID
+        )
+        .name
+        return
+            (try? Self.verifyDual(
+                object.signature, over: Self.directoryMessage(name: name, body: object.envelope),
+                domain: .vaultDirectory, author: row.deviceID, view: view)) != nil
+    }
+
+    /// Makes every vault deletion this device holds and has verified its own: the local row is replaced by the same
+    /// deletion signed by the account key and this device (docs/02-architecture.md §7.7). The row a deletion
+    /// arrives in names the device that made it, and a deletion counts only while its signer is registered; once
+    /// this device has checked it, its standing must not depend on that device any more, or revoking the device
+    /// that deleted a vault would bring the vault back here. Needs the vault unlocked and this device registered;
+    /// until then a deletion seen only while locked rests on its author's signature, and on the copies other
+    /// devices vouched for on the transport.
+    func adoptVerifiedDeletions(account: AccountRecord) async throws {
+        let epoch = lockEpoch
+        guard keys != nil, let view = try? await registry(account),
+            view.state.standing(of: account.deviceID) == .active, view.state.pendingCredentials.isEmpty
+        else { return }
+        var change = StoreChange()
+        for row in try await store.records(in: account.accountID, kind: .vaultDirectory)
+        where row.recordID != account.personalVaultID && row.deviceID != account.deviceID && row.version < .max
+            && Self.isVerifiedDeletion(row, accountID: account.accountID, view: view)
+        {
+            let name = AccountObjectLocation.vaultDeletion(
+                accountID: account.accountID, vaultID: row.recordID, author: account.deviceID
+            ).name
+            let signature = try await dualSignature(
+                Self.directoryMessage(name: name, body: Self.deletionMarker), domain: .vaultDirectory,
+                keys: try requireKeys(since: epoch), account: account)
+            var own = Self.directoryRow(
+                vaultID: row.recordID, accountID: account.accountID, deviceID: account.deviceID,
+                deletion: SignedObject(signature: signature, envelope: Self.deletionMarker))
+            own.version = row.version + 1
+            change.upserts.append(own)
+            change.expectations[own.key] = .version(row.version)
+        }
+        guard !change.upserts.isEmpty else { return }
+        _ = try requireKeys(since: epoch)
+        try await store.commit(change)
     }
 
     /// The key new records of a vault are sealed under.

@@ -606,6 +606,45 @@ struct VaultsSyncTests {
         try await fleet.expectConverged()
     }
 
+    /// docs/02-architecture.md §7.7: a deletion wins for good. Revoking the device that deleted a vault must not
+    /// bring the vault back on a device that had already checked the deletion — synced unlocked (A), or only while
+    /// locked and then unlocked (B) — whether or not it syncs again first.
+    @Test("a vault deletion a device has checked stays deleted when the device that made it is revoked")
+    func deletionOutlivesItsAuthor() async throws {
+        let fleet = try await Fleet.make(3)
+        let (a, b, x) = (fleet.devices[0].session, fleet.devices[1].session, fleet.devices[2].session)
+        let work = try await a.createVault(name: "Work")
+        try await a.save(login(work.id, title: "Payroll"))
+        try await fleet.settle()
+
+        try await x.deleteVault(id: work.id, confirmingItemCount: 1)
+        try await x.sync()
+        try await a.sync()
+        await b.lock()
+        try await b.sync()
+        try await b.unlock(password: TestVault.password)
+        for session in [a, b] {
+            #expect(try await session.vaults(includingDeleted: true).first { $0.id == work.id }?.isDeleted == true)
+        }
+
+        // Each revokes X on its own, before syncing again.
+        try await a.revokeDevice(Fleet.deviceID(2), password: .keepPassword(current: TestVault.password))
+        try await b.revokeDevice(Fleet.deviceID(2), password: .keepPassword(current: TestVault.password))
+        for session in [a, b] {
+            #expect(try await session.deviceStanding() == .active)
+            let vault = try await session.vaults(includingDeleted: true).first { $0.id == work.id }
+            #expect(vault?.isDeleted == true, "not brought back by the revocation")
+            #expect(try await session.vaults().map(\.id) == [fleet.personal])
+            await #expect(throws: VaultError.vaultDeleted(work.id)) {
+                try await session.save(login(work.id, title: "Into a deleted vault"))
+            }
+        }
+        try await fleet.settle([fleet.devices[0], fleet.devices[1]])
+        for session in [a, b] {
+            #expect(try await session.vaults(includingDeleted: true).first { $0.id == work.id }?.isDeleted == true)
+        }
+    }
+
     @Test("a locked device learns of a new vault, and opens it at the next unlock")
     func lockedDeviceLearnsOfVault() async throws {
         let fleet = try await Fleet.make()
