@@ -147,6 +147,8 @@ public actor VaultSession {
     var skippedRegistryEntries: Set<ObjectDigest> = []
     /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
     var pendingImport: PendingImport?
+    /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.
+    var importGeneration: UInt64 = 0
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(

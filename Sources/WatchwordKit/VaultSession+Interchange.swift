@@ -36,7 +36,8 @@ public enum PlaintextExportFormat: Sendable, Hashable {
 /// `CryptoError.authenticationFailed`, which cannot tell them from tampering.
 public enum InterchangeSessionError: Error, Equatable, Sendable {
     /// The preview named is not the one the session holds: it was committed, discarded, replaced by a newer one, or
-    /// dropped by `lock()`. Read the file again.
+    /// dropped by `lock()`. Read the file again. From a preview call: `discardImport()` or a newer preview ran while
+    /// this one was being read, and its drafts were dropped rather than kept.
     case noPendingImport
     /// An entry that duplicates an existing item has no decision: the person must choose skip, keep both or merge.
     case decisionRequired(importedID: UUID)
@@ -64,6 +65,12 @@ public struct ImportPreview: Sendable, Equatable {
     public var entries: [ImportPreviewEntry]
     /// Entries that duplicate items already in `vaultID`; each needs a decision before `commitImport`.
     public var matches: [DuplicateMatch]
+    /// For an encrypted Watchword archive, its identifier and when it was made, as sealed: set only once the archive
+    /// has opened, so they are the authenticated values (the manifest covers the header). The restore screen shows
+    /// the date, so that an older archive put in place of the newest (A1 can replace files in the cloud drive, and
+    /// every archive under the same passphrase and Secret Key opens) is seen for what it is. `nil` for other formats.
+    public var archiveID: UUID?
+    public var archiveCreatedAt: Date?
 }
 
 public struct ImportPreviewEntry: Sendable, Hashable, Identifiable {
@@ -162,14 +169,15 @@ extension VaultSession {
     /// Reads an import file into drafts for `vaultID` and returns what an import would do. Writes nothing.
     ///
     /// The drafts, which hold every secret in the file, stay in the session until `commitImport`, `discardImport`,
-    /// the next preview or `lock()`, whichever comes first. The parse runs on the session and is bounded by
-    /// `InterchangeLimits`.
+    /// the next preview or `lock()`, whichever comes first; a `discardImport()` or newer preview while this one is
+    /// still being read wins, and this one throws `noPendingImport`. The parse runs on the session and is bounded
+    /// by `InterchangeLimits`.
     public func previewImport(
         _ bytes: [UInt8], format: ImportFileFormat, into vaultID: UUID, options: ImportOptions = ImportOptions()
     ) async throws -> ImportPreview {
         let epoch = lockEpoch
+        let generation = beginImport()
         try await requireWritableVault(vaultID, since: epoch)
-        pendingImport = nil
         let result: ImportResult
         switch format {
         case .passwordCSV:
@@ -179,7 +187,7 @@ extension VaultSession {
         case .credentialExchange:
             result = try CredentialExchange.importDocument(bytes, into: vaultID, options: options, using: &random)
         }
-        return try await stage(result, vaultID: vaultID, since: epoch)
+        return try await stage(result, vaultID: vaultID, since: epoch, generation: generation)
     }
 
     /// Opens an encrypted Watchword archive and returns what importing its items into `vaultID` would do. Writes
@@ -187,14 +195,19 @@ extension VaultSession {
     /// the Secret Key of the account that made it (ADR 0008): this account's own, from the Keychain, or, for an
     /// archive another account made (a restore into a new account), `secretKey` as printed on that account's
     /// Emergency Kit. A wrong passphrase, a wrong Secret Key and a tampered archive are all
-    /// `CryptoError.authenticationFailed`.
+    /// `CryptoError.authenticationFailed`. The preview carries the archive's authenticated creation time, for the
+    /// restore screen to show.
+    ///
+    /// The derivation costs what the archive's header says (up to `KDFParameters.maximumIterations`, seconds on a
+    /// phone) before anything in the file is authenticated, so it runs off the session's actor, with the decryption
+    /// and decoding of the entries: a `lock()` meanwhile takes effect at once, and this call then throws `locked`.
     public func previewArchiveImport(
         _ bytes: [UInt8], passphrase: String, secretKey text: String? = nil, into vaultID: UUID,
         options: ImportOptions = ImportOptions()
     ) async throws -> ImportPreview {
         let epoch = lockEpoch
+        let generation = beginImport()
         try await requireWritableVault(vaultID, since: epoch)
-        pendingImport = nil
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
         let archive = try AccountArchive.parse(bytes)
         let secretKey: SecretKey
@@ -213,14 +226,13 @@ extension VaultSession {
         }
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
-        let payloads = try archive.open(passphrase: passphrase, secretKey: secretKey)
-        defer {
-            for payload in payloads { payload.zeroise() }
+        let entries = try await awayFromSession(since: epoch) {
+            try Self.archivedEntries(of: archive, passphrase: passphrase, secretKey: secretKey)
         }
-        _ = try requireKeys(since: epoch)
-        let result = try ArchivedItems.importEntries(
-            Self.archivedEntries(payloads), into: vaultID, options: options, using: &random)
-        return try await stage(result, vaultID: vaultID, since: epoch)
+        let result = try ArchivedItems.importEntries(entries, into: vaultID, options: options, using: &random)
+        return try await stage(
+            result, vaultID: vaultID, since: epoch, generation: generation,
+            archive: (archive.archiveID, archive.createdAt))
     }
 
     /// What merging the imported entry into the existing item would add, with every value in full, for the
@@ -235,8 +247,10 @@ extension VaultSession {
         return DuplicateDetector.additions(of: imported, to: existing)
     }
 
-    /// Drops the preview without writing anything.
+    /// Drops the preview without writing anything, and any preview still being read: it throws `noPendingImport`
+    /// instead of keeping its drafts.
     public func discardImport() {
+        importGeneration &+= 1
         pendingImport = nil
     }
 
@@ -368,21 +382,22 @@ extension VaultSession {
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
 
-        var payloads: [SecureBytes] = []
-        defer {
-            for payload in payloads { payload.zeroise() }
-        }
-        for vault in chosen.vaults {
-            let name = Array(vault.name.utf8.prefix(ArchivePayload.maximumVaultNameBytes))
-            payloads.append(SecureBytes(copying: [ArchivePayload.vault] + Self.bytes(vault.id) + name))
-        }
-        for item in chosen.items {
-            let encoded = try ItemCodec.encode(item)
-            payloads.append(SecureBytes.concatenating([SecureBytes(copying: [ArchivePayload.item]), encoded]))
-            encoded.zeroise()
-        }
+        // One entry's plaintext in protected storage at a time: `seal` zeroises each as soon as it is sealed.
+        let vaults = chosen.vaults
+        let items = chosen.items
         let bytes = try AccountArchive.seal(
-            payloads, archiveID: UUID.random(using: &random), accountID: record.accountID, createdAt: now,
+            entryCount: vaults.count + items.count,
+            payload: { index in
+                guard index >= vaults.count else {
+                    let vault = vaults[index]
+                    let name = Array(vault.name.utf8.prefix(ArchivePayload.maximumVaultNameBytes))
+                    return SecureBytes(copying: [ArchivePayload.vault] + Self.bytes(vault.id) + name)
+                }
+                let encoded = try ItemCodec.encode(items[index - vaults.count])
+                defer { encoded.zeroise() }
+                return SecureBytes.concatenating([SecureBytes(copying: [ArchivePayload.item]), encoded])
+            },
+            archiveID: UUID.random(using: &random), accountID: record.accountID, createdAt: now,
             passphrase: passphrase, secretKey: secretKey, parameters: try kdfParameters(), using: &random)
         _ = try requireKeys(since: epoch)
         return ArchiveExport(
@@ -399,11 +414,24 @@ extension VaultSession {
         _ = try requireKeys(since: epoch)
     }
 
-    /// Compares the drafts with the target vault's items and keeps them, inside the session, for the commit.
-    private func stage(_ result: ImportResult, vaultID: UUID, since epoch: UInt64) async throws -> ImportPreview {
+    /// Starts a preview: drops the one held, and makes any preview still being read stale.
+    private func beginImport() -> UInt64 {
+        importGeneration &+= 1
+        pendingImport = nil
+        return importGeneration
+    }
+
+    /// Compares the drafts with the target vault's items and keeps them, inside the session, for the commit, unless
+    /// a lock, a `discardImport()` or a newer preview came while they were read: then they are dropped.
+    private func stage(
+        _ result: ImportResult, vaultID: UUID, since epoch: UInt64, generation: UInt64,
+        archive: (id: UUID, createdAt: Date)? = nil
+    ) async throws -> ImportPreview {
         _ = try requireKeys(since: epoch)
+        guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
         let existing = try await items(inVaults: [vaultID]).items
         _ = try requireKeys(since: epoch)
+        guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
         let matches = DuplicateDetector.matches(imported: result.entries.map(\.item), existing: existing)
         let id = UUID.random(using: &random)
         pendingImport = PendingImport(id: id, epoch: epoch, vaultID: vaultID, result: result, matches: matches)
@@ -414,7 +442,20 @@ extension VaultSession {
                     id: $0.item.id, title: $0.item.title, kind: $0.kind, state: $0.state, reference: $0.reference,
                     hosts: $0.item.scopes.map(\.host), loginNames: $0.item.loginNames)
             },
-            matches: matches)
+            matches: matches, archiveID: archive?.id, archiveCreatedAt: archive?.createdAt)
+    }
+
+    /// Runs `work` off the session's actor, then requires that no `lock()` came meanwhile (CLAUDE.md: `lock()`
+    /// always wins). For work whose cost the caller does not control and that touches none of the session's keys:
+    /// an archive's derivation, whose iteration count is the file's. On the actor it would hold `lock()`, auto-lock
+    /// and sync behind it with the vault keys resident; here a lock zeroises them at once, and what `work` produced
+    /// is dropped.
+    func awayFromSession<T: Sendable>(since epoch: UInt64, _ work: @escaping @Sendable () throws -> T) async throws
+        -> T
+    {
+        let outcome = await Task.detached(priority: Task.currentPriority) { Result { try work() } }.value
+        _ = try requireKeys(since: epoch)
+        return try outcome.get()
     }
 
     private func currentImport(_ preview: UUID) throws -> PendingImport {
@@ -507,36 +548,42 @@ extension VaultSession {
         return (chosen, listing.items, listing.unreadable)
     }
 
-    /// The entries of an opened archive, with each item's vault name as its container. An entry that is neither a
-    /// vault nor an item that decodes is listed as unreadable.
-    static func archivedEntries(_ payloads: [SecureBytes]) -> [ArchivedEntry] {
+    /// Opens `archive` and decodes its entries one at a time, each item with its vault's name as its container. Each
+    /// plaintext is zeroised as soon as it is decoded (`AccountArchive.open(passphrase:secretKey:each:)`), so memory
+    /// grows with the items, not with a page-rounded buffer per entry. An entry that is neither a vault nor an item
+    /// that decodes is listed as unreadable.
+    static func archivedEntries(of archive: AccountArchive, passphrase: String, secretKey: SecretKey) throws
+        -> [ArchivedEntry]
+    {
         var names: [UUID: String] = [:]
-        for payload in payloads where payload.count >= 17 && payload[0] == ArchivePayload.vault {
-            // A vault's ID and name: metadata, not key material.
-            let bytes = payload.unprotectedCopy()
-            guard bytes.count - 17 <= ArchivePayload.maximumVaultNameBytes,
-                let name = String(bytes: bytes[17...], encoding: .utf8)
-            else { continue }
-            names[Self.uuid(Array(bytes[1..<17]))] = name
-        }
         var entries: [ArchivedEntry] = []
-        for payload in payloads {
+        try archive.open(passphrase: passphrase, secretKey: secretKey) { payload in
             guard payload.count > 0 else {
                 entries.append(ArchivedEntry(.unreadable))
-                continue
+                return
             }
             switch payload[0] {
             case ArchivePayload.vault:
-                continue
+                // A vault's ID and name: metadata, not key material.
+                let bytes = payload.unprotectedCopy()
+                guard bytes.count >= 17, bytes.count - 17 <= ArchivePayload.maximumVaultNameBytes,
+                    let name = String(bytes: bytes[17...], encoding: .utf8)
+                else { return }
+                names[Self.uuid(Array(bytes[1..<17]))] = name
             case ArchivePayload.item:
-                if let item = try? ItemCodec.decode(payload.dropFirst()) {
-                    entries.append(ArchivedEntry(.item(item), container: names[item.vaultID]))
+                let encoded = payload.extracting(1..<payload.count)
+                defer { encoded.zeroise() }
+                if let item = try? ItemCodec.decode(encoded) {
+                    entries.append(ArchivedEntry(.item(item)))
                 } else {
                     entries.append(ArchivedEntry(.unreadable))
                 }
             default:
                 entries.append(ArchivedEntry(.unreadable))
             }
+        }
+        for index in entries.indices {
+            if case .item(let item) = entries[index].content { entries[index].container = names[item.vaultID] }
         }
         return entries
     }

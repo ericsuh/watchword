@@ -430,7 +430,8 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - Open, all of it integration and most of it Mac-only: `completeUnlessOpen` file protection and the standing
   warning on screen (the session documents both; the app does them); restoring an archive's vaults as vaults
   (today every archived item goes into the one vault the person chooses, naming the vault it came from); parsing
-  off the session actor, so that a lock does not wait for a large file's parse; the OS
+  a plaintext file off the session actor, so that a lock does not wait for a large file's parse (an archive's key
+  derivation and decryption already run off it); the restore screen showing `ImportPreview.archiveCreatedAt`; the OS
   Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
   and their XCUITests, including a duplicate screen that names each host a merge would add and asks about it
   (`DuplicateMatch.newHosts`, `MergeChoices`), shows each URL and sign-in field before adding it

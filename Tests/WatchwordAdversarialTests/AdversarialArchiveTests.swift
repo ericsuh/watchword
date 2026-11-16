@@ -322,6 +322,62 @@ struct AdversarialSessionInterchangeTests {
         #expect(!String(decoding: export.bytes, as: UTF8.self).contains("evil.example"))
     }
 
+    /// A7 hands the person an archive whose cleartext header asks for the most iterations the bounds allow (25M,
+    /// seconds of PBKDF2 on a phone), and nothing in it is authenticated until that derivation ends. The person, or
+    /// auto-lock, locks meanwhile: the lock takes effect at once, with the vault keys zeroised, rather than waiting
+    /// behind the file's choice of cost on the session's actor (review finding X1). The derivation runs through
+    /// `awayFromSession`; here a stand-in for it blocks until the test has locked, so the lock can only have
+    /// returned if the work was off the actor.
+    @Test("a lock while an archive's key is derived takes effect at once, and the preview then fails")
+    func lockWinsDuringArchiveDerivation() async throws {
+        let (vault, _) = try await Self.vault()
+        let epoch = await vault.session.lockEpoch
+        let (started, starting) = AsyncStream.makeStream(of: Void.self)
+        let release = DispatchSemaphore(value: 0)
+        let released = Flag()
+        let work = Task {
+            try await vault.session.awayFromSession(since: epoch) { () -> Int in
+                starting.yield()
+                // Bounded, so a regression fails instead of hanging: the lock below never returns while this
+                // blocks the actor.
+                if release.wait(timeout: .now() + 60) == .success { released.set() }
+                return 1
+            }
+        }
+        var iterator = started.makeAsyncIterator()
+        _ = await iterator.next()
+        await vault.session.lock()
+        #expect(await vault.session.keys == nil)
+        release.signal()
+        await #expect(throws: VaultError.locked) { try await work.value }
+        #expect(released.isSet, "lock() returned only after the work had given up waiting")
+    }
+
+    /// The same path end to end: A7 raises an archive's iteration count within the bounds (parse accepts it), and
+    /// the preview, deriving off the actor, fails as authentication and leaves the session unlocked with nothing
+    /// staged.
+    @Test("an archive whose iteration count was raised fails as authentication through the session")
+    func raisedIterations() async throws {
+        let (vault, personal) = try await Self.vault()
+        let key = SecretKey.generate()
+        var generator = SeededGenerator(seed: 12)
+        let archive = try AccountArchive.seal(
+            [SecureBytes(copying: [1])], archiveID: UUID(), accountID: UUID(),
+            createdAt: Date(timeIntervalSince1970: 0), passphrase: Self.passphrase, secretKey: key,
+            parameters: KDFParameters(iterations: KDFParameters.minimumIterations), using: &generator)
+        var ceiling = archive
+        ceiling.replaceSubrange(
+            AdversarialArchiveTests.Layout.iterations..<(AdversarialArchiveTests.Layout.iterations + 4),
+            with: AdversarialArchiveTests.littleEndian(KDFParameters.minimumIterations * 2))
+        #expect(throws: Never.self) { _ = try AccountArchive.parse(ceiling) }
+        await #expect(throws: CryptoError.authenticationFailed) {
+            try await vault.session.previewArchiveImport(
+                ceiling, passphrase: Self.passphrase, secretKey: key.formatted, into: personal)
+        }
+        #expect(await vault.session.keys != nil)
+        #expect(await vault.session.pendingImport == nil)
+    }
+
     /// A3 holds the unlocked device and asks for a plaintext export or an archive under a passphrase of their
     /// own. Neither is made without the account password, and a wrong one fails as authentication.
     @Test("no export, plaintext or archive, without the account password")
@@ -358,5 +414,23 @@ struct AdversarialSessionInterchangeTests {
         await #expect(throws: InterchangeSessionError.noPendingImport) {
             try await vault.session.commitImport(preview.id, decisions: [match.importedID: .keepBoth])
         }
+    }
+}
+
+/// A flag one thread sets and another reads, for a test that blocks a thread on purpose.
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

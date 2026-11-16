@@ -27,16 +27,19 @@ struct ArchiveKeyDerivationTests {
     /// Expected keys from Python `cryptography` 50 (OpenSSL's PBKDF2 and HKDF) over the derivation as specified in
     /// docs/02-architecture.md §14.1, never from this code: `HKDF(salt, archiveID, "WW-archive-salt-v1")`, PBKDF2 of
     /// the NFKD passphrase at 650,000 iterations, `HKDF(SK, accountID, "WW-archive-2SKD-v1")`, and
-    /// `HKDF(Kp ‖ Ks, archiveID ‖ accountID, "WW-archive-key-v1")`. The second is the decomposed spelling of a
-    /// precomposed passphrase.
+    /// `HKDF(Kp ‖ Ks, archiveID ‖ accountID, "WW-archive-key-v1")`. The second vector is Python's
+    /// `unicodedata.normalize("NFKD", …)` of a passphrase that NFKD changes: a precomposed "é" and the "ﬁ" ligature
+    /// (U+FB01), which decompose to "e" + U+0301 and "fi". Derived from that input, the expected key holds only if
+    /// the passphrase is normalised, and with NFKD (NFC would keep the ligature); its decomposed spelling, typed
+    /// on another keyboard, must give the same key (review finding X6).
     @Test("matches an independent implementation of the derivation")
     func knownAnswer() throws {
         #expect(
             try Self.derive("correct horse battery staple")
                 == [UInt8](hex: "3da66ec3ec9b9dd2b9e578fbc54d5281d650018c5bccacce9750544fdcfbd834"))
-        #expect(
-            try Self.derive("Cafe\u{0301} fi")
-                == [UInt8](hex: "1ea1a0b0a9106a8e300736dc8b69c61ecc616929f291b9daab0d604de8f7b8be"))
+        let normalised = [UInt8](hex: "1ea1a0b0a9106a8e300736dc8b69c61ecc616929f291b9daab0d604de8f7b8be")
+        #expect(try Self.derive("Caf\u{E9} \u{FB01}") == normalised)
+        #expect(try Self.derive("Cafe\u{0301} fi") == normalised)
     }
 
     @Test("is not the Account Unlock Key of the same inputs, and every input changes it")
@@ -128,6 +131,43 @@ struct AccountArchiveTests {
             passphrase: "correct horse battery staple", secretKey: ArchiveKeyDerivationTests.secretKey)
         #expect(
             opened.map { $0.unprotectedCopy() } == [[1] + Array("first entry".utf8), [2] + Array("second entry".utf8)])
+    }
+
+    /// Review finding X3: every `SecureBytes` is at least a page, so an archive's plaintexts must not all be held at
+    /// once. Each one `seal` asks for, and each one `open` hands over, is zeroised as soon as it has been used.
+    @Test("holds one entry's plaintext at a time, sealing and opening")
+    func oneEntryAtATime() throws {
+        let texts = ["first", "second", "third"]
+        var produced: [SecureBytes] = []
+        var previousZeroised: [Bool] = []
+        var generator = SeededGenerator(seed: 2)
+        let bytes = try AccountArchive.seal(
+            entryCount: texts.count,
+            payload: { index in
+                previousZeroised.append(produced.allSatisfy(\.isZeroised))
+                let payload = SecureBytes(copying: Array(texts[index].utf8))
+                produced.append(payload)
+                return payload
+            },
+            archiveID: ArchiveKeyDerivationTests.archiveID, accountID: ArchiveKeyDerivationTests.accountID,
+            createdAt: Date(timeIntervalSince1970: 1_800_000_000), passphrase: Self.passphrase,
+            secretKey: ArchiveKeyDerivationTests.secretKey, parameters: .baseline, using: &generator)
+        #expect(produced.count == 3 && produced.allSatisfy(\.isZeroised))
+        #expect(previousZeroised == [true, true, true], "each entry was zeroised before the next was asked for")
+        previousZeroised = []
+
+        var handed: [SecureBytes] = []
+        var read: [String] = []
+        try AccountArchive.parse(bytes).open(
+            passphrase: Self.passphrase, secretKey: ArchiveKeyDerivationTests.secretKey
+        ) { payload in
+            previousZeroised.append(handed.allSatisfy(\.isZeroised))
+            handed.append(payload)
+            read.append(String(decoding: payload.unprotectedCopy(), as: UTF8.self))
+        }
+        #expect(read == texts)
+        #expect(handed.count == 3 && handed.allSatisfy(\.isZeroised))
+        #expect(previousZeroised == [true, true, true], "each entry was zeroised before the next was opened")
     }
 
     @Test("an empty archive is still a sealed one")

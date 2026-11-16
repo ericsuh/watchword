@@ -2083,9 +2083,14 @@ depends on `WatchwordInterchange`; the module still knows nothing of the session
 **Import is preview, then commit.** `previewImport(_:format:into:options:)` (CSV, 1PUX, CXF; the CSV variant is
 read off the header) and `previewArchiveImport(_:passphrase:secretKey:into:options:)` parse the bytes, compare
 the drafts with the items of the chosen vault (`DuplicateDetector.matches`) and return an `ImportPreview`: the
-`ImportReport`, a summary per entry (title, kind, state, hosts, login names) and the matches. **Nothing is
-written, and the preview holds no secret**: the drafts stay inside the actor (`pendingImport`), and `lock()`
-drops them, as do `discardImport()`, the next preview and the commit. The values a merge would add, with every
+`ImportReport`, a summary per entry (title, kind, state, hosts, login names) and the matches; for an archive also
+its identifier and creation time (`archiveID`, `archiveCreatedAt`), set only once it has opened, so they are the
+values the manifest authenticated, and the restore screen shows the date: A1 can put an older archive in place of
+the newest, and every archive under the same passphrase and Secret Key opens. **Nothing is written, and the
+preview holds no secret**: the drafts stay inside the actor (`pendingImport`), and `lock()` drops them, as do
+`discardImport()`, the next preview and the commit. Each preview and `discardImport()` advances a generation
+(`importGeneration`), so a preview still awaiting the store when the person cancels, or starts another, drops its
+drafts and throws `noPendingImport` instead of keeping them. The values a merge would add, with every
 value in full for the duplicate screen, come from `importAdditions(preview:importedID:existingID:)` while it is
 shown. `commitImport(_:decisions:)` checks every decision before writing anything: an entry that matches an
 existing item must have one (`decisionRequired`), and a merge may only go into an item it was matched with
@@ -2098,8 +2103,14 @@ whatever a caller put there). A merge is an edit of the existing item, `Duplicat
 item as the write reads it, so nothing written since the preview is undone, with only the hosts and fields in
 `MergeChoices`. An entry the source had in its trash (when the person asked for those) is saved, then moved to the
 trash through `trash(id:)`. One item fails alone (`ImportOutcome.failed`); a `lock()` during a commit stops it
-(`importInterrupted(saved:)`) and the preview is gone with the lock. Parsing runs on the session actor, bounded by
-`InterchangeLimits`; a lock waits for a parse in progress, as it waits for an unlock's derivation.
+(`importInterrupted(saved:)`) and the preview is gone with the lock. Parsing a plaintext format runs on the session
+actor, bounded by `InterchangeLimits`; a lock waits for a parse in progress. An archive's key derivation does not:
+its cost is the iteration count in the file's cleartext header (up to the 25M ceiling, seconds on a phone) and
+nothing in the file is authenticated until it ends, so on the actor it would hold `lock()`, auto-lock and sync
+behind a file's choice with the vault keys resident. The derivation, decryption and decoding run off the actor
+(`awayFromSession`), touching none of the session's keys, and the lock epoch is checked when they return: a lock
+meanwhile takes effect at once, and the preview throws `locked`. (An unlock's derivation runs on the actor, but
+under the account's own parameters and with no keys resident.)
 
 **Plaintext export needs the account password, in the same call.** `exportPlaintext(_:vaults:password:)`
 re-derives the Account Unlock Key from the password under the stored header's own KDF parameters and opens the
@@ -2159,8 +2170,12 @@ authenticated data against its place: an entry moved to another position, relabe
 taken from another archive, and a header relabelled with another account, all fail here, before any key is
 derived. Then `open` derives AWK, opens the archive key (a wrong passphrase, a wrong Secret Key, and a header
 altered in any field the key depends on, all fail as one `CryptoError.authenticationFailed`), opens the manifest and
-compares its digests with every byte of the header and the entries, and only then decrypts the entries, in order.
-A truncated, extended, reordered or spliced archive that got that far fails at the manifest, as the same error.
+compares its digests with every byte of the header and the entries, and only then decrypts the entries, in order,
+handing each plaintext to the caller and zeroising it as soon as it is decoded. Sealing likewise asks for one
+entry's plaintext at a time. Every `SecureBytes` is page-rounded (16 KiB on arm64 Darwin), so holding them all
+would cost the entry count times a page, about 3 GiB at the format's 200,000-entry limit; held one at a time, a
+restore's memory grows with the items it decodes. A truncated, extended, reordered or spliced archive that got that
+far fails at the manifest, as the same error.
 
 An archive names its account in the clear. `previewArchiveImport` with no `secretKey` uses this account's Secret Key
 and refuses an archive of another account by name (`archiveFromAnotherAccount`), so the person can be asked for that
@@ -2186,8 +2201,9 @@ metadata, the whole history, the times, the archived mark and the exclusion from
 not restore is the vaults themselves: the items of every archived vault go into the one vault the person chooses,
 each listing the vault it came from (`ImportEntryReference.container`).
 
-A known-answer vector for the derivation, and a whole archive written by an independent Python implementation of
-this section (fixed keys and nonces), are in `AccountArchiveTests`; the archive is also the seed of the `archive`
+Known-answer vectors for the derivation (one of a passphrase that NFKD changes, a precomposed "é" and the U+FB01
+ligature, so a missing or different normalisation fails), and a whole archive written by an independent Python
+implementation of this section (fixed keys and nonces), are in `AccountArchiveTests`; the archive is also the seed of the `archive`
 fuzz target. The adversarial areas are "encrypted Watchword archive" and "interchange through the session".
 
 ## 15. Module and target layout

@@ -473,6 +473,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - The archive is sealed under the archive passphrase *and* the Secret Key (ADR 0008); `AccountArchive.parse`
   checks everything, KDF bounds and every envelope's place included, before a key is derived, and every failure
   after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.
+  Its derivation costs what the file says, so it runs off the actor (`awayFromSession`), never on it, and entries are
+  opened and decoded one at a time; only `Item.isTrashedByPerson` comes back as trash.
 - Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
   exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
   signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting

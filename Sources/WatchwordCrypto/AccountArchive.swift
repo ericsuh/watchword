@@ -92,14 +92,20 @@ public struct AccountArchive: Sendable {
 
     // MARK: - Writing
 
-    /// Seals `payloads`, in order, into a new archive for `accountID` under a fresh archive key wrapped under the key
-    /// derived from `passphrase` and `secretKey` with `parameters` (validated first) and a fresh salt.
+    /// Seals `entryCount` payloads, in order, into a new archive for `accountID` under a fresh archive key wrapped
+    /// under the key derived from `passphrase` and `secretKey` with `parameters` (validated first) and a fresh salt.
+    ///
+    /// `payload` is called once per entry, in order, and what it returns is zeroised as soon as it is sealed, so an
+    /// export holds one entry's plaintext in protected storage at a time: every `SecureBytes` is at least a page
+    /// (16 KiB on arm64 Darwin), and an archive of 200,000 small items built as an array would need 3 GiB of them.
     public static func seal<R: RandomNumberGenerator>(
-        _ payloads: [SecureBytes], archiveID: UUID, accountID: UUID, createdAt: Date, passphrase: String,
-        secretKey: SecretKey, parameters: KDFParameters, using generator: inout R
+        entryCount: Int, payload: (Int) throws -> SecureBytes, archiveID: UUID, accountID: UUID, createdAt: Date,
+        passphrase: String, secretKey: SecretKey, parameters: KDFParameters, using generator: inout R
     ) throws -> [UInt8] {
         try parameters.validate()
-        guard payloads.count <= maximumEntries else { throw AccountArchiveError.tooManyEntries(payloads.count) }
+        guard entryCount >= 0, entryCount <= maximumEntries else {
+            throw AccountArchiveError.tooManyEntries(entryCount)
+        }
         let salt = SecureBytes(randomCount: parameters.saltLength, using: &generator).unprotectedCopy()
         let wrapKeyID = UUID.randomVersion4(using: &generator)
         let wrappingKey = try ArchiveKeyDerivation.wrappingKey(
@@ -114,10 +120,12 @@ public struct AccountArchive: Sendable {
             key: wrappingKey, using: &generator)
 
         var entriesBytes: [UInt8] = []
-        for (index, payload) in payloads.enumerated() {
+        for index in 0..<entryCount {
             let entryID = UUID.randomVersion4(using: &generator)
+            let plaintext = try payload(index)
+            defer { plaintext.zeroise() }
             let envelope = try RecordCipher.seal(
-                payload,
+                plaintext,
                 context: entryContext(
                     archiveID: archiveID, entryID: entryID, index: index, archiveKeyID: archiveKey.keyID),
                 key: archiveKey, using: &generator)
@@ -136,17 +144,29 @@ public struct AccountArchive: Sendable {
         header += AccountBytes.littleEndian(parameters.iterations) + AccountBytes.field(salt)
         header += wrapKeyID.byteArray + archiveKey.keyID.byteArray
         header += AccountBytes.field(wrapped)
-        header += AccountBytes.littleEndian(UInt32(payloads.count))
+        header += AccountBytes.littleEndian(UInt32(entryCount))
 
         let manifest = try RecordCipher.seal(
             AccountBytes.sha256(header) + AccountBytes.sha256(entriesBytes),
             context: manifestContext(
                 archiveID: archiveID, accountID: accountID, archiveKeyID: archiveKey.keyID,
-                entryCount: payloads.count),
+                entryCount: entryCount),
             key: archiveKey, using: &generator)
         let archive = header + AccountBytes.field(manifest) + entriesBytes
         guard archive.count <= maximumLength else { throw AccountArchiveError.tooLarge(archive.count) }
         return archive
+    }
+
+    /// `seal(entryCount:payload:...)` over an array, for tests and small archives. The caller's buffers are copied
+    /// and left as they were.
+    static func seal<R: RandomNumberGenerator>(
+        _ payloads: [SecureBytes], archiveID: UUID, accountID: UUID, createdAt: Date, passphrase: String,
+        secretKey: SecretKey, parameters: KDFParameters, using generator: inout R
+    ) throws -> [UInt8] {
+        try seal(
+            entryCount: payloads.count, payload: { payloads[$0].extracting(0..<payloads[$0].count) },
+            archiveID: archiveID, accountID: accountID, createdAt: createdAt, passphrase: passphrase,
+            secretKey: secretKey, parameters: parameters, using: &generator)
     }
 
     // MARK: - Reading
@@ -234,9 +254,19 @@ public struct AccountArchive: Sendable {
 
     /// Derives the wrapping key from `passphrase` and `secretKey` (the Secret Key of `accountID`, the account the
     /// header names), opens the archive key, checks the manifest against every byte parsed, and only then opens
-    /// the entries, in order. Every failure from the derivation on is `CryptoError.authenticationFailed`: a wrong
-    /// passphrase, a wrong Secret Key and a tampered archive are not told apart.
-    public func open(passphrase: String, secretKey: SecretKey) throws -> [SecureBytes] {
+    /// the entries, in order, handing each plaintext to `body` and zeroising it as soon as `body` returns: a restore
+    /// holds one entry's plaintext in protected storage at a time, however many entries the archive has. Every
+    /// failure from the derivation on is `CryptoError.authenticationFailed`: a wrong passphrase, a wrong Secret Key
+    /// and a tampered archive are not told apart.
+    ///
+    /// The manifest covers every entry's ciphertext, so an entry that fails to open after it was checked can only
+    /// have been sealed that way by someone holding the archive key; `body` may then have seen earlier entries, and
+    /// the caller discards what it built from them when this throws.
+    ///
+    /// The derivation costs what the header's iteration count says, up to `KDFParameters.maximumIterations`, before
+    /// anything in the file is authenticated: a caller that holds keys runs this away from them (the session does,
+    /// off its actor, so `lock()` is not kept waiting behind a file's choice of cost).
+    public func open(passphrase: String, secretKey: SecretKey, each body: (SecureBytes) -> Void) throws {
         let wrappingKey: EncryptionKey
         do {
             wrappingKey = try ArchiveKeyDerivation.wrappingKey(
@@ -246,7 +276,6 @@ public struct AccountArchive: Sendable {
             throw CryptoError.authenticationFailed
         }
         defer { wrappingKey.zeroise() }
-        var opened: [SecureBytes] = []
         do {
             let material = try RecordCipher.open(
                 wrappedKey,
@@ -268,18 +297,30 @@ public struct AccountArchive: Sendable {
             manifestPlaintext.zeroise()
             guard digests == expectedManifest else { throw CryptoError.authenticationFailed }
             for (index, entry) in entries.enumerated() {
-                opened.append(
-                    try RecordCipher.open(
-                        entry.envelope,
-                        context: Self.entryContext(
-                            archiveID: archiveID, entryID: entry.id, index: index, archiveKeyID: archiveKeyID),
-                        key: archiveKey, maximumLength: Self.maximumEntryLength))
+                let plaintext = try RecordCipher.open(
+                    entry.envelope,
+                    context: Self.entryContext(
+                        archiveID: archiveID, entryID: entry.id, index: index, archiveKeyID: archiveKeyID),
+                    key: archiveKey, maximumLength: Self.maximumEntryLength)
+                body(plaintext)
+                plaintext.zeroise()
             }
-            return opened
         } catch {
-            for payload in opened { payload.zeroise() }
             throw CryptoError.authenticationFailed
         }
+    }
+
+    /// Every entry's plaintext at once, each in its own protected buffer: for tests and small archives only (see
+    /// `open(passphrase:secretKey:each:)`).
+    func open(passphrase: String, secretKey: SecretKey) throws -> [SecureBytes] {
+        var opened: [SecureBytes] = []
+        do {
+            try open(passphrase: passphrase, secretKey: secretKey) { opened.append($0.extracting(0..<$0.count)) }
+        } catch {
+            for payload in opened { payload.zeroise() }
+            throw error
+        }
+        return opened
     }
 
     // MARK: - Contexts
