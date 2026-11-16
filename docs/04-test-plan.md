@@ -560,6 +560,18 @@ a real adapter would have been asked to send:
   password of words, measured against it in the same run; text from the breached-account API is stripped of
   control and bidirectional characters and never carries the service's HTML.
 
+**In the session** (`AdversarialSessionHygieneTests`, suite "Adversarial: hygiene in the vault session";
+`02-architecture.md` §13.8): after `lock()` the engine holds nothing (ledger, reuse lookups and report refused), the
+session's device-local key and its record of what the engine saw are gone, the sealed cache answers nothing, and
+every byte in the device-local store is ciphertext (no record magic, ledger key, item ID or prefix in hexadecimal),
+under names that are keyed digests; a scan whose response is held until after the lock reports `interrupted`,
+leaves the device-local store byte for byte as it was, and after the next unlock the item is still due and is
+asked for again; the device-local key differs per device of an account and per account, is never the raw key,
+and a sealed record opens neither under another device's or account's key nor under another name; a ledger and
+range planted from another account's device under this device's names, for an item given the same ID and
+version, are not believed. Functional: "Vault session: hygiene" (reports, reuse, an edit due at once, rows the
+sync engine wrote reconciled, the ledger and cache surviving a relaunch, eviction and erasure with the account).
+
 The functional suites (`WatchwordHygieneTests`) cover: SHA-1 prefix and suffix and the reuse HMAC against
 vectors from Python's `hashlib`/`hmac`; the parser on padded, unpadded, malformed, oversized and
 line-limit responses; cache expiry, `freshAfter`, the cache codec and its damage cases; every status class;

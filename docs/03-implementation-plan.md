@@ -373,8 +373,13 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 
 - `URLSessionHTTPClient` in `WatchwordPlatform` (ephemeral, no redirects, size and time limits), and a
   capture of real range responses on a Mac to check the fixtures against.
-- Wiring into `VaultSession`: the reuse key from `Ksym`, the ledger and the prefix cache as sealed local
-  records, `update`/`scan` on save, `unlock`/`lock`.
+- Wiring into `VaultSession` is **done** (Linux; `02-architecture.md` §13.8): the reuse key and the device-local
+  key derived from `Ksym` under labels of their own, the ledger and the prefix cache as sealed per-device records
+  in the `DeviceLocalStore` port, the engine updated on every commit and reconciled with the store before every
+  query and after every sync, `unlock`/`lock` in that order around the keyset, and `runHygieneStep()` for the UI or
+  a background task to drive. Tests: "Vault session: hygiene" and the adversarial suite "hygiene in the vault
+  session". Still open: the file adapter for `DeviceLocalStore` (App Group, excluded from backup); until then the
+  ledger and cache last as long as the process.
 - `BGProcessingTask` / `NSBackgroundActivityScheduler` glue that wakes the loop.
 - The report UI, per-item badges in the item list, settings for the site directory and the HIBP API key, and
   the UI snapshot tests.

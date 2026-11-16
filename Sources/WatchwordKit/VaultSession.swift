@@ -28,19 +28,23 @@ public struct VaultConfiguration: Sendable {
     /// What this device is called in the account's list of devices ("Eric's iPhone"). Sealed under the keyset before
     /// it is written anywhere; at most 64 characters are kept.
     public var deviceName: String
+    /// Breach checks and the hygiene report (docs/02-architecture.md §13.8); `nil` turns hygiene off.
+    public var hygiene: HygieneSettings?
 
     public init(
         appVersion: String,
         kdf: KDFStrategy = .calibrate,
         quickUnlock: QuickUnlockSettings = .standard,
         autoLock: AutoLockSettings = .platformDefault,
-        deviceName: String = ""
+        deviceName: String = "",
+        hygiene: HygieneSettings? = nil
     ) {
         self.appVersion = appVersion
         self.kdf = kdf
         self.quickUnlock = quickUnlock
         self.autoLock = autoLock
         self.deviceName = deviceName
+        self.hygiene = hygiene
     }
 }
 
@@ -145,6 +149,8 @@ public actor VaultSession {
     /// parent that is not there), not fetched again by this session until a sync keeps something new: a revoked
     /// device that floods the transport costs each of them one fetch (docs/02-architecture.md §7.8).
     var skippedRegistryEntries: Set<ObjectDigest> = []
+    /// The hygiene engine and what drives it (`VaultSession+Hygiene.swift`); built at the first unlock.
+    var hygieneRuntime: HygieneRuntime?
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(
@@ -697,6 +703,7 @@ public actor VaultSession {
         keys = newKeys
         lastActivity = now
         backgroundedAt = nil
+        startHygiene()
     }
 
     // MARK: - Lock (PRD F5.5)
@@ -708,6 +715,8 @@ public actor VaultSession {
         keys?.zeroise()
         keys = nil
         backgroundedAt = nil
+        // After the keyset is zeroised, never before (§13.8): nothing the engine does can keep the keys resident.
+        stopHygiene()
     }
 
     /// Call on user interaction. Resets the idle timer — unless the timeout has already passed, in which case it
@@ -997,6 +1006,7 @@ public actor VaultSession {
         ).zeroise()
         lock()
         try await writer(for: record).eraseAll()
+        try? await eraseHygieneRecords()
         account = nil
         // Every item is attempted even if one fails, so a Keychain error cannot leave the Secret Key behind just
         // because an earlier deletion threw; anything left over is reported.
@@ -1222,6 +1232,7 @@ public actor VaultSession {
         change.expectations[sealed.key] = existing.map { .version($0.version) } ?? .absent
         try await writer(for: account).commit(change)
         highestVersionSeen[item.vaultID] = max(highestVersionSeen[item.vaultID] ?? 0, item.version)
+        await noteHygieneWrite(item)
     }
 
     func sealItem(_ item: Item, vaultKey: VaultKey, account: AccountRecord) throws -> StoredRecord {

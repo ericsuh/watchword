@@ -55,6 +55,8 @@ public enum VaultError: Error, Equatable, Sendable {
     case keychainCleanupIncomplete(Int)
     /// `sync()` on a session built without `SyncSettings`.
     case syncNotConfigured
+    /// A hygiene call on a session built without `HygieneSettings` (docs/02-architecture.md §13.8).
+    case hygieneNotConfigured
     /// A conflict can only be resolved to a value the item holds for that group: the one shown or one kept in
     /// `Item.conflicts` (PRD F7.6).
     case conflictValueNotHeld

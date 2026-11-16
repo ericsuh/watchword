@@ -106,6 +106,8 @@ extension VaultSession {
                 report.vaults[vaultID] = Self.report(first, followedBy: try await engine(vaultID).sync())
             }
         }
+        // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
+        try? await reconcileHygiene()
         return report
     }
 
