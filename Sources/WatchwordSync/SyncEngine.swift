@@ -25,12 +25,15 @@ public struct SyncConfiguration: Sendable {
     /// judged against the departing account's own segments, so they must stay on the transport for every device
     /// that has yet to judge it (docs/02-architecture.md §8.8, "a departed account's log").
     public var maintainsLog = true
-    /// Entries of ignorable record kinds this version does not carry that one vault keeps aside (ADR 0009), and
-    /// their bytes. Past either, an entry is not kept (`SyncReport.unknownEntriesDropped`, `SyncState.stashOverflow`):
-    /// the stream still merges, the device writes no snapshot, and the version that learns the kind replays the log.
-    /// Generous: one per record, writing device and deletion, a few hundred bytes each.
+    /// Entries of ignorable record kinds this version does not carry that one vault keeps aside (`SyncStash`, ADR
+    /// 0009), and their bytes, in all and for what any one device's objects carried. Past any of them, an entry is
+    /// not kept (`SyncReport.unknownEntriesDropped`, `SyncStash.overflow`): the stream still merges, the device writes
+    /// no ordinary snapshot, and the version that learns the kind replays the log. Generous: one per record, writing
+    /// device and deletion, a few hundred bytes each; the per-device share keeps one device from crowding out the rest.
     public var maximumStashedEntries = 4096
     public var maximumStashedBytes = 4 << 20
+    public var maximumStashedEntriesPerAuthor = 2048
+    public var maximumStashedBytesPerAuthor = 2 << 20
 
     public init(schemaVersions: [EnvelopeKind: UInt64]) {
         self.schemaVersions = schemaVersions
@@ -147,8 +150,12 @@ public struct SyncReport: Sendable, Equatable {
     public var unknownEntriesProcessed = 0
     /// This device was due to write a snapshot and did not, because it holds entries it cannot read (ADR 0009).
     public var snapshotWithheld = false
-    /// Entries of a kind this version carries were dropped by an earlier one, and this vault's log must be replayed
-    /// to bring them back. The engine does it itself unless the vault has a judge, whose session replays it.
+    /// The trusted devices whose objects carried those entries: the ones to update, or, if no version reads the kind,
+    /// to look at (an insider can hold back snapshots this way for as long as it is trusted).
+    public var snapshotWithheldBy: Set<UUID> = []
+    /// The stash was incomplete (entries of a kind this version carries dropped past the caps, or a stash not saved
+    /// after a sync), or a shared vault holds kept entries this version can now read: the vault's log had to be
+    /// replayed. The engine does it itself unless the vault has a judge, whose session replays it in the same sync.
     public var replayNeeded = false
 
     public init() {}
@@ -185,6 +192,10 @@ public actor SyncEngine {
     let configuration: SyncConfiguration
     let judge: (any WriteJudge)?
     private var running = false
+    /// The stash of the sync in progress (ADR 0009): loaded when it starts, saved once when it ends.
+    private var stash = SyncStash()
+    /// The stash may lack entries of segments counted as merged, and this vault's log has not been replayed yet.
+    private var stashIncomplete = false
 
     /// `store` is the underlying record store; the session writes through a `DeletionRecordingStore` around the same
     /// store, so the engine's own deletions (applying remote tombstones) are not re-published as local ones.
@@ -234,12 +245,20 @@ public actor SyncEngine {
             return report
         }
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
+        let (loadedStash, stashDropped) = try await loadStash(rebuilding: &state)
+        stash = loadedStash
+        // What a revoked device carried is not read any more (§7.8): its own versions stay, and hold nothing back.
+        stash.forgetRetired(retired)
         var reconcile = reconcile
-        if !state.stashOverflow.isDisjoint(with: carriedRawKinds) {
-            // An earlier version dropped entries of a kind this one carries, the stash being full (ADR 0009): the log
-            // still holds them, in their segments or in a snapshot by a device that read them.
+        let carried = carriedRawKinds
+        // An earlier version dropped entries of a kind this one carries, the stash being full; or the stash was not
+        // saved after a sync that counted segments as merged. The log still holds what is missing, in its segments or
+        // in a snapshot by a device that read it (ADR 0009).
+        let incomplete = state.stashUnsaved || stash.overflow.values.contains { !$0.isDisjoint(with: carried) }
+        if incomplete {
             if judge == nil { reconcile = true } else { report.replayNeeded = true }
         }
+        stashIncomplete = incomplete && !reconcile
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
             // are facts the log also holds, and keeping them stops a replay from putting an erased record back. Not
@@ -251,7 +270,13 @@ public actor SyncEngine {
             state.publishedAcknowledgement = kept.publishedAcknowledgement
             state.lastPublishedSequence = kept.lastPublishedSequence
             if judge == nil { state.erasures = kept.erasures }
+            // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
+            // so those are kept across it.
+            var replayed = SyncStash()
+            for entry in stash.entries where retired.contains(entry.author) { replayed.insert(entry) }
+            stash = replayed
         }
+        if stash != loadedStash { state.stashUnsaved = true }
         state.nextSequence = max(state.nextSequence, 1)
         var listing = Listing()
         do {
@@ -281,8 +306,26 @@ public actor SyncEngine {
         } catch SyncTransportError.unavailable {
             report.transportUnavailable = true
         }
+        // The stash once per sync, then the state that says it was saved.
+        if stashDropped || stash != loadedStash {
+            try await syncState.saveStash(stash.encoded(), vaultID: vaultID)
+        }
+        state.stashUnsaved = stashIncomplete
         try await syncState.saveState(state)
         return report
+    }
+
+    /// The stored stash, held to this engine's caps. One that does not parse or is over them (the file was edited,
+    /// A8) is dropped, and the state marked so that the log is replayed to rebuild it.
+    private func loadStash(rebuilding state: inout SyncState) async throws -> (SyncStash, dropped: Bool) {
+        guard let bytes = try await syncState.stash(vaultID: vaultID) else { return (SyncStash(), false) }
+        guard let parsed = try? SyncStash.parse(bytes), parsed.count <= configuration.maximumStashedEntries,
+            parsed.bytes <= configuration.maximumStashedBytes
+        else {
+            state.stashUnsaved = true
+            return (SyncStash(), true)
+        }
+        return (parsed, false)
     }
 
     /// Downloads and signature-checks new objects only. Needs no keys (§7.4).
@@ -389,11 +432,13 @@ public actor SyncEngine {
             staged.removeAll { retired.contains($0.location.author) }
         }
         // Kept aside by an earlier version that did not know their kind, and readable now (ADR 0009). A vault with a
-        // judge replays its whole log instead, so the judge sees every segment that carried them (§8.8).
-        var ready = state.stashed.filter { carriedRawKinds.contains($0.rawKind) }
-        if !ready.isEmpty, judge != nil {
+        // judge replays its whole log instead, so the judge sees every segment that carried them (§8.8); what a
+        // revoked device carried, which no replay reads, is processed here in either case.
+        let carried = carriedRawKinds
+        var ready = stash.entries.filter { carried.contains($0.entry.rawKind) }
+        if judge != nil, ready.contains(where: { !retired.contains($0.author) }) {
             report.replayNeeded = true
-            ready = []
+            ready.removeAll { !retired.contains($0.author) }
         }
         guard !staged.isEmpty || !ready.isEmpty else { return }
         var highWater = try await vaultHighWater(state)
@@ -425,7 +470,7 @@ public actor SyncEngine {
                         entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
                         highWater: &highWater, report: &report)
                 }
-                keep(payload.unknownEntries, fromSegment: false, state: &state, report: &report)
+                keep(payload.unknownEntries, from: snapshot.location, state: &state, report: &report)
                 state.snapshots[snapshot.location] = payload.vector
                 state.snapshotCoverage.merge(payload.vector, uniquingKeysWith: max)
             } catch let error where Self.isFatal(error) {
@@ -515,7 +560,7 @@ public actor SyncEngine {
                             highWater: &highWater, report: &report)
                     }
                     // Kept aside, and the stream goes on: an ignorable kind this version does not know (ADR 0009).
-                    keep(payload.unknownEntries, fromSegment: true, state: &state, report: &report)
+                    keep(payload.unknownEntries, from: object.location, state: &state, report: &report)
                     acknowledgement = payload.vector
                 } catch let error where Self.isFatal(error) {
                     throw error
@@ -533,10 +578,11 @@ public actor SyncEngine {
                         continue
                     }
                     report.rejected.append(SyncRejection(name: object.location.name, reason: Self.reason(error)))
-                    if Self.requiresNewerVersion(error) {
+                    let covered = sequence <= (state.snapshotCoverage[author] ?? 0)
+                    if Self.requiresNewerVersion(error), !covered {
                         // A critical kind this version does not know (ADR 0009): the stream stops here and skips
                         // nothing. The segment is complete and authentic, so it stays staged for the version that
-                        // can read it.
+                        // can read it. (One a merged snapshot covers is passed below, as any refused segment is.)
                         report.requiresNewerVersion = true
                     } else {
                         // Unstaged, so the next sync fetches it again: a partially visible file may since have
@@ -613,63 +659,90 @@ public actor SyncEngine {
             guard let envelope = entry.envelope else { continue }
             // The record's own header must name the kind and key the entry does, so a record of a known kind cannot
             // be filed under an ignorable label and passed over here.
-            guard envelope.count >= EnvelopeHeader.fixedPrefixLength,
-                Array(envelope[0..<4]) == EnvelopeHeader.magic,
-                UInt16(envelope[4]) | UInt16(envelope[5]) << 8 == EnvelopeHeader.currentVersion,
-                envelope[6] == entry.rawKind, Array(envelope[7..<23]) == SyncPayload.bytes(entry.keyID)
-            else { throw Rejection(reason: .recordContextMismatch(entry.recordID)) }
+            guard Self.headerNames(entry, envelope: envelope) else {
+                throw Rejection(reason: .recordContextMismatch(entry.recordID))
+            }
         }
     }
 
-    /// Keeps entries of ignorable kinds this version does not know (ADR 0009), within the stash's caps. An entry from
-    /// a segment is its author's own (`validate`), and a version a device writes contains its earlier ones, so it
-    /// replaces that device's lower versions of the record (a deletion only a deletion); one from a snapshot replaces
-    /// nothing, because a snapshot may attribute a version to any device. Past a cap the entry is not kept and the
-    /// kind is recorded in `stashOverflow`: the stream still merges, this device writes no snapshot, and the version
-    /// that learns the kind replays the log, which still holds the entry.
+    /// Whether an envelope's header (magic, version, kind, key) is the one its entry names, read without knowing the
+    /// kind. In simple steps: one long boolean of mixed operators is a type-checker risk on Swift 6.1.
+    static func headerNames(_ entry: UnknownSyncEntry, envelope: [UInt8]) -> Bool {
+        guard envelope.count >= EnvelopeHeader.fixedPrefixLength else { return false }
+        guard Array(envelope[0..<4]) == EnvelopeHeader.magic else { return false }
+        let low = UInt16(envelope[4])
+        let high = UInt16(envelope[5]) << 8
+        guard low | high == EnvelopeHeader.currentVersion else { return false }
+        guard envelope[6] == entry.rawKind else { return false }
+        return Array(envelope[7..<23]) == SyncPayload.bytes(entry.keyID)
+    }
+
+    /// Keeps entries of ignorable kinds this version does not know (ADR 0009), within the stash's caps, each with the
+    /// device whose object carried it. An entry already contained in one held is not kept again: the same entry, or
+    /// a lower version by the same writer (from a segment, only one its writer's own stream carried, because a
+    /// snapshot may attribute a version to any device). An entry from a segment is its author's own (`validate`), and
+    /// a version a device writes contains its earlier ones, so it replaces that device's lower versions of the record
+    /// (a deletion only a deletion). Past a cap, overall or for that author, the entry is not kept and the kind is
+    /// recorded against the author: the stream still merges, this device writes no ordinary snapshot, and the version
+    /// that learns the kind replays the log, which still holds the entry. A lookup per entry, not a scan.
     private func keep(
-        _ entries: [UnknownSyncEntry], fromSegment: Bool, state: inout SyncState, report: inout SyncReport
+        _ entries: [UnknownSyncEntry], from location: SyncObjectLocation, state: inout SyncState,
+        report: inout SyncReport
     ) {
         guard !entries.isEmpty else { return }
-        var bytes = state.stashed.reduce(0) { $0 + $1.length }
-        for entry in entries where !state.stashed.contains(entry) {
-            if fromSegment {
-                let superseded = state.stashed.filter {
-                    $0.recordID == entry.recordID && $0.rawKind == entry.rawKind && $0.device == entry.device
-                        && $0.isDeletion == entry.isDeletion && $0.version < entry.version
-                }
-                for old in superseded {
-                    state.stashed.remove(old)
-                    bytes -= old.length
-                }
+        let author = location.author
+        let fromSegment = location.kind == .segment
+        let before = stash
+        for entry in entries {
+            let held = stash.held(in: SyncStash.Slot(entry))
+            if held.contains(where: { $0.entry == entry }) { continue }
+            let contained = held.contains { kept in
+                kept.entry.version >= entry.version && (!fromSegment || kept.isAuthorsOwn)
             }
-            guard state.stashed.count < configuration.maximumStashedEntries,
-                bytes + entry.length <= configuration.maximumStashedBytes
-            else {
-                state.stashOverflow.insert(entry.rawKind)
+            if contained { continue }
+            if fromSegment {
+                for old in held where old.entry.version < entry.version { stash.remove(old) }
+            }
+            let used = stash.usage(of: author)
+            let fits =
+                stash.count < configuration.maximumStashedEntries
+                && stash.bytes + entry.length <= configuration.maximumStashedBytes
+                && used.count < configuration.maximumStashedEntriesPerAuthor
+                && used.bytes + entry.length <= configuration.maximumStashedBytesPerAuthor
+            guard fits else {
+                stash.overflow[author, default: []].insert(entry.rawKind)
                 report.unknownEntriesDropped += 1
                 continue
             }
-            state.stashed.insert(entry)
-            bytes += entry.length
+            stash.insert(SyncStash.Kept(entry: entry, author: author))
             report.unknownEntriesKept += 1
         }
+        // Saved with the state that counts this object as merged, so a crash before the stash is saved is noticed.
+        if stash != before { state.stashUnsaved = true }
     }
 
     /// Processes kept entries whose kind this version carries, as if they had just arrived: every context check, then
-    /// the merger. One that does not check or merge is kept for the person in the quarantine (PRD F7.7) rather than
-    /// stopping a stream that has long moved on.
+    /// the merger, in ascending version order, so the U5 ceiling climbs through them as it would have for a device
+    /// that read them on arrival. One that does not check or merge is kept for the person in the quarantine (PRD F7.7)
+    /// rather than stopping a stream that has long moved on. Only ignorable kinds are ever kept aside; an entry of a
+    /// critical kind here was planted in the file (A8) and is dropped unread.
     private func processStashed(
-        _ ready: Set<UnknownSyncEntry>, pending: [RecordKey: PendingDeletion], reconciling: Bool,
+        _ ready: [SyncStash.Kept], pending: [RecordKey: PendingDeletion], reconciling: Bool,
         state: inout SyncState, highWater: inout UInt64, report: inout SyncReport
     ) async throws {
         let order = ready.sorted {
-            ($0.version, $0.device.uuidString, $0.recordID.uuidString, $0.rawKind, $0.isDeletion ? 1 : 0)
-                < ($1.version, $1.device.uuidString, $1.recordID.uuidString, $1.rawKind, $1.isDeletion ? 1 : 0)
+            ($0.entry.version, $0.entry.device.uuidString, $0.entry.recordID.uuidString, $0.entry.rawKind)
+                < ($1.entry.version, $1.entry.device.uuidString, $1.entry.recordID.uuidString, $1.entry.rawKind)
         }
-        for stashed in order {
-            guard let kind = EnvelopeKind(rawValue: stashed.rawKind), let schema = configuration.schemaVersions[kind]
-            else { continue }
+        state.stashUnsaved = true
+        for kept in order {
+            let stashed = kept.entry
+            guard EnvelopeKind.criticality(ofRawValue: stashed.rawKind) == .ignorable,
+                let kind = EnvelopeKind(rawValue: stashed.rawKind), let schema = configuration.schemaVersions[kind]
+            else {
+                stash.remove(kept)
+                continue
+            }
             let entry = stashed.known(as: kind)
             do {
                 if let envelope = entry.envelope {
@@ -692,7 +765,8 @@ public actor SyncEngine {
                 report.quarantined.append(entry.key)
                 try await syncState.quarantine(entry, vaultID: vaultID)
             }
-            state.stashed.remove(stashed)
+            // Taken out only once it is applied or quarantined: a lock part-way leaves the rest kept.
+            stash.remove(kept)
             report.unknownEntriesProcessed += 1
         }
         try await syncState.saveState(state)
@@ -1085,14 +1159,22 @@ public actor SyncEngine {
                 active.min(by: { $0.precedes($1) }) == deviceID || uncovered >= 4 * configuration.snapshotThreshold
             else { return }
         }
-        // A device holding entries it cannot read writes no snapshot (ADR 0009): its snapshot would cover their
-        // segments without carrying them, and once those segments were collected, a device that reads the kind and
-        // has not merged them yet would never see them. Snapshots come only from devices that read everything they
-        // merged, so whatever covers a segment carries what it said. Nothing is lost by waiting: what this device
-        // holds is in its store, and the others step in at four times the threshold.
-        guard state.stashed.isEmpty, state.stashOverflow.isEmpty else {
-            report.snapshotWithheld = true
-            return
+        // A device holding entries it cannot read, carried by a device still trusted, writes no ordinary snapshot
+        // (ADR 0009): its snapshot would cover their segments without carrying them, and once those segments were
+        // collected, a device that reads the kind and has not merged them yet would never see them. Ordinary
+        // snapshots come only from devices that read everything they merged, so whatever covers a segment carries
+        // what it said; the others step in at four times the threshold. The one it owes for a revoked device's work
+        // (§7.8) it still writes, covering only revoked devices' streams, which nobody collects or reads: it hands
+        // that work on and makes nothing collectable.
+        var vector = state.merged
+        let holding = stash.authorsHoldingBackSnapshots(retired: retired)
+        if !holding.isEmpty || stashIncomplete {
+            guard owed else {
+                report.snapshotWithheld = true
+                report.snapshotWithheldBy = holding
+                return
+            }
+            vector = state.merged.filter { retired.contains($0.key) }
         }
 
         var entries: [SyncEntry] = []
@@ -1113,8 +1195,7 @@ public actor SyncEngine {
             guard lamport <= configuration.maximumVersion else { return }
             let location = SyncObjectLocation.snapshot(vaultID: vaultID, author: deviceID, lamport: lamport)
             let payload = SyncPayload(
-                kind: .snapshot, vaultID: vaultID, author: deviceID, number: lamport, vector: state.merged,
-                entries: entries
+                kind: .snapshot, vaultID: vaultID, author: deviceID, number: lamport, vector: vector, entries: entries
             ).encoded()
             guard payload.count < Envelope.maximumLength - 4096 else { return }
             let envelope = try await keyring.seal(payload, at: location)
@@ -1126,8 +1207,8 @@ public actor SyncEngine {
                 lamport += 1
                 continue
             }
-            state.snapshots[location] = state.merged
-            state.snapshotCoverage.merge(state.merged, uniquingKeysWith: max)
+            state.snapshots[location] = vector
+            state.snapshotCoverage.merge(vector, uniquingKeysWith: max)
             // Handed on: what this device merged from revoked devices is now in a snapshot of its own.
             state.snapshots = state.snapshots.filter { !retired.contains($0.key.author) }
             report.snapshotsWritten += 1

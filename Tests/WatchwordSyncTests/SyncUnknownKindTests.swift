@@ -111,15 +111,17 @@ struct SyncUnknownKindTests {
             try await VersionedHousehold.rows(home.earlier, .scanStatus).isEmpty, "nothing it cannot read is stored")
         let state = try #require(await home.earlier.state())
         #expect(state.merged[home.laterID] == 2, "the stream went on past both segments")
-        #expect(state.stashed.count == 1, "the second result replaced the first: its author's later version")
-        #expect(state.stashed.first?.envelope == latest.envelope, "kept byte for byte")
+        let kept = await home.earlier.stash()
+        #expect(kept.count == 1, "the second result replaced the first: its author's later version")
+        #expect(kept.entries.first?.entry.envelope == latest.envelope, "kept byte for byte")
+        #expect(kept.entries.first?.author == home.laterID)
 
         let upgraded = await home.upgraded()
         let after = try await upgraded.sync()
         #expect(after.fetched == 0, "nothing downloaded again")
         #expect(after.unknownEntriesProcessed == 1 && after.quarantined.isEmpty)
         #expect(try await VersionedHousehold.rows(upgraded, .scanStatus)[bank.id] == latest)
-        #expect(await upgraded.state()?.stashed.isEmpty == true)
+        #expect(await upgraded.stash().isEmpty)
     }
 
     @Test("results kept aside are processed after an upgrade even when they arrived in a snapshot")
@@ -180,7 +182,7 @@ struct SyncUnknownKindTests {
         let upgraded = await home.upgraded { $0.snapshotThreshold = 4 }
         try await upgraded.sync()
         #expect(try await VersionedHousehold.rows(upgraded, .scanStatus) == latest)
-        #expect(await upgraded.state()?.stashed.isEmpty == true)
+        #expect(await upgraded.stash().isEmpty)
     }
 
     @Test("a critical kind an earlier version does not know stops the stream there, skips nothing, and says so")
@@ -268,14 +270,14 @@ struct SyncUnknownKindTests {
         #expect(report.rejected.isEmpty && report.waiting.isEmpty)
         let merged = try await home.earlier.items()
         #expect(merged.count == 6 && merged[last.id] != nil)
-        #expect(await home.earlier.state()?.stashOverflow == [EnvelopeKind.scanStatus.rawValue])
+        #expect(await home.earlier.stash().overflow == [home.laterID: [EnvelopeKind.scanStatus.rawValue]])
 
         let upgraded = await home.upgraded { $0.maximumStashedEntries = 2 }
         let after = try await upgraded.sync()
         #expect(after.fetched > 0, "the log replayed")
         #expect(try await VersionedHousehold.rows(upgraded, .scanStatus) == latest)
-        let state = try #require(await upgraded.state())
-        #expect(state.stashed.isEmpty && state.stashOverflow.isEmpty)
+        #expect(await upgraded.stash().isEmpty)
+        #expect(await upgraded.state()?.stashUnsaved == false)
     }
 }
 
@@ -314,5 +316,104 @@ struct SyncPayloadUnknownKindTests {
         #expect(throws: SyncFormatError.notCanonical) {
             try SyncPayload.parse(payload.encoded(), allowedKinds: [.item])
         }
+    }
+}
+
+extension VersionedHousehold {
+    /// Seals and signs `payload` as `client` would, and puts it on the transport under its own name.
+    func plant(_ payload: SyncPayload, as client: SyncTestClient) async throws {
+        let keyring = await client.keyring
+        let envelope = try await keyring.seal(payload.encoded(), at: payload.location)
+        let signature = try await keyring.sign(envelope, at: payload.location)
+        await transport.tamper(
+            payload.location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+    }
+}
+
+extension SyncUnknownKindTests {
+    @Test("a revoked device's own results kept aside survive a replay, and are processed after the upgrade")
+    func revokedAuthorsOwnEntriesSurviveReconcile() async throws {
+        let home = await VersionedHousehold.make()
+        let item = try await home.later.save(Household.login(title: "Bank"))
+        let result = try await home.scan(item, "found once")
+        try await home.later.sync()
+        try await home.earlier.sync()
+        #expect(await home.earlier.stash().count == 1)
+        await home.keys.retire(device: home.laterID)
+        // The replay reads nothing of the revoked device's, so what it kept of that device's own is kept across it.
+        try await home.earlier.sync(reconcile: true)
+        let kept = await home.earlier.stash()
+        #expect(kept.count == 1 && kept.entries.first?.author == home.laterID)
+        #expect(!kept.holdsBackSnapshots(retired: [home.laterID]))
+        let upgraded = await home.upgraded()
+        let after = try await upgraded.sync()
+        #expect(after.unknownEntriesProcessed == 1)
+        #expect(try await VersionedHousehold.rows(upgraded, .scanStatus)[item.id] == result)
+    }
+
+    @Test("a snapshot's lower version of a result already held from its writer's stream is not kept again")
+    func supersededSnapshotEntryIsNotKept() async throws {
+        let home = await VersionedHousehold.make()
+        let item = try await home.later.save(Household.login(title: "Bank"))
+        let older = try await home.scan(item, "first")
+        let newer = try await home.scan(item, "second")
+        // The stream carries the newer version; a snapshot by the same device (a stale one) the older.
+        try await home.plant(
+            SyncPayload(
+                kind: .segment, vaultID: SyncFixtures.vault, author: home.laterID, number: 1, vector: [:],
+                entries: [SyncEntry(newer)]),
+            as: home.later)
+        try await home.earlier.sync()
+        try await home.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: SyncFixtures.vault, author: home.laterID, number: 1, vector: [:],
+                entries: [SyncEntry(older)]),
+            as: home.later)
+        let report = try await home.earlier.sync()
+        #expect(report.rejected.isEmpty && report.unknownEntriesKept == 0)
+        let kept = await home.earlier.stash()
+        #expect(kept.count == 1 && kept.entries.first?.entry.envelope == newer.envelope)
+    }
+
+    @Test("a critical segment a merged snapshot covers is passed without asking for a newer version")
+    func coveredCriticalSegmentIsNoStop() async throws {
+        let home = await VersionedHousehold.make()
+        let first = try await home.later.save(Household.login(title: "First"))
+        try await home.later.sync()
+        try await home.later.saveRecord(
+            Array("Household".utf8), recordID: SyncFixtures.vault, kind: .vaultMetadata,
+            schemaVersion: VersionedHousehold.schema)
+        try await home.later.sync()
+        // A snapshot that covers both segments and carries only the item (as one whose author dropped the record).
+        let row = try #require(try await home.later.store.record(RecordKey(recordID: first.id, kind: .item)))
+        try await home.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: SyncFixtures.vault, author: home.laterID, number: 9,
+                vector: [home.laterID: 2], entries: [SyncEntry(row)]),
+            as: home.later)
+        let report = try await home.earlier.sync()
+        #expect(!report.requiresNewerVersion)
+        #expect(report.waiting.isEmpty)
+        #expect(Set(try await home.earlier.items().keys) == [first.id])
+    }
+
+    @Test("a stash that may not have been saved after a sync is rebuilt by replaying the log")
+    func unsavedStashIsRebuilt() async throws {
+        let home = await VersionedHousehold.make()
+        let item = try await home.later.save(Household.login(title: "Bank"))
+        try await home.scan(item, "found")
+        try await home.later.sync()
+        try await home.earlier.sync()
+        let saved = await home.earlier.stash()
+        #expect(saved.count == 1)
+        // As after a crash between counting the segment merged and saving the stash.
+        var state = try #require(await home.earlier.state())
+        state.stashUnsaved = true
+        await home.earlierState.tamper(state)
+        await home.earlierState.tamperStash(SyncStash().encoded(), vaultID: SyncFixtures.vault)
+        let report = try await home.earlier.sync()
+        #expect(report.fetched > 0, "replayed")
+        #expect(await home.earlier.stash() == saved)
+        #expect(await home.earlier.state()?.stashUnsaved == false)
     }
 }

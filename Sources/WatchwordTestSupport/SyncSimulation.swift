@@ -152,6 +152,12 @@ public actor SyncTestClient {
     public func state() async -> SyncState? {
         await syncState.loadState(vaultID: vaultID)
     }
+
+    /// The entries this device keeps aside for a later version (ADR 0009), as stored.
+    public func stash() async -> SyncStash {
+        guard let bytes = await syncState.stash(vaultID: vaultID) else { return SyncStash() }
+        return (try? SyncStash.parse(bytes)) ?? SyncStash()
+    }
 }
 
 /// A shared object store with the faults a real one has (docs/04-test-plan.md §2, `InMemorySyncTransport` with

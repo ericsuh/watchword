@@ -52,7 +52,7 @@ extension AdversarialSyncTests {
         #expect(report.applied == 0 && report.unknownEntriesKept == 0 && !report.requiresNewerVersion)
         #expect(report.waiting[Self.a] == 1)
         #expect(try await reader.items().isEmpty)
-        #expect(await reader.state()?.stashed.isEmpty ?? true)
+        #expect(await reader.stash().isEmpty)
     }
 
     /// Threat: an insider device (or A4 in a shared vault), holding the vault key and a trusted signing key, files an
@@ -76,7 +76,7 @@ extension AdversarialSyncTests {
         #expect(
             report.rejected == [SyncRejection(name: f.segmentName(1), reason: .recordContextMismatch(item.id))])
         #expect(report.unknownEntriesKept == 0 && report.waiting[Self.a] == 1)
-        #expect(await reader.state()?.stashed.isEmpty ?? true)
+        #expect(await reader.stash().isEmpty)
     }
 
     /// Threat: an insider device (or A4), with the vault key and a trusted signing key, floods its stream with
@@ -140,9 +140,12 @@ extension AdversarialSyncTests {
         #expect(report.unknownEntriesDropped > 0)
         #expect(Set(try await reader.items().keys) == Set(results.keys).union([own.id]), "every item merged")
         let held = try #require(await reader.state())
-        #expect(held.stashed.count <= 16 && held.stashed.reduce(0) { $0 + $1.length } <= 6 << 10)
+        let kept = await reader.stash()
+        #expect(kept.count <= 16 && kept.bytes <= 6 << 10)
         #expect(held.merged[flooder] == 2 && held.merged[Self.a] == 1)
-        #expect(held.stashOverflow.contains(99))
+        #expect(kept.overflow[flooder]?.contains(99) == true)
+        // One stash write for the whole pass, not one per merged segment.
+        #expect(await state.stashWrites[Self.vault] == 1)
 
         // Updated to read scan results: the honest ones are all there, the flood is still capped, and the replay
         // it needed is not repeated on the next sync.
@@ -154,7 +157,138 @@ extension AdversarialSyncTests {
         try await upgraded.sync()
         let scans = await store.records(in: Self.vault, kind: .scanStatus)
         #expect(Dictionary(uniqueKeysWithValues: scans.map { ($0.recordID, $0) }) == results)
-        #expect(await upgraded.state()?.stashOverflow == [99])
+        #expect(await upgraded.stash().overflow == [flooder: [99]])
         #expect(try await upgraded.sync().fetched == 0)
+    }
+
+    /// Threat: an insider device with the vault key and a trusted signing key publishes one entry of a kind no
+    /// version defines (raw 99), then is revoked. Every device keeps the entry aside; were that to hold back
+    /// snapshots, none would be written again — collection would stop for good, and the snapshot that hands on the
+    /// revoked device's work from before its revocation (§7.8) would never come, so a device joining later would lack
+    /// that work. A revoked device's objects are not read, and what it carried does not hold back snapshots.
+    @Test("an entry kept aside from a device since revoked does not stop snapshots or the hand-on of its work")
+    func revokedAuthorsStashDoesNotStopSnapshots() async throws {
+        let f = try await Self.fixture()
+        let insider = UUID(uuidString: "D0000000-0000-4000-8000-0000000000E0")!
+        await f.keys.trust(device: insider)
+        await f.keys.trust(device: Self.b)
+        var configuration = SyncTestClient.configuration
+        configuration.snapshotThreshold = 4
+        func client(_ id: UUID) -> SyncTestClient {
+            SyncTestClient(
+                deviceID: id, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        }
+        let (a, b, bad) = (client(Self.a), client(Self.b), client(insider))
+        let handedOn = try await bad.save(Self.login("Written before the revocation", password: "kept"))
+        try await bad.sync()
+        let unknown = UnknownSyncEntry(
+            recordID: UUID(), rawKind: 99, keyID: SyncPayload.zeroUUID, version: 1, device: insider, envelope: nil,
+            erasure: [1])
+        try await f.plant(
+            SyncPayload(
+                kind: .segment, vaultID: Self.vault, author: insider, number: 2, vector: [:], entries: [],
+                unknownEntries: [unknown]),
+            signedBy: await bad.keyring)
+        try await a.sync()
+        try await b.sync()
+        await f.keys.retire(device: insider)
+
+        var snapshots = 0
+        for round in 0..<40 {
+            try await a.save(Self.login("Round \(round)", password: "round-\(round)"))
+            snapshots += try await a.sync().snapshotsWritten
+            snapshots += try await b.sync().snapshotsWritten
+        }
+        #expect(snapshots > 0)
+        let newcomer = client(Self.former)
+        await f.keys.trust(device: Self.former)
+        try await newcomer.sync()
+        #expect(try await newcomer.items()[handedOn.id] != nil, "the revoked device's earlier work was handed on")
+    }
+
+    /// Threat: an insider device that is still trusted keeps every device holding an entry it cannot read (raw 99), so
+    /// no device writes an ordinary snapshot. Another device is then revoked, and its earlier work exists only on
+    /// devices that merged it. The snapshot that hands that work on must still be written: it covers only the revoked
+    /// device's stream, so no segment the kept entry came from can be collected on its strength.
+    @Test("a trusted insider's unreadable entry does not stop the hand-on of a revoked device's work")
+    func handOnDespiteStash() async throws {
+        let f = try await Self.fixture()
+        let insider = UUID(uuidString: "D0000000-0000-4000-8000-0000000000E0")!
+        let lost = UUID(uuidString: "D0000000-0000-4000-8000-0000000000E1")!
+        for id in [insider, lost, Self.b, Self.former] { await f.keys.trust(device: id) }
+        var configuration = SyncTestClient.configuration
+        configuration.snapshotThreshold = 4
+        func client(_ id: UUID) -> SyncTestClient {
+            SyncTestClient(
+                deviceID: id, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        }
+        let (a, b, bad, phone) = (client(Self.a), client(Self.b), client(insider), client(lost))
+        try await bad.save(Self.login("Insider", password: "insider"))
+        try await bad.sync()
+        try await f.plant(
+            SyncPayload(
+                kind: .segment, vaultID: Self.vault, author: insider, number: 2, vector: [:], entries: [],
+                unknownEntries: [
+                    UnknownSyncEntry(
+                        recordID: UUID(), rawKind: 99, keyID: SyncPayload.zeroUUID, version: 1, device: insider,
+                        envelope: nil, erasure: [1])
+                ]),
+            signedBy: await bad.keyring)
+        let handedOn = try await phone.save(Self.login("Only on the lost phone", password: "phone"))
+        try await phone.sync()
+        try await a.sync()
+        try await b.sync()
+        await f.keys.retire(device: lost)
+        for round in 0..<12 {
+            try await a.save(Self.login("Round \(round)", password: "round-\(round)"))
+            try await a.sync()
+            try await b.sync()
+        }
+        let names = await f.transport.list(prefix: SyncObjectLocation.vaultPrefix(Self.vault))
+        let snapshots = names.compactMap(SyncObjectLocation.init(name:)).filter { $0.kind == .snapshot }
+        #expect(!snapshots.isEmpty, "the hand-on snapshot was written")
+        let newcomer = client(Self.former)
+        try await newcomer.sync()
+        #expect(try await newcomer.items()[handedOn.id] != nil)
+        // Nothing of the insider's stream was collected on the strength of it: its segment is still there.
+        #expect(names.contains(f.segmentName(2, author: insider)))
+    }
+
+    /// Threat: A8, who can write this device's files while it is locked, plants a stash row that keeps aside an
+    /// *item* deletion, so that the next sync applies it and erases or trashes an item; or a row over this engine's
+    /// caps. A critical kind is never kept aside, so the row is refused when parsed, dropped, and the log replayed to
+    /// rebuild the stash; nothing in it reaches the store.
+    @Test("a planted stash row naming a critical kind, or over the caps, is dropped and rebuilt, and erases nothing")
+    func plantedStash() async throws {
+        let f = try await Self.fixture()
+        let item = try await f.writer.save(Self.login("Bank", password: "planted"))
+        try await f.writer.sync()
+        let reader = await f.reader()
+        try await reader.sync()
+        var planted =
+            Array("WWSK".utf8) + [1] + SyncPayload.littleEndian(UInt32(0)) + SyncPayload.littleEndian(UInt32(1))
+        planted += SyncPayload.bytes(Self.a) + SyncPayload.bytes(item.id) + [EnvelopeKind.item.rawValue]
+        planted += SyncPayload.bytes(SyncPayload.zeroUUID) + SyncPayload.littleEndian(UInt64(1 << 40))
+        planted += SyncPayload.bytes(Self.a) + [1] + SyncPayload.littleEndian(UInt32(0))
+        await reader.syncState.tamperStash(planted, vaultID: Self.vault)
+        let report = try await reader.sync()
+        #expect(report.fetched > 0, "the log was replayed to rebuild the stash")
+        let row = try #require(try await reader.store.record(RecordKey(recordID: item.id, kind: .item)))
+        #expect(try await reader.keyring.openItem(row).trashedAt == nil, "neither erased nor trashed")
+        #expect(await reader.stash().isEmpty)
+
+        // Over the caps: as many entries as the default configuration's cap, plus one.
+        var over = SyncStash()
+        for index in 0...4096 {
+            over.insert(
+                .init(
+                    entry: UnknownSyncEntry(
+                        recordID: UUID(), rawKind: 99, keyID: SyncPayload.zeroUUID, version: UInt64(index + 1),
+                        device: Self.a, envelope: nil),
+                    author: Self.a))
+        }
+        await reader.syncState.tamperStash(over.encoded(), vaultID: Self.vault)
+        #expect(try await reader.sync().fetched > 0)
+        #expect(await reader.stash().isEmpty)
     }
 }

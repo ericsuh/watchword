@@ -88,7 +88,7 @@ public struct SyncEntry: Sendable, Hashable {
 }
 
 /// An entry of an ignorable record kind this reader does not know (ADR 0009), kept byte for byte: it is never stored,
-/// merged or handed to a merger, only kept aside (`SyncState.stashed`) until a version that knows the kind processes it.
+/// merged or handed to a merger, only kept aside (`SyncStash`) until a version that knows the kind processes it.
 public struct UnknownSyncEntry: Sendable, Hashable {
     public var recordID: UUID
     public var rawKind: UInt8

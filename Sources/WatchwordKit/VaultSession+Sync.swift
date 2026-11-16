@@ -155,6 +155,10 @@ extension VaultSession {
         total.unknownEntriesDropped += first.unknownEntriesDropped
         total.unknownEntriesProcessed += first.unknownEntriesProcessed
         total.snapshotWithheld = total.snapshotWithheld || first.snapshotWithheld
+        total.snapshotWithheldBy.formUnion(first.snapshotWithheldBy)
+        // Either run's: a stop the second did not reach (it replayed instead, say) is still a stop to report.
+        total.requiresNewerVersion = total.requiresNewerVersion || first.requiresNewerVersion
+        total.replayNeeded = total.replayNeeded || first.replayNeeded
         return total
     }
 
@@ -451,6 +455,14 @@ struct AuthenticatedSyncState: SyncStateStore {
         try await base.discardQuarantined(entries, vaultID: vaultID)
     }
 
+    func stash(vaultID: UUID) async throws -> [UInt8]? {
+        try await base.stash(vaultID: vaultID)
+    }
+
+    func saveStash(_ bytes: [UInt8], vaultID: UUID) async throws {
+        try await base.saveStash(bytes, vaultID: vaultID)
+    }
+
     func eraseAll() async throws {
         try await base.eraseAll()
     }
@@ -550,6 +562,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.unknownEntriesDropped += report.unknownEntriesDropped
             total.unknownEntriesProcessed += report.unknownEntriesProcessed
             total.snapshotWithheld = total.snapshotWithheld || report.snapshotWithheld
+            total.snapshotWithheldBy.formUnion(report.snapshotWithheldBy)
             total.replayNeeded = total.replayNeeded || report.replayNeeded
         }
         return total

@@ -20,7 +20,7 @@
     /// both in one transaction: tombstones are recorded after the deletion commits (`DeletionRecordingStore`) and the
     /// engine's state can always be rebuilt with a reconciling sync.
     public final class SQLiteSyncStateStore: SyncStateStore {
-        public static let schemaVersion = 1
+        public static let schemaVersion = 2
         public static let databaseName = "sync.sqlite"
 
         private let connection: SQLiteConnection
@@ -88,6 +88,14 @@
             ) STRICT
             """
 
+        /// Version 2 (ADR 0009): the stash, one row per vault, written once per sync rather than with the state.
+        static let stashTable = """
+            CREATE TABLE stash (
+                vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 16),
+                stash BLOB NOT NULL
+            ) STRICT
+            """
+
         static let expectedSchema: Set<[SQLiteValue]> = [
             [.text("table"), .text("sync_state"), .text("sync_state"), .text(stateTable)],
             [.text("index"), .text("sqlite_autoindex_sync_state_1"), .text("sync_state"), .null],
@@ -96,6 +104,8 @@
             [.text("table"), .text("pending_deletions"), .text("pending_deletions"), .text(pendingTable)],
             [.text("index"), .text("sqlite_autoindex_pending_deletions_1"), .text("pending_deletions"), .null],
             [.text("table"), .text("quarantine"), .text("quarantine"), .text(quarantineTable)],
+            [.text("table"), .text("stash"), .text("stash"), .text(stashTable)],
+            [.text("index"), .text("sqlite_autoindex_stash_1"), .text("stash"), .null],
         ]
 
         private func migrate() throws {
@@ -111,6 +121,10 @@
                         try connection.execute(table)
                     }
                     try connection.execute("PRAGMA user_version = 1")
+                }
+                if version < 2 {
+                    try connection.execute(Self.stashTable)
+                    try connection.execute("PRAGMA user_version = 2")
                 }
                 // As in `SQLiteRecordStore`: a planted trigger could make deletions or state saves silently do nothing
                 // (review finding S1), so anything but exactly this schema is refused.
@@ -291,12 +305,32 @@
             }
         }
 
+        // MARK: - Stash
+
+        public func stash(vaultID: UUID) throws -> [UInt8]? {
+            let rows = try connection.query(
+                "SELECT stash FROM stash WHERE vault_id = ?", [SQLiteRecordStore.value(vaultID)])
+            guard let row = rows.first else { return nil }
+            // Rebuildable from the log: the engine parses the bytes and replays the log if they do not parse.
+            guard row.count == 1, case .blob(let bytes) = row[0] else { return [] }
+            return bytes
+        }
+
+        public func saveStash(_ bytes: [UInt8], vaultID: UUID) throws {
+            try connection.query(
+                "INSERT OR REPLACE INTO stash (vault_id, stash) VALUES (?, ?)",
+                [SQLiteRecordStore.value(vaultID), .blob(bytes)])
+        }
+
         // MARK: - Erasure
 
         public func eraseAll() throws {
             try connection.transaction {
                 try connection.execute(
-                    "DELETE FROM sync_state; DELETE FROM staged; DELETE FROM pending_deletions; DELETE FROM quarantine;"
+                    """
+                    DELETE FROM sync_state; DELETE FROM staged; DELETE FROM pending_deletions; DELETE FROM quarantine;
+                    DELETE FROM stash;
+                    """
                 )
             }
             // As in `SQLiteRecordStore.eraseAll`: the superseded pages must leave the write-ahead log too.

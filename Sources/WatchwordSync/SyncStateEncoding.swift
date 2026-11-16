@@ -4,7 +4,8 @@ import WatchwordStore
 
 /// `SyncState` as JSON. Dictionary keys are UUID strings and record keys are spelled out, so the encoding does not
 /// depend on how Foundation encodes a dictionary with non-string keys. Portable (only `SQLiteSyncStateStore` uses it,
-/// on Apple platforms), so its round trip is tested on Linux too.
+/// on Apple platforms), so its round trip is tested on Linux too. The stash is not here: it has a row of its own
+/// (`SyncStash`), so the state saved with every merged segment stays small.
 struct EncodedState: Codable {
     struct Stamp: Codable {
         var record: UUID
@@ -24,17 +25,6 @@ struct EncodedState: Codable {
         var coverage: [String: UInt64]
     }
 
-    /// An entry of a kind the writing version did not know (ADR 0009), byte for byte.
-    struct Unknown: Codable {
-        var record: UUID
-        var kind: UInt8
-        var key: UUID
-        var version: UInt64
-        var device: UUID
-        var envelope: Data?
-        var erasure: Data
-    }
-
     var vaultID: UUID
     var nextSequence: UInt64
     var lastPublishedSequence: UInt64
@@ -46,9 +36,8 @@ struct EncodedState: Codable {
     var publishedAcknowledgement: [String: UInt64]
     var snapshots: [Snapshot]
     var snapshotCoverage: [String: UInt64]
-    /// Absent in a row written before ADR 0009: nothing kept, nothing dropped.
-    var stashed: [Unknown]?
-    var stashOverflow: [UInt8]?
+    /// Absent in a row written before ADR 0009.
+    var stashUnsaved: Bool?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -71,15 +60,7 @@ struct EncodedState: Codable {
         snapshots = state.snapshots.map { Snapshot(name: $0.key.name, coverage: Self.strings($0.value)) }
             .sorted { $0.name < $1.name }
         snapshotCoverage = Self.strings(state.snapshotCoverage)
-        stashed = state.stashed.map {
-            Unknown(
-                record: $0.recordID, kind: $0.rawKind, key: $0.keyID, version: $0.version, device: $0.device,
-                envelope: $0.envelope.map { Data($0) }, erasure: Data($0.erasure))
-        }.sorted {
-            ($0.record.uuidString, $0.kind, $0.device.uuidString, $0.version, $0.envelope == nil ? 1 : 0)
-                < ($1.record.uuidString, $1.kind, $1.device.uuidString, $1.version, $1.envelope == nil ? 1 : 0)
-        }
-        stashOverflow = state.stashOverflow.sorted()
+        stashUnsaved = state.stashUnsaved
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -115,16 +96,7 @@ struct EncodedState: Codable {
             else { return nil }
             state.snapshots[location] = coverage
         }
-        for entry in stashed ?? [] {
-            // Only what `init(_:)` writes: a deletion names no key and carries no envelope.
-            guard entry.envelope != nil || entry.key == SyncPayload.zeroUUID, entry.envelope?.isEmpty != true
-            else { return nil }
-            state.stashed.insert(
-                UnknownSyncEntry(
-                    recordID: entry.record, rawKind: entry.kind, keyID: entry.key, version: entry.version,
-                    device: entry.device, envelope: entry.envelope.map { Array($0) }, erasure: Array(entry.erasure)))
-        }
-        state.stashOverflow = Set(stashOverflow ?? [])
+        state.stashUnsaved = stashUnsaved ?? false
         return state
     }
 

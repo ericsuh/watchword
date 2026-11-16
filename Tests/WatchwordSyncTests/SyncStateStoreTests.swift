@@ -72,15 +72,7 @@ enum StateStoreFixtures {
             vaultID: SyncFixtures.vault, author: SyncFixtures.deviceB, lamport: 12)
         state.snapshots = [snapshot: [SyncFixtures.deviceA: 5, SyncFixtures.deviceB: 2]]
         state.snapshotCoverage = [SyncFixtures.deviceA: 5, SyncFixtures.deviceB: 2]
-        state.stashed = [
-            UnknownSyncEntry(
-                recordID: key.recordID, rawKind: 77, keyID: record(1).keyID, version: 5, device: SyncFixtures.deviceB,
-                envelope: [4, 5, 6]),
-            UnknownSyncEntry(
-                recordID: key.recordID, rawKind: 10, keyID: SyncPayload.zeroUUID, version: 6,
-                device: SyncFixtures.deviceB, envelope: nil, erasure: [8]),
-        ]
-        state.stashOverflow = [12]
+        state.stashUnsaved = true
         return state
     }
 }
@@ -88,41 +80,105 @@ enum StateStoreFixtures {
 /// The encoding `SQLiteSyncStateStore` writes, which is portable and so checked here on every platform.
 @Suite("Sync state encoding")
 struct SyncStateEncodingTests {
-    @Test("every field, entries kept for a later version included, survives the encoding")
+    @Test("every field survives the encoding")
     func roundTrip() throws {
         let state = StateStoreFixtures.state()
         let bytes = try JSONEncoder().encode(EncodedState(state))
         #expect(try JSONDecoder().decode(EncodedState.self, from: bytes).state == state)
     }
 
-    @Test("a row written before entries were kept aside decodes with none kept")
+    @Test("a row written before the stash had a row of its own decodes as saved")
     func olderRow() throws {
         var state = StateStoreFixtures.state()
         var encoded = EncodedState(state)
-        encoded.stashed = nil
-        encoded.stashOverflow = nil
-        state.stashed = []
-        state.stashOverflow = []
+        encoded.stashUnsaved = nil
+        state.stashUnsaved = false
         let bytes = try JSONEncoder().encode(encoded)
         #expect(try JSONDecoder().decode(EncodedState.self, from: bytes).state == state)
     }
+}
 
-    @Test("a kept deletion that names a key, or an empty kept envelope, is no state at all")
-    func malformedKeptEntries() throws {
-        var keyed = EncodedState(StateStoreFixtures.state())
-        keyed.stashed = [
+enum StashFixtures {
+    static let record = UUID(uuidString: "5E000000-0000-4000-8000-000000000001")!
+    static let key = UUID(uuidString: "5E000000-0000-4000-8000-0000000000EE")!
+
+    static func stash() -> SyncStash {
+        var stash = SyncStash()
+        stash.insert(
             .init(
-                record: UUID(), kind: 10, key: UUID(), version: 1, device: SyncFixtures.deviceA, envelope: nil,
-                erasure: Data())
-        ]
-        #expect(keyed.state == nil)
-        var empty = keyed
-        empty.stashed = [
+                entry: UnknownSyncEntry(
+                    recordID: record, rawKind: 77, keyID: key, version: 5, device: SyncFixtures.deviceB,
+                    envelope: [4, 5, 6]),
+                author: SyncFixtures.deviceB))
+        stash.insert(
             .init(
-                record: UUID(), kind: 10, key: UUID(), version: 1, device: SyncFixtures.deviceA, envelope: Data(),
-                erasure: Data())
-        ]
-        #expect(empty.state == nil)
+                entry: UnknownSyncEntry(
+                    recordID: record, rawKind: 10, keyID: SyncPayload.zeroUUID, version: 6,
+                    device: SyncFixtures.deviceA,
+                    envelope: nil, erasure: [8]),
+                author: SyncFixtures.deviceB))
+        stash.overflow = [SyncFixtures.deviceC: [12, 99]]
+        return stash
+    }
+
+    /// A stash's encoding with one entry, as `SyncStash.encoded()` lays it out, for rows `encoded()` would never write.
+    static func row(kind: UInt8, keyID: UUID, version: UInt64 = 1, flags: UInt8, body: [UInt8]) -> [UInt8] {
+        var out = Array("WWSK".utf8) + [1] + SyncPayload.littleEndian(UInt32(0)) + SyncPayload.littleEndian(UInt32(1))
+        out += SyncPayload.bytes(SyncFixtures.deviceA) + SyncPayload.bytes(record) + [kind] + SyncPayload.bytes(keyID)
+        out += SyncPayload.littleEndian(version) + SyncPayload.bytes(SyncFixtures.deviceA) + [flags]
+        return out + SyncPayload.littleEndian(UInt32(body.count)) + body
+    }
+}
+
+/// The stash's own encoding (ADR 0009): its row is in a file A8 can edit, so it is parsed as hostile.
+@Suite("Sync stash encoding")
+struct SyncStashEncodingTests {
+    @Test("entries, their authors and what was dropped survive the encoding, in one canonical form")
+    func roundTrip() throws {
+        let stash = StashFixtures.stash()
+        #expect(try SyncStash.parse(stash.encoded()) == stash)
+        var reordered = SyncStash()
+        for kept in stash.entries.reversed() { reordered.insert(kept) }
+        reordered.overflow = stash.overflow
+        #expect(reordered.encoded() == stash.encoded())
+        #expect(stash.count == 2 && stash.usage(of: SyncFixtures.deviceB).count == 2)
+    }
+
+    @Test("every truncation is refused with a typed error")
+    func truncation() {
+        let bytes = StashFixtures.stash().encoded()
+        for length in 0..<bytes.count {
+            #expect(throws: SyncFormatError.self) { try SyncStash.parse(Array(bytes[..<length])) }
+        }
+        #expect(throws: SyncFormatError.trailingBytes) { try SyncStash.parse(bytes + [0]) }
+    }
+
+    /// A critical kind is never kept aside, so a row naming one was planted; processed, an item deletion would erase or
+    /// trash an item.
+    @Test("a row naming a critical kind, a keyed deletion, version zero or an empty envelope is refused")
+    func plantedRows() {
+        let zero = SyncPayload.zeroUUID
+        #expect(throws: SyncFormatError.unsupportedRecordKind(0)) {
+            try SyncStash.parse(StashFixtures.row(kind: 0, keyID: zero, flags: 1, body: []))
+        }
+        #expect(throws: SyncFormatError.unsupportedRecordKind(200)) {
+            try SyncStash.parse(StashFixtures.row(kind: 200, keyID: StashFixtures.key, flags: 0, body: [1]))
+        }
+        #expect(throws: SyncFormatError.malformedEntry) {
+            try SyncStash.parse(StashFixtures.row(kind: 10, keyID: StashFixtures.key, flags: 1, body: []))
+        }
+        #expect(throws: SyncFormatError.malformedEntry) {
+            try SyncStash.parse(StashFixtures.row(kind: 10, keyID: StashFixtures.key, version: 0, flags: 0, body: [1]))
+        }
+        #expect(throws: SyncFormatError.malformedEntry) {
+            try SyncStash.parse(StashFixtures.row(kind: 10, keyID: StashFixtures.key, flags: 0, body: []))
+        }
+        #expect(throws: SyncFormatError.unknownFlags(3)) {
+            try SyncStash.parse(StashFixtures.row(kind: 10, keyID: StashFixtures.key, flags: 3, body: [1]))
+        }
+        var counted = Array("WWSK".utf8) + [1] + SyncPayload.littleEndian(UInt32(0))
+        counted += SyncPayload.littleEndian(UInt32.max)
+        #expect(throws: SyncFormatError.countTooLarge) { try SyncStash.parse(counted) }
     }
 }
 
@@ -142,6 +198,21 @@ struct SyncStateStoreContractTests {
         next.nextSequence = 10
         try await store.saveState(next)
         #expect(try await store.loadState(vaultID: SyncFixtures.vault) == next)
+    }
+
+    @Test("the stash has a row of its own per vault, replaced whole", arguments: StateStoreKind.available)
+    func stashRow(_ kind: StateStoreKind) async throws {
+        let store = try kind.make()
+        #expect(try await store.stash(vaultID: SyncFixtures.vault) == nil)
+        let bytes = StashFixtures.stash().encoded()
+        try await store.saveStash(bytes, vaultID: SyncFixtures.vault)
+        try await store.saveState(StateStoreFixtures.state())
+        #expect(try await store.stash(vaultID: SyncFixtures.vault) == bytes)
+        #expect(try await store.stash(vaultID: SyncFixtures.otherVault) == nil)
+        try await store.saveStash(SyncStash().encoded(), vaultID: SyncFixtures.vault)
+        #expect(try await store.stash(vaultID: SyncFixtures.vault) == SyncStash().encoded())
+        try await store.eraseAll()
+        #expect(try await store.stash(vaultID: SyncFixtures.vault) == nil)
     }
 
     @Test("staged objects are kept by location and unstaged by location", arguments: StateStoreKind.available)
@@ -258,8 +329,8 @@ struct SyncStateStoreContractTests {
         func newerSchema() throws {
             let url = StateStoreFixtures.temporaryURL()
             _ = try SQLiteSyncStateStore(url: url)
-            try SQLiteConnection(path: SQLiteRecordStore.resolvingSymlinks(url.path)).execute("PRAGMA user_version = 2")
-            #expect(throws: RecordStoreError.unsupportedSchemaVersion(2)) { _ = try SQLiteSyncStateStore(url: url) }
+            try SQLiteConnection(path: SQLiteRecordStore.resolvingSymlinks(url.path)).execute("PRAGMA user_version = 3")
+            #expect(throws: RecordStoreError.unsupportedSchemaVersion(3)) { _ = try SQLiteSyncStateStore(url: url) }
         }
     }
 #endif
