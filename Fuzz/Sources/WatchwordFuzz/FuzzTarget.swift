@@ -1,4 +1,5 @@
 import Foundation
+import WatchwordCrypto
 import WatchwordEnvelope
 import WatchwordInterchange
 import WatchwordMatching
@@ -26,6 +27,9 @@ enum FuzzTarget: String, CaseIterable, Sendable {
     case host
     case otpauth
     case passkey
+    /// The encrypted Watchword archive's parser: everything it checks before a key is derived (no derivation here, so
+    /// a run spends its time on the parser, not on PBKDF2).
+    case archive
 
     /// Tight limits, so a run spends its time in the parsers and not in megabytes of input. The standard limits are
     /// the same code with larger numbers.
@@ -163,6 +167,11 @@ enum FuzzTarget: String, CaseIterable, Sendable {
                 return
             }
             require((try? PasskeyCredential(fieldValue: value)) == passkey, "a passkey does not round-trip")
+        case .archive:
+            guard let archive = try? AccountArchive.parse(bytes) else { return }
+            require(archive.entryCount <= AccountArchive.maximumEntries, "an archive past the entry limit was read")
+            require((try? archive.kdf.validate()) != nil, "an archive's KDF parameters were not validated")
+            require(bytes.count <= AccountArchive.maximumLength, "an archive past the size limit was read")
         }
     }
 

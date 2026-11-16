@@ -39,6 +39,7 @@ let package = Package(
                 .product(name: "WatchwordEnvelope", package: "Watchword"),
                 .product(name: "WatchwordStore", package: "Watchword"),
                 .product(name: "WatchwordSync", package: "Watchword"),
+                .product(name: "WatchwordCrypto", package: "Watchword"),
             ]
         )
     ],
