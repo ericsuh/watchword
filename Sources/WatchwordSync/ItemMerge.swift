@@ -254,26 +254,46 @@ public enum ItemMerge {
     /// or one that supersedes it. That is decided from what the item holds, not from its clock claiming the
     /// tombstone's revision, so it is the same join on a record whose clock claims more than its values show.
     public static func settle(_ item: Item, origin: Revision, against erasure: ItemErasure) -> Settlement {
+        settle(item, origin: origin, against: ItemErasures([erasure]))
+    }
+
+    /// Settles a version of an item against every permanent deletion of it a device knows (`ItemErasures`, the join
+    /// of their summaries the engine keeps): which of them it learned of first decides nothing.
+    ///
+    /// A version is erased when the deletions' authors had, between them, seen everything in it: each of its edits was
+    /// in a copy a person deleted (review finding W13). Otherwise each deletion is its own write, by its own device at
+    /// its own tombstone's revision, exactly as `settle(_:origin:against:)` makes it for one: applying several is a
+    /// join with each of their constants, so it commutes with merging and with itself, and devices that know the same
+    /// deletions and kept the same edits hold the same item, whichever order they learned of them in. No deletion is
+    /// given anything another one had seen.
+    public static func settle(_ item: Item, origin: Revision, against erasures: ItemErasures) -> Settlement {
+        guard !erasures.elements.isEmpty else { return .keep }
         var state = ItemState(item, origin: origin)
-        if state.clock.isCovered(by: erasure.seen) { return .erase }
-        let revision = erasure.revision
-        var seen = erasure.seen
-        seen.record(revision)
-        let stamp = GroupStamp(revision: revision, seen: seen)
-        let writes: [ItemGroupValue] = [.trashedAt(erasure.date ?? ItemErasure.undatedTrash), .keptAfterDeletion(true)]
+        if state.clock.isCovered(by: erasures.seen) { return .erase }
         var changed = false
-        for value in writes {
-            guard let group = group(of: value) else { continue }
-            let before = Set(state.registers[group] ?? [])
-            let after = ItemState.maximal(before.union([ConflictingValue(stamp: stamp, value: value)]))
-            if Set(after) != before {
-                state.registers[group] = after
-                changed = true
+        var met = true
+        for erasure in erasures.elements {
+            let revision = erasure.revision
+            var seen = erasure.seen
+            seen.record(revision)
+            let stamp = GroupStamp(revision: revision, seen: seen)
+            let writes: [ItemGroupValue] = [
+                .trashedAt(erasure.date ?? ItemErasure.undatedTrash), .keptAfterDeletion(true),
+            ]
+            for value in writes {
+                guard let group = group(of: value) else { continue }
+                let before = Set(state.registers[group] ?? [])
+                let after = ItemState.maximal(before.union([ConflictingValue(stamp: stamp, value: value)]))
+                if Set(after) != before {
+                    state.registers[group] = after
+                    changed = true
+                }
             }
+            // Registers that hold the write, or a value that supersedes it, come with a clock that covers it.
+            if !seen.isCovered(by: state.clock) { met = false }
+            state.clock.formUnion(seen)
         }
-        // Registers that hold the write, or a value that supersedes it, come with a clock that covers it.
-        guard changed || !seen.isCovered(by: state.clock) else { return .keep }
-        state.clock.formUnion(seen)
+        guard changed || !met else { return .keep }
         return .kept(state.item)
     }
 
@@ -380,10 +400,14 @@ public struct ItemErasure: Hashable, Sendable, Codable {
         } else {
             self = .void
         }
-        let plausible =
-            row <= ItemMerge.maximumCounter && seen.entries.values.allSatisfy { $0 <= row }
-            && (tombstone.map { $0 > 0 && $0 - 1 == row } ?? true)
+        let plausible = isPlausible && (tombstone.map { $0 > 0 && $0 - 1 == row } ?? true)
         if !plausible { self = .void }
+    }
+
+    /// Whether an honest device could have written this: no count above 2^62, and a vector that claims no more than
+    /// the row it erased could hold.
+    var isPlausible: Bool {
+        row <= ItemMerge.maximumCounter && seen.entries.values.allSatisfy { $0 <= row }
     }
 
     /// The erasure summary: JSON with sorted keys.
@@ -400,6 +424,84 @@ public struct ItemErasure: Hashable, Sendable, Codable {
     /// When a version kept after an erasure that names no time is trashed: one fixed time, so that every device
     /// writes the same value. Such an item is never purged (`keptAfterDeletion`), whatever this says.
     static let undatedTrash = Date(timeIntervalSince1970: 0)
+}
+
+/// Every permanent deletion of one item a device knows: the erasure summary `ItemRecordMerger.joinErasureSummaries`
+/// keeps for a record erased more than once (docs/02-architecture.md §7.5, review findings W13 and W18).
+///
+/// A set, not one erasure standing for them all: each deletion stays the write its own device made, at its own
+/// tombstone's revision, having seen what it had seen (`ItemMerge.settle`), so that the join of two summaries invents
+/// no write. The join is set union — commutative, associative and idempotent — with one canonical encoding: a single
+/// erasure is the summary `ItemErasure.summary()` writes, which is what a tombstone carries, and several are a JSON
+/// array of those, sorted (`summary()`). A summary that does not decode, and an implausible element, read as
+/// `ItemErasure.void`: a deletion that had seen nothing. It is still a deletion — a version is still moved to the
+/// trash because of it — but it erases nothing.
+public struct ItemErasures: Hashable, Sendable {
+    /// Distinct, in the canonical order (`ItemErasure.precedes`).
+    public private(set) var elements: [ItemErasure]
+
+    public init(_ elements: some Sequence<ItemErasure>) {
+        self.elements = Set(elements).sorted { $0.precedes($1) }
+    }
+
+    /// Reads a summary: one erasure, a canonical array of them, or anything else (`void`).
+    public init(summary: [UInt8]) {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        if summary.first == UInt8(ascii: "["),
+            let elements = try? decoder.decode([ItemErasure].self, from: Data(summary)), !elements.isEmpty
+        {
+            self.init(elements.map { $0.isPlausible ? $0 : .void })
+        } else {
+            self.init([ItemErasure(summary: summary)])
+        }
+    }
+
+    /// Everything the deletions' authors had seen, between them.
+    public var seen: VersionVector {
+        elements.reduce(into: VersionVector()) { $0.formUnion($1.seen) }
+    }
+
+    /// Both sets of deletions.
+    public func joined(_ other: ItemErasures) -> ItemErasures {
+        ItemErasures(elements + other.elements)
+    }
+
+    /// The deletions as summaries of tombstones at or below `tombstone`, the latest stamp of the deletions joined
+    /// (the engine's): a deletion whose summary claims a later row is not one of them, and has seen nothing (review
+    /// finding Y28). The stamp is the same on every device that knows the same deletions, so this is too.
+    public func believed(atOrBelow tombstone: UInt64) -> ItemErasures {
+        ItemErasures(elements.map { $0.revision.version <= tombstone ? $0 : .void })
+    }
+
+    /// The erasure summary: one erasure as `ItemErasure.summary()` writes it, several as a JSON array of those in the
+    /// canonical order.
+    public func summary() throws -> [UInt8] {
+        if elements.count == 1 { return try elements[0].summary() }
+        var bytes: [UInt8] = [UInt8(ascii: "[")]
+        for (index, element) in elements.enumerated() {
+            if index > 0 { bytes.append(UInt8(ascii: ",")) }
+            bytes += try element.summary()
+        }
+        bytes.append(UInt8(ascii: "]"))
+        return bytes
+    }
+}
+
+extension ItemErasure {
+    /// A fixed total order on erasures: by revision, then by what they had seen and when (`CanonicalWriter`, so it
+    /// does not depend on how an encoder spells them).
+    func precedes(_ other: ItemErasure) -> Bool {
+        if revision != other.revision { return revision < other.revision }
+        func bytes(_ erasure: ItemErasure) -> [UInt8] {
+            var writer = CanonicalWriter()
+            writer.append(erasure.row)
+            writer.append(erasure.seen)
+            writer.append(erasure.date)
+            return writer.bytes
+        }
+        return bytes(self).lexicographicallyPrecedes(bytes(other))
+    }
 }
 
 extension ConflictingValue {

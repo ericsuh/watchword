@@ -276,6 +276,134 @@ struct ItemMergeAuditTests {
         #expect(ItemErasure(summary: Array(bare)).row == 7)
     }
 
+    /// W13 and W18 meet Y25. A record erased on two devices is judged against the join of both erasures, which the
+    /// engine keeps as one summary. The join must be a join — or which erasure a device heard of first, and how its
+    /// summaries were grouped, would decide what it keeps — with one encoding, so that "the join adds nothing" can be
+    /// decided by comparing bytes; and a summary that does not decode must be a deletion that had seen nothing.
+    @Test("the join of a record's erasures is commutative, associative and idempotent, in one canonical encoding")
+    func erasureJoin() async throws {
+        let onA = F.edit(F.base(), by: F.a, at: 2) { $0.title = "Seen by A" }
+        let onB = F.edit(F.base(), by: F.b, at: 5) { $0.fields[1].value = "seen-by-B" }
+        let first = Self.erasure(of: onA, by: F.a)
+        let second = Self.erasure(of: onB, by: F.b)
+        let late = ItemErasure(
+            seen: VersionVector([F.a: 2, F.b: 5]), row: 9, device: F.c, date: Date(timeIntervalSince1970: 1_800_000_300)
+        )
+        let keys = FakeAccountKeys(seed: 31)
+        let merger = ItemRecordMerger(sealer: FakeSyncKeyring(deviceID: F.c, keys: keys), deviceID: F.c)
+        func join(_ x: [UInt8], _ y: [UInt8]) async throws -> [UInt8] {
+            try await merger.joinErasureSummaries(x, y, kind: .item)
+        }
+        let summaries = [
+            try first.summary(), try second.summary(), try late.summary(), [], Array("[]".utf8), [0xFF],
+            try ItemErasures([first, second]).summary(),
+        ]
+        // One erasure is encoded as a tombstone carries it, and reads back as itself.
+        #expect(try ItemErasures([first]).summary() == first.summary())
+        #expect(ItemErasures(summary: try first.summary()).elements == [first])
+        for x in summaries {
+            let canonical = try ItemErasures(summary: x).summary()
+            #expect(try await join(x, x) == canonical, "idempotent")
+            #expect(try await join(canonical, canonical) == canonical)
+            for y in summaries {
+                #expect(try await join(x, y) == join(y, x), "commutative")
+                for z in summaries {
+                    #expect(try await join(join(x, y), z) == join(x, join(y, z)), "associative")
+                }
+            }
+        }
+        // Anything that does not decode is a deletion that had seen nothing: it adds a deletion, and no coverage.
+        let undecodable = ItemErasures(summary: [0xFF])
+        #expect(undecodable == ItemErasures([.void]) && undecodable.seen.isEmpty)
+        let joined = ItemErasures(summary: try await join(first.summary(), [0xFF]))
+        #expect(joined.elements.contains(.void) && joined.seen == first.seen)
+        // An implausible element of an array is read as `void`, like a summary of its own.
+        let lying = ItemErasure(seen: VersionVector([F.a: 99]), row: 3, device: F.b, date: nil)
+        let planted =
+            Array("[".utf8) + (try first.summary()) + Array(",".utf8) + (try lying.summary()) + Array("]".utf8)
+        #expect(ItemErasures(summary: planted) == ItemErasures([first, .void]))
+        // Above the stamp the engine passes, a deletion is not believed (Y28); at or below it, it is.
+        let both = ItemErasures([first, second])
+        #expect(both.believed(atOrBelow: second.revision.version) == both)
+        #expect(both.believed(atOrBelow: first.revision.version) == ItemErasures([first, .void]))
+    }
+
+    /// A join that would not fit in a tombstone is refused, so that no snapshot carries one every reader refuses
+    /// (`SyncPayload.maximumErasureLength`); the engine then keeps the erasure with the later stamp.
+    @Test("a join of erasure summaries over the tombstone limit is refused")
+    func erasureJoinOverTheLimit() async throws {
+        func erasure(_ marker: UInt8, by device: UUID) throws -> [UInt8] {
+            var claimed: [UUID: UInt64] = [:]
+            for n in 0..<900 {
+                claimed[
+                    UUID(uuid: (marker, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, UInt8(n >> 8), UInt8(n & 0xFF)))] =
+                    1
+            }
+            return try ItemErasure(seen: VersionVector(claimed), row: 4, device: device, date: nil).summary()
+        }
+        let (x, y) = (try erasure(0xD1, by: F.a), try erasure(0xD2, by: F.b))
+        #expect(x.count <= SyncPayload.maximumErasureLength && y.count <= SyncPayload.maximumErasureLength)
+        let keys = FakeAccountKeys(seed: 32)
+        let merger = ItemRecordMerger(sealer: FakeSyncKeyring(deviceID: F.c, keys: keys), deviceID: F.c)
+        await #expect(throws: ItemMergeError.self) {
+            _ = try await merger.joinErasureSummaries(x, y, kind: .item)
+        }
+    }
+
+    /// W13 and Y25 together. Two devices delete the item, each having seen an edit the other had not; a third holds an
+    /// edit neither saw. A version that the two deletions had seen *between them* is erased: each of its edits was in a
+    /// copy a person deleted. A version holding the third edit is kept, and receives each deletion's own write — not
+    /// one write standing for both, which no device made — so the item kept is the same whichever deletion a device
+    /// learned of first, and whether it learned of them one at a time or together.
+    @Test("two deletions of one item: covered between them, erased; kept, the same item in either order")
+    func deletionsInEitherOrder() throws {
+        let base = F.base()
+        let onA = F.edit(base, by: F.a, at: 2) { $0.title = "Renamed on A" }
+        let onB = F.edit(base, by: F.b, at: 2) { $0.fields[1].value = "typed-on-B" }
+        let first = Self.erasure(of: onA, by: F.a)
+        let second = Self.erasure(of: onB, by: F.b)
+        let both = ItemErasures([first, second])
+
+        let seenBetweenThem = F.merge((onA, F.a), (onB, F.b))
+        let mergedOrigin = Revision(version: seenBetweenThem.version, device: ItemMerge.zeroDevice)
+        #expect(ItemMerge.settle(seenBetweenThem, origin: mergedOrigin, against: both) == .erase)
+        guard case .kept = ItemMerge.settle(seenBetweenThem, origin: mergedOrigin, against: first) else {
+            Issue.record("one deletion alone erased an edit it had not seen")
+            return
+        }
+
+        let onC = F.edit(base, by: F.c, at: 2) { $0.fields[1].value = "typed-on-C" }
+        func kept(_ item: Item, origin: Revision, against erasures: ItemErasures) -> (Item, Revision)? {
+            guard case .kept(let kept) = ItemMerge.settle(item, origin: origin, against: erasures) else { return nil }
+            let tombstone = erasures.elements.map(\.revision.version).max() ?? 0
+            let revision = Revision(version: max(item.version, tombstone) + 1, device: F.c)
+            return (ItemMerge.written(kept, as: revision), revision)
+        }
+        let origin = F.origin(onC, F.c)
+        let together = try #require(kept(onC, origin: origin, against: both))
+        let afterFirst = try #require(kept(onC, origin: origin, against: ItemErasures([first])))
+        let firstThenSecond = try #require(kept(afterFirst.0, origin: afterFirst.1, against: both))
+        let afterSecond = try #require(kept(onC, origin: origin, against: ItemErasures([second])))
+        let secondThenFirst = try #require(kept(afterSecond.0, origin: afterSecond.1, against: both))
+        #expect(ItemMerge.sameState(firstThenSecond.0, secondThenFirst.0))
+        #expect(ItemMerge.sameState(firstThenSecond.0, together.0))
+        #expect(ItemMerge.settle(together.0, origin: together.1, against: both) == .keep, "settled")
+
+        let item = together.0
+        #expect(item.field(.password)?.value == "typed-on-C")
+        #expect(item.isTrashed && item.keptAfterDeletion && !item.isTrashedByPerson)
+        // Both deletions' own writes, at their own revisions: neither is credited with what the other had seen.
+        let trashes = [try #require(item.revisions[.trashedAt])] + (item.conflicts[.trashedAt] ?? []).map(\.stamp)
+        #expect(trashes.count == 2)
+        #expect(Set(trashes.map(\.revision)) == [first.revision, second.revision])
+        for stamp in trashes {
+            let erasure = stamp.revision == first.revision ? first : second
+            var seen = erasure.seen
+            seen.record(erasure.revision)
+            #expect(stamp.seen == seen)
+        }
+    }
+
     /// Y26. The version kept after a deletion was guessed from the highest count in the summary. A device that had
     /// merged two versions (a row above every edit in it) and then deleted the item wrote a tombstone above that
     /// guess, so every device holding an edit it had not seen returned a version *below* the tombstone, which the
@@ -295,23 +423,28 @@ struct ItemMergeAuditTests {
 
         let unseen = try await keeper.sealItem(F.edit(base, by: F.b, at: 2) { $0.title = "Renamed meanwhile" })
         let merger = ItemRecordMerger(sealer: keeper, deviceID: F.b)
-        guard case .replace(let kept) = try await merger.resolveErasure(summary, of: unseen) else {
+        // The engine passes the tombstone's version (Y28); the copy is written just above it.
+        guard case .replace(let kept) = try await merger.resolveErasure(summary, of: unseen, above: tombstone) else {
             Issue.record("an edit the deletion had not seen was not kept")
             return
         }
         #expect(kept.version > tombstone && kept.deviceID == F.b)
+        #expect(kept.version == tombstone + 1)
         let item = try await keeper.openItem(kept)
         #expect(item.title == "Renamed meanwhile" && item.isTrashed && item.keptAfterDeletion)
-        #expect(try await merger.resolveErasure(summary, of: kept) == .keep, "settled: not kept a second time")
-        #expect(try await merger.resolveErasure(summary, of: row) == .erase)
-        // The same, for an engine that passes the tombstone's version.
-        guard case .replace(let exact) = try await merger.resolveErasure(summary, of: unseen, tombstone: tombstone)
+        #expect(
+            try await merger.resolveErasure(summary, of: kept, above: tombstone) == .keep,
+            "settled: not kept a second time")
+        #expect(try await merger.resolveErasure(summary, of: row, above: tombstone) == .erase)
+        // Another device keeps the same item, at a version of its own.
+        let other = ItemRecordMerger(sealer: eraser, deviceID: F.c)
+        guard case .replace(let elsewhere) = try await other.resolveErasure(summary, of: unseen, above: tombstone)
         else {
             Issue.record("an edit the deletion had not seen was not kept")
             return
         }
-        #expect(exact.version == tombstone + 1)
-        #expect(ItemMerge.sameState(try await keeper.openItem(exact), item))
+        #expect(elsewhere.deviceID == F.c)
+        #expect(ItemMerge.sameState(try await eraser.openItem(elsewhere), item))
     }
 
     /// Y25, end to end: the item a person restored after a deletion stays restored when the tombstone is met again.

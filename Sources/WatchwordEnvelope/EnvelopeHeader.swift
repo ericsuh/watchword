@@ -10,6 +10,15 @@ public enum EnvelopeKind: UInt8, Sendable, Hashable, CaseIterable {
     /// A vault snapshot written by the sync layer (docs/02-architecture.md §7.1). A kind of its own, so a snapshot can
     /// never be presented as a log segment or the reverse.
     case snapshot = 5
+    /// A vault's own description (its name and creation time), sealed under the vault key like an item: a vault's name
+    /// is as private as an item's title (PRD F2.1, docs/02-architecture.md §5).
+    case vaultMetadata = 6
+    /// A fact in the account's vault directory (docs/02-architecture.md §7.7): the local index row of a vault and the
+    /// signed deletion of one. Never an item, a key or a log object.
+    case vaultDirectory = 7
+    /// The device registry (docs/02-architecture.md §7.8): a registry entry kept in the local store, and a device's
+    /// name sealed under the keyset's symmetric key inside one.
+    case deviceRegistry = 8
 }
 
 public enum EnvelopeError: Error, Equatable, Sendable {

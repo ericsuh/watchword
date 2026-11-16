@@ -139,7 +139,16 @@ Rationale and parameters:
   Every signature covers `"WW-sig-v1" ‖ 0x00 ‖ domain ‖ message`, with one domain per purpose
   (key bundle, key grant, membership, log segment), so no signature verifies for another purpose.
   The keyset is wrapped under AUK as an `accountHeader` envelope bound to the account ID.
-- **Vault keys.** One per vault; the Personal vault key is wrapped with Ksym; shared vault keys are
+- **Device keys.** Each device also has a signing key of its own, registered in the account's device registry
+  (§7.8): P-256 in the Secure Enclave where there is one, an Ed25519 key in the Keychain otherwise (the only
+  kind built so far). Everything a device writes to the sync store carries the account key's signature *and*
+  its own, over `"WW-devsig-v1" ‖ 0x00 ‖ domain ‖ deviceID ‖ message` for the device's, so the keyset alone does
+  not make a writer, and a device can be revoked.
+- **Enrolment key.** `Ed25519(HKDF-SHA256(ikm = AUK, salt = accountID, info = "WW-enrol-v1"))`: a signing key
+  whoever knows the password and the Secret Key can derive, and nobody else. A new device registers itself with
+  it; a password change is signed with the key of the password it replaces (§7.8).
+- **Vault keys.** One per vault; the Personal vault key, and the key of every other vault the account owns, is
+  wrapped with Ksym (a `vaultKeyWrap` record named by the key's ID in its vault); shared vault keys are
   wrapped to each member with HPKE base mode (DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM),
   info = `"WW-vaultkey-v1"||vaultID||keyID`, associated data binding sender, recipient and the
   recipient's X25519 key, and the whole wrap (`VaultKeyGrant`) signed by the sender's Ed25519 key.
@@ -157,7 +166,7 @@ Envelope v1 (binary, little-endian; also expressible as JSON for debugging)
   magic        "WWE1"
   version      u16   = 1
   kind         u8    (0 = item, 1 = vault-key-wrap, 2 = membership, 3 = account-header, 4 = log-segment,
-                    5 = snapshot)
+                    5 = snapshot, 6 = vault-metadata, 7 = vault-directory, 8 = device-registry)
   keyID        16 B  (UUID of the key that encrypted this record)
   nonce        12 B
   aadLength    u16, aad bytes  (canonical CBOR map {1: recordID, 2: vaultID, 3: schemaVersion,
@@ -204,6 +213,13 @@ ServiceScope { host, includeSubdomains, scheme?, path?, excludedHosts: [host], n
 Field { id, kind, label, value(secret or plain), order, meta }   // kinds listed in PRD F1.2
 ```
 
+A vault's own description is a record of kind 6 whose record ID is the vault's ID, sealed under the vault key:
+`VaultMetadata { vaultID, name, createdAt, modifiedAt, version }` (`VaultMetadataCodec`: JSON with sorted keys,
+16 KiB at most, a name of at most 256 characters, and the same identity check against the row). A vault's name
+is as private as an item's title. Kinds 7 and 8 are not sealed payloads of their own: they name rows of the
+local store that hold a vault's directory entry and a device-registry entry (§6, §7.7, §7.8), and kind 8 is also
+the kind under which a device's name is sealed inside its registry entry.
+
 Titles and hosts are inside the ciphertext. A separate **index record** per item (also encrypted,
 but with a different, smaller payload: `id, vaultID, hosts, usernames, title`) lets the AutoFill
 extension build its in-memory index after unlock without decrypting every full item. Watchword writes no
@@ -231,6 +247,14 @@ milestone 2 stores full item records only.
   misread. A commit may name the version it read of each record (`StoreChange.expectations`), so a writer
   that awaited something in between — the sync engine waiting on its merger while the person saves the same
   item — fails with `versionConflict` instead of overwriting the newer save.
+- Account-level rows live in `records` too, under the account's own ID where a vault's would be, so nothing
+  about the schema changed: the published account header (kind 3, record ID the account's; any other record ID
+  is a candidate header for a password changed elsewhere), one row per device-registry entry (kind 8, named by
+  the first half of the entry's SHA-256), and one directory row per vault (kind 7, record ID the vault's:
+  `0x01`, or `0x02` and the signed statement that the vault was deleted). None is trusted for being there: a
+  registry entry is re-hashed and its signatures re-checked whenever the registry is evaluated, a candidate
+  header and a vault deletion count only if the account key and a registered device signed them, and the
+  Keychain anchor below says how far the registry had got (§7.7, §7.8).
 - The file is untrusted input (A8 can edit it while the app is locked; a restored backup is anyone's).
   The connection is opened with `SQLITE_OPEN_NOFOLLOW` (the database path is resolved first, since
   `/var` is itself a link), `trusted_schema = OFF`, `cell_size_check = ON` and `secure_delete = ON`;
@@ -269,15 +293,20 @@ milestone 2 stores full item records only.
     rather than the database so that A8, who can edit the file, cannot substitute a key of their own.
   - All items: `kSecUseDataProtectionKeychain` (iOS semantics on macOS), non-synchronisable,
     accessed through `WatchwordPlatform.SystemKeychainStore`.
-  - `deviceSigningKey` — Secure Enclave P-256 key used to sign this device's change-log segments
-    in addition to the account Ed25519 key (lets other devices distinguish which device wrote what).
+  - `deviceSigningKey` — this device's own signing key, with which it signs everything it writes to the sync
+    store beside the account Ed25519 key (§7.8). Reached through the `DeviceKeyStore` port: a Secure Enclave
+    P-256 key where there is one (that adapter is Apple-only and not built yet), otherwise — and today — a
+    software Ed25519 seed stored here with the device ID it belongs to (`KeychainDeviceKeyStore`).
+  - `deviceRegistryAnchor` — what this device trusts of the device registry: the genesis entry, the credential
+    entry it follows and the newest entries it has applied. Not secret; in the Keychain so that A8 can neither
+    substitute a registry nor roll one back to before a revocation.
 
 ## 7. Sync
 
 ### 7.1 Model: per-device append-only change logs plus snapshots
 
 Each device appends **log segments** (envelopes of kind 4, each containing one or more item
-versions or membership operations, signed with the account Ed25519 key and the device key) to its
+versions or membership operations, signed with the account Ed25519 key and the device key, §7.8) to its
 own stream `vault/<vaultID>/log/<deviceID>/<seq>`. No two devices ever write the same object, so
 the transport never sees a write conflict. Periodically, the device with the lowest device ID among
 those that wrote since the last snapshot writes a **snapshot** (`vault/<vaultID>/snapshot/<lamport>-<deviceID>`;
@@ -335,8 +364,10 @@ VK, so merge is deferred until unlock. The AutoFill extension works from the las
 `SyncKeyring` port, and field-level merging through the `RecordMerger` port, both implemented with fakes in
 `WatchwordTestSupport`, so the whole engine — including the N-device partition simulation and the adversarial
 suite "sync log" — runs under `swift test` on Linux. The production keyring, the persistent state store and the
-app's conflict UI are described in §7.6; the CloudKit and iCloud Drive transports are still to come
-(`03-implementation-plan.md`, milestone 3).
+app's conflict UI are described in §7.6, the account's own objects and enrolment in §7.7, the device registry in
+§7.8 and automatic syncing in §7.9; the CloudKit and iCloud Drive transports are still to come
+(`03-implementation-plan.md`, milestone 3). One engine runs per vault; a vault's log carries its items and its
+description (`vaultMetadata`), each kind merged by its own merger (`KindRoutingMerger`).
 
 **Objects.** A transport holds `SignedObject`s: `"WWSO" ‖ version ‖ signature ‖ envelope`, where the envelope
 is of kind `logSegment` or `snapshot`, sealed under the vault key, with the object's location bound into its
@@ -394,6 +425,24 @@ validly signed segment), and acknowledgement and coverage values must be plausib
   undone when the tombstone is met again, and one made without seeing it stays beside it as a conflict. Erasing a
   covered version whole is the one step that is not a join (an item is never split); `10-sync-correctness.md` §5
   says what holds instead: no edit the erasure had not seen is ever lost, and devices cannot end up different.
+- A record can be erased more than once, on devices that had each seen something the other had not; a device
+  remembers the *join* of every erasure of a record it knows (`RecordMerger.joinErasureSummaries`), stamped with the
+  later of their stamps, and judges a version against that, so which erasure arrives first decides nothing. For items
+  the join is the set of the deletions (`ItemErasures`, set union in one canonical encoding), not one erasure standing
+  for both: a version is erased when the deletions had, between them, seen all of it, and otherwise each deletion is
+  its own write as above, so no deletion is credited with what another had seen and a device that learned of them in
+  either order holds the same item. A device publishes its own deletion even when it already knows a later erasure of
+  the same record by another device: that one's author may have seen less. The same holds for its own earlier
+  erasure: the person may delete a version that erasure kept, and a kept version keeps its own number, so the second
+  deletion's stamp can be the lower. A pending deletion counts as published only once this device has published a
+  deletion of the record at or after its stamp *and* the join it holds already contains everything this one had seen.
+  An erasure a device already holds is not applied to its local version a second time (a later snapshot may carry it
+  again): it erased the version or the version was kept, and applied again it would put back in the trash an item the
+  person has since restored. Only a reconciling sync judges again. The engine passes the merger the joined erasure's
+  stamp, which depends on the erasures alone (a record's versions climb with every merge; its edits, which are all a
+  summary names, do not): a summary naming a row above it is not believed (review finding Y28), and a version kept is
+  written above that stamp and the row, at a version of the keeping device's own — the item it holds is the same on
+  every device.
 - The 30-day purge (F1.5) removes only what the person who trashed an item had seen, as a deletion does, and never
   splits an item: it skips one kept after a deletion, one whose `trashedAt` group holds a conflicting restore, and one
   whose version vector holds an edit the trash's `GroupStamp.seen` does not (`Item.isTrashedByPerson`, F7.7). Those
@@ -415,7 +464,9 @@ stream has on the transport, so a device whose state was rolled back never reuse
 **Snapshots and garbage collection.** Once the segments not covered by a snapshot reach a threshold (never less
 than twice the number of streams, so the acknowledgements a snapshot causes cannot trigger the next), the lowest
 active device writes one; any device steps in once four times the threshold is reached. A failure elsewhere in the
-sync never stops this. Every device merges *every* listed snapshot, not only the newest, and continues a stream from
+sync never stops this. Every device merges *every* listed snapshot, not only the newest — its entries too, even when
+its coverage holds nothing new, because merging is idempotent and a snapshot can carry what no accepted segment does
+(below) — and continues a stream from
 the highest coverage any of them has when its next segment is missing. A device deletes its own segment once every
 other known stream has acknowledged merging it and some listed snapshot covers it, always keeping its newest; it
 deletes one of its own snapshots only when another listed snapshot covers everything it does. A snapshot's contents
@@ -424,13 +475,22 @@ are trusted only as far as their signature: existing devices never delete anythi
 **Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and replays the log. On a
 healthy device it changes nothing; on one whose file was rolled back it restores the newest versions.
 
-Known limits, tracked in `06-adversarial-review.md` §H: every device still holds the account signing key, so
-the device registry (D9) is still needed before sync ships; a device that stops syncing for good holds garbage
-collection back until it is removed; the store can withhold objects (reported, not prevented); an item's history
+**Revoked devices.** The keyring tells the engine which devices are revoked (`SyncKeyring.retiredAuthors`, §7.8).
+From then on the engine does not read their objects at all (`SyncReport.retiredObjects`; staged ones are dropped
+unmerged), does not wait for their acknowledgement before collecting garbage (review finding Y6), never waits for
+them to write the next snapshot, and stops publishing if the revoked device is itself. What the revoked device
+wrote *before* is not lost: a device that had merged any of it that no trusted device's snapshot is known to cover
+writes one snapshot of its own, which every other device merges, so an edit made on a phone before it was lost
+and received by only one other device still reaches the rest (PRD F7.7), and the devices converge although each
+stopped reading the lost device's stream at a different point. The price is stated in §7.8: something a revoked
+device wrote after its revocation, but before some device learned of it, is handed on by that device like the
+rest.
+
+Known limits, tracked in `06-adversarial-review.md` §H: the store can withhold objects (reported, not prevented); an item's history
 lives in its record and is never pruned (F1.4), so an item edited often enough to reach the payload limit (SEC9)
 refuses further edits until history moves to records of its own; and a snapshot may attribute versions to any device (its author is
-trusted for the vault, so this is an insider's capability). From the audit of the merge (Y28–Y30, Y36, Y37): the engine does
-not yet pass a tombstone's version to the merger, which therefore believes the erasure summary about it; it rejects the
+trusted for the vault, so this is an insider's capability). From the audit of the merge (Y29, Y30, Y36, Y37; Y28, the
+tombstone's version, is fixed): the engine rejects the
 whole object carrying a version whose merge is over the payload limit, stopping that author's stream on that device,
 where it should quarantine the one entry; it does not refuse to publish an over-long erasure summary (the merger no
 longer writes one); the session
@@ -441,14 +501,24 @@ than as the merge reads them.
 
 **Keyring.** `VaultSession` is the production `SyncKeyring` and `ItemSealer`, through `VaultSyncAdapter`, which
 holds the session and never a key: every call goes back to the actor, which throws `SyncKeyringError.locked` once
-`lock()` has zeroised the keys. Segments and snapshots are sealed with `RecordCipher` under the personal vault's
+`lock()` has zeroised the keys. Segments and snapshots are sealed with `RecordCipher` under their vault's
 current key, in the context `SyncObjectLocation.envelopeContext` gives; items with the same code path as a save.
-Signatures are the account's Ed25519 key, domain `logSegment`, over `name ‖ 0x00 ‖ envelope`: the envelope already
+Every object carries two signatures, domain `logSegment`, over `name ‖ 0x00 ‖ envelope` (`0x02 ‖ account signature
+‖ device signature`): the account's Ed25519 key and the writing device's own key. The envelope already
 binds the location, but only once the vault key opens it, so binding the name into the signature also refuses a moved
-object at download, while locked. Verification uses the keyset's own public key while unlocked and the Keychain copy
-(`accountSigningKey`, §6) while locked; with neither, every object is refused (`trustedKeyUnavailable`, so the report
-says why) rather than trusted, and the next unlock restores the copy. The keyring signs only as its own device. Until the device registry (D9)
-lands, any device holding the account key may write to the vault.
+object at download, while locked. `verify` accepts an object only from a device the registry (§7.8) holds as
+registered and not revoked, for a vault of the account, with both signatures verifying — the account's against the
+keyset's own public key while unlocked and the Keychain copy (`accountSigningKey`, §6) while locked, the device's
+against the key the registry gives for it. The registry is evaluated from public keys, so this is the same check
+locked and unlocked. With no account key or no registry to trust, every object is refused (`trustedKeyUnavailable`,
+so the report says why) rather than trusted, and the next unlock or sync restores them. The keyring signs only as
+its own device, and another device signing in its stream is refused by everyone else.
+
+**Vaults.** `VaultSession.syncAll()` syncs the account's own objects first (§7.7), then runs one engine per vault
+in the directory — deleted vaults included, so that what a deletion had not seen still arrives — and returns an
+`AccountSyncReport`; `sync()` returns the vaults' reports added up. While locked each engine only downloads. The
+same holds, unlocked, while this device is not registered, has been revoked, or has seen a password change it
+has not been given (§7.8).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
@@ -468,7 +538,8 @@ of the signing key with the other Keychain items. A pending deletion is the one 
 than rebuilds — it becomes a tombstone that erases the record everywhere — so the session reaches the store through
 `AuthenticatedSyncState`: each deletion it commits is signed with the account key (`SignatureDomain.pendingDeletion`,
 over every field and the deleted row's envelope), and a pending deletion that is not this device's, or does not verify,
-is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing.
+is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing. This holds per
+vault: a pending deletion counts only for the vault it is filed under.
 
 **App.** Settings has Sync Now and the last report in words; a list row with conflicting values shows a badge, and
 the item's detail lists each conflicting group with the shown value first and each alternative after it, every one
@@ -476,6 +547,273 @@ behind its own Keep button, secrets hidden until shown. Production builds are bu
 transport exists. UI-test launches (`--uitest`) sync over an in-memory transport with `UITestPeer`, a second session
 of the same account in the process, so XCUITest drives a concurrent rename through the real keyring
 (`SyncConflictTests`).
+
+### 7.7 Vaults, the account's own objects, and enrolment (as built)
+
+**Vaults** (PRD F2.1–F2.3). An account has the Personal vault and any number of others it owns
+(`createVault`, `renameVault`, `deleteVault`, `vaults()`, `items(in:)`; sharing is §8). Each vault has its own
+256-bit key, wrapped under Ksym as a `vaultKeyWrap` record whose identity — vault and key ID — comes from where it
+is stored, and a sealed description (§5). The Personal vault needs no description to exist (its name defaults
+to "Personal"), can be renamed, and can be neither deleted nor shared: the session refuses, and a deletion of it
+is ignored whoever signed it. Every `VaultSession` invariant holds per vault: contexts from the row, identity
+checks after decryption, conditional commits, sync metadata owned by the vault. Search (`search`, `ItemSearch`)
+runs over decrypted items in memory — titles, scope hosts, usernames and emails, tags, notes, never a secret
+field — and nothing is indexed on disk.
+
+**Moving and copying** (F2.2). A copy is a new item with a new ID. A move is a copy under an ID derived from the
+version moved and the destination (`SHA-256("WW-move-v1" ‖ item ‖ destination ‖ device ‖ version)`), and the
+original put in the trash, **in one commit**; then the original is deleted for good through the path of any
+permanent deletion. An interruption therefore leaves either nothing changed or the item in its new vault with
+the original at worst still in the trash (where the 30-day purge finds it): never neither, and never a move that
+only seems to have happened. Other devices see nothing special — a new item in one vault's log, an item trashed
+and then deleted in the other's — so the existing merge rules decide every race: an edit made elsewhere that the
+move had not seen is kept, in the trash of the vault it was made in (the deletion removes only what its author had
+seen, §7.5), and two devices moving the same version to the same vault create the same item. The two halves are
+in two logs, so "never neither" must also hold on the transport: `syncAll` publishes every vault with this
+device's deletions held back (`SyncEngine.sync(deferringDeletions:)`; they stay pending and count as erasures
+here), and publishes them only once every vault's push in that sync succeeded. A sync that reaches one vault's log
+and not another's (offline, locked midway, `ownStreamConflict`) leaves the other devices with the original where it
+was until a later sync publishes the copy and then the deletion. An item that holds
+values kept for the person to choose between is not moved until they have chosen (`itemHasUnresolvedValues`): the
+copy would not carry them and the deletion would discard them, which only the person may do (F7.7).
+
+**Deleting a vault** is explicit, confirmed, signed and never inferred from absence. The caller names how many
+items the vault holds (`itemCount(in:)`, shown to the person); if that is no longer true, nothing is deleted. In
+one commit the vault's directory row becomes a deletion signed by the account key and the device, and every item
+is deleted through the path of a permanent deletion, each tombstone carrying what the deleting device had seen.
+On another device an item, or an edit, the deletion had not seen is kept: it stays in the deleted vault and is
+*shown* in the trash, as kept after a deletion (so the purge never takes it), listed by `items()` with a vault ID
+that `vaults()` no longer lists, from where the person moves it to another vault or deletes it. Shown, not
+written: a write would be an edit of each device's own, which the next deletion made elsewhere would not have
+seen and would have to keep. Nothing new can be
+saved into a deleted vault. Its key is kept, so that what arrives later can still be read; its objects on the
+transport are not collected yet.
+
+**Objects on the transport** (`AccountObjectLocation`), beside the per-vault logs, all created once and never
+overwritten, all with exact names:
+
+```
+account/<accountID>/header/<generation>-<deviceID>             the account header (AccountHeaderObject)
+account/<accountID>/registry/<sha256 of the entry, hex>        one device-registry entry (§7.8)
+account/<accountID>/vault/<vaultID>/key/<keyID>/<deviceID>     a vault key wrapped under Ksym, vouched for by that device
+account/<accountID>/vault/<vaultID>/deleted/<deviceID>         the vault was deleted, as stated by that device
+```
+
+- **The header** is everything a new device needs to derive the AUK and open the keyset: KDF algorithm,
+  iterations and salt, the AUK's key ID, the wrapped keyset exactly as the local store holds it, the IDs of the
+  registry's genesis entry and of the credential entry it belongs to, and a *binding*: an AEAD under the AUK over
+  the SHA-256 of all of that, carrying which vault is the personal one. It is signed by the account key and the
+  device that wrote it.
+- **The vault directory** is a pair of grow-only sets: wraps and deletions, each object a `SignedObject` whose
+  two signatures (domain `vaultDirectory`) cover its name and body. A deletion wins for good; vault IDs are never
+  reused. Every device vouches, under its own name, for each vault key it has opened and each deletion it has
+  verified, so a directory object never depends on the signature of a device that is later revoked. The local
+  copy follows the same rule: once a device has verified a deletion and can sign (unlocked, registered), it
+  replaces the local row with the deletion signed by itself — at the next sync, at the next unlock, and before it
+  revokes a device — so revoking the device that deleted a vault does not bring the vault back there. A deletion
+  seen only while locked rests on its author's signature, and on other devices' copies on the transport, until
+  then. A wrap is
+  accepted only if a registered device vouched for it under that exact name *and* its envelope's own context
+  names that vault and key; when unlocked, also only if it opens under the keyset. A wrap row in the local store
+  that does not open (edited in the file, A8: moved under another vault, corrupted) counts as missing while
+  unlocked, and the next sync replaces it with a copy from the transport that passed those checks; until then the
+  vault is not listed or written and its items are reported unreadable, never opened under another key.
+
+Names reveal the account ID, vault, key and device IDs and the credential generation; a device's name is sealed
+under Ksym inside its registry entry; vault names are in the vaults' own logs.
+
+**Enrolment** (F5.2, F10.2; `VaultSession.enrol`). A second device joins from nothing but the transport, the
+account password and the Secret Key (typed, or the Emergency Kit's setup code, which also names the account):
+
+1. List the account's headers and take the newest first. A header that does not parse, whose name disagrees with
+   its contents, or whose KDF parameters are outside the two-sided bounds is skipped before any derivation
+   (SEC5, SEC9); at most three that parse are tried, because each costs a derivation.
+2. Derive the AUK, open the keyset (bound to the account ID), open the binding. Any failure is the one error a
+   wrong password and a wrong Secret Key share. The binding is what authenticates the header to a device that
+   holds no key yet: nobody without the password and Secret Key can make one, and it fixes the two things a new
+   device must not take from the store on trust — the registry's genesis entry and the personal vault.
+3. Fetch the registry, evaluate it from that genesis entry and along that credential entry (§7.8), and check the
+   header's signatures against it. If the registry already holds a later password change, the header was an old
+   one — replayed by the store, or opened with an old password — and enrolment stops (`passwordSuperseded`).
+4. Take a new device ID and device key, and register with the enrolment key the AUK yields.
+5. Fetch the vault directory: every key a registered device vouched for that opens under the keyset for the
+   vault and key its name says. The personal vault's key must be among them.
+6. Commit the account, pin the registry in the Keychain, and leave the vault unlocked. The first sync publishes
+   the registration, and the others accept the device's writes from then on.
+
+**A store restored onto other hardware** arrives without its device key (Keychain items never leave a device), so
+at its first unlock the installation registers as a new device under a new ID. The engine publishes only its own
+device's rows, so what the old ID wrote and never published would otherwise stay on this device alone (F7.7): in
+the commit that registers it, every row of the old ID that the restored sync state does not record as published is
+written again by the new ID, unchanged (`ItemMerge.written`, one version up), and each of the old ID's verified
+pending deletions is recorded again as the new ID's, stamped above it. A vault's name, being last-writer-wins, is
+carried over only when the sync state says it was unpublished, so a stale backup cannot override a later rename.
+Each vault's sync state then starts over: the old ID's stream is not this device's to continue.
+
+What a store that replays the account's *entire* earlier state can do: show a new device the account as it was
+(only with the password of that time, so the person has to type an old password for it to work). That device
+then holds nothing newer than that state and none of its writes are accepted by devices that have moved on;
+when the store shows it the change, it refuses the old password like every other device. A device that already
+has the account is not affected at all: it follows only newer credentials, and remembers which in the Keychain.
+
+**A password change is the account's, not the device's.** `changePassword` re-verifies the current password,
+writes a credential entry to the registry (§7.8) and a new header, and deletes the header it replaces from the
+transport. Every other device, at its next sync, keeps the new header as a *candidate* — only if the registry
+holds its credential entry and the account key and the writing device signed it — and from then on refuses the old
+password (`passwordChangedOnAnotherDevice`), refuses quick unlock (and destroys the Local Unlock Key), and neither
+merges nor publishes until the person enters the new password there, which adopts the header. The keyset does not
+change: a password change does not take the keys away from someone who opened them with the old password (§7.8
+says what does). If the change was not the person's, they unlock a device they still hold with the password it
+has (`unlock(password:ignoringPasswordChange:)`), revoke the device that made it and set a password of their own;
+every other device then follows whichever password the person gives it.
+
+### 7.8 The device registry (as built; review findings D9, Y5, Y6)
+
+Before it, any holder of the account's Ed25519 key could write to every stream, so a lost device could not be
+excluded. Now a device writes only if the registry says it may.
+
+**Entries.** The registry is a grow-only set of signed entries on the transport and in each device's store,
+named by the SHA-256 of their bytes; each names the entries its author had seen (`parents`), so the set is a
+hash-linked graph the store can neither alter nor reorder. Four kinds: *genesis* (the account's first device,
+the account's public signing key and the first enrolment key; exactly one), *add* (a device: ID, public key,
+sealed name), *revoke*, and *credential* (the account's credentials changed: a new enrolment key, and the entry
+it follows). Every entry carries the account key's signature and its author's: a registered device's own key, or
+— for a device registering itself — the current enrolment key. A credential entry is signed a third time, by the
+enrolment key of the generation it replaces: a device that merely holds the keyset cannot change the password for
+everyone. Entries the account key did not sign are never admitted at all.
+
+**Rules** (`DeviceRegistry.evaluate`, a pure function; the merge is set union, so devices that hold the same
+entries and follow the same credentials compute the same registry). The entries are replayed in one order:
+
+1. *Credential changes are checkpoints.* Everything a credential change had seen is replayed before anything it
+   had not, generation by generation. An entry that arrives later is judged against the state the checkpoint
+   left, however old the parents it names, and cannot reorder what the checkpoint sealed: a revocation moves
+   only entries of its own layer (otherwise a revoked device could append a revocation naming one of its own
+   back-dated, sealed entries, and so move it in front of its own revocation).
+2. Between checkpoints: causal order, each revocation as early as that allows (what it had seen, the
+   revocation, then what it had not), ties by entry ID. A revocation that can never count (below) moves nothing.
+
+An entry is applied only if, at its place, its author is a registered device not yet revoked — or the current
+enrolment key, for an entry written knowing of it — and its signatures verify. A device's entry must also
+descend from an entry that registered that device under that key *and that counted* where it stands in the
+replay: a device writes only once it is registered, so every honest entry does, and an entry that registered a
+device but counted for nothing registers nobody. A revoked device's ID and key are never accepted again; a
+registered device's key never changes; no key serves two devices.
+
+*A bounded number of keys per device* (`maximumKeysPerDevice`, 2). An entry whose ancestors register its author
+under more than two distinct keys is void, and no signature of it is checked; otherwise its signature is tried
+against each of those keys once, when the graph is built, and every replay reads the answer. So evaluating costs
+at most two device-signature verifications per entry, plus one per enrolment and one per credential link replayed:
+linear in the entries, whatever a key holder plants (without the bound, thousands of registrations of one ID under
+distinct keys and thousands of entries descending from them all were millions of verifications, and every device's
+evaluation hung; W27). The rule reads ancestry alone, so it is the same whatever order the entries arrived in. An
+honest history registers an ID under one key only (a device's key never changes, and an approved device enrols with
+the key it was approved with); the second key is margin. Several keys for one ID reach an honest device's ancestry
+only through an entry a registered device wrote while it counted — a device that could as well have revoked it.
+
+**What can never count is not kept.** Some entries are void whatever arrives later: past the last checkpoint, one
+whose author was revoked before it; one by a device that nothing it descends from registered under a key that
+verifies it; one by an enrolment key it does not descend from, that does not verify it, or whose generation was
+replaced. Voidness spreads to what relies on a void entry. Past the last checkpoint, a device's entry is void
+unless it descends from a registration of its author, under a key that verifies it, that is not void itself, and
+an enrolment is void if the credential entry it cites is; a registration the checkpoints sealed counts for good or
+for nothing, so behind the last checkpoint "not void" means "counted". Entries are judged in causal order, each
+once, so this is one pass over the graph. Without it a revoked device registers a *puppet* — a device whose key
+it made — in a void entry (a garbage author signature, or its own revoked key, or an enrolment under a password
+change of its own), and floods in the puppet's name: each entry verifies against that registration, and nobody
+ever revoked the puppet (review of the device registry, "puppets"; a puppet registering a further puppet is the
+same case one step on). The registry does not retain them (`DeviceRegistryState.retainedEntries`: every other connected entry,
+and whatever a retained one descends from): a device does not store them, prunes them from its store, does not
+publish them, and does not fetch them again in the same session until a sync keeps something new. The size
+limit (`maximumEntries`, 4096) counts retained entries only, and a sync fetches in batches evaluated with what
+the device holds (at most `maximumEvaluated`, twice that, at once). So a revoked device that kept the account
+key can put any number of entries on the transport, but once a password change has sealed its revocation they
+fill no device's registry, stop no fetch of the entries that matter, and keep neither the password change from
+spreading nor a new device from enrolling (review of the device registry, "flood"), in its own name or in a
+puppet's. A registered device in the wrong hands, or a revoked one before a password change, can still sign
+entries that might count (and so can puppets it registers before the change); the limit then
+refuses the registry rather than evaluate it without bound, as before. A candidate password
+change is judged *as if it were followed* (the registry replayed with it as the last checkpoint), never by where
+it falls among unsealed entries: otherwise a revoked device could hide the change from a device that has not been
+given the new password yet, by back-dating a revocation of the device that made it (found by the adversarial
+suite).
+
+**What each device trusts.** The genesis entry and the credential entry it follows, and the newest entries it
+has applied, are pinned in the Keychain (`deviceRegistryAnchor`). The genesis entry comes from the account header
+the person's password opened; the credential entry moves forward only when this device changes the password or
+the person unlocks it with a newer one. So the store cannot forge the registry (no account key), cannot roll a
+device back (the local file must still hold everything the anchor names, or nothing verifies until a sync
+restores it), and cannot fork it in any way that survives the entries reaching a device (union is the merge). It
+can withhold entries, as it can withhold anything (Y7): a device then acts on an older registry until they
+arrive. A header older than the pinned credentials is refused at unlock (`accountHeaderRolledBack`).
+
+**Adding a device.** By enrolment with the password and Secret Key (§7.7), or by a registered, unlocked device
+vouching for a device's ID and key before it has them (`prepareDeviceIdentity`, `approveDevice`).
+
+**Revoking a device** (`revokeDevice`, which takes the current password): a revoke entry, optionally followed in
+the same commit by a credential change that names it as its parent. From the moment a device learns of it:
+
+- `verify` refuses every object of the revoked device, segments and snapshots, locked or unlocked, and the engine
+  stops reading its streams (§7.5);
+- it is retired from garbage collection and from snapshot election (Y6);
+- its ID and its key can never be registered again, by anyone;
+- the revoked device itself, if it runs this app, sees its standing, publishes nothing, and should be erased.
+
+**What revocation does not do, and what the person must also do.** State this in the UI; the API makes the
+choice explicit (`RevocationPasswordChoice`).
+
+- *It does not take back what the device holds.* A device that someone unlocked — or whose holder knows the
+  account password — has the keyset: the account key, Ksym and with it every vault key, including those of vaults
+  created later, for as long as it can reach the sync store. Revocation is about **writing**, not reading.
+  To stop the reading, the device must lose access to the store (erase it with Find My, remove it from the Apple
+  ID, change the file provider's credentials), and the keyset and vault keys must be replaced — an account
+  re-key (new keyset, new Secret Key, every vault key rotated and re-encrypted), which is **not built** and is
+  tracked with vault-key rotation (milestone 4, F4.3). Until it exists, the app must say so plainly when a device
+  is revoked.
+- *Keeping the password* (`.keepPassword`) is sound only if the device was locked when it was lost and nobody who
+  may hold it knows the account password. Such a device has no account key: it can write nothing, with or without
+  the revocation, which then mainly retires it. If that assumption is wrong, its holder can still enrol a new
+  device with the password and Secret Key they know — exactly as the person can — and, holding the account key,
+  can sign back-dated entries that the devices judge among unsealed ones.
+- *Changing the password with the revocation* (`.change`) is what the app should force whenever the person
+  cannot vouch for that assumption — in practice, the default, with keeping the password the exception to
+  confirm. The revocation is then behind a checkpoint that only someone knowing the *new* password can have
+  made: on every device that has been given it, nothing the revoked device signs afterwards counts — not a
+  registration under any ID or key, not an enrolment with the old password, not a back-dated revocation of the
+  others — and a device that has not been given it yet neither merges nor publishes. What still holds: the
+  reading, above; and whatever the revoked device wrote before a given device learned of the revocation, which
+  that device merged in good faith and hands on (§7.5).
+- *A stolen local header.* A thief with the device's Keychain (the Secret Key) and database can try passwords
+  against the header as it was, offline. A password change elsewhere does not change that copy, and the keyset
+  it opens is still the account's: again only the re-key ends it. The KDF floor and the Keychain's protection
+  class are what stand in the way until then.
+
+**Seam for sharing (milestone 4).** `VaultSession.syncVerify` is the one place that decides whether an author may
+write to a vault. For a shared vault it gains a second question before the registry's — is the author's account
+a member with a writing role, per the membership chain? — and then asks that account's registry about the
+device. `currentKeyID(for:)` is the one place a vault's current key is chosen: a key received through a
+member's HPKE grant is stored wrapped under this account's Ksym like any other vault key, and the membership
+record's key ID replaces the rule there.
+
+### 7.9 Automatic syncing (`AutoSyncPolicy`)
+
+When to sync is a pure function of the clock and what has happened, in the style of `AutoLockPolicy`: no timers
+or threads in the package. The app records events (`unlocked`, `locked`, `localChange`, `remoteChangeHint`,
+`syncStarted`, `syncSucceeded`, `syncFailed`), asks `decide(now:state:settings:)`, and arms one timer for the date
+a `.wait(until:)` names. The rules (defaults in `AutoSyncSettings`):
+
+- after an unlock, at once, whatever else is pending (what was downloaded while locked can now be merged);
+- after a local change, once 5 s have passed without another, and never later than 60 s after the first of a
+  burst; a change made while a sync runs is kept for the next;
+- on a remote-change hint from the transport (a CloudKit push, a file presenter), after 2 s, coalescing a burst;
+- periodically: every 15 minutes while unlocked, hourly while locked;
+- never two automatic syncs within 10 s of each other;
+- after a failure nothing until a backoff has passed (30 s, doubling per failure in a row, capped at an hour),
+  then a retry; any success clears it;
+- while locked every sync is download-only (F7.5, §7.4), and local changes wait for the unlock.
+
+A clock that moved backwards cannot show that an interval has not passed, so such a wait is treated as over:
+syncing early costs a request, waiting for ever would cost the data.
 
 ## 8. Sharing protocol
 
@@ -1775,7 +2113,8 @@ Fuzz/ (a package of its own, depending on this one by path; nothing in it reache
 Ports (protocols) injected into the core: `KeychainStore`, `BiometricGate`, `RandomSource`,
 `Clock`, `HTTPClient`, `SyncTransport`, `CredentialIdentityPublisher`, `FileAccess`. Milestone 2
 has `RecordStore`, `KeychainStore`, `BiometricGate` and `WallClock`; randomness is an injected
-`RandomNumberGenerator`. Milestone 3 adds `SyncTransport`, `SyncKeyring`, `RecordMerger` and `SyncStateStore`,
+`RandomNumberGenerator`. The device registry adds `DeviceKeyStore` (this device's signing key:
+`KeychainDeviceKeyStore` in software, `FakeDeviceKeyStore` in tests, a Secure Enclave adapter to come). Milestone 3 adds `SyncTransport`, `SyncKeyring`, `RecordMerger` and `SyncStateStore`,
 with `InMemorySyncTransport`, `FileSyncTransport` and `InMemorySyncStateStore` in the module and the fakes
 (`FakeSyncKeyring`, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`) in `WatchwordTestSupport`; the
 production keyring is `VaultSession` (an `ItemSealer` for the shared `ItemRecordMerger`) and the production state
@@ -1802,10 +2141,12 @@ Milestone 4 adds `KeyBundleDirectory` and `VerifiedContactStore` (§8.4), each w
 - Per-item keys (wrapped by VK) to make rotation O(members) instead of O(items): **decided in milestone 4, against**
   (`adr/0007-rotation-reencrypts-records.md`, closing review finding D10). Rotation re-encrypts; a per-blob content
   key is the thing to add if attachments arrive.
-- A device registry signed by existing devices (review finding D9). Today every device holds the
-  account Ed25519 key, so a lost device cannot be excluded without rotating the account key.
-  Needed before sync ships. `SyncKeyring.verify` is where it plugs in: it already decides, per object, whether
-  the author named in the location may write to the vault.
+- The device registry (review finding D9) is built (§7.8): a revoked device can no longer write. What it left
+  open is an **account re-key** — a new keyset and Secret Key, every vault key rotated — which is the only thing
+  that ends a revoked device's *reading* if it held the keyset, and the remedy for a stolen local header. It
+  shares its machinery with vault-key rotation on membership removal (milestone 4, F4.3) and should be decided
+  with it. Also open: the Secure Enclave P-256 `DeviceKeyStore` adapter (verification is in place), and
+  collecting a deleted vault's objects from the transport.
 - OS QuickType behaviour with overlapping domain identities. Planned for milestone 2 but not yet
   verified: it needs a physical device with the AutoFill extension publishing identities, which
   arrives with milestone 5. Carried to milestone 5's on-device QA. Until then the portable core

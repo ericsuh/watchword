@@ -729,34 +729,42 @@ struct AdversarialItemMergeTests {
             Array("{\"seen\":{},\"row\":-1,\"device\":\"\(Self.insider.uuidString)\"}".utf8),
             Array("{\"seen\":{\"not a device\":1},\"row\":9,\"device\":\"\(Self.insider.uuidString)\"}".utf8),
         ]
+        // Each arrives on a tombstone just above the row, as a deletion of it is stamped; the copy kept is written
+        // above that tombstone, which the engine names (Y28), whatever the summary says.
+        let tombstone = row.version + 1
         for summary in summaries {
             #expect(ItemErasure(summary: summary) == .void)
-            guard case .replace(let kept) = try await merger.resolveErasure(summary, of: row) else {
+            #expect(ItemErasures(summary: summary) == ItemErasures([.void]))
+            guard case .replace(let kept) = try await merger.resolveErasure(summary, of: row, above: tombstone) else {
                 Issue.record("a summary that has seen nothing erased or ignored a version")
                 continue
             }
             let opened = try await keyring.openItem(kept)
             #expect(opened.field(.password)?.value == "kept-password" && opened.isTrashed && opened.keptAfterDeletion)
-            #expect(!opened.isTrashedByPerson && kept.version == row.version + 1)
+            #expect(!opened.isTrashedByPerson && kept.version == tombstone + 1)
         }
-        // A plausible summary from the insider erases what it claims to have seen — a deletion is a writer's to make —
-        // and nothing more: an edit above what it names is kept, above the tombstone it names.
+        // A plausible summary from the insider, on the tombstone it names, erases what it claims to have seen — a
+        // deletion is a writer's to make — and nothing more: an edit above what it names is kept, above the tombstone.
         let plausible = try ItemErasure(
             seen: VersionVector([Self.honest: 1]), row: 1 << 40, device: Self.insider,
             date: Date(timeIntervalSince1970: 1)
         ).summary()
-        guard case .replace(let kept) = try await merger.resolveErasure(plausible, of: row) else {
+        guard case .replace(let kept) = try await merger.resolveErasure(plausible, of: row, above: (1 << 40) + 1)
+        else {
             Issue.record("an edit the summary does not name was not kept")
             return
         }
         #expect(kept.version == (1 << 40) + 2)
         #expect(try await keyring.openItem(kept).field(.password)?.value == "kept-password")
-        // With the tombstone's own version from the engine, a summary that names another row is not believed at all.
-        guard case .replace(let exact) = try await merger.resolveErasure(plausible, of: row, tombstone: 7) else {
+        // On a tombstone below the row it names, it is not believed at all: it has seen nothing, and the copy is
+        // written just above the tombstone.
+        guard case .replace(let exact) = try await merger.resolveErasure(plausible, of: row, above: 7) else {
             Issue.record("an edit the summary does not name was not kept")
             return
         }
         #expect(exact.version == 8)
+        let opened = try await keyring.openItem(exact)
+        #expect(opened.revisions[.trashedAt]?.revision == ItemErasure.void.revision, "the summary was not believed")
     }
 
     /// Threat: the insider publishes a tombstone at an ordinary version whose summary says the row it erased was at
@@ -764,10 +772,9 @@ struct AdversarialItemMergeTests {
     /// holding an edit the summary does not cover writes its copy at 2^40 + 2: the vault's versions have jumped by more
     /// than the engine lets any *received* version jump (review finding U5 — repeat it and the versions run out).
     ///
-    /// The merger cannot tell: `RecordMerger.resolveErasure` is not given the tombstone's version, only the summary.
-    /// `ItemRecordMerger.resolveErasure(_:of:tombstone:)` takes it, refuses a summary that names any other row, and
-    /// writes just above the tombstone; the engine does not call it yet. Recorded as a known issue until it does
-    /// (docs/06-adversarial-review.md §H, Y28).
+    /// The engine now passes the tombstone's stamp to `RecordMerger.resolveErasure`, and `ItemRecordMerger` believes
+    /// no summary that names a row above it and writes just above the tombstone (docs/06-adversarial-review.md §H,
+    /// Y28, fixed when the sync-core workstream merged).
     @Test("a tombstone whose summary names a far higher row does not raise the vault's versions")
     func tombstoneNamingAHigherRow() async throws {
         let keys = FakeAccountKeys(seed: 22)
@@ -804,11 +811,8 @@ struct AdversarialItemMergeTests {
         #expect(report.rejected.isEmpty)
         let kept = try #require(await reader.store.record(key))
         #expect(try await reader.item(item.id).fields[0].value == "typed on the honest device")
-        withKnownIssue(
-            "SyncEngine does not pass the tombstone's version to the merger, so the summary's row is believed"
-        ) {
-            #expect(kept.version <= 2 + SyncTestClient.configuration.maximumVersionJump)
-        }
+        #expect(kept.version <= 2 + SyncTestClient.configuration.maximumVersionJump)
+        #expect(kept.version == 3, "just above the tombstone")
     }
 
     // MARK: - Size, at the engine
@@ -957,7 +961,7 @@ struct AdversarialItemMergeTests {
             _ = try await merger.merge(local: localRow, remote: relabelled)
         }
         await #expect(throws: ItemMergeError.identityMismatch(local.id)) {
-            _ = try await merger.resolveErasure([], of: relabelled)
+            _ = try await merger.resolveErasure([], of: relabelled, above: relabelled.version + 1)
         }
     }
 }

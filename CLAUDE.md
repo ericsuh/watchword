@@ -8,12 +8,12 @@ Watchword is a native iOS/iPadOS/macOS password manager for a household, end-to-
 synced through the user's own iCloud (or any file-based cloud). The repository is in the **design
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
-`WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
-its CloudKit and iCloud Drive transports, milestone 4's sharing protocol core (`WatchwordSharing`), which nothing
-calls yet, milestone 5's portable AutoFill core (`WatchwordAutoFill`) short of the extension adapter, and
-milestone 6's portable hygiene core (`WatchwordHygiene`) short of its network adapter, session wiring and UI, and milestone 7's import and export parsers
-(`WatchwordInterchange`) short of their wiring into the session and the apps.
-`Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+`WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and in `VaultSession` the production keyring, multiple
+vaults, the device registry and enrolment over the transport) short of its CloudKit and iCloud Drive transports,
+milestone 4's sharing protocol core (`WatchwordSharing`), which nothing calls yet, milestone 5's portable AutoFill core
+(`WatchwordAutoFill`) short of the extension adapter, milestone 6's portable hygiene core (`WatchwordHygiene`) short
+of its network adapter, session wiring and UI, and milestone 7's import and export parsers (`WatchwordInterchange`)
+short of their wiring into the session and the apps. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -150,15 +150,18 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   `SecItemCopyMatching`, `LAContext.canEvaluatePolicy`, the PDF `CGContext`). The only module allowed unsafe
   code (ADR 0001 and its milestone-2 amendment).
 - **`WatchwordCrypto`** — Secret Key, 2SKD, KDF calibration, keyset, vault keys, HPKE grants, signatures,
-  fingerprints, record sealing. Depends on `SecureMemory` and `WatchwordEnvelope`.
+  fingerprints, record sealing; device keys and signatures (`DevicePublicKey`, `DeviceSignatures`,
+  `SoftwareDeviceKey`, `EnrolmentKey`), the device registry (`RegistryEntry`, `DeviceRegistry.evaluate`) and the
+  published account header (`AccountHeaderObject`). Depends on `SecureMemory` and `WatchwordEnvelope`.
 - **`WatchwordStore`** — the `RecordStore` port, `InMemoryRecordStore` and `SQLiteRecordStore` (the App Group
   ciphertext database). Envelopes plus storage locations only; never keys.
 - **`WatchwordSync`** — milestone 3's portable half: object layout, the `SyncTransport` port with
   `InMemorySyncTransport` and `FileSyncTransport`, signed sealed segments and snapshots (`SyncPayload`,
   `SignedObject`), the `SyncKeyring`/`RecordMerger`/`SyncStateStore` ports, conflict-keeping `ItemMerge` over
   `ItemState` (the item as a state-based CRDT, `docs/10-sync-correctness.md`) and line-level `NoteText`,
-  `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `SyncEngine`,
-  `DeletionRecordingStore`, and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
+  `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `KindRoutingMerger`, `SyncEngine`,
+  `DeletionRecordingStore`, `AccountObjectLocation` (names of the account's own objects), `AutoSyncPolicy` (when to
+  sync, pure), and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
 - **`WatchwordSharing`** — milestone 4's protocol core for shared vaults: the signed membership chain
   (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `writePermission`, `writeStanding` and the
@@ -175,9 +178,12 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   the `SiteDirectory` seam, `HygieneReport`, and `HygieneEngine`, the actor the session will drive between unlock and
   lock. Depends on `WatchwordModel`, `SecureMemory` and `Crypto`; knows nothing of the session or the store.
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
-  history, trash, password change, deletion, `sync()`, conflict resolution), `UnlockPolicy`, `AutoLockPolicy`,
-  `ItemCodec`, `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`), and `VaultSyncAdapter`, the
-  production `SyncKeyring` and `ItemSealer` (`VaultSession+Sync.swift`).
+  history, trash, password change, deletion, `sync()`, conflict resolution; vaults, move, copy and search in
+  `VaultSession+Vaults.swift`; enrolment, devices, revocation and the account's objects on the transport in
+  `VaultSession+Account.swift`), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `VaultMetadataCodec`, `ItemSearch`,
+  `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`, `DeviceKeyStore` with the software
+  `KeychainDeviceKeyStore`), and `VaultSyncAdapter`, the production `SyncKeyring` and `ItemSealer`
+  (`VaultSession+Sync.swift`).
 - **`WatchwordAutoFill`** — the credential provider extension's portable core (milestone 5): `CredentialProviderModel`
   (one method per request the OS makes: credential list, passwords, one-time codes, text to insert, passkey
   registration and assertion, save and generate password, credential-update reports), `ReleaseGate`, `TOTP`,
@@ -192,24 +198,26 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `StoredItemSize`, `DuplicateDetector`,
   `InterchangeGuide`. Depends on `WatchwordModel` and `WatchwordMatching`; Foundation only, no keys, files or clocks.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
-  fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
-  checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for AutoFill
-  `FakeCredentialVault`, `FakeCredentialIdentityPublisher`, `AutoFillHarness` and the S1 to S4 items in
-  `AutoFillFixtures`; for hygiene `FakeHTTPClient`, which records every request, `RecordingPwnedRangeCache`,
-  `SimulatedPwnedPasswords`; for sharing, with real keys, `HostileSharingStore`, `SimulatedMember` (the reference
-  for the integration's sync pass, §8.8), `SharingHousehold` and `ForgedRecord`, an encoder of its own for records
-  the module would never sign; for imports `ZIPFixture` and `DeflateFixture`, which build the archives and streams
-  no real writer produces). Test targets only; not a product, and no production target may depend on it.
+  fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `FakeDeviceKeyStore`, `TestVault`, whose
+  `enrolledDevice` enrols a real second device over the transport; `RegistryFixture` for hand-built registry
+  entries; for sync `FakeSyncKeyring` over a keyed checksum that is not cryptography, `FakeItemMerger`,
+  `SyncTestClient`, `SimulatedServer`; for AutoFill `FakeCredentialVault`, `FakeCredentialIdentityPublisher`,
+  `AutoFillHarness` and the S1 to S4 items in `AutoFillFixtures`; for hygiene `FakeHTTPClient`, which records every
+  request, `RecordingPwnedRangeCache`, `SimulatedPwnedPasswords`; for sharing, with real keys, `HostileSharingStore`,
+  `SimulatedMember` (the reference for the integration's sync pass, §8.8), `SharingHousehold` and `ForgedRecord`, an
+  encoder of its own for records the module would never sign; for imports `ZIPFixture` and `DeflateFixture`, which
+  build the archives and streams no real writer produces). Test targets only; not a product, and no production target
+  may depend on it.
 
 `docs/02-architecture.md` §15 maps each module to its milestone; §14 describes import and export as built; §7.5
-describes sync as built, and
-§7.6 the vault side (keyring, saves, state, conflict UI); `docs/10-sync-correctness.md` is the model of an item as a
-CRDT and the argument that sync converges; `docs/03-implementation-plan.md` milestone 3 lists what is
-still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds). §8 describes sharing as
-built, and milestone 4 what is open there (wiring into `VaultSession` and sync, `CKShare`, the UI). §13 describes hygiene as
-built, and milestone 6 what is still open (the `URLSession` adapter, session wiring, background glue, the report UI).
-Milestone 7 lists what is open for import and export (session wiring, the encrypted archive, Credential Exchange,
-the screens).
+describes sync as built, §7.6 the vault side (keyring, saves, state, conflict UI), §7.7 vaults, the account's objects
+on the transport and enrolment, §7.8 the device registry (and what revocation does not do), §7.9 automatic syncing;
+`docs/10-sync-correctness.md` is the model of an item as a CRDT and the argument that sync converges;
+`docs/03-implementation-plan.md` milestone 3 lists what is still open (CloudKit and iCloud Drive transports, the
+Secure Enclave device key, sync in production builds, `UITestPeer`). §8 describes sharing as built, and milestone 4
+what is open there (wiring into `VaultSession` and sync, `CKShare`, the UI). §13 describes hygiene as built, and
+milestone 6 what is still open (the `URLSession` adapter, session wiring, background glue, the report UI). Milestone 7
+lists what is open for import and export (session wiring, the encrypted archive, Credential Exchange, the screens).
 
 ### `WatchwordHygiene` invariants
 
@@ -349,14 +357,31 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   stay discarded.
 - A permanent deletion, applied to a version it does not cover, is one write by the deleting device at the
   tombstone's revision (`ItemMerge.settle`, from the `ItemErasure` the tombstone carries): the same on every device,
-  never a fresh edit per device.
+  never a fresh edit per device. Several deletions of one item are several such writes (`ItemErasures`, their set),
+  never one write claiming what another deletion had seen; a version is erased when they had, between them, seen all
+  of it. The engine passes the latest tombstone's stamp (`resolveErasure(_:of:above:)`), never a version that depends
+  on the copy in question: the merger believes no summary naming a later row (Y28) and writes a kept version above
+  that stamp and the row, through `ItemMerge.written`.
 - Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
   counts as an erasure while merging. The outbox compares rows with `SyncState.published`, not `known`.
+- A record can be erased more than once. A device remembers the join of every erasure of a record
+  (`RecordMerger.joinErasureSummaries`; for items the union of `ItemErasures`, stamped with the later stamp) and
+  judges versions against that, so arrival order decides nothing. A pending
+  deletion is done only when this device published a deletion at or after its stamp *and* the join already holds
+  what it had seen; never skip one because another device's erasure, or this device's own earlier one, is stamped
+  later (W13, W18).
 - The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;
   a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
-- Signatures cover `name ‖ 0x00 ‖ envelope` under `SignatureDomain.logSegment`; verifying while locked uses the
-  Keychain's `accountSigningKey` copy, and with no trusted key every object is refused (`trustedKeyUnavailable`).
+- Every object carries two signatures over `name ‖ 0x00 ‖ envelope` under `SignatureDomain.logSegment`: the
+  account key's and the writing device's own (`DualSignature`). `verify` accepts only a device the registry holds
+  as registered and not revoked; while locked it uses the Keychain's `accountSigningKey` copy and registry anchor,
+  and with no trusted key or registry every object is refused (`trustedKeyUnavailable`).
+- A revoked device (`SyncKeyring.retiredAuthors`) is not read, not waited for by garbage collection or snapshot
+  election (Y6), and what a device had merged from it is handed on in a snapshot of that device's own. Snapshot
+  entries are always merged, stale coverage or not: merging is idempotent, and that snapshot may be the only carrier.
+- One engine per vault; a vault's log carries items and the vault's description, each merged by its own merger
+  (`KindRoutingMerger`). Never let a record of one kind reach another kind's merger.
 - Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
   `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
 
@@ -434,6 +459,34 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.
 - The sync adapter holds the session, never a key; every key operation re-enters the actor and throws
   `SyncKeyringError.locked` after `lock()`.
+- Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
+  exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
+  signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting
+  a vault deletes its items through the path of a permanent deletion; what the deletion had not seen stays, and is
+  *shown* trashed and kept after a deletion (`VaultSession.presented`), never written that way: an automatic write
+  per device is an edit the next deletion elsewhere has not seen.
+- A move is a copy (derived ID) plus the original trashed in **one commit**, then the original deleted like any
+  permanent deletion. Never move by changing a row's vault, and never move an item with unresolved values.
+- Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
+  never searched.
+
+### Device registry and account objects (`docs/02-architecture.md` §7.7, §7.8)
+
+- The registry is a grow-only set of entries named by their SHA-256; `DeviceRegistry.evaluate` is a pure,
+  deterministic function of the entries, the pinned genesis entry and the pinned credential entry. Keep it that
+  way: no clock, no arrival order, no local state.
+- Password changes are checkpoints: what a credential entry had seen is replayed before what it had not. A
+  candidate change is judged by replaying with it as the last checkpoint, never by its place among unsealed
+  entries (a revoked device can back-date entries in front of it; review finding W1).
+- Every entry needs the account key's signature and its author's (a registered device, or the current enrolment
+  key); a credential entry also the previous generation's enrolment key. A revoked ID or key never returns.
+- What a device trusts is in the Keychain (`deviceRegistryAnchor`, `accountSigningKey`), never in the database.
+  The local store must still hold everything the anchor names, or the registry is unavailable and nothing verifies.
+- Everything fetched before a key is held is hostile: headers are bounded and KDF-validated before any derivation,
+  authenticated by the binding under the derived AUK, and the genesis entry comes from that binding only.
+- A device with a password change it has not been given neither merges nor publishes, refuses the old password
+  once it holds the new header, and adopts the change only when the person's password opens it.
+- Revocation stops writing, not reading: do not describe it as more (§7.8 states the limits; the re-key is open).
 
 ### `CredentialProviderModel` invariants
 
@@ -599,7 +652,8 @@ directions are tested; keep both when adjusting constants.
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"AutoFill request model"`, `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`,
   `"local vault store"`, `"Keychain item protection"`, `"sync log"`, `"sync log, item metadata"`, `"sync with real keys"`,
-  `"hygiene and breach checks"`, `"sharing and membership"`, `"import parsers"`), so **renaming a suite breaks CI deliberately** — update
+  `"hygiene and breach checks"`, `"sharing and membership"`, `"import parsers"`,
+  `"account enrolment and device registry"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
@@ -610,9 +664,10 @@ directions are tested; keep both when adjusting constants.
   test — time will come from an injected `Clock`.
 - `WATCHWORD_LONG_TESTS=1` and `WATCHWORD_TEST_SEED` are the nightly workflow's knobs for extended
   randomised runs; new long-running tests should honour them via `TestEnvironment`. `test:long` runs the
-  adversarial target plus any test whose identifier contains `LongRunning` (the sync simulation is
-  `LongRunningSyncSimulationTests`, the membership ledger's convergence property `LongRunningMembershipForkTests`;
-  the merge's laws are `LongRunningItemMergeLawTests` and `LongRunningItemMergeExhaustiveTests`), so name a new
+  adversarial target plus any test whose identifier contains `LongRunning` (the sync simulations are
+  `LongRunningSyncSimulationTests`, over fakes, and `LongRunningVaultSimulationTests`, real sessions with vaults,
+  enrolment and a revocation; the membership ledger's convergence property is `LongRunningMembershipForkTests`; the
+  merge's laws are `LongRunningItemMergeLawTests` and `LongRunningItemMergeExhaustiveTests`), so name a new
   randomised suite that way to have the nightly widen it.
 - Known-answer vectors come from the RFC that defines the primitive, or from an independent
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.

@@ -1,4 +1,5 @@
 import Foundation
+import WatchwordEnvelope
 import WatchwordModel
 import WatchwordStore
 
@@ -24,6 +25,8 @@ public enum ItemMergeError: Error, Equatable, Sendable {
     /// limit (SEC9), which the join of two versions that each fit can be. Nothing is wrong with either version, so
     /// this is not a reason to distrust the object that carried the remote one (docs/10-sync-correctness.md §8, Y37).
     case resultNotSealable(UUID)
+    /// The join of two erasure summaries is longer than a tombstone may carry (`SyncPayload.maximumErasureLength`).
+    case summaryTooLarge(Int)
 }
 
 /// The `RecordMerger` for item records: open both versions, `ItemMerge.merge`, seal the result through
@@ -102,32 +105,41 @@ public struct ItemRecordMerger: RecordMerger {
             .summary()
     }
 
-    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
-        try await resolveErasure(summary, of: record, tombstone: nil)
-    }
-
-    /// `resolveErasure`, for a caller that knows the version of the tombstone carrying `summary`: a summary that
-    /// does not name the row just below it is then read as having seen nothing, and the version kept is written above
-    /// the tombstone whatever the summary says. Without it the tombstone's version is taken from the summary.
-    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, tombstone: UInt64?) async throws
+    /// Settles a version of an erased record against every erasure of it the engine knows (`summary`, the join of
+    /// their summaries), through `ItemMerge.settle`. `tombstone` is the latest stamp among them, which the engine
+    /// knows and a summary does not say (review finding Y28): an erasure whose summary names a later row has seen
+    /// nothing, and a version kept is written above both the tombstone and the record — never at a version taken
+    /// from a summary. What is kept is a function of the item and the erasures alone, so every device that keeps a
+    /// version stores the same item; only the version it writes it down at, which is its own, differs.
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above tombstone: UInt64) async throws
         -> ErasureDecision
     {
         let item = try await sealer.openItem(record)
         guard item.id == record.recordID, item.vaultID == record.vaultID else {
             throw ItemMergeError.identityMismatch(record.recordID)
         }
-        let erasure = ItemErasure(summary: summary, tombstone: tombstone)
-        switch ItemMerge.settle(item, origin: Self.origin(record), against: erasure) {
+        let erasures = ItemErasures(summary: summary).believed(atOrBelow: tombstone)
+        switch ItemMerge.settle(item, origin: Self.origin(record), against: erasures) {
         case .erase:
             return .erase
         case .keep:
             return .keep
         case .kept(let kept):
-            // Above the record and above the tombstone, as every device that keeps a version writes it.
-            let floor = max(record.version, tombstone ?? erasure.revision.version)
-            let revision = try Self.revision(above: floor, by: deviceID)
+            let revision = try Self.revision(above: max(record.version, tombstone), by: deviceID)
             return .replace(try await seal(ItemMerge.written(kept, as: revision)))
         }
+    }
+
+    /// Every erasure either summary holds (`ItemErasures`): set union, in one canonical encoding. A summary that does
+    /// not decode is a deletion that had seen nothing. Throws when the join would not fit in a tombstone
+    /// (`SyncPayload.maximumErasureLength`), since a snapshot carries it and every reader would refuse that snapshot;
+    /// the engine then keeps the erasure with the later stamp, which erases no more than the join would.
+    public func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8] {
+        let joined = try ItemErasures(summary: first).joined(ItemErasures(summary: second)).summary()
+        guard joined.count <= SyncPayload.maximumErasureLength else {
+            throw ItemMergeError.summaryTooLarge(joined.count)
+        }
+        return joined
     }
 
     static func revision(above version: UInt64, by device: UUID) throws -> Revision {

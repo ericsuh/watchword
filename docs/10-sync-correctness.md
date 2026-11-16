@@ -225,10 +225,30 @@ associative with the item join, because coverage of a join is not the join of co
   much covered content rides along with a kept edit, can depend on the order of arrival; that two devices end up
   *different* cannot.
 
-The engine remembers one erasure per record, the latest, for versions that arrive after a tombstone, and applies each
-tombstone with its own erasure when it arrives. With two concurrent deletions of one item a late version is therefore
-judged against the later erasure only, which can keep a version the earlier one covered. That errs towards keeping,
-and by the convergence argument does not split devices.
+**Several deletions of one item.** An item can be permanently deleted on two devices, each having seen something the
+other had not. The engine remembers the *join* of every erasure of a record it knows (`RecordMerger.joinErasureSummaries`,
+stamped with the later stamp) and judges every version against that, the local one when a tombstone arrives and one
+arriving after (review findings W13, W18). For items the join is the *set* of the deletions (`ItemErasures`): set
+union, commutative, associative and idempotent, with one canonical encoding (a single erasure as a tombstone carries
+it, several as a sorted array; an undecodable summary is a deletion that had seen nothing, `ItemErasure.void`).
+`ItemMerge.settle` against a set erases a version whose clock the deletions' vectors cover *between them*, since each
+of its edits was in a copy a person deleted; any other version receives each deletion's own write, exactly as above.
+It does not join the deletions into one erasure with one revision: that would be a write no device made, crediting
+one deletion with what another had seen, and two devices that learned of the deletions in different orders would hold
+different items (one still holding the earlier deletion's write beside the joined one, the other not) until they
+exchanged versions. As a set, the result is a join with each deletion's constant, so it is the same whichever
+deletion a device learned of first.
+
+What a device learns in between still matters in one way, the same way as above: a device that kept a version
+against the first deletion holds that deletion's write, which the second deletion had not seen, so the version is no
+longer covered by the pair and stays kept; a device that learned of both before judging erases it. By the convergence
+argument the kept row reaches the second device too, so devices still do not end up different, and the error is
+towards keeping.
+
+The engine passes the merger the joined erasure's stamp (`resolveErasure(_:of:above:)`), a function of the erasures
+alone: a deletion whose summary names a row above it is not believed and has seen nothing (Y28), and a version kept
+is written above that stamp and the row, at a version of the keeping device's own. Only that version number differs
+between devices; the item, sealed through `ItemMerge.written`, is the same.
 
 The 30-day purge (F1.5) is a permanent deletion and follows the same rules. It removes only `Item.isTrashedByPerson`:
 a trash written knowing every edit the item holds, with no other value of `trashedAt` beside it, and not a version kept
@@ -324,9 +344,10 @@ failed each time.
   Two different writes under one revision are then both kept (they are distinct register elements; reused line IDs
   keep both texts), so nothing is lost; but a third device's write that had seen the first is taken to have seen the
   second too. The remedy is for the vault to persist the highest version it has assigned outside the rolled-back file.
-- **The engine does not tell the merger the tombstone's version** (Y28). `ItemRecordMerger` takes it from the erasure
-  summary, which an insider can set far above the tombstone, raising the vault's versions. The merger has the entry
-  point that fixes it (`resolveErasure(_:of:tombstone:)`); the engine has to call it.
+- **The engine did not tell the merger the tombstone's version** (Y28, fixed when the sync-core work merged). The
+  engine now passes the joined erasure's stamp, and `ItemRecordMerger` believes no summary naming a row above it.
+  Within that bound an insider can still name a *lower* row, or another device, in its summary; the write that
+  deletion makes is then at a lower revision than its tombstone, which raises nothing and is the same on every device.
 - **Saving a draft made from an older version** (Y29). `ItemMerge.stamped` treats every difference between the draft
   and the stored version as the person's edit. `VaultSession.save` passes it a draft opened before a sync merged
   another device's edit, which then silently undoes that edit. The session must refuse a draft whose version is not

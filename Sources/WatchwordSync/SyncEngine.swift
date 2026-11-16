@@ -58,12 +58,20 @@ public enum SyncRejectionReason: Sendable, Equatable {
     case mergeFailed(UUID)
     /// The merger returned a result the engine must not store.
     case invalidMergeResult(UUID)
+    /// An account-level object (a registry entry, an account header, a vault-directory object) that is not what its
+    /// name says, or is not signed by the account key and a registered device (docs/02-architecture.md §7.7).
+    case accountObjectRefused
     case other(String)
 }
 
 public struct SyncRejection: Sendable, Equatable {
     public var name: String
     public var reason: SyncRejectionReason
+
+    public init(name: String, reason: SyncRejectionReason) {
+        self.name = name
+        self.reason = reason
+    }
 }
 
 /// What one sync did. Nothing here is fatal: a rejected object is reported and skipped, never repaired and never
@@ -86,7 +94,8 @@ public struct SyncReport: Sendable, Equatable {
     /// Streams stopped at a missing or rejected segment: the next sequence number each is waiting for. Later segments
     /// are never applied over a gap.
     public var waiting: [UUID: UInt64] = [:]
-    /// Snapshots older than what this device already holds; ignored.
+    /// Snapshots whose coverage this device had already merged. Their entries are merged all the same (it is
+    /// idempotent): a snapshot may carry what its author merged from a device revoked since.
     public var staleSnapshots = 0
     /// Names in the vault's prefix that are not sync objects.
     public var ignoredNames = 0
@@ -97,6 +106,20 @@ public struct SyncReport: Sendable, Equatable {
     /// This device's next sequence number was already taken: a crash after publishing, or another installation using
     /// this device ID (a restored backup). The object is merged on the next sync and nothing is overwritten.
     public var ownStreamConflict: UInt64?
+    /// Objects on the transport written by a device since revoked: not fetched, not counted as waiting, and not
+    /// waited for by garbage collection (review finding Y6).
+    public var retiredObjects = 0
+    /// This device has been revoked: nothing it publishes would be accepted, so it publishes nothing.
+    public var deviceRevoked = false
+    /// This device is not in the account's device registry as it sees it (its registration has not been accepted,
+    /// or was made with a password since changed): it downloads, and publishes nothing until it is registered.
+    public var deviceNotRegistered = false
+    /// The account password was changed on another device and has not been entered on this one yet. Until it is,
+    /// this device downloads but neither merges nor publishes (docs/02-architecture.md §7.8).
+    public var awaitingNewPassword = false
+    /// Deletions made on this device that were held back (`sync(deferringDeletions: true)`): still pending, still
+    /// counted as erasures here, published by a later sync.
+    public var deletionsDeferred = 0
 
     public init() {}
 }
@@ -157,11 +180,21 @@ public actor SyncEngine {
     // MARK: - Entry points
 
     /// Downloads, merges, publishes and maintains. While locked, only the download happens and the report says so.
-    public func sync(reconcile: Bool = false) async throws -> SyncReport {
+    ///
+    /// `deferringDeletions` publishes everything but this device's pending deletions, and any version written after
+    /// one of them (which must follow its deletion): they stay pending, count as erasures here as before, and go out
+    /// at a later sync. The session uses it so that a deletion in one vault is never on the transport before what
+    /// this device wrote in another — a move's copy before its original's deletion (docs/02-architecture.md §7.7).
+    public func sync(reconcile: Bool = false, deferringDeletions: Bool = false) async throws -> SyncReport {
         guard !running else { throw SyncError.syncInProgress }
         running = true
         defer { running = false }
         var report = SyncReport()
+        let retired = await keyring.retiredAuthors(vaultID: vaultID)
+        guard !retired.contains(deviceID) else {
+            report.deviceRevoked = true
+            return report
+        }
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
@@ -176,7 +209,7 @@ public actor SyncEngine {
         state.nextSequence = max(state.nextSequence, 1)
         var listing = Listing()
         do {
-            listing = try await pull(state: state, report: &report)
+            listing = try await pull(state: state, retired: retired, report: &report)
             // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
             // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
             if let highest = listing.segments[deviceID]?.max() {
@@ -187,13 +220,14 @@ public actor SyncEngine {
             report.transportUnavailable = true
         }
         do {
-            try await mergeStaged(state: &state, report: &report)
+            try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             try await syncState.saveState(state)
             if !report.transportUnavailable {
-                try await push(state: &state, report: &report)
+                try await push(
+                    state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
                 if report.ownStreamConflict == nil {
-                    try await maintain(state: &state, listing: listing, report: &report)
+                    try await maintain(state: &state, listing: listing, retired: retired, report: &report)
                 }
             }
         } catch SyncKeyringError.locked {
@@ -212,7 +246,12 @@ public actor SyncEngine {
         defer { running = false }
         var report = SyncReport()
         let state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
-        _ = try await pull(state: state, report: &report)
+        do {
+            _ = try await pull(
+                state: state, retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
+        } catch SyncTransportError.unavailable {
+            report.transportUnavailable = true
+        }
         return report
     }
 
@@ -223,7 +262,7 @@ public actor SyncEngine {
         var snapshots: [SyncObjectLocation] = []
     }
 
-    private func pull(state: SyncState, report: inout SyncReport) async throws -> Listing {
+    private func pull(state: SyncState, retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
         var listing = Listing()
         // A listing may name an object twice (providers do); each is fetched once.
         for name in Set(try await transport.list(prefix: SyncObjectLocation.vaultPrefix(vaultID))) {
@@ -233,6 +272,12 @@ public actor SyncEngine {
                         ? configuration.maximumSequence : configuration.maximumVersion)
             else {
                 report.ignoredNames += 1
+                continue
+            }
+            // A revoked device's objects are not read at all: what it wrote before the revocation reaches a device
+            // that lacks it through a snapshot written by a device still trusted (§7.8).
+            guard !retired.contains(location.author) else {
+                report.retiredObjects += 1
                 continue
             }
             switch location.kind {
@@ -276,8 +321,16 @@ public actor SyncEngine {
 
     // MARK: - Merge
 
-    private func mergeStaged(state: inout SyncState, report: inout SyncReport) async throws {
-        let staged = try await syncState.staged(vaultID: vaultID)
+    private func mergeStaged(
+        state: inout SyncState, retired: Set<UUID>, reconciling: Bool, report: inout SyncReport
+    ) async throws {
+        var staged = try await syncState.staged(vaultID: vaultID)
+        // Staged before its author was revoked: dropped unmerged, like anything else that device wrote.
+        let fromRetired = staged.filter { retired.contains($0.location.author) }
+        if !fromRetired.isEmpty {
+            try await syncState.unstage(fromRetired.map(\.location))
+            staged.removeAll { retired.contains($0.location.author) }
+        }
         guard !staged.isEmpty else { return }
         var highWater = try await vaultHighWater(state)
         // A deletion made here but not yet published is as much an erasure as a published one: without it, a
@@ -293,13 +346,14 @@ public actor SyncEngine {
             do {
                 let payload = try await open(snapshot)
                 try validate(payload, at: snapshot.location)
-                if Self.covers(state.merged, payload.vector) {
-                    report.staleSnapshots += 1  // Nothing in it this device has not merged already.
-                } else {
-                    for entry in payload.entries {
-                        try await apply(
-                            entry, pending: pending[entry.key], state: &state, highWater: &highWater, report: &report)
-                    }
+                // A snapshot that covers nothing new is counted, and merged all the same: merging is idempotent, and
+                // a snapshot can hold what no segment this device accepts does — what its author merged from a
+                // device revoked since (§7.8).
+                if Self.covers(state.merged, payload.vector) { report.staleSnapshots += 1 }
+                for entry in payload.entries {
+                    try await apply(
+                        entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                        highWater: &highWater, report: &report)
                 }
                 state.snapshots[snapshot.location] = payload.vector
                 state.snapshotCoverage.merge(payload.vector, uniquingKeysWith: max)
@@ -343,7 +397,8 @@ public actor SyncEngine {
                     try validate(payload, at: object.location)
                     for entry in payload.entries {
                         try await apply(
-                            entry, pending: pending[entry.key], state: &state, highWater: &highWater, report: &report)
+                            entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                            highWater: &highWater, report: &report)
                     }
                     acknowledgement = payload.vector
                 } catch let error where Self.isFatal(error) {
@@ -415,8 +470,8 @@ public actor SyncEngine {
     }
 
     private func apply(
-        _ entry: SyncEntry, pending: PendingDeletion?, state: inout SyncState, highWater: inout UInt64,
-        report: inout SyncReport
+        _ entry: SyncEntry, pending: PendingDeletion?, reconciling: Bool, state: inout SyncState,
+        highWater: inout UInt64, report: inout SyncReport
     ) async throws {
         let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
         guard entry.version <= configuration.maximumVersion, overflow || entry.version <= ceiling else {
@@ -426,12 +481,26 @@ public actor SyncEngine {
             return
         }
         highWater = max(highWater, entry.version)
+        // Every erasure of the record this device knows of, taken together: the ones it merged, and its own if it
+        // has one that is not published yet.
         var erasure = state.erasures[entry.key]
-        if let pending, erasure.map({ $0.stamp < pending.stamp }) ?? true {
-            erasure = Erasure(stamp: pending.stamp, summary: try await summary(of: pending.record))
+        if let pending {
+            erasure = try await join(
+                erasure, Erasure(stamp: pending.stamp, summary: try await summary(of: pending.record)),
+                kind: entry.kind)
+        }
+        // An erasure this device already holds — the same one again in a later snapshot, or one that adds nothing to
+        // what it knows — has had its say about the local version: it erased it, or it was kept. Applied a second
+        // time it would put back in the trash an item the person has since restored. Only a reconciling sync judges
+        // again, because it does not trust the local file.
+        var alreadyJudged = false
+        if entry.isDeletion, !reconciling, let known = state.erasures[entry.key], known.stamp >= entry.stamp {
+            let joined = try await join(
+                known, Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
+            alreadyJudged = joined.summary == known.summary
         }
         var attempt = 0
-        while true {
+        while !alreadyJudged {
             do {
                 if try await applyOnce(entry, erasure: erasure) { report.applied += 1 }
                 break
@@ -441,8 +510,9 @@ public actor SyncEngine {
             }
         }
         state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
-        if entry.isDeletion, state.erasures[entry.key].map({ $0.stamp < entry.stamp }) ?? true {
-            state.erasures[entry.key] = Erasure(stamp: entry.stamp, summary: entry.erasure)
+        if entry.isDeletion {
+            state.erasures[entry.key] = try await join(
+                state.erasures[entry.key], Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
         }
         if entry.device == deviceID {
             state.published[entry.key] = max(state.published[entry.key] ?? entry.stamp, entry.stamp)
@@ -460,7 +530,10 @@ public actor SyncEngine {
             // An erasure removes the local version only if its author had seen all of it; an edit it never saw is
             // kept, in the trash (PRD F7.6).
             guard let local else { return false }
-            let erasure = Erasure(stamp: entry.stamp, summary: entry.erasure)
+            // Judged against this erasure together with every other one known: which of two erasures of a record a
+            // device learns of first must not decide what it keeps.
+            let erasure = try await join(
+                erasure, Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
             switch try await resolve(erasure, of: local) {
             case .erase:
                 try await store.commit(StoreChange(conditionalDeletions: [key: local.version]))
@@ -517,11 +590,30 @@ public actor SyncEngine {
 
     private func resolve(_ erasure: Erasure, of record: StoredRecord) async throws -> ErasureDecision {
         do {
-            return try await merger.resolveErasure(erasure.summary, of: record)
+            // The stamp alone, not the version in question: the same for every device that knows the same erasures.
+            return try await merger.resolveErasure(erasure.summary, of: record, above: erasure.stamp.version)
         } catch let error where Self.isFatal(error) {
             throw error
         } catch {
             throw Rejection(reason: .mergeFailed(record.recordID))
+        }
+    }
+
+    /// Two erasures of one record as one: the later stamp, and everything either author had seen.
+    private func join(_ known: Erasure?, _ other: Erasure, kind: EnvelopeKind) async throws -> Erasure {
+        guard let known else { return other }
+        guard known.summary != other.summary else {
+            return Erasure(stamp: max(known.stamp, other.stamp), summary: known.summary)
+        }
+        do {
+            return Erasure(
+                stamp: max(known.stamp, other.stamp),
+                summary: try await merger.joinErasureSummaries(known.summary, other.summary, kind: kind))
+        } catch let error where Self.isFatal(error) {
+            throw error
+        } catch {
+            // Undecidable: the one with the later stamp, as before either was joined. Nothing is erased on a guess.
+            return known.stamp < other.stamp ? other : known
         }
     }
 
@@ -553,7 +645,9 @@ public actor SyncEngine {
 
     // MARK: - Publish
 
-    private func push(state: inout SyncState, report: inout SyncReport) async throws {
+    private func push(
+        state: inout SyncState, retired: Set<UUID>, deferringDeletions: Bool, report: inout SyncReport
+    ) async throws {
         try await settlePendingDeletions(state: state)
         var entries: [RecordKey: SyncEntry] = [:]
         for kind in configuration.schemaVersions.keys {
@@ -568,8 +662,14 @@ public actor SyncEngine {
         // the deletion in a later segment, so every device applies them in that order.
         var later: [SyncEntry] = []
         for (key, deletion) in pending {
-            if let erasure = state.erasures[key], erasure.stamp >= deletion.stamp {
-                obsolete[key] = deletion.stamp  // Already published.
+            if try await isPublished(deletion, key: key, state: state) {
+                obsolete[key] = deletion.stamp
+                continue
+            }
+            if deferringDeletions {
+                // Neither the deletion nor a version written after it: that one must follow the deletion.
+                entries.removeValue(forKey: key)
+                report.deletionsDeferred += 1
                 continue
             }
             if let row = entries.removeValue(forKey: key) { later.append(row) }
@@ -578,7 +678,7 @@ public actor SyncEngine {
         // Another device collects its segments once every device acknowledges them and a snapshot covers them; tell
         // it when this device has merged further into that covered range than it last said.
         let needsAcknowledgement = state.merged.contains { author, merged in
-            author != deviceID
+            author != deviceID && !retired.contains(author)
                 && min(merged, state.snapshotCoverage[author] ?? 0) > (state.publishedAcknowledgement[author] ?? 0)
         }
         guard !entries.isEmpty || !later.isEmpty || needsAcknowledgement else {
@@ -614,7 +714,9 @@ public actor SyncEngine {
                 state.published[entry.key] = max(state.published[entry.key] ?? entry.stamp, entry.stamp)
                 if entry.isDeletion {
                     published[entry.key] = entry.stamp
-                    state.erasures[entry.key] = Erasure(stamp: entry.stamp, summary: entry.erasure)
+                    state.erasures[entry.key] = try await join(
+                        state.erasures[entry.key], Erasure(stamp: entry.stamp, summary: entry.erasure),
+                        kind: entry.kind)
                 }
             }
             state.publishedAcknowledgement = vector
@@ -626,14 +728,31 @@ public actor SyncEngine {
         try await syncState.removePendingDeletions(obsolete, vaultID: vaultID)
     }
 
+    /// Whether a pending deletion is on the transport already: this device published a deletion of the record at or
+    /// after its stamp, and the erasures it knows of hold everything this one had seen. Another device's erasure of
+    /// the same record, however late its stamp, is not this one: its author may have seen less (W13). Nor is this
+    /// device's own earlier erasure, when the person deletes a version that erasure had kept: a kept version keeps
+    /// its own number, so the second deletion's stamp can be the lower of the two (W18). Both found by the vault
+    /// simulation.
+    private func isPublished(_ deletion: PendingDeletion, key: RecordKey, state: SyncState) async throws -> Bool {
+        guard let published = state.published[key], published.deleted, published >= deletion.stamp,
+            let known = state.erasures[key]
+        else { return false }
+        let joined = try await join(
+            known, Erasure(stamp: deletion.stamp, summary: try await summary(of: deletion.record)), kind: key.kind)
+        return joined.summary == known.summary
+    }
+
     /// A row that came back while its deletion was being made — merged from another device between the session's
     /// read and its delete — is settled the way the deletion will settle it on every other device, so this device does
     /// not keep a record everyone else erases.
     private func settlePendingDeletions(state: SyncState) async throws {
-        for (key, deletion) in try await syncState.pendingDeletions(vaultID: vaultID)
-        where state.erasures[key].map({ $0.stamp < deletion.stamp }) ?? true {
+        for (key, deletion) in try await syncState.pendingDeletions(vaultID: vaultID) {
+            if try await isPublished(deletion, key: key, state: state) { continue }
             guard let row = try await store.record(key), row.vaultID == vaultID else { continue }
-            let erasure = Erasure(stamp: deletion.stamp, summary: try await summary(of: deletion.record))
+            let erasure = try await join(
+                state.erasures[key], Erasure(stamp: deletion.stamp, summary: try await summary(of: deletion.record)),
+                kind: key.kind)
             let decision: ErasureDecision
             do {
                 decision = try await resolve(erasure, of: row)
@@ -677,22 +796,47 @@ public actor SyncEngine {
 
     /// A snapshot's coverage is what this device has merged, whatever else failed in the sync, so a rejected or
     /// missing object elsewhere never stops snapshots (or, through them, garbage collection).
-    private func maintain(state: inout SyncState, listing: Listing, report: inout SyncReport) async throws {
-        try await writeSnapshotIfElected(state: &state, report: &report)
-        try await collectGarbage(state: &state, listing: listing, report: &report)
+    private func maintain(
+        state: inout SyncState, listing: Listing, retired: Set<UUID>, report: inout SyncReport
+    ) async throws {
+        try await writeSnapshotIfElected(state: &state, retired: retired, report: &report)
+        try await collectGarbage(state: &state, listing: listing, retired: retired, report: &report)
     }
 
-    private func writeSnapshotIfElected(state: inout SyncState, report: inout SyncReport) async throws {
-        let uncovered = state.merged.reduce(0) { total, element in
-            total + Int(clamping: element.value &- min(element.value, state.snapshotCoverage[element.key] ?? 0))
+    /// Whether this device holds something merged from a revoked device that no snapshot by a trusted device is known
+    /// to carry: segments past what such snapshots cover, or a snapshot the revoked device wrote. Every other device
+    /// refuses that device's objects from now on, so this one must hand on what it merged in good faith, in a
+    /// snapshot of its own; otherwise devices that had not merged it yet would never converge with this one, and an
+    /// edit made on the lost device before it was revoked could exist here alone (PRD F7.7).
+    private func holdsUnsharedRetiredContent(_ state: SyncState, retired: Set<UUID>) -> Bool {
+        guard !retired.isEmpty else { return false }
+        if state.snapshots.keys.contains(where: { retired.contains($0.author) }) { return true }
+        let trusted = state.snapshots.filter { !retired.contains($0.key.author) }.values
+        return retired.contains { device in
+            let merged = state.merged[device] ?? 0
+            return merged > (trusted.map { $0[device] ?? 0 }.max() ?? 0)
         }
-        guard uncovered >= max(configuration.snapshotThreshold, 2 * state.merged.count) else { return }
-        // The lowest device ID among those that wrote since the last snapshot (§7.1); the others wait for it, unless
-        // it has fallen so far behind (it may be offline for good) that any device steps in. Two snapshots at once
-        // are harmless: each has its own name.
-        let active = state.merged.filter { $0.value > (state.snapshotCoverage[$0.key] ?? 0) }.keys
-        guard active.min(by: { $0.precedes($1) }) == deviceID || uncovered >= 4 * configuration.snapshotThreshold
-        else { return }
+    }
+
+    private func writeSnapshotIfElected(
+        state: inout SyncState, retired: Set<UUID>, report: inout SyncReport
+    ) async throws {
+        let owed = holdsUnsharedRetiredContent(state, retired: retired)
+        if !owed {
+            let uncovered = state.merged.reduce(0) { total, element in
+                total + Int(clamping: element.value &- min(element.value, state.snapshotCoverage[element.key] ?? 0))
+            }
+            guard uncovered >= max(configuration.snapshotThreshold, 2 * state.merged.count) else { return }
+            // The lowest device ID among those that wrote since the last snapshot (§7.1); the others wait for it,
+            // unless it has fallen so far behind (it may be offline for good) that any device steps in. A revoked
+            // device is never waited for. Two snapshots at once are harmless: each has its own name.
+            let active = state.merged.filter {
+                !retired.contains($0.key) && $0.value > (state.snapshotCoverage[$0.key] ?? 0)
+            }.keys
+            guard
+                active.min(by: { $0.precedes($1) }) == deviceID || uncovered >= 4 * configuration.snapshotThreshold
+            else { return }
+        }
 
         var entries: [SyncEntry] = []
         var present: Set<RecordKey> = []
@@ -705,24 +849,33 @@ public actor SyncEngine {
         for (key, erasure) in state.erasures where !present.contains(key) {
             entries.append(.tombstone(key, stamp: erasure.stamp, erasure: erasure.summary))
         }
-        let lamport = max(entries.map(\.version).max() ?? 0, 1)
-        let location = SyncObjectLocation.snapshot(vaultID: vaultID, author: deviceID, lamport: lamport)
-        let payload = SyncPayload(
-            kind: .snapshot, vaultID: vaultID, author: deviceID, number: lamport, vector: state.merged,
-            entries: entries
-        ).encoded()
-        guard payload.count < Envelope.maximumLength - 4096 else { return }
-        let envelope = try await keyring.seal(payload, at: location)
-        let signature = try await keyring.sign(envelope, at: location)
-        do {
-            try await transport.create(
-                location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
-        } catch SyncTransportError.objectExists {
+        var lamport = max(entries.map(\.version).max() ?? 0, 1)
+        // A snapshot this device owes must be written even if it already wrote one at this Lamport time (nothing
+        // newer has been stored since): the next free number is as good a name.
+        for _ in 0..<(owed ? 16 : 1) {
+            guard lamport <= configuration.maximumVersion else { return }
+            let location = SyncObjectLocation.snapshot(vaultID: vaultID, author: deviceID, lamport: lamport)
+            let payload = SyncPayload(
+                kind: .snapshot, vaultID: vaultID, author: deviceID, number: lamport, vector: state.merged,
+                entries: entries
+            ).encoded()
+            guard payload.count < Envelope.maximumLength - 4096 else { return }
+            let envelope = try await keyring.seal(payload, at: location)
+            let signature = try await keyring.sign(envelope, at: location)
+            do {
+                try await transport.create(
+                    location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+            } catch SyncTransportError.objectExists {
+                lamport += 1
+                continue
+            }
+            state.snapshots[location] = state.merged
+            state.snapshotCoverage.merge(state.merged, uniquingKeysWith: max)
+            // Handed on: what this device merged from revoked devices is now in a snapshot of its own.
+            state.snapshots = state.snapshots.filter { !retired.contains($0.key.author) }
+            report.snapshotsWritten += 1
             return
         }
-        state.snapshots[location] = state.merged
-        state.snapshotCoverage.merge(state.merged, uniquingKeysWith: max)
-        report.snapshotsWritten += 1
     }
 
     /// Deletes this device's own segments that every other known device has acknowledged merging and that some
@@ -730,13 +883,18 @@ public actor SyncEngine {
     /// stream's position and acknowledgement stay visible. Also deletes this device's own snapshots that another listed
     /// snapshot covers entirely. A device joining merges every listed snapshot, so it never depends on which one is
     /// "newest".
-    private func collectGarbage(state: inout SyncState, listing: Listing, report: inout SyncReport) async throws {
+    private func collectGarbage(
+        state: inout SyncState, listing: Listing, retired: Set<UUID>, report: inout SyncReport
+    ) async throws {
         let listed = Set(listing.snapshots)
-        state.snapshots = state.snapshots.filter { listed.contains($0.key) }
+        // A revoked device's snapshots are not listed (they are not read); what this device merged from one is
+        // remembered until it has written the snapshot that hands it on.
+        state.snapshots = state.snapshots.filter { listed.contains($0.key) || retired.contains($0.key.author) }
         let covered = listed.reduce(UInt64(0)) { highest, location in
             max(highest, state.snapshots[location]?[deviceID] ?? 0)
         }
-        let others = state.merged.keys.filter { $0 != deviceID }
+        // A revoked device's acknowledgement never comes, and is not waited for (review finding Y6).
+        let others = state.merged.keys.filter { $0 != deviceID && !retired.contains($0) }
         let acknowledged = others.map { state.acknowledgements[$0]?[deviceID] ?? 0 }.min() ?? covered
         let limit = min(covered, acknowledged)
         let own = listing.segments[deviceID] ?? []
@@ -748,7 +906,7 @@ public actor SyncEngine {
         }
         for (location, coverage) in state.snapshots where location.author == deviceID {
             let superseded = state.snapshots.contains { other, otherCoverage in
-                other != location && Self.covers(otherCoverage, coverage)
+                other != location && !retired.contains(other.author) && Self.covers(otherCoverage, coverage)
                     && (!Self.covers(coverage, otherCoverage) || Self.snapshotOrder(location, other))
             }
             guard superseded else { continue }

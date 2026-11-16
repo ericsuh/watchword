@@ -15,6 +15,13 @@ public enum SignatureDomain: UInt8, Sendable, CaseIterable {
     /// A deletion this device's session made and has not yet published, kept in the local sync state store
     /// (`PendingDeletion.authenticator`), so a row planted in that file cannot become a tombstone.
     case pendingDeletion = 5
+    /// An entry of the device registry (docs/02-architecture.md §7.8): a device added, a device revoked, the account's
+    /// credentials changed.
+    case deviceRegistry = 6
+    /// The account header as published on the transport (§7.7): KDF parameters, salt and the wrapped keyset.
+    case accountHeader = 7
+    /// A fact in the account's vault directory (§7.7): a vault-key wrap vouched for, or a vault deleted.
+    case vaultDirectory = 8
 }
 
 public enum Signatures {

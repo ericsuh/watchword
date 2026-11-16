@@ -83,6 +83,7 @@ public actor FakeAccountKeys {
     private var vaultKeys: [UUID: [UUID: [UInt8]]] = [:]
     private var currentKey: [UUID: UUID] = [:]
     private var deviceSecrets: [UUID: [UInt8]] = [:]
+    private var retired: Set<UUID> = []
     private var generator: SeededGenerator
 
     public init(seed: UInt64 = 1) {
@@ -106,6 +107,17 @@ public actor FakeAccountKeys {
     /// Removes a device from the directory; its signatures stop verifying.
     public func revoke(device: UUID) {
         deviceSecrets[device] = nil
+    }
+
+    /// Revokes a device as the device registry does (docs/02-architecture.md §7.8): its signatures stop verifying,
+    /// and every keyring reports it as retired, so engines stop reading and waiting for its stream.
+    public func retire(device: UUID) {
+        deviceSecrets[device] = nil
+        retired.insert(device)
+    }
+
+    func retiredDevices() -> Set<UUID> {
+        retired
     }
 
     func key(vaultID: UUID, keyID: UUID) -> [UInt8]? {
@@ -193,6 +205,10 @@ public actor FakeSyncKeyring: SyncKeyring {
         }
     }
 
+    public func retiredAuthors(vaultID: UUID) async -> Set<UUID> {
+        await keys.retiredDevices()
+    }
+
     // MARK: - Item records, as `VaultSession` seals them, for the fake merger and test clients.
 
     public static func itemContext(_ row: StoredRecord) -> EnvelopeContext {
@@ -252,8 +268,14 @@ public struct FakeItemMerger: RecordMerger {
         try await base.erasureSummary(of: record)
     }
 
-    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision {
-        try await base.resolveErasure(summary, of: record)
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above version: UInt64) async throws
+        -> ErasureDecision
+    {
+        try await base.resolveErasure(summary, of: record, above: version)
+    }
+
+    public func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8] {
+        try await base.joinErasureSummaries(first, second, kind: kind)
     }
 }
 

@@ -379,31 +379,35 @@ struct MergeModel {
     }
 
     /// Settles the stored version against every erasure the device knows, as the engine does with a tombstone and
-    /// with a version that arrives after one (`ItemRecordMerger.resolveErasure`).
+    /// with a version that arrives after one: against their join (`ItemErasures`, `ItemRecordMerger.resolveErasure`),
+    /// so which of them the device learned of first decides nothing.
     private mutating func settle(at index: Int) {
-        for erasure in replicas[index].erasures {
-            guard let item = replicas[index].item, let origin = replicas[index].origin else { return }
-            switch ItemMerge.settle(item, origin: origin, against: erasure) {
-            case .erase:
-                replicas[index].item = nil
-                replicas[index].delivered = []
-                replicas[index].seen = []
-            case .keep:
-                break
-            case .kept(let kept):
-                let device = replicas[index].device
-                let revision = Revision(version: max(item.version, erasure.revision.version) + 1, device: device)
-                // The deletion is a write delivered to this copy; what it had seen, the copy now counts as seen.
-                let delivered = replicas[index].delivered.union([erasure.revision])
-                let seen = replicas[index].seen.union(erasureKnowledge[erasure.revision] ?? [])
-                let written = ItemMerge.written(kept, as: revision)
-                keptAfterDeletion += 1
-                checkUpdate(from: item, origin: origin, to: written, what: "a deletion that did not cover the item")
-                if !written.isTrashed || written.isTrashedByPerson {
-                    fail("a version kept after a deletion is not in the trash, or is one the purge would remove")
-                }
-                store(written, writer: device, at: index, delivered: delivered, seen: seen)
+        guard !replicas[index].erasures.isEmpty, let item = replicas[index].item, let origin = replicas[index].origin
+        else { return }
+        let erasures = ItemErasures(replicas[index].erasures)
+        switch ItemMerge.settle(item, origin: origin, against: erasures) {
+        case .erase:
+            replicas[index].item = nil
+            replicas[index].delivered = []
+            replicas[index].seen = []
+        case .keep:
+            break
+        case .kept(let kept):
+            let device = replicas[index].device
+            let tombstone = erasures.elements.map(\.revision.version).max() ?? 0
+            let revision = Revision(version: max(item.version, tombstone) + 1, device: device)
+            // Each deletion is a write delivered to this copy; what they had seen, the copy now counts as seen.
+            let revisions = erasures.elements.map(\.revision)
+            let delivered = replicas[index].delivered.union(revisions)
+            var seen = replicas[index].seen
+            for erased in revisions { seen.formUnion(erasureKnowledge[erased] ?? []) }
+            let written = ItemMerge.written(kept, as: revision)
+            keptAfterDeletion += 1
+            checkUpdate(from: item, origin: origin, to: written, what: "a deletion that did not cover the item")
+            if !written.isTrashed || written.isTrashedByPerson {
+                fail("a version kept after a deletion is not in the trash, or is one the purge would remove")
             }
+            store(written, writer: device, at: index, delivered: delivered, seen: seen)
         }
     }
 

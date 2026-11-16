@@ -39,6 +39,55 @@ public protocol SyncKeyring: Sendable {
     /// `location.vaultID`. Needs public keys only, so it works while locked. Throws `untrustedAuthor` or
     /// `authenticationFailed`.
     func verify(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws
+    /// The devices revoked from writing to `vaultID` (docs/02-architecture.md §7.8). `verify` refuses their objects;
+    /// the engine also stops reading their streams, stops waiting for their acknowledgements before collecting
+    /// garbage (review finding Y6), never waits for them to write a snapshot, and hands on what it had already
+    /// merged from them in a snapshot of its own. Needs public keys only. Empty when the keyring cannot tell (the
+    /// registry is unavailable): `verify` then refuses everything, so nothing depends on the answer.
+    func retiredAuthors(vaultID: UUID) async -> Set<UUID>
+}
+
+extension SyncKeyring {
+    public func retiredAuthors(vaultID: UUID) async -> Set<UUID> { [] }
+}
+
+/// A `RecordMerger` that hands each record to the merger for its kind (items to `ItemRecordMerger`, vault metadata
+/// to the vault's own). A kind with no merger is refused, so the engine rejects the object carrying it.
+public struct KindRoutingMerger: RecordMerger {
+    public struct NoMerger: Error, Equatable, Sendable {
+        public let kind: EnvelopeKind
+    }
+
+    public let mergers: [EnvelopeKind: any RecordMerger]
+
+    public init(_ mergers: [EnvelopeKind: any RecordMerger]) {
+        self.mergers = mergers
+    }
+
+    private func merger(for record: StoredRecord) throws -> any RecordMerger {
+        guard let merger = mergers[record.kind] else { throw NoMerger(kind: record.kind) }
+        return merger
+    }
+
+    public func merge(local: StoredRecord, remote: StoredRecord) async throws -> MergeDecision {
+        guard local.kind == remote.kind else { throw NoMerger(kind: remote.kind) }
+        return try await merger(for: remote).merge(local: local, remote: remote)
+    }
+
+    public func erasureSummary(of record: StoredRecord) async throws -> [UInt8] {
+        try await merger(for: record).erasureSummary(of: record)
+    }
+
+    public func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above version: UInt64) async throws
+        -> ErasureDecision
+    {
+        try await merger(for: record).resolveErasure(summary, of: record, above: version)
+    }
+
+    public func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8] {
+        guard let merger = mergers[kind] else { throw NoMerger(kind: kind) }
+        return try await merger.joinErasureSummaries(first, second, kind: kind)
+    }
 }
 
 /// What to do when a remote version of a record meets the local one.
@@ -73,8 +122,20 @@ public protocol RecordMerger: Sendable {
 
     /// A version of an erased record — the local one when an erasure arrives, or one arriving after the erasure is
     /// known. If its author had seen everything in it, it is erased; otherwise it holds an edit the erasure's author
-    /// never saw, and is kept, in the trash, with that edit as its latest version (PRD F7.6).
-    func resolveErasure(_ summary: [UInt8], of record: StoredRecord) async throws -> ErasureDecision
+    /// never saw, and is kept, in the trash, with that edit as its latest version (PRD F7.6). `version` is the
+    /// erasure's stamp — for joined erasures, the latest — which the engine knows and a summary does not say (a
+    /// record's versions climb with every merge, its edits do not): a replacement must be written above it and above
+    /// `record.version`. It depends only on the erasures, never on the version in question, so a merger may judge the
+    /// summary against it and still decide the same on every device (review finding Y28).
+    func resolveErasure(_ summary: [UInt8], of record: StoredRecord, above version: UInt64) async throws
+        -> ErasureDecision
+
+    /// The summary of two erasures of one record taken together: everything either author had seen (for items, both
+    /// deletions, each its own write: `ItemErasures`). A record can be erased more than once — on two devices, each
+    /// having seen something the other had not — and which erasure a device learns of first must not decide what it
+    /// keeps, so the engine remembers their join. Commutative, associative and idempotent, with one canonical
+    /// encoding; a summary that does not decode counts as having seen nothing.
+    func joinErasureSummaries(_ first: [UInt8], _ second: [UInt8], kind: EnvelopeKind) async throws -> [UInt8]
 }
 
 /// What to do with a version of a record that has been erased.

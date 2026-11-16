@@ -351,10 +351,9 @@
     struct AdversarialKeychainAttributeTests {
         static let store = SystemKeychainStore(service: "test.watchword", accessGroup: "TEAMID.test.watchword")
         static let accountID = UUID()
-        static let items: [KeychainItem] = [
-            .secretKey(accountID: accountID), .quickUnlockKey(accountID: accountID),
-            .quickUnlockState(accountID: accountID), .accountSigningKey(accountID: accountID),
-        ]
+        /// Every item, the device signing key and the registry anchor included (docs/02-architecture.md §7.8): a
+        /// device key that synchronised would be every device's, and an anchor that did would be the store's to set.
+        static let items = KeychainItem.all(accountID: accountID)
 
         @Test("every item is device-only, non-synchronisable and in the shared access group")
         func deviceOnly() throws {
@@ -375,8 +374,8 @@
             }
         }
 
-        /// The account signing key copy (milestone 3) is a trust root for locked downloads: if it shared a Keychain
-        /// account name with another item, storing one would replace the other.
+        /// The account signing key copy and the registry anchor (milestone 3) are trust roots for locked downloads: if
+        /// one shared a Keychain account name with another item, storing one would replace the other.
         @Test("every item has its own Keychain account name")
         func distinctNames() {
             let names = Self.items.compactMap { Self.store.baseQuery(for: $0)[kSecAttrAccount as String] as? String }
