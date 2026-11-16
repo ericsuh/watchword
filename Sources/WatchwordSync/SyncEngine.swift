@@ -456,6 +456,18 @@ public actor SyncEngine {
                 } catch let error where Self.isFatal(error) {
                     throw error
                 } catch {
+                    if case SyncKeyringError.unknownKey(let keyID) = error, let judge,
+                        await judge.passesOverSegment(sealedUnder: keyID, vaultID: vaultID)
+                    {
+                        // Sealed under a key this account was never entitled to (a shared vault's member who joined
+                        // after a rotation): it never opens here, and rotation sealed what it carried again under a
+                        // later key.
+                        state.merged[author] = sequence
+                        next = sequence + 1
+                        try await syncState.saveState(state)
+                        try await syncState.unstage([object.location])
+                        continue
+                    }
                     report.rejected.append(SyncRejection(name: object.location.name, reason: Self.reason(error)))
                     // Unstaged, so the next sync fetches it again: a partially visible file may since have completed.
                     try await syncState.unstage([object.location])

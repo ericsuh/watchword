@@ -198,7 +198,9 @@ extension VaultSession {
     }
 
     func currentVaultKey(_ vaultID: UUID, keys: UnlockedKeys, account: AccountRecord) -> VaultKey? {
-        Self.currentKeyID(for: vaultID, among: Array(keys.vaultKeys.values), personal: account).flatMap {
+        // A shared vault's key is the one its membership chain names (VaultSession+Sharing.swift).
+        if let shared = sharedCurrentKey(vaultID, keys: keys) { return shared }
+        return Self.currentKeyID(for: vaultID, among: Array(keys.vaultKeys.values), personal: account).flatMap {
             keys.vaultKeys[$0]
         }
     }
@@ -209,6 +211,8 @@ extension VaultSession {
     func writableVaultKey(_ vaultID: UUID, keys: UnlockedKeys, account: AccountRecord, allowingDeleted: Bool = false)
         async throws -> VaultKey
     {
+        // A shared vault adds the member's role to this check (PRD F4.5).
+        try await checkSharedWrite(vaultID, account: account)
         if vaultID != account.personalVaultID {
             guard let entry = try await vaultDirectory(account)[vaultID] else {
                 throw VaultError.unknownVault(vaultID)
@@ -419,6 +423,8 @@ extension VaultSession {
         guard rows.count == confirmingItemCount else {
             throw VaultError.vaultDeletionNotConfirmed(itemCount: rows.count)
         }
+        // A shared vault is deleted by its owner, in its membership chain too (VaultSession+Sharing.swift).
+        try await checkSharedDeletion(id, account: account)
         let name = AccountObjectLocation.vaultDeletion(
             accountID: account.accountID, vaultID: id, author: account.deviceID
         ).name

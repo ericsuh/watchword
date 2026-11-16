@@ -145,6 +145,8 @@ public actor VaultSession {
     /// parent that is not there), not fetched again by this session until a sync keeps something new: a revoked
     /// device that floods the transport costs each of them one fetch (docs/02-architecture.md §7.8).
     var skippedRegistryEntries: Set<ObjectDigest> = []
+    /// Shared vaults: settings, ledgers, plans, proposals and stream indexes (VaultSession+Sharing.swift).
+    var sharing = SharingRuntime()
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(

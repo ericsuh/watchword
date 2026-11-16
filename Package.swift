@@ -69,7 +69,7 @@ let package = Package(
 
         // Shared vaults: the signed membership chain, fingerprint verification and pinned contacts, invitations, key
         // grants, and rotation on removal or departure (§8; milestone 4). Portable: real cryptography through
-        // WatchwordCrypto, storage and the key directory through ports. Not yet wired into VaultSession or sync.
+        // WatchwordCrypto, storage and the key directory through ports. VaultSession drives it (§8.9).
         .target(
             name: "WatchwordSharing",
             dependencies: ["WatchwordEnvelope", "WatchwordCrypto", "SecureMemory", crypto]
@@ -81,12 +81,13 @@ let package = Package(
         .target(name: "WatchwordHygiene", dependencies: ["WatchwordModel", "SecureMemory", crypto]),
 
         // VaultSession façade, unlock and auto-lock policies, and the ports the UI and adapters plug into (§10, §15). Also
-        // the production SyncKeyring and ItemSealer, since they need the keys VaultSession holds (§7; milestone 3).
+        // the production SyncKeyring and ItemSealer, since they need the keys VaultSession holds (§7; milestone 3), and
+        // shared vaults in the session and in sync (§8.9; milestone 4).
         .target(
             name: "WatchwordKit",
             dependencies: [
                 "WatchwordModel", "WatchwordMatching", "WatchwordEnvelope", "WatchwordCrypto", "WatchwordStore",
-                "WatchwordSync", "SecureMemory",
+                "WatchwordSync", "WatchwordSharing", "SecureMemory",
             ]
         ),
 
@@ -149,7 +150,7 @@ let package = Package(
             name: "WatchwordKitTests",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordMatching", "WatchwordStore", "WatchwordCrypto",
-                "WatchwordEnvelope", "WatchwordSync", "SecureMemory", "WatchwordTestSupport",
+                "WatchwordEnvelope", "WatchwordSync", "WatchwordSharing", "SecureMemory", "WatchwordTestSupport",
             ]
         ),
         .testTarget(

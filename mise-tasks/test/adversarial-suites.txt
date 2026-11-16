@@ -17,3 +17,4 @@ hygiene and breach checks
 sharing and membership
 import parsers
 account enrolment and device registry
+shared vaults through the session

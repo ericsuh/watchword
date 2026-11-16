@@ -43,4 +43,10 @@ public protocol WriteJudge: Sendable {
     /// whose work counts here (`MembershipLedger.writeStanding`), judged value by value through each value's own
     /// revision, not by who sealed the version.
     func admits(_ record: StoredRecord) async throws -> Bool
+
+    /// Whether a segment sealed under `keyID`, which this device does not hold, can be passed over for good: the
+    /// vault's membership never entitled this account to that key (it joined after the key was rotated away), so the
+    /// segment will never open here, and what it carried reaches this device sealed again under a later key. Any
+    /// other key it does not hold makes the stream wait, as before.
+    func passesOverSegment(sealedUnder keyID: UUID, vaultID: UUID) async -> Bool
 }

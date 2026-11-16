@@ -228,7 +228,7 @@ half delivered** on a Mac; the transports are open.
   revoked device's reading if it held the keyset (architecture §7.8, §16); it belongs with vault-key rotation in
   milestone 4. Collecting a deleted vault's objects from the transport.
 
-## Milestone 4 — Sharing (protocol core done; integration open)
+## Milestone 4 — Sharing (protocol core and session integration done; transports and UI open)
 
 - `WatchwordSharing`: membership chain, invitations, fingerprints, rotation on removal/leave,
   read-only enforcement in the client; CloudKit `CKShare` and `UICloudSharingController`/
@@ -270,22 +270,30 @@ half delivered** on a Mac; the transports are open.
 Verified on Linux only (swift-crypto over BoringSSL). A macOS run against CryptoKit is still owed; the one place
 the two are known to differ, randomised Ed25519 signing, is why bundles are compared by key rather than by value.
 
+**Delivered: the integration into `VaultSession` and `SyncEngine`** (`02-architecture.md` §8.9), on Linux: per shared
+vault a ledger, keys from grants, at most one rotation plan, the pending proposals and a signed stream index, behind
+the `SharingStateStore` and `VerifiedContactStore` ports (in memory, and `SQLiteSharingStore`, Mac-only and not yet
+compiled); the sync pass of §8.8 inside `syncAll`; `SyncKeyring.verify` from the ledger's keys, `writeStanding` and the
+members' device registries; the write cut over sync's own segments, applied value by value through each value's
+revision and taken out of what was merged (S28 closed in the product); re-sealing through `ItemMerge.written`; the
+session API a UI calls (verify, share, invite, accept, leave, change role, remove, rotate, status); `SyncEngine`
+quarantining a version whose merge cannot be sealed (Y37); scenarios S3 and S4 through `VaultSession`s of different
+accounts over `InMemorySyncTransport` (`SharedVaultScenarioTests`) and the adversarial suite "shared vaults through the
+session" (a removed and a demoted member's late writes, a forged grant, objects swapped between vaults, a rotation
+interrupted by `lock()`).
+
 **Still open:**
 
-- Integration into `VaultSession`: a ledger, keys, at most one rotation plan and the pending proposals per shared
-  vault; the sync pass of `02-architecture.md` §8.8 during `sync()` (`SimulatedMember` is its reference);
-  `writeStanding(of:)` and the member's signing key from the ledger in `SyncKeyring.verify`; **the write cut over
-  sync's own objects** (`02-architecture.md` §8.8: bound to segments by digest, applied to each value's own author
-  through its `GroupStamp` and the device registry, and taken out of what was already merged; until this exists,
-  review finding S28 is closed in the module and open in the product); re-sealing through `ItemMerge.written`;
-  SQLite adapters for
-  `VerifiedContactStore`, the saved ledger, the saved plan and the pending proposals. It depends on the session holding more than one vault
-  and on the device registry (D9), which is why this milestone stopped at the protocol.
+- A macOS run of all of it against CryptoKit, and of `SQLiteSharingStore` at all.
+- Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself.
+- Note-line removals are not attributed to their writer (S32), which needs a stamp in `NoteText`.
 - The transports' own sharing: `CKShare` with `UICloudSharingController`/`NSSharingService`, the folder-share flow
-  for the file transport, and the key directory's adapter (the account record).
+  for the file transport (the `ShareAccessControl` port is the seam), and the key directory's adapter (the account
+  record; `KeyBundleDirectory` is the port, `VaultSession.publicKeyBundle` what it publishes).
 - The sharing UI: invitation and fingerprint screens (safety number, QR display and scan), the member list with
-  unverified members shown as such (D17), "pending rotation" (F4.3), and the wording F4.3 and F4.5 require.
-- Scenarios S3 and S4 end to end through `VaultSession` over `InMemorySyncTransport`, and the manual CloudKit run.
+  unverified members shown as such (D17), "pending rotation" (F4.3), held-aside writes, and the wording F4.3 and F4.5
+  require.
+- The manual CloudKit run of S3 and S4.
 
 ## Milestone 5 — AutoFill
 

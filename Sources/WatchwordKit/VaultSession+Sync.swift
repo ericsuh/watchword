@@ -70,11 +70,14 @@ extension VaultSession {
             .item: ItemRecordMerger(sealer: adapter, deviceID: record.deviceID),
             .vaultMetadata: VaultMetadataMerger(sealer: adapter),
         ])
+        // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
+        var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
         func engine(_ vaultID: UUID) -> SyncEngine {
-            SyncEngine(
+            let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+            return SyncEngine(
                 vaultID: vaultID, deviceID: record.deviceID, store: store, syncState: syncState,
                 transport: syncSettings.transport, keyring: adapter, merger: merger,
-                configuration: syncSettings.configuration)
+                configuration: shared.configuration, judge: shared.judge)
         }
         // Deletions go out last, and only once everything else this device wrote is on the transport, in every
         // vault: a move is a copy in one vault's log and a deletion in another's, and the deletion must never reach
@@ -83,8 +86,11 @@ extension VaultSession {
         var restPublished = true
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
+            let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
-                vaultReport = try await engine(vaultID).sync(reconcile: reconcile, deferringDeletions: true)
+                vaultReport = try await engine(vaultID).sync(
+                    reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing)
+                sharedEngineDidRun(vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport)
                 if vaultReport.deletionsDeferred > 0 { deferred.append(vaultID) }
                 if vaultReport.transportUnavailable || vaultReport.deferredUntilUnlock
                     || vaultReport.ownStreamConflict != nil
@@ -106,6 +112,17 @@ extension VaultSession {
                 report.vaults[vaultID] = Self.report(first, followedBy: try await engine(vaultID).sync())
             }
         }
+        if mayWrite {
+            for vaultID in sharedVaultsNeedingReplay() {
+                guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
+                let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+                let second = try await engine(vaultID).sync(reconcile: true, publishing: shared.publishing)
+                sharedEngineDidRun(vaultID, reconciled: true, report: second)
+                report.vaults[vaultID] = Self.report(first, followedBy: second)
+            }
+            await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
+        }
+        report.sharing = sharingReports
         return report
     }
 
@@ -120,6 +137,7 @@ extension VaultSession {
         total.collected += first.collected
         total.rejected = first.rejected + second.rejected
         total.quarantined = first.quarantined + second.quarantined
+        total.heldAside = first.heldAside + second.heldAside
         total.staleSnapshots += first.staleSnapshots
         total.ignoredNames = max(first.ignoredNames, second.ignoredNames)
         total.retiredObjects = max(first.retiredObjects, second.retiredObjects)
@@ -261,15 +279,19 @@ extension VaultSession {
         guard try await vaultDirectory(record)[location.vaultID] != nil else {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
+        if sharing.vaults[location.vaultID] != nil {
+            // A writer from another account (VaultSession+SharingSync.swift).
+            return try sharedVerify(signature, over: envelope, at: location, ownView: view, account: record)
+        }
         try Self.verifyDual(
             signature, over: Self.syncSignedMessage(envelope, at: location), domain: .logSegment,
             author: location.author, view: view)
     }
 
     /// The devices revoked from the account, whose streams sync no longer reads or waits for (review finding Y6).
-    func syncRetiredAuthors() async -> Set<UUID> {
+    func syncRetiredAuthors(vaultID: UUID? = nil) async -> Set<UUID> {
         guard let record = try? await loadAccount(), let view = try? await registry(record) else { return [] }
-        return Set(view.state.revoked.keys)
+        return Set(view.state.revoked.keys).union(vaultID.map(sharedRetiredAuthors) ?? [])
     }
 
     /// What a sync object's signature covers: its name and its envelope. The envelope already binds the location
@@ -445,7 +467,7 @@ struct VaultSyncAdapter: SyncKeyring, ItemSealer {
     }
 
     func retiredAuthors(vaultID: UUID) async -> Set<UUID> {
-        await session.syncRetiredAuthors()
+        await session.syncRetiredAuthors(vaultID: vaultID)
     }
 
     func openItem(_ row: StoredRecord) async throws -> Item {
@@ -478,6 +500,8 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// transport is refused until a sync restores it.
     public var registryUnavailable = false
     public var transportUnavailable = false
+    /// What the sharing pass did for each shared vault (docs/02-architecture.md §8.8).
+    public var sharing: [UUID: SharedVaultSyncReport] = [:]
 
     public init() {}
 
@@ -501,6 +525,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.collected += report.collected
             total.rejected += report.rejected
             total.quarantined += report.quarantined
+            total.heldAside += report.heldAside
             total.waiting.merge(report.waiting, uniquingKeysWith: min)
             total.staleSnapshots += report.staleSnapshots
             total.ignoredNames += report.ignoredNames
