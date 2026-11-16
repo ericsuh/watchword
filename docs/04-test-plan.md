@@ -406,7 +406,16 @@ while publishing its grants, resumed and completed by the next sync. From the in
 back-dated to its author's in-cut revision (S36); a late rename stored again by an unaware member (S37); a late
 permanent deletion merged before the removal was known (S40); an invitation whose key ID is another vault's (S38); two
 vaults listing one account with different keys (S39); a replay asked for by a late stream, cut short by a lock and
-run after a relaunch (S41). Scenarios S3 and S4 through the session are
+run after a relaunch (S41). From the fourth round (`AdversarialSharedVaultLateWriteTests.swift`): a late removal of a
+note line, made through the session and from a modified client that names no writer (S32); a late discard of
+retained values, back-dated to an in-cut revision, and a late history entry naming no writer (S43); and a demoted
+member's late title, whose knowledge an unaware member's rename on top of it carried (S44). Each is merged by a
+device the store had not shown the record, written on top of, and counts on no device once it is shown, the two
+devices holding the same item. Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
+parts names its writer and that a merge's attributed parts are exactly its inputs', and
+`LongRunningLateWriteSimulationTests` checks, over random histories, that a device that held late versions aside as
+they came and devices that merged them and rebuilt from what counts hold the same item, with nothing late in it and
+no honest version held aside. Scenarios S3 and S4 through the session are
 `SharedVaultScenarioTests` (`WatchwordKitTests`). A chain stopped at a later format (§8.9) through the session is
 "Vault session: a shared vault in a later format" (`WatchwordKitTests`): the vault read-only and reported, nothing
 published, planned or left, the owner's device stopped too, a member who may still write merged; and, in this suite

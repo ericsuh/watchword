@@ -10,9 +10,9 @@ import WatchwordModel
 /// | `registers` | per group, an antichain of stamped values under `GroupStamp.supersedes` | union, then the maximal ones |
 /// | `order` | a chain: the latest reorder | the later of the two |
 /// | `clock` | version vectors | entry-wise maximum |
-/// | `lines` | per line ID, `NoteText.join` | union, joined line by line |
-/// | `history` | sets of entries | union |
-/// | `retained`, `discards` | a set that grows, less what a growing vector covers | union less the covered; maximum |
+/// | `lines` | per line ID, `NoteText.join` (removals with their writers) | union, joined line by line |
+/// | `history` | per entry, the set of writes that recorded it | union, then union per entry |
+/// | `retained`, `discards` | a set that grows, less what a growing set of discards covers | union less the covered; union |
 /// | `createdAt`, `modifiedAt` | chains | earliest; latest |
 ///
 /// `Item` is the stored form of the same thing: `init(_:origin:)` reads one, `item` writes one, and the round trip is
@@ -53,9 +53,11 @@ struct ItemState {
     var clock: VersionVector
     /// One line per ID, in document order.
     var lines: [NoteLine]
-    var history: Set<ItemHistoryEntry>
+    /// Each entry (without `writtenBy`) and the writes that recorded it, never empty (review finding S43).
+    var history: [ItemHistoryEntry: Set<Revision>]
     var retained: Set<ConflictingValue>
-    var discards: [ItemGroup: VersionVector]
+    /// Per group, every resolution's discard, each naming its writer (review finding S43).
+    var discards: [ItemGroup: Set<ItemDiscard>]
 
     // MARK: - Reading
 
@@ -101,17 +103,23 @@ struct ItemState {
             stamp: stamp(.fieldOrder),
             ids: (item.fieldOrder ?? item.fields.map(\.id)).filter { listed.insert($0).inserted })
 
-        var discards: [ItemGroup: VersionVector] = [:]
-        for (group, vector) in item.discards where group.isKnown && group != .fieldOrder {
-            let clamped = vector.clamped(to: limit)
-            if !clamped.isEmpty { discards[group] = clamped }
+        // A discard, or a history entry, that names no writer is the work of the record that carries it (S43).
+        var discards: [ItemGroup: Set<ItemDiscard>] = [:]
+        for (group, list) in item.discards where group.isKnown && group != .fieldOrder {
+            for discard in list {
+                let seen = discard.seen.clamped(to: limit)
+                guard !seen.isEmpty else { continue }
+                let revision = (discard.revision ?? origin).clamped(to: limit)
+                discards[group, default: []].insert(ItemDiscard(revision: revision, seen: seen))
+            }
         }
         self.discards = discards
+        let coverage = Self.coverage(discards)
         retained = []
         for value in item.retainedValues {
             let value = value.clamped(to: limit)
             guard let group = ItemMerge.group(of: value.value), group != .fieldOrder,
-                !Self.covers(discards[group], value)
+                !Self.covers(coverage[group], value)
             else { continue }
             retained.insert(value)
         }
@@ -127,8 +135,13 @@ struct ItemState {
 
         lines = NoteText.ordered(
             item.noteLines.isEmpty
-                ? NoteText.initial(item.notes, revision: origin) : NoteText.clamped(item.noteLines, to: limit))
-        history = Set(item.history)
+                ? NoteText.initial(item.notes, revision: origin) : NoteText.read(item.noteLines, origin: origin))
+        var history: [ItemHistoryEntry: Set<Revision>] = [:]
+        for entry in item.history {
+            let writers = entry.writtenBy.isEmpty ? [origin] : entry.writtenBy.map { $0.clamped(to: limit) }
+            history[Self.content(of: entry), default: []].formUnion(writers)
+        }
+        self.history = history
         base = item
     }
 
@@ -149,12 +162,14 @@ struct ItemState {
         result.order = FieldOrder.later(order, other.order)
         result.clock = clock.merging(other.clock)
         if lines != other.lines { result.lines = NoteText.merge(lines, other.lines) }
-        // Both histories, whole: merging never shortens a history (PRD F1.4, F7.7).
-        if history != other.history { result.history = history.union(other.history) }
-        if discards != other.discards { result.discards = discards.merging(other.discards) { $0.merging($1) } }
+        // Both histories, whole: merging never shortens a history (PRD F1.4, F7.7), and every write that recorded an
+        // entry is kept with it.
+        if history != other.history { result.history = history.merging(other.history) { $0.union($1) } }
+        if discards != other.discards { result.discards = discards.merging(other.discards) { $0.union($1) } }
         if retained != other.retained || discards != other.discards {
+            let coverage = Self.coverage(result.discards)
             result.retained = retained.union(other.retained).filter { value in
-                !Self.covers(ItemMerge.group(of: value.value).flatMap { result.discards[$0] }, value)
+                !Self.covers(ItemMerge.group(of: value.value).flatMap { coverage[$0] }, value)
             }
         }
         result.base.createdAt = min(base.createdAt, other.base.createdAt)
@@ -269,9 +284,35 @@ struct ItemState {
         }
     }
 
-    /// Whether a resolution that had `vector` before it discarded `value`.
-    static func covers(_ vector: VersionVector?, _ value: ConflictingValue) -> Bool {
-        vector?.contains(value.stamp.revision) ?? false
+    /// Whether one of a group's resolutions, by what it had before it, discarded `value`: whether the join of their
+    /// vectors (`coverage`) contains its revision, which is the same thing, since a vector contains a revision when
+    /// its entry for the device is at least the version, and the join takes the greatest entry.
+    static func covers(_ coverage: VersionVector?, _ value: ConflictingValue) -> Bool {
+        coverage?.contains(value.stamp.revision) ?? false
+    }
+
+    /// Per group, the join of every discard's vector: what the group's resolutions had, between them, before them.
+    static func coverage(_ discards: [ItemGroup: Set<ItemDiscard>]) -> [ItemGroup: VersionVector] {
+        discards.mapValues(coverage(of:))
+    }
+
+    static func coverage(of discards: Set<ItemDiscard>) -> VersionVector {
+        discards.reduce(into: VersionVector()) { $0.formUnion($1.seen) }
+    }
+
+    /// An entry as the history is keyed: without the writes that recorded it.
+    static func content(of entry: ItemHistoryEntry) -> ItemHistoryEntry {
+        guard !entry.writtenBy.isEmpty else { return entry }
+        var entry = entry
+        entry.writtenBy = []
+        return entry
+    }
+
+    /// Records `entry` as written by `revision`, unless the history holds it already: an entry carried over from the
+    /// version an edit was made on is not that edit's.
+    mutating func record(_ entry: ItemHistoryEntry, by revision: Revision) {
+        let content = Self.content(of: entry)
+        if history[content] == nil { history[content] = [revision] }
     }
 
     // MARK: - Updates
@@ -284,7 +325,7 @@ struct ItemState {
     /// Keeps a value an edit superseded without the person choosing to discard it (PRD F7.7).
     mutating func retain(_ value: ConflictingValue) {
         guard value.value != .field(nil), let group = ItemMerge.group(of: value.value),
-            !Self.covers(discards[group], value)
+            !Self.covers(discards[group].map(Self.coverage(of:)), value)
         else { return }
         retained.insert(value)
     }
@@ -320,9 +361,14 @@ struct ItemState {
         item.clock = clock
         item.noteLines = lines
         item.notes = lines.filter { !$0.removed }.map(\.text).joined(separator: "\n")
-        item.history = Self.sorted(history)
+        item.history = Self.sorted(
+            history.map { entry, writers in
+                var entry = entry
+                entry.writtenBy = writers.sorted()
+                return entry
+            })
         item.retainedValues = ItemMerge.sortedCanonically(retained)
-        item.discards = discards
+        item.discards = discards.mapValues(Self.sorted)
         return item
     }
 
@@ -349,8 +395,25 @@ struct ItemState {
         return result
     }
 
-    /// Newest first, in a fixed order.
-    static func sorted(_ history: Set<ItemHistoryEntry>) -> [ItemHistoryEntry] {
+    /// A group's discards in a fixed order: by revision, then by what they had seen (`CanonicalWriter`).
+    static func sorted(_ discards: Set<ItemDiscard>) -> [ItemDiscard] {
+        guard discards.count > 1 else { return Array(discards) }
+        func bytes(_ discard: ItemDiscard) -> [UInt8] {
+            var writer = CanonicalWriter()
+            writer.append(discard.seen)
+            return writer.bytes
+        }
+        return discards.sorted { x, y in
+            let (revisionX, revisionY) = (
+                x.revision ?? ItemMerge.zeroStamp.revision, y.revision ?? ItemMerge.zeroStamp.revision
+            )
+            if revisionX != revisionY { return revisionX < revisionY }
+            return bytes(x).lexicographicallyPrecedes(bytes(y))
+        }
+    }
+
+    /// Newest first, in a fixed order. Entries differ in content (`content(of:)`), which is all this compares.
+    static func sorted(_ history: some Collection<ItemHistoryEntry>) -> [ItemHistoryEntry] {
         guard history.count > 1 else { return Array(history) }
         // Entries replaced at the same time by the same version are told apart by their fields; that is rare, so the
         // encoding is made only then.

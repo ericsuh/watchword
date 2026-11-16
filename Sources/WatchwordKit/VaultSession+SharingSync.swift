@@ -424,6 +424,9 @@ extension VaultSession {
     ///   segment in hand) and the accounts listing the device may have written it; otherwise it is held aside until
     ///   that device's stream shows it (`SharedStreamIndex.awaiting`).
     ///
+    /// Note-line removals, discards and history entries are values like the rest, each naming its writer (S32, S43).
+    /// Last, every edit the version's clock says it contains must count (`knowledgeCounts`, S44).
+    ///
     /// A version that does not open here cannot be judged and is held aside; receiving its key replays the log.
     func judgeAdmits(_ record: StoredRecord) async throws -> Bool {
         guard sharing.vaults[record.vaultID] != nil else { return true }
@@ -467,11 +470,46 @@ extension VaultSession {
             if !accounts.isEmpty { awaited.insert(value.device) }
             admitted = false
         }
+        if admitted, record.kind == .item, let item = try? openItem(record, keys: keys) {
+            admitted = Self.knowledgeCounts(
+                ItemMerge.effectiveClock(item, origin: Self.origin(record)), of: record, in: vault, vouched: vouched,
+                listing: listing, awaited: &awaited)
+        }
         if let known = sharing.vaults[record.vaultID]?.index.awaiting, !awaited.isSubset(of: known) {
             sharing.vaults[record.vaultID]?.index.awaiting.formUnion(awaited)
             sharing.vaults[record.vaultID]?.indexChanged = true
         }
         return admitted
+    }
+
+    /// Whether every edit a version's clock says it contains counts (review finding S44): a version built on a write
+    /// that does not count holds what that write had seen, and an edit made on it supersedes values its writer was
+    /// shown only through that write. So for each device in the clock (`ItemMerge.effectiveClock`, which covers every
+    /// stamp's `seen`) whose listing accounts do not all may write now, a segment of its stream that counts must have
+    /// carried a version of the record at or above the clock's count: the edit was published inside the cut. A
+    /// current member's count is a claim like any other value's `seen` and is taken as written. A device no account
+    /// lists names nobody's work and is passed over. One whose stream is not here yet is waited for (`awaited`), and a
+    /// version that vouches (S42) vouches for these as for its values.
+    static func knowledgeCounts(
+        _ clock: VersionVector, of record: StoredRecord, in vault: SharedVault, vouched: Bool,
+        listing: (UUID) -> [UUID], awaited: inout Set<UUID>
+    ) -> Bool {
+        for (device, count) in clock.entries {
+            let accounts = listing(device)
+            guard !accounts.isEmpty, !accounts.allSatisfy({ vault.ledger.writeStanding(of: $0) == .mayWrite }) else {
+                continue
+            }
+            let carriers = (vault.index.firstCarrier[device] ?? [:]).filter {
+                $0.key.recordID == record.recordID && $0.key.kind == record.kind.rawValue && $0.key.version >= count
+            }
+            if carriers.contains(where: { Self.segmentCounts(device, sequence: $0.value, in: vault) }) { continue }
+            if carriers.isEmpty {
+                if vouched, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) { continue }
+                awaited.insert(device)
+            }
+            return false
+        }
+        return true
     }
 
     /// Whether some of the account's work can count here: it may write, or could once.

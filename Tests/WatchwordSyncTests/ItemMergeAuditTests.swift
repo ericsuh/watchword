@@ -593,7 +593,7 @@ struct ItemMergeAuditTests {
                     text: texts.randomElement(using: &generator)!,
                     removed: round % 4 == 0 && Int.random(in: 0..<5, using: &generator) == 0)
             }
-            let normal = copies.map { $0.removed ? NoteText.removed($0) : $0 }
+            let normal = copies.map { $0.removed ? NoteText.removed($0, by: nil) : $0 }
             let together = NoteText.join(normal)
             var folded = normal[0]
             for copy in normal.dropFirst() { folded = NoteText.join(folded, copy) }

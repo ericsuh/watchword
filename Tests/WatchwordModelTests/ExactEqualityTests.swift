@@ -147,7 +147,7 @@ struct ExactEqualityTests {
         #expect(Mirror(reflecting: item.fields[0]).children.count == 5)
         #expect(Mirror(reflecting: ServiceScope(host: "example.com")).children.count == 3)
         let id = NoteLine.ID(revision: Revision(version: 1, device: Self.device), index: 0)
-        #expect(Mirror(reflecting: NoteLine(id: id, after: nil, text: "")).children.count == 4)
+        #expect(Mirror(reflecting: NoteLine(id: id, after: nil, text: "")).children.count == 5)
     }
 }
 
