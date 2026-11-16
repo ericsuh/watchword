@@ -533,3 +533,54 @@ struct AdversarialSyncTests {
         }
     }
 }
+
+/// A transport through which one object cannot be read, as a CloudKit asset A1 removed or a file whose coordinated read
+/// never completes: fetching it throws `objectUnreadable`.
+actor UnreadableObjectTransport: SyncTransport {
+    let base: InMemorySyncTransport
+    let unreadable: String
+
+    init(base: InMemorySyncTransport, unreadable: String) {
+        self.base = base
+        self.unreadable = unreadable
+    }
+
+    func list(prefix: String) async throws -> [String] { await base.list(prefix: prefix) }
+
+    func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
+        if name == unreadable { throw SyncTransportError.objectUnreadable(name) }
+        return try await base.fetch(name, maximumLength: maximumLength)
+    }
+
+    func create(_ name: String, contents: [UInt8]) async throws { try await base.create(name, contents: contents) }
+
+    func delete(_ name: String) async throws { await base.delete(name) }
+}
+
+extension AdversarialSyncTests {
+    /// Threat: A1 plants one object that cannot be read (an asset removed from its record, a file whose read never
+    /// completes) in another device's stream, hoping the error stops this device's sync as a whole and so keeps it
+    /// from ever publishing (review of the adapters, finding 4). The object must be refused alone, its stream wait at
+    /// it, and this device publish its own segment as usual.
+    @Test("one unreadable object is refused alone; the device still publishes")
+    func unreadableObject() async throws {
+        let fixture = try await Self.fixture()
+        try await fixture.writer.save(Self.login("Bank", password: "hunter22"))
+        try await fixture.writer.sync()
+        let planted = fixture.segmentName(2)
+        await fixture.transport.tamper(planted, contents: [0])
+        await fixture.keys.trust(device: Self.b)
+        let reader = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: fixture.keys,
+            transport: UnreadableObjectTransport(base: fixture.transport, unreadable: planted))
+        _ = try await reader.save(Self.login("Mine", password: "correct horse"))
+
+        let report = try await reader.sync()
+        #expect(!report.transportUnavailable)
+        #expect(report.rejected.map(\.name) == [planted])
+        #expect(report.rejected.first?.reason == .transport(.objectUnreadable(planted)))
+        #expect(report.waiting[Self.a] == 2)
+        #expect(report.segmentsWritten == 1)
+        #expect(report.applied == 1)
+    }
+}

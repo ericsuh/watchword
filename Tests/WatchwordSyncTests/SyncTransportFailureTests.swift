@@ -49,8 +49,7 @@ struct SyncTransportFailureTests {
         "throttling, a full store, a signed-out account and a reset store stop the sync like being offline",
         arguments: [
             SyncTransportError.unavailable, .rateLimited(retryAfter: 30), .rateLimited(retryAfter: nil),
-            .notAuthenticated,
-            .storeReset,
+            .notAuthenticated, .storeReset, .listingTooLarge("vault/"),
         ])
     func stopping(_ error: SyncTransportError) async throws {
         #expect(error.stopsSync)
@@ -98,7 +97,7 @@ struct SyncTransportFailureTests {
         "errors about one object refuse that object and do not stop the sync",
         arguments: [
             SyncTransportError.objectExists("n"), .forbidden("n"), .objectTooLarge("n"), .invalidName("n"),
-            .conflictingVersions("n"),
+            .conflictingVersions("n"), .objectUnreadable("n"),
         ])
     func perObject(_ error: SyncTransportError) {
         #expect(!error.stopsSync)
