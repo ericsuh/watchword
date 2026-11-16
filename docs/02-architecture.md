@@ -2044,8 +2044,16 @@ skip a rule. A draft gets its `id` from an injected `RandomNumberGenerator` (nev
 `vaultID` the caller names. A URL becomes a scope only through `ScopeDerivation`: `HostNormalizer`, then
 `ScopePolicy`, and one check stricter than the policy (a host with ASCII punctuation such as `*` is refused,
 so a file cannot plant a scope that reads as a wildcard); a refused URL is kept as a `url` field with a
-warning (F11.2). A scope is a host and nothing more, so a URL that says more than `https://host/` (another
-scheme, a port, the sign-in page, a `www.` that was stripped) is *also* kept as a `url` field, and every
+warning (F11.2). **A `www` host also matches its apex** (owner decision, 2026-11-16): a scope derived for
+`www.<apex>` gets a further scope for `<apex>` beside it, with the same subdomain setting, and keeps its own
+(`ScopeDerivation.apexScope(beside:)`). Exactly one leading `www` label is removed (`www.www.example.com`
+adds `www.example.com`), the apex must pass `ScopePolicy` (`www.co.uk` adds nothing) and not be an address,
+an apex the entry lists for itself is its own scope rather than an addition, and each addition is a line of
+the report (`ImportWarning.apexScopeAdded`) so the preview can show it. It is on by default and opt-out
+(`ImportOptions.matchApexOfWWWHosts`); it replaces the earlier opt-in `stripsLeadingWWW`, which *replaced*
+the `www` scope by the apex. The added scope is a scope the file brought like any other: a merge into an
+existing item adds it only through `MergeChoices` (below). A scope is a host and nothing more, so a URL that
+says more than `https://host/` (another scheme, a port, the sign-in page) is *also* kept as a `url` field, and every
 exporter writes that text back in place of the URL it would otherwise synthesise for the scope; which
 field stands for which scope is decided on export by deriving the host again, never from a hint. **No
 exporter writes a sign-in URL for a host the item is not scoped to** (`ExportSupport.websites`): whatever

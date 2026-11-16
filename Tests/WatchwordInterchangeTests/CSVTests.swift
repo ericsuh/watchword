@@ -228,9 +228,11 @@ struct PasswordCSVTests {
         #expect(result.entries[1].reference.line == 4)
 
         let www = try result.entry(titled: "Example (www)").item
-        #expect(www.scopes.map(\.host) == ["www.example.com"])
+        #expect(www.scopes.map(\.host) == ["www.example.com", "example.com"])
         #expect(www.values(.password) == ["-leading-dash"])
-        #expect(result.report.warnings.isEmpty)
+        #expect(
+            result.report.warnings.map(\.warning) == [.apexScopeAdded(wwwHost: "www.example.com", apex: "example.com")])
+        #expect(result.report.warnings.first?.entry.title == "Example (www)")
     }
 
     @Test("Imports 1Password 8 CSV: favourites, archive, tags and bare one-time-password secrets")
@@ -304,13 +306,16 @@ struct PasswordCSVTests {
 
     @Test("Exports Apple Passwords CSV that reads back")
     func exportRoundTrip() throws {
-        let imported = try importCSV(Fixtures.applePasswordsCSV)
+        // Without the apex scope a www host gains on import: an item with two scopes is two Apple Passwords entries,
+        // one per website, and would read back as two items.
+        let exact = ImportOptions(matchApexOfWWWHosts: false)
+        let imported = try importCSV(Fixtures.applePasswordsCSV, options: exact)
         let exported = PasswordCSV.exportApplePasswords(imported.entries.map(\.item))
         #expect(exported.report.exportedCount == 3)
         #expect(exported.report.warnings.isEmpty)
         let text = String(decoding: exported.bytes, as: UTF8.self)
         #expect(text.hasPrefix("Title,URL,Username,Password,Notes,OTPAuth\r\n"))
-        let again = try importCSV(text)
+        let again = try importCSV(text, options: exact)
         #expect(again.entries.map { ItemShape($0.item) } == imported.entries.map { ItemShape($0.item) })
     }
 

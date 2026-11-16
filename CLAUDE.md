@@ -297,7 +297,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   and the vault ID from the caller, never from the file; a URL becomes a scope only through `ScopeDerivation`
   (`HostNormalizer`, then `ScopePolicy`) and otherwise stays a `url` field with a warning (a URL that says more than
   its host is also kept as text beside its scope, and `ExportSupport.websites` writes it back); TOTP values go through
-  `OTPParameters`, passkeys through `PasskeyCredential`. Don't build an `Item` in a format's parser.
+  `OTPParameters`, passkeys through `PasskeyCredential`. Don't build an `Item` in a format's parser. The one scope
+  an import adds that no URL named is the apex beside a `www` host (`ScopeDerivation.apexScope(beside:)`, one label,
+  through `ScopePolicy`, reported as `apexScopeAdded`, opt-out with `ImportOptions.matchApexOfWWWHosts`); don't
+  strip further, and it reaches an existing item only through `MergeChoices` like any other.
 - The ZIP reader validates every member and decompresses only the one asked for. Nothing is extracted to disk, nested
   archives are never opened, and anything with two readings is refused. Don't add leniency to "support" a real-world
   archive without an adversarial test for what the leniency admits.

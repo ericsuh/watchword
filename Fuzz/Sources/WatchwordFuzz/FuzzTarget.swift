@@ -143,9 +143,11 @@ enum FuzzTarget: String, CaseIterable, Sendable {
             {
                 require(domain == url, "a host normalised differently as a domain and as a URL")
             }
-            for strips in [false, true] {
-                if case .success(let scope) = ScopeDerivation.scope(forURL: text, stripsLeadingWWW: strips) {
-                    require(ScopePolicy.isAcceptable(scope), "a derived scope is one the policy refuses")
+            if case .success(let scope) = ScopeDerivation.scope(forURL: text) {
+                require(ScopePolicy.isAcceptable(scope), "a derived scope is one the policy refuses")
+                if let apex = ScopeDerivation.apexScope(beside: scope) {
+                    require(ScopePolicy.isAcceptable(apex), "an apex scope is one the policy refuses")
+                    require("www." + apex.host == scope.host, "an apex scope is not its www host less one label")
                 }
             }
         case .otpauth:

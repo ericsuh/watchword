@@ -480,6 +480,12 @@ every case above and the attacks a parser author would add to them:
   before the start of output, reserved symbols, too many codes, missing, incomplete and over-subscribed code
   sets, a repeat with nothing to repeat, a run past the declared lengths, a block that cannot end), every
   prefix of valid streams, and seeded random damage.
+- `www` hosts (owner decision, 2026-11-16): `www.example.com` gains `example.com` beside it, with the same
+  subdomain setting, and the report says so; `www.co.uk`, `www.github.io`, `www.1.2.3.4` and `wwwexample.com`
+  gain nothing; `www.www.example.com` gains `www.example.com` and nothing more; an apex the entry lists itself is
+  not an addition; opting out (`matchApexOfWWWHosts: false`) keeps exactly the recorded host; a merge into an
+  item scoped `www.example.com` offers `example.com` as a choice and never adds it unasked (`ImportMappingTests`);
+  every apex a random URL yields passes the scope policy (`importedScopesPassPolicy`, and the `host` fuzz target).
 - CSV: formula payloads (and values with an apostrophe already in front) imported, exported and imported
   again byte for byte (`formulaInjection`, `formulaCellsAreExact`); record structure hidden inside quoted cells;
   invalid UTF-8 and UTF-16; a byte-order mark before the header; an unterminated quote, an over-long row, too

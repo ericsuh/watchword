@@ -46,16 +46,95 @@ struct ImportMappingTests {
         #expect(try ScopeDerivation.scope(forURL: "https://example.com/").get().includeSubdomains)
     }
 
-    @Test("Stripping www is opt-in, and never strips down to a public suffix")
-    func leadingWWW() throws {
+    // MARK: www hosts also match their apex (owner decision, 2026-11-16)
+
+    private func importURLs(_ urls: [String], options: ImportOptions = ImportOptions()) throws -> ImportResult {
+        var generator = SeededGenerator(seed: 6)
+        let cells = urls.map { "\"" + $0 + "\"" }
+        let csv = "Title,URL,Username,Password\n" + cells.map { "Site,\($0),pat,pw\n" }.joined()
+        return try PasswordCSV.importFile(Array(csv.utf8), into: Fixtures.vaultID, options: options, using: &generator)
+    }
+
+    @Test("The apex beside a www scope: one label removed, the subdomain setting kept, never a public suffix")
+    func apexScope() throws {
+        let www = try ScopeDerivation.scope(forURL: "https://www.example.com/").get()
+        #expect(ScopeDerivation.apexScope(beside: www) == ServiceScope(host: "example.com"))
+        let exact = ServiceScope(host: "www.example.com", includeSubdomains: false)
+        #expect(ScopeDerivation.apexScope(beside: exact) == ServiceScope(host: "example.com", includeSubdomains: false))
+        #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.co.uk")) == nil)
+        #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.com")) == nil)
+        #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.github.io")) == nil)
+        #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.1.2.3.4")) == nil)
+        #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "wwwexample.com")) == nil)
+        #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "shop.www.example.com")) == nil)
+        #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "example.com")) == nil)
+        // Exactly one label: `www.www.example.com` gives `www.example.com`, which is not stripped again.
         #expect(
-            try ScopeDerivation.scope(forURL: "https://www.example.com/", stripsLeadingWWW: true).get().host
-                == "example.com")
+            ScopeDerivation.apexScope(beside: ServiceScope(host: "www.www.example.com"))
+                == ServiceScope(host: "www.example.com"))
+    }
+
+    @Test("An imported www host keeps its scope and gains the apex, and the report says so")
+    func wwwGainsApex() throws {
+        let result = try importURLs(["https://www.example.com/login"])
+        let item = try #require(result.entries.first?.item)
+        #expect(item.scopes == [ServiceScope(host: "www.example.com"), ServiceScope(host: "example.com")])
         #expect(
-            try ScopeDerivation.scope(forURL: "https://www.co.uk/", stripsLeadingWWW: true).get().host == "www.co.uk")
+            result.report.warnings.map(\.warning) == [.apexScopeAdded(wwwHost: "www.example.com", apex: "example.com")])
+        // The URL the file gave is still kept as it was written.
+        #expect(item.values(.url) == ["https://www.example.com/login"])
+    }
+
+    @Test("Nothing is added for www.co.uk, for an apex the entry already lists, or past one www label")
+    func apexNotAdded() throws {
+        let suffix = try importURLs(["https://www.co.uk/"])
+        #expect(suffix.entries.first?.item.scopes.map(\.host) == ["www.co.uk"])
+        #expect(suffix.report.warnings.isEmpty)
+
+        // An entry that lists the apex itself has it as its own scope, not as an addition.
+        var generator = SeededGenerator(seed: 6)
+        let listed = try OnePUX.importDocument(
+            Array(
+                (#"{"accounts":[{"vaults":[{"items":[{"uuid":"a","categoryUuid":"001","overview":{"title":"W","#
+                    + #""urls":[{"url":"https://www.example.com/"},{"url":"https://example.com/"}]},"details":{}}]}]}]}"#)
+                    .utf8), into: Fixtures.vaultID, using: &generator)
+        #expect(listed.entries.first?.item.scopes.map(\.host) == ["www.example.com", "example.com"])
+        #expect(listed.report.warnings.isEmpty)
+
+        let twice = try importURLs(["https://www.www.example.com/"])
+        #expect(twice.entries.first?.item.scopes.map(\.host) == ["www.www.example.com", "www.example.com"])
         #expect(
-            try ScopeDerivation.scope(forURL: "https://wwwexample.com/", stripsLeadingWWW: true).get().host
-                == "wwwexample.com")
+            twice.report.warnings.map(\.warning) == [
+                .apexScopeAdded(wwwHost: "www.www.example.com", apex: "www.example.com")
+            ])
+    }
+
+    @Test("Opting out keeps exactly the host the file recorded")
+    func apexOptOut() throws {
+        let result = try importURLs(["https://www.example.com/"], options: ImportOptions(matchApexOfWWWHosts: false))
+        #expect(result.entries.first?.item.scopes == [ServiceScope(host: "www.example.com")])
+        #expect(result.report.warnings.isEmpty)
+    }
+
+    @Test("Merging into an existing item never adds the apex without the person's choice")
+    func apexMerge() throws {
+        let existing = Item(
+            vaultID: Fixtures.vaultID, title: "Site", scopes: [ServiceScope(host: "www.example.com")],
+            fields: [
+                Field(kind: .username, label: "Username", value: "pat"),
+                Field(kind: .password, label: "Password", value: "pw"),
+            ])
+        let imported = try #require(try importURLs(["https://www.example.com/"]).entries.first?.item)
+        #expect(imported.scopes.map(\.host) == ["www.example.com", "example.com"])
+        let matches = DuplicateDetector.matches(imported: [imported], existing: [existing])
+        #expect(matches.count == 1)
+        let additions = DuplicateDetector.additions(of: imported, to: existing)
+        #expect(additions.scopes == [ServiceScope(host: "example.com")])
+        #expect(additions.needsChoice)
+        #expect(DuplicateDetector.merged(imported, into: existing).scopes == existing.scopes)
+        #expect(
+            DuplicateDetector.merged(imported, into: existing, accepting: MergeChoices(hosts: ["example.com"])).scopes
+                == [ServiceScope(host: "www.example.com"), ServiceScope(host: "example.com")])
     }
 
     @Test(

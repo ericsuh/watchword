@@ -1228,13 +1228,18 @@ struct AdversarialInterchangeTests {
         for _ in 0..<TestEnvironment.iterations(standard: 2_000, long: 200_000) {
             let url = (0..<Int.random(in: 1...6, using: &generator)).map { _ in pieces.randomElement(using: &generator)!
             }.joined()
-            for strips in [false, true] {
-                guard case .success(let scope) = ScopeDerivation.scope(forURL: url, stripsLeadingWWW: strips) else {
-                    continue
-                }
+            guard case .success(let derived) = ScopeDerivation.scope(forURL: url) else { continue }
+            // The apex an import adds beside a `www` scope is held to the same policy (never `co.uk` from `www.co.uk`).
+            for scope in [derived] + [ScopeDerivation.apexScope(beside: derived)].compactMap({ $0 }) {
                 #expect(ScopePolicy.isAcceptable(scope), "\(url) → \(scope.host)")
                 #expect(!PublicSuffix.isPublicSuffix(scope.host), "\(url) → \(scope.host)")
                 #expect(scope.excludedHosts.isEmpty)
+            }
+            // And whatever an import makes of the URL, every scope it gives the draft is one the policy accepts.
+            let cell = "\"" + url.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            let imported = try importCSV(Array("Title,URL,Password\nx,\(cell),p\n".utf8))
+            for scope in imported.entries.flatMap(\.item.scopes) {
+                #expect(ScopePolicy.isAcceptable(scope), "\(url) → \(scope.host)")
             }
         }
     }

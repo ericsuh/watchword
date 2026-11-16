@@ -417,6 +417,10 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
   (`ExportWarning.websiteNotScoped`), and the CSV export no longer puts an arbitrary `url` field in its URL
   column. The `1pux`, `cxf` and `password-csv` fuzz targets check that an export, read back, names no host
   the items were not scoped to.
+- Done on the owner's decisions of 2026-11-16: an imported `www` host also matches its apex (a further scope,
+  same subdomain setting, through the policy, reported as `apexScopeAdded`; opt-out with
+  `ImportOptions.matchApexOfWWWHosts`, which replaced the opt-in `stripsLeadingWWW`), for the import preview to
+  show. Open: the session wiring passes the option (default on), and the preview lists the additions.
 - Open, all of it integration and most of it Mac-only: the session wiring (password re-entry before a
   plaintext export, `completeUnlessOpen` file protection, the standing warning, an import path through
   `VaultSession` that keeps imported history and timestamps); the encrypted Watchword archive; the OS
