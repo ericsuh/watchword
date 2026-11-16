@@ -111,7 +111,7 @@ struct VaultSessionBridgeTests {
             return
         }
         #expect(list.passwords.map(\.itemID) == [Fixtures.awsRoot.id])
-        #expect(list.otherAccounts.map(\.itemID) == [Fixtures.amazonRetail.id])
+        #expect(!list.passwords.contains { $0.itemID == Fixtures.amazonRetail.id })
         #expect(
             try await model.password(
                 for: PasswordChoice(itemID: Fixtures.awsRoot.id, userName: Fixtures.email), identifiers: [console]

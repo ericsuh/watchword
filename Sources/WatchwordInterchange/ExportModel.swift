@@ -10,9 +10,6 @@ public enum ExportWarning: Hashable, Sendable {
     case passkeyUnreadable(itemID: UUID)
     /// Fields the format has no column for were written into the notes as `label: value` lines.
     case fieldsMovedToNotes(itemID: UUID, count: Int)
-    /// A cell began with a character a spreadsheet would run as a formula, and was prefixed with an apostrophe
-    /// (PRD SEC7). An importer will see the apostrophe as part of the value.
-    case cellNeutralised(itemID: UUID, column: String)
     /// The item is in the trash and was left out.
     case trashedItemOmitted(itemID: UUID)
     /// A one-time-password field that is not a usable `otpauth://totp/` URI was written as a concealed field.

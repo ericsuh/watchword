@@ -50,7 +50,8 @@ struct OnePUXTests {
         #expect(entry.kind == .login)
         #expect(entry.state == .active)
         #expect(entry.reference.sourceID == "fkruyzrldvizuqlnavfj3gltfe")
-        #expect(item.scopes.map(\.host) == ["www.example.com", "accounts.example.co.uk"])
+        // The apex of the www host is added after the file's own scopes (ImportOptions.matchApexOfWWWHosts).
+        #expect(item.scopes.map(\.host) == ["www.example.com", "accounts.example.co.uk", "example.com"])
         #expect(item.scopes.allSatisfy { $0.includeSubdomains })
         // A sign-in name the form typed as an email address is kept as one.
         #expect(item.values(.username).isEmpty)
@@ -71,7 +72,8 @@ struct OnePUXTests {
         #expect(websites.map(\.value) == ["https://www.example.com/login", "https://github.io"])
         #expect(
             result.warnings(for: "Example") == [
-                .scopeRefused(url: "https://github.io", reason: .policy(.publicSuffix("github.io")))
+                .scopeRefused(url: "https://github.io", reason: .policy(.publicSuffix("github.io"))),
+                .apexScopeAdded(wwwHost: "www.example.com", apex: "example.com"),
             ])
 
         // A saved web-form text field is kept; a checkbox is page state and is not.
@@ -405,16 +407,20 @@ struct OnePUXTests {
         #expect(try ItemShape(#require(again.entries.first).item) == ItemShape(item))
     }
 
-    @Test("Stripping www keeps the URL as it was written")
-    func strippedWWWKeepsText() throws {
+    @Test("A www URL keeps its scope, gains the apex, and is written back as it was")
+    func wwwGainsApexAndKeepsText() throws {
         let result = try importItems(
-            #"{"uuid":"a","categoryUuid":"001","overview":{"title":"W","url":"https://www.example.com/"},"details":{}}"#,
-            options: ImportOptions(stripsLeadingWWW: true))
+            #"{"uuid":"a","categoryUuid":"001","overview":{"title":"W","url":"https://www.example.com/"},"details":{}}"#
+        )
         let item = try #require(result.entries.first).item
-        #expect(item.scopes.map(\.host) == ["example.com"])
-        #expect(item.values(.url) == ["https://www.example.com/"])
+        #expect(item.scopes.map(\.host) == ["www.example.com", "example.com"])
+        #expect(item.values(.url).isEmpty)
         let text = String(decoding: OnePUX.exportDocument([item], options: exportOptions).document, as: UTF8.self)
-        #expect(text.contains(#""urls":[{"label":"website","url":"https://www.example.com/"}]"#))
+        #expect(text.contains(#"{"label":"website","url":"https://www.example.com/"}"#))
+        let optedOut = try importItems(
+            #"{"uuid":"a","categoryUuid":"001","overview":{"title":"W","url":"https://www.example.com/"},"details":{}}"#,
+            options: ImportOptions(matchApexOfWWWHosts: false))
+        #expect(try #require(optedOut.entries.first).item.scopes.map(\.host) == ["www.example.com"])
     }
 
     @Test("A date before 1970 is a date")

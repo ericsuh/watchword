@@ -48,7 +48,7 @@ that a test target may contain both as long as a single test does not mix their 
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes (protocol core, milestone 4, `WatchwordSharingTests`: "Membership record format", "Sharing formats: known answers", "Membership chain rules", "Membership ledger", "Fingerprint verification and invitations", "Key grants and rotation", and "Shared vault simulation" — two and three members with real keysets over a hostile store: create, invite, verify, accept, write, role change, removal with rotation, leaving, an interrupted rotation, concurrent administrators, deletion; through `VaultSession` and a real transport: open) |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
-| F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "Scenarios S1 and S2 through the request model", and "Request model over a real vault session" — S1 and S2 again over a `VaultSession` with a stand-in for its `CredentialVault` conformance; milestone 5) |
+| F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "… pages loaded over plain http" (F6.9: every list, release, save and generate request refused for an `http` URL, by choice too; `https` pages and domains unchanged; identities unaffected, and an `http` URL in an identity's place refused), "Scenarios S1 and S2 through the request model", and "Request model over a real vault session" — S1 and S2 again over a `VaultSession` with a stand-in for its `CredentialVault` conformance; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Item merge audit regressions", "Item merge laws under random histories" and "Item merge, every small history" — the merge as a CRDT (`10-sync-correctness.md` §7): the specification of a multi-value register at every step, the semilattice laws on whole items, every update inflationary, the same versions in any order with repeats, convergence and nothing typed lost, with the number of histories explored asserted —, "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
 | F2.x vaults | `WatchwordKitTests`: "Vault session: vaults" — create, list, rename; each vault its own key and a sealed name; items per vault and across; copy; move, and a move interrupted at each commit (never neither, never falsely moved); vault deletion confirmed by item count, the Personal vault undeletable; search over decrypted items, never a secret (F2.3); directory rows edited in the file. "Vault session: vaults across devices" — a vault, its name and items reaching another device; concurrent renames; a move against an unseen edit (kept, in the trash: F7.6); the same move on two devices; unresolved values refused; a vault deleted against concurrent work (what the deletion had not seen is kept: F7.7); a vault deletion outliving the revocation of the device that made it; a move whose copy could not be published (the original stays on the other devices, never neither); a locked device learning of a vault. "Vault session: a lock during the account's objects" — a lock landing in a vault-key fetch or in the reconciliation after an unlock wins, and traps nothing |
 | F5.2, F10.1, F10.2 enrolment and devices | `WatchwordKitTests`: "Vault session: enrolment from the transport (F5.2)" — a device joining from the transport, password and Secret Key alone; wrong credentials one failure, leaving nothing behind; an approved device; an account from before the registry; a store restored onto other hardware, and the edits and deletions its old device had not synced reaching the others. "Vault session: devices, revocation and password changes" — a password change reaching other devices (old password refused, quick unlock destroyed, nothing merged or published until the new one is entered); enrolling after a change; revocation with and without a password change; a password change the person did not make, undone; a registry rolled back in the local file. `WatchwordCryptoTests`: "Device keys and signatures", "Device registry", "Published account header". Section 6.9 |
@@ -63,8 +63,9 @@ that a test target may contain both as long as a single test does not mix their 
 Each test is written once against `VaultSession` and once as an XCUITest where UI is involved.
 
 - **E2E-S1 Amazon vs AWS.** Seed both items. Request credential list for
-  `https://signin.aws.amazon.com/signin` → primary list contains only the AWS item, retail is in
-  the shadowed list; request for `https://www.amazon.com/ap/signin` → only retail. Assert the
+  `https://signin.aws.amazon.com/signin` → the list contains only the AWS item, and retail (shadowed)
+  is neither listed nor released, by choice included; request for `https://www.amazon.com/ap/signin`
+  → only retail. Assert the
   TOTP returned for each matches the right item. Assert that with both items in the vault neither
   has a QuickType password or code identity, and that the retail identity a stale store still holds,
   handed back as stored, releases nothing (`02-architecture.md` §9.1: a tap does not name the page).
@@ -270,7 +271,7 @@ specification, plus vectors from independent Python implementations for HPKE wit
   mixed case, IDN homographs (`xn--` forms) and raw Unicode, IPv6 hosts, `file:` and `data:`
   schemes → never match an unrelated item.
 - Public-suffix boundaries once PSL is integrated (`co.uk` scope must not match everything).
-- Shadowed items are never auto-selected; the request handler refuses to return a credential for a
+- Shadowed items are never listed or auto-selected; the request handler refuses to return a credential for a
   service identifier the chosen item does not match (defence in depth against UI bugs).
 - Passkey assertion for a relying party different from the stored `rpID` is refused.
 
@@ -313,6 +314,10 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
 - *Locked.* Every request type reports the lock and releases nothing; a lock that lands mid-request wins for a
   write, and for every kind of release when it lands after the items were read (each request type is run
   unlocked, where it must release, and again with the vault locking as its one read returns).
+- *Plain `http` pages (F6.9).* An attacker on the network path serves `http://bank.example` (and its
+  upper-case and `www.` spellings) for a site with a saved item scoped `bank.example`: the sweep releases
+  nothing, by choice included; the credential, one-time code and text lists are `insecurePage`; no save, asked
+  or unasked, is made; the same item over `https` is released (`plainHTTPPage`).
 - *Excluded from AutoFill (F6.8).* An item excluded on another device is not released for the identities a
   stale store still holds, is not listed, and is not released when chosen.
 - *The identity store* learns hosts, user names and opaque IDs only, and nothing of excluded, archived or
@@ -327,6 +332,11 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   their pushed segments are rejected by remaining members.
 - Read-only member's writes are rejected by the transport fake and never merged.
 - Two admins remove each other concurrently → deterministic outcome, no vault lock-out.
+- A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
+  with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
+  and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed
+  by an administrator or a writer, unsigned, for another vault or at the wrong epoch change nothing, at one
+  signature check each at most (`laterFormatStopsTheChain`, `laterFormatImpostors`, in "sharing and membership").
 
 **Implemented in milestone 3** (`AdversarialSyncTests`, suite "Adversarial: sync log", with the fake keyring):
 the server's reorder/duplicate/drop/stale-snapshot cases, a byte flipped anywhere in a segment, objects moved to
@@ -454,7 +464,8 @@ read-only writes refused by the transport fake), and anything that depends on th
 
 ### 6.5 Interchange (milestone 7)
 - Zip-slip entry names, nested zip bombs beyond the ratio cap, 1PUX with 10^6 items, CSV cells
-  starting with `=`, `+`, `-`, `@` (export neutralises; import preserves), rows with embedded
+  starting with `=`, `+`, `-`, `@`, a tab or a carriage return (imported and exported byte for byte,
+  never neutralised: owner decision, 2026-11-16), rows with embedded
   newlines/quotes, invalid UTF-8, BOMs, and a 2 GB declared size → bounded time and memory, no
   crash, clear error.
 - CXF payloads with unknown types, duplicate IDs, and oversized blobs.
@@ -475,7 +486,14 @@ every case above and the attacks a parser author would add to them:
   before the start of output, reserved symbols, too many codes, missing, incomplete and over-subscribed code
   sets, a repeat with nothing to repeat, a run past the declared lengths, a block that cannot end), every
   prefix of valid streams, and seeded random damage.
-- CSV: formula payloads imported exactly and exported inert; record structure hidden inside quoted cells;
+- `www` hosts (owner decision, 2026-11-16): `www.example.com` gains `example.com` beside it, with the same
+  subdomain setting, and the report says so; `www.co.uk`, `www.github.io`, `www.1.2.3.4` and `wwwexample.com`
+  gain nothing; `www.www.example.com` gains `www.example.com` and nothing more; an apex the entry lists itself is
+  not an addition; opting out (`matchApexOfWWWHosts: false`) keeps exactly the recorded host; a merge into an
+  item scoped `www.example.com` offers `example.com` as a choice and never adds it unasked (`ImportMappingTests`);
+  every apex a random URL yields passes the scope policy (`importedScopesPassPolicy`, and the `host` fuzz target).
+- CSV: formula payloads (and values with an apostrophe already in front) imported, exported and imported
+  again byte for byte (`formulaInjection`, `formulaCellsAreExact`); record structure hidden inside quoted cells;
   invalid UTF-8 and UTF-16; a byte-order mark before the header; an unterminated quote, an over-long row, too
   many columns and 50,001 rows, each stopped at its limit; a file over 100 MB refused in every format before
   it is parsed.

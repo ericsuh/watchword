@@ -190,14 +190,25 @@ Requirement IDs are stable and referenced from the test plan.
 - F6.5 Save new logins offered by sites (save-password requests) and honour site password rules in
   generate-password requests.
 - F6.6 Matching rule: among items whose scopes match the requested host, the most specific scope
-  wins; less specific matches are shown in a secondary "other accounts on this site" list and are
-  never pre-selected (S1).
+  wins; less specific matches are *shadowed*: never offered, listed or released on that host by the
+  AutoFill extension, and reachable only in the app (S1). Listing what cannot be used served
+  nothing, so the extension's "other accounts on this site" list was removed (decided by the owner
+  on 2026-11-16, `06-adversarial-review.md` §K, K8).
 - F6.7 Handle relying-party credential-update reports (unused password, renamed passkey, unknown
   credential) by updating or flagging the item.
 - F6.8 A per-item "exclude from AutoFill suggestions" toggle. Publishing an identity hands the
   item's host and username to the OS-managed credential identity store, which is a disclosure
   surface outside the app's control; items the person marks sensitive are reachable only by opening
   the app.
+- F6.9 Fill only on `https` pages. A request whose service identifier is a URL with the scheme
+  `http` is refused, whatever is scoped to its host and even when the person chooses the item:
+  passwords, one-time codes, text insertion, credential list suggestions, and save and generate
+  password. App identifiers (domains, with no scheme) and passkeys (WebAuthn needs a secure context
+  anyway) are unchanged. Whether a form *submits* to an `http` address cannot be enforced: the
+  system tells the extension the page, not the form's action. A QuickType suggestion the system
+  offers on an `http` page cannot be refused either, as a tap hands back the published identity and
+  not the page; the hygiene report flags saved `http://` addresses (F9.3). Decided by the owner on
+  2026-11-16 (`06-adversarial-review.md` §K, K3).
 
 ### 5.7 Sync (F7)
 
@@ -324,8 +335,12 @@ exactly what the attacker wants.
 - SEC6. The AutoFill extension never returns a credential to a service identifier the item is not
   scoped to. Enforced by type (matching accepts only a normalised host) and by a single
   authorization chokepoint, not by convention across view controllers.
-- SEC7. Import parsers treat input as hostile (size limits, zip-slip and zip-bomb protection,
-  CSV formula-injection neutralisation on export).
+- SEC7. Import parsers treat input as hostile (size limits, zip-slip and zip-bomb protection).
+  Values are data in both directions: an import takes each CSV cell exactly as written, and an
+  export writes every stored value unaltered, with RFC 4180 quoting only. The exported CSV is for
+  another password manager's importer, not a spreadsheet, so nothing neutralises formulas in it; the
+  export screen says the file holds every password in plain text and is not meant for spreadsheets
+  (decided by the owner on 2026-11-16, `06-adversarial-review.md` §K, K2).
 - SEC8. Host normalisation and scope policy fail closed: an input that cannot be unambiguously
   resolved to a hostname, or a scope that spans unrelated owners, is rejected rather than
   interpreted generously.

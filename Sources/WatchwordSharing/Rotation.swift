@@ -322,6 +322,7 @@ public enum RotationPlanner {
     ) throws -> RotationPlan {
         let state = ledger.state
         guard !state.isDeleted else { throw SharingError.vaultDeleted }
+        guard !ledger.continuesInLaterFormat else { throw SharingError.requiresNewerVersion }
         let operation: MembershipRecord.Operation
         switch reason {
         case .removal(let account):

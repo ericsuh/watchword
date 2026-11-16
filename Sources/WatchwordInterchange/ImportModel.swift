@@ -101,11 +101,12 @@ public enum ImportWarning: Equatable, Sendable {
     case urlsNotConsidered(count: Int)
     /// The entry was scoped to Android apps, which have no place in a Watchword item; `count` were left out.
     case androidAppsNotImported(count: Int)
-    /// A cell looks like one this app's own export made inert (an apostrophe before `=`, `+`, `-` or `@`). It was
-    /// imported as written, apostrophe included.
-    case possiblyNeutralisedFormula(column: String)
     /// The entry carried no title; one was derived from its first URL or login name.
     case titleDerived
+    /// The entry's URL named `wwwHost`, and `apex` was added as a further scope beside it, with the same subdomain
+    /// setting, so the item is offered on both (`ImportOptions.matchApexOfWWWHosts`). A merge into an existing item
+    /// adds it only if the person accepts that host, like any other (`MergeChoices`).
+    case apexScopeAdded(wwwHost: String, apex: String)
 }
 
 /// Why an entry was not imported.
@@ -214,15 +215,18 @@ public struct ImportOptions: Hashable, Sendable {
     public var includesTrashed: Bool
     /// The tag given to entries the source marked as favourites, or `nil` to drop the mark.
     public var favoriteTag: String?
-    /// Derive the scope for `https://www.example.com/` as `example.com` instead of `www.example.com`. Off by default:
-    /// a scope then matches exactly the host the source recorded and its subdomains, never a sibling. With it on, the
-    /// shorter host must itself pass `ScopePolicy`, or the full host is used.
-    public var stripsLeadingWWW: Bool
+    /// Give an entry whose URL names `www.<apex>` a further scope for `<apex>`, with the same subdomain setting, beside
+    /// the `www` one, which is kept (owner decision, 2026-11-16). On by default: a login saved on `www.example.com` is
+    /// then offered on `example.com` too, as the person almost always means. The apex must pass `ScopePolicy` (never
+    /// a public suffix: `www.co.uk` adds nothing), only one leading `www` label is removed
+    /// (`ScopeDerivation.apexScope(beside:)`), and each addition is listed in the report (`apexScopeAdded`) so the
+    /// preview can show it. Off, a scope matches exactly the host the source recorded and its subdomains.
+    public var matchApexOfWWWHosts: Bool
 
-    public init(includesTrashed: Bool = false, favoriteTag: String? = "Favorite", stripsLeadingWWW: Bool = false) {
+    public init(includesTrashed: Bool = false, favoriteTag: String? = "Favorite", matchApexOfWWWHosts: Bool = true) {
         self.includesTrashed = includesTrashed
         self.favoriteTag = favoriteTag
-        self.stripsLeadingWWW = stripsLeadingWWW
+        self.matchApexOfWWWHosts = matchApexOfWWWHosts
     }
 }
 

@@ -146,13 +146,15 @@ enum ReleaseGate {
         snapshot.itemInUse(itemID).map(ManualChoice.init(item:))
     }
 
-    /// Of several refusals, the one that warns: a look-alike assessment beats "nothing matches", which beats an
-    /// identifier that could not be read.
+    /// Of several refusals, the one that warns: a look-alike assessment beats a page loaded over plain `http`, which
+    /// beats "nothing matches", which beats an identifier that could not be read.
     static func mostInformative(_ refusals: [FillRefusal]) -> FillRefusal {
         func weight(_ refusal: FillRefusal) -> Int {
             switch refusal {
             case .itemNotScopedToHost(let assessment), .noMatchingItem(let assessment):
-                return assessment.isSuspicious ? 3 : 2
+                return assessment.isSuspicious ? 4 : 2
+            case .insecurePage:
+                return 3
             case .unusableIdentifier:
                 return 1
             }

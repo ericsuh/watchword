@@ -27,8 +27,9 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
         case attachmentsNotImported
         /// Fields Apple Passwords has no place for are written into the notes.
         case fieldsMovedToNotes
-        /// Cells that look like spreadsheet formulas are prefixed with an apostrophe.
-        case formulaCellsChanged
+        /// The exported CSV holds every password in plain text, exactly as saved, and is for another app's importer,
+        /// not for a spreadsheet: nothing in it is altered to stop a spreadsheet running a value as a formula.
+        case notForSpreadsheets
         /// A Credential Exchange transfer that delivers nothing leaves the source untouched.
         case transferMayDeliverNothing
         case compareCounts
@@ -339,12 +340,11 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
                             + "website. Security questions, PINs, recovery codes and other fields are written into "
                             + "the notes, and an item with several websites becomes one entry for each."),
                     Caveat(
-                        .formulaCellsChanged,
-                        "A value that begins with =, +, - or @ is written with an apostrophe in front, so that a "
-                            + "spreadsheet opening the file cannot run it as a formula. Passwords imports the "
-                            + "apostrophe as part of the value. The export report lists each value changed: correct "
-                            + "them in Passwords afterwards, or choose to write values unchanged if the file will "
-                            + "only ever be opened by Passwords."),
+                        .notForSpreadsheets,
+                        "The file holds every password in plain text, exactly as you saved it, and is meant only "
+                            + "for importing into Passwords. Do not open it in Excel, Numbers or another spreadsheet: "
+                            + "nothing in it is changed to stop a spreadsheet from running a value that begins with "
+                            + "=, +, - or @ as a formula."),
                     exportReport,
                 ]),
         ])

@@ -550,7 +550,6 @@ struct PasskeyRequestTests {
             return
         }
         #expect(Set(list.passkeys.map(\.userName)) == ["alice", "bob"])
-        #expect(list.otherAccounts.isEmpty)
         let published = await harness.publisher.published.compactMap { identity -> PasskeyIdentity? in
             if case .passkey(let passkey) = identity { return passkey }
             return nil

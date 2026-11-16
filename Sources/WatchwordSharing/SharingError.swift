@@ -139,4 +139,7 @@ public enum SharingError: Error, Hashable, Sendable {
     case writeCutRequired
     /// A `WriteCut` was given for a change that ends nobody's permission to write.
     case writeCutNotExpected
+    /// The vault has gone on in a format this version cannot read (`MembershipLedger.continuesInLaterFormat`, §8.9):
+    /// nothing is proposed or planned on the chain this version stopped at.
+    case requiresNewerVersion
 }

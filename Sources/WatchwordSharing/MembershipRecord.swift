@@ -279,6 +279,44 @@ public struct MembershipRecord: Sendable, Hashable {
             vaultKeyID: vaultKeyID, keyEpoch: keyEpoch, writeCut: writeCut, entries: entries, signature: signature)
     }
 
+    /// A record in a format this version cannot read (a later format version, or this one with an operation it does
+    /// not know), as far as the part every format keeps can tell: the vault, the epoch, the record it follows and
+    /// who signed it, and the signature over everything before it.
+    struct LaterFormat: Sendable {
+        let vaultID: UUID
+        let epoch: UInt64
+        let previousHash: MembershipHash
+        let signer: UUID
+        let signedContent: [UInt8]
+        let signature: [UInt8]
+        let encoded: [UInt8]
+    }
+
+    /// Reads `bytes` as a record of a later format, which is how a version that has a new operation (ownership
+    /// transfer, docs/02-architecture.md §8.9) makes this one stop instead of carrying on without it. Every later
+    /// format keeps this version's prefix (`magic`, a version byte, vault ID 16, epoch u64, previous hash 32, signer
+    /// 16, then the operation code where the version is this one), ends in a 64-byte signature under
+    /// `SignatureDomain.membership` over everything before it, and fits in `maximumLength`. `nil` for anything else,
+    /// including every record this version can parse: those go through `parse`, never through here.
+    static func laterFormat(_ bytes: [UInt8]) -> LaterFormat? {
+        let prefixLength = 4 + 1 + 16 + 8 + MembershipHash.byteCount + 16
+        guard bytes.count <= maximumLength, bytes.count >= prefixLength + 1 + signatureLength,
+            Array(bytes[0..<4]) == magic
+        else { return nil }
+        let version = bytes[4]
+        guard version > formatVersion || (version == formatVersion && bytes[prefixLength] > Operation.deleteVault.code)
+        else { return nil }
+        var reader = SharingReader(Array(bytes[5..<prefixLength]))
+        guard let vaultID = try? reader.uuid(), let epoch = try? reader.uint64(),
+            epoch <= MembershipLimits.maximumEpoch,
+            let previousHash = try? reader.read(MembershipHash.byteCount), let signer = try? reader.uuid()
+        else { return nil }
+        return LaterFormat(
+            vaultID: vaultID, epoch: epoch, previousHash: MembershipHash(unchecked: previousHash), signer: signer,
+            signedContent: Array(bytes.dropLast(signatureLength)), signature: Array(bytes.suffix(signatureLength)),
+            encoded: bytes)
+    }
+
     private static func role(_ raw: UInt8) throws -> MemberRole {
         guard let role = MemberRole(rawValue: raw) else { throw SharingFormatError.unknownRole(raw) }
         return role

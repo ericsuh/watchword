@@ -147,7 +147,6 @@ struct SaveAndGenerateRequestTests {
             return
         }
         #expect(Set(list.passwords.map(\.userName)) == [Fixtures.email, "work@example.com"])
-        #expect(list.otherAccounts.isEmpty)
         #expect(list.suggested == nil)
         // The first account's one-time code is still its own to give.
         #expect(
@@ -266,7 +265,7 @@ struct SaveAndGenerateRequestTests {
 
     @Test(
         "a host the scope policy refuses is never saved as a scope (F11.2)",
-        arguments: ["https://localhost/login", "https://github.io/", "https://co.uk/", "http://intranet/"])
+        arguments: ["https://localhost/login", "https://github.io/", "https://co.uk/", "https://intranet/"])
     func scopePolicy(_ url: String) async {
         let harness = AutoFillHarness(items: Fixtures.all)
         for refusal in [

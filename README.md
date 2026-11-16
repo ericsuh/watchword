@@ -52,6 +52,20 @@ mise run app:screenshots        # a picture of every major screen, into Screensh
 mise tasks                      # everything else; `mise run <task> --help` for flags
 ```
 
+## Passkey AAGUID
+
+Watchword's passkeys carry the AAGUID `5B0C7A3E-9D41-4F6C-A2B8-3E1F7C0D9A54`
+(`PasskeyAuthenticator.aaguid`). It identifies the authenticator model, Watchword, to relying
+parties, so a site can label which provider holds a passkey ("saved in Watchword"). It is the
+same for every installation: not a secret, and not per user or per device. With "none"
+attestation, which is what passkey providers use, the platform may replace it with zeros, so a
+site may never see it.
+
+As of 2026-11-16 it is not registered: it was checked against the community list
+[passkeydeveloper/passkey-authenticator-aaguids](https://github.com/passkeydeveloper/passkey-authenticator-aaguids)
+(`combined_aaguid.json`, 417 entries) and appears nowhere in it. Registering it there is what
+lets sites show Watchword's name and icon.
+
 ## Principles
 
 - Two secrets (account password + device-held Secret Key) are required to unlock or sync.

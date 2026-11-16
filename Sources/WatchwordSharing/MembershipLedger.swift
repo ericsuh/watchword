@@ -83,14 +83,31 @@ public struct MembershipLedger: Sendable {
     /// Removals carried out on a branch that lost, by a signer who may still remove that member: one per member, in
     /// account order. Plan each again (`RotationPlanner.plan` with `reason`) on a device whose account may.
     public private(set) var owedRemovals: [OwedRemoval]
+    /// Records of a format this version cannot read, each signed by the owner as of the record it follows, which
+    /// extend a record this ledger holds (docs/02-architecture.md §8.9). Held, and saved with the ledger, so that a
+    /// later call that is not offered them again still stops where this one did. At most
+    /// `MembershipLimits.maximumLaterFormatRecords`.
+    public private(set) var laterFormatRecords: [[UInt8]]
 
-    init(vaultID: UUID, owner: PublicKeyBundle, chain: [Link], branches: [Link], owedRemovals: [OwedRemoval]) {
+    /// Whether the vault has gone on in a format this version cannot read: a later version's operation (ownership
+    /// transfer) signed by the owner. Fail closed: the accepted chain stops at the last record this version
+    /// understands on that path, whatever else is offered; this device proposes nothing, plans no rotation and may
+    /// not write (`WriteRefusal.requiresNewerVersion`). Updating the app is the way on.
+    public var continuesInLaterFormat: Bool {
+        !laterFormatRecords.isEmpty
+    }
+
+    init(
+        vaultID: UUID, owner: PublicKeyBundle, chain: [Link], branches: [Link], owedRemovals: [OwedRemoval],
+        laterFormatRecords: [[UInt8]] = []
+    ) {
         precondition(!chain.isEmpty)
         self.vaultID = vaultID
         self.owner = owner
         self.chain = chain
         self.branches = branches
         self.owedRemovals = owedRemovals
+        self.laterFormatRecords = laterFormatRecords
     }
 
     /// The current verified state.
@@ -131,6 +148,7 @@ public struct MembershipLedger: Sendable {
     /// `MembershipState.writePermission(for:)`.
     public func writePermission(for accountID: UUID) -> WritePermission {
         let permission = state.writePermission(for: accountID)
+        if permission.isAllowed, continuesInLaterFormat { return .refused(.requiresNewerVersion) }
         guard permission.isAllowed, owedRemovals.contains(where: { $0.accountID == accountID }) else {
             return permission
         }
@@ -209,7 +227,7 @@ public struct MembershipLedger: Sendable {
         return (
             MembershipLedger(
                 vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
-                owedRemovals: resolution.owed),
+                owedRemovals: resolution.owed, laterFormatRecords: resolution.later),
             resolution.report
         )
     }
@@ -270,10 +288,12 @@ public struct MembershipLedger: Sendable {
     @discardableResult
     public mutating func ingest(_ candidates: [[UInt8]]) -> IngestReport {
         let resolution = MembershipLedger.resolve(
-            vaultID: vaultID, owner: owner, chain: chain, branches: branches, candidates: candidates)
+            vaultID: vaultID, owner: owner, chain: chain, branches: branches, candidates: candidates,
+            later: laterFormatRecords)
         chain = resolution.chain
         branches = resolution.branches
         owedRemovals = resolution.owed
+        laterFormatRecords = resolution.later
         return resolution.report
     }
 
@@ -315,6 +335,7 @@ public struct MembershipLedger: Sendable {
         var chain: [Link]
         var branches: [Link]
         var owed: [OwedRemoval]
+        var later: [[UInt8]] = []
         var report: IngestReport
     }
 
@@ -322,7 +343,8 @@ public struct MembershipLedger: Sendable {
     /// documentation says what the rule is and why). `chain` and `branches` were verified when they were first held
     /// and are not verified again.
     private static func resolve(
-        vaultID: UUID, owner: PublicKeyBundle, chain accepted: [Link], branches held: [Link], candidates: [[UInt8]]
+        vaultID: UUID, owner: PublicKeyBundle, chain accepted: [Link], branches held: [Link], candidates: [[UInt8]],
+        later heldLater: [[UInt8]] = []
     ) -> Resolution {
         var report = IngestReport()
         var nodes: [Node] = []
@@ -364,12 +386,18 @@ public struct MembershipLedger: Sendable {
         // in for the genuine record (review finding S4).
         var pendingByParent: [MembershipHash: [Pending]] = [:]
         var seen: Set<[UInt8]> = []
+        // Records of a format this version cannot read: still rejected as malformed, and kept aside to be checked
+        // once every record that can be verified has been (§8.9).
+        var laterCandidates = heldLater.compactMap(MembershipRecord.laterFormat)
         for (index, bytes) in candidates.enumerated() {
             let record: MembershipRecord
             do {
                 record = try MembershipRecord.parse(bytes)
             } catch let error as SharingFormatError {
                 report.rejected.append(.init(index: index, reason: .malformed(error)))
+                if let later = MembershipRecord.laterFormat(bytes), later.vaultID == vaultID {
+                    laterCandidates.append(later)
+                }
                 continue
             } catch {
                 report.rejected.append(.init(index: index, reason: .malformed(.truncated)))
@@ -435,6 +463,33 @@ public struct MembershipLedger: Sendable {
         for pending in pendingByParent.values.joined() {
             report.rejected.append(.init(index: pending.index, reason: .unconnected))
         }
+
+        // Fail closed on a later format (§8.9): a record this version cannot read, extending a record held, signed
+        // by the account that is the owner in the state it follows. Cheap checks first, then one signature check
+        // each; junk in a later format's clothing costs what unsigned junk costs. Where such a record is found, the
+        // accepted chain is the path to the record it follows, and stops there.
+        var stops: [Int] = []
+        var laterKept: [[UInt8]] = []
+        var laterSeen: Set<[UInt8]> = []
+        for later in laterCandidates where laterSeen.insert(later.encoded).inserted {
+            guard laterKept.count < MembershipLimits.maximumLaterFormatRecords,
+                let parent = indexByHash[later.previousHash]
+            else { continue }
+            let before = nodes[parent].link.state
+            guard !before.isDeleted, later.vaultID == vaultID, later.epoch == before.epoch + 1,
+                let signer = before.member(later.signer), signer.role == .owner
+            else { continue }
+            signatureChecks += 1
+            guard
+                (try? Signatures.verify(
+                    later.signature, for: later.signedContent, domain: .membership,
+                    signingKey: signer.bundle.signingKey)) != nil
+            else { continue }
+            stops.append(parent)
+            laterKept.append(later.encoded)
+        }
+        laterKept.sort { $0.lexicographicallyPrecedes($1) }
+
         report.rejected.sort { $0.index < $1.index }
         report.signatureChecks = signatureChecks
         report.keyHistorySteps = keyHistorySteps
@@ -456,13 +511,29 @@ public struct MembershipLedger: Sendable {
             return left == right ? nodes[a].link.state.hash < nodes[b].link.state.hash : left > right
         }
 
-        // Walk.
+        // Walk: the fork rule, unless the vault went on in a later format, when the chain is the path to the earliest
+        // record a later one follows (by epoch, then hash) and nothing after it.
         var path: [Int] = []
-        var next = nodes.indices.filter { nodes[$0].parent == nil }.min(by: preferred)
-        while let index = next {
-            path.append(index)
-            nodes[index].isOnChain = true
-            next = nodes[index].children.min(by: preferred)
+        let stop = stops.min {
+            (nodes[$0].link.state.epoch, nodes[$0].link.state.hash) < (
+                nodes[$1].link.state.epoch, nodes[$1].link.state.hash
+            )
+        }
+        if let stop {
+            var cursor: Int? = stop
+            while let index = cursor {
+                path.append(index)
+                cursor = nodes[index].parent
+            }
+            path.reverse()
+            for index in path { nodes[index].isOnChain = true }
+        } else {
+            var next = nodes.indices.filter { nodes[$0].parent == nil }.min(by: preferred)
+            while let index = next {
+                path.append(index)
+                nodes[index].isOnChain = true
+                next = nodes[index].children.min(by: preferred)
+            }
         }
         let chain = path.map { nodes[$0].link }
         // `path` is never empty here, and its last element is the head.
@@ -578,7 +649,7 @@ public struct MembershipLedger: Sendable {
         report.superseded = accepted[shared...].map(\.record)
         report.outranked = nodes.filter { $0.isNew && !$0.isOnChain }.map(\.link.record)
             .sorted { ($0.epoch, $0.hash) < ($1.epoch, $1.hash) }
-        return Resolution(chain: chain, branches: branches, owed: owed, report: report)
+        return Resolution(chain: chain, branches: branches, owed: owed, later: laterKept, report: report)
     }
 
     /// Whether `node`, a record on a losing branch, is a removal that still has to happen in `head`: it removes a
@@ -631,7 +702,7 @@ public struct MembershipLedger: Sendable {
     /// magic "WWML"  formatVersion u8 = 2  account 16  vaultID 16  SHA-256(owner's account ID and keys) 32
     /// headEpoch u64  headHash 32  signature 64
     /// recordCount u32, then per record: length u16, record        (the accepted chain)
-    /// branchCount u32, then per record: length u16, record        (losing branches)
+    /// branchCount u32, then per record: length u16, record        (losing branches, then `laterFormatRecords`)
     /// ```
     ///
     /// Save it after every `ingest` that adopted, outranked or forgot anything.
@@ -639,10 +710,10 @@ public struct MembershipLedger: Sendable {
         let content = MembershipLedger.checkpointContent(
             account: keyset.accountID, vaultID: vaultID, owner: owner, epoch: state.epoch, hash: state.hash)
         var out = content + (try keyset.sign(content, domain: .membership))
-        for links in [chain, branches] {
-            out += SharingBytes.littleEndian(UInt32(links.count))
-            for link in links {
-                out += SharingBytes.littleEndian(UInt16(link.encoded.count)) + link.encoded
+        for records in [chain.map(\.encoded), branches.map(\.encoded) + laterFormatRecords] {
+            out += SharingBytes.littleEndian(UInt32(records.count))
+            for record in records {
+                out += SharingBytes.littleEndian(UInt16(record.count)) + record
             }
         }
         return out
@@ -678,7 +749,10 @@ public struct MembershipLedger: Sendable {
         else { throw LedgerError.checkpointInvalid }
 
         var records: [[UInt8]] = []
-        for limit in [Int(MembershipLimits.maximumEpoch) + 1, MembershipLimits.maximumRetainedBranchRecords] {
+        for limit in [
+            Int(MembershipLimits.maximumEpoch) + 1,
+            MembershipLimits.maximumRetainedBranchRecords + MembershipLimits.maximumLaterFormatRecords,
+        ] {
             let count = Int(try reader.uint32())
             guard count <= limit, count <= reader.remaining / 2 else { throw SharingFormatError.countTooLarge }
             records.reserveCapacity(records.count + count)
@@ -691,12 +765,17 @@ public struct MembershipLedger: Sendable {
         try reader.finish()
 
         let resolution = resolve(vaultID: vaultID, owner: owner.bundle, chain: [], branches: [], candidates: records)
-        guard resolution.report.rejected.isEmpty else { throw LedgerError.savedRecordInvalid }
+        // Every saved record must be valid, but for the later-format records the ledger held, which this version
+        // reports as malformed and holds again (§8.9).
+        let later = Set(resolution.later)
+        guard resolution.report.rejected.allSatisfy({ later.contains(records[$0.index]) }) else {
+            throw LedgerError.savedRecordInvalid
+        }
         guard UInt64(resolution.chain.count) == epoch + 1, resolution.chain[Int(epoch)].state.hash == hash else {
             throw LedgerError.rolledBack(expectedEpoch: epoch)
         }
         return MembershipLedger(
             vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
-            owedRemovals: resolution.owed)
+            owedRemovals: resolution.owed, laterFormatRecords: resolution.later)
     }
 }

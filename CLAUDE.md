@@ -297,14 +297,19 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   and the vault ID from the caller, never from the file; a URL becomes a scope only through `ScopeDerivation`
   (`HostNormalizer`, then `ScopePolicy`) and otherwise stays a `url` field with a warning (a URL that says more than
   its host is also kept as text beside its scope, and `ExportSupport.websites` writes it back); TOTP values go through
-  `OTPParameters`, passkeys through `PasskeyCredential`. Don't build an `Item` in a format's parser.
+  `OTPParameters`, passkeys through `PasskeyCredential`. Don't build an `Item` in a format's parser. The one scope
+  an import adds that no URL named is the apex beside a `www` host (`ScopeDerivation.apexScope(beside:)`, one label,
+  through `ScopePolicy`, reported as `apexScopeAdded`, opt-out with `ImportOptions.matchApexOfWWWHosts`); don't
+  strip further, and it reaches an existing item only through `MergeChoices` like any other.
 - The ZIP reader validates every member and decompresses only the one asked for. Nothing is extracted to disk, nested
   archives are never opened, and anything with two readings is refused. Don't add leniency to "support" a real-world
   archive without an adversarial test for what the leniency admits.
 - JSON is walked one item at a time (`JSONReader.readBoundedValue`); don't materialise a document. No
   `JSONSerialization`: its behaviour differs between Linux and Apple platforms.
-- Invalid UTF-8 is refused, never repaired. Cells and fields are data on import; only CSV *export* neutralises
-  formulas.
+- Invalid UTF-8 is refused, never repaired. Cells and fields are data in both directions: an import takes a cell
+  exactly as written and every export writes the stored value unaltered (RFC 4180 quoting only). Nothing
+  neutralises spreadsheet formulas, on export or import (owner decision, 2026-11-16: the CSV is not for spreadsheets;
+  `InterchangeGuide` warns instead). Don't add an apostrophe, and don't strip one.
 - Checks on names, cells and URLs work on bytes or Unicode scalars, never on `Character`s and never through
   Foundation's string searches or white-space sets: to `split` and `hasPrefix`, a slash followed by a combining mark
   is not a slash (`../` + U+0301 passed as a name until review caught it), and `whitespacesAndNewlines` differs
@@ -387,10 +392,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 
 ### `WatchwordSharing` invariants
 
-- **The owner is fixed** (never removed, never re-roled), and **the administrator set changes only in records the
-  owner signed**: adding, removing or re-roling an administrator and deleting the vault are owner-only
+- **The owner is fixed in this version** (never removed, never re-roled), and **the administrator set changes only in
+  records the owner signed**: adding, removing or re-roling an administrator and deleting the vault are owner-only
   (`MembershipRules.authorise`). The fork rule and "nobody can be locked out" both rest on these two; do not add an
-  operation that breaks either (ownership transfer needs a new design, not a new case).
+  operation that breaks either. Ownership transfer is wanted in a future version and needs the design in
+  `docs/02-architecture.md` §8.9 (a later format version; "owner" read per state; transfers counted first by the fork
+  rule), not a new case here.
+- **A later format fails closed** (§8.9): `MembershipRecord.laterFormat` reads the prefix every later format keeps,
+  and a record of one that extends a held record and verifies under the owner of the state it follows stops the
+  ledger there (`continuesInLaterFormat`: chain cut, no proposals, plans or own writes). Keep the prefix, the trailing
+  signature and `maximumLength` stable, or a future version's records become junk to this one, which then carries on.
 - A record is verified against the state *before* it, and the signer's key comes from that state, never from the
   record. Cheap checks first, then the signature, and only then anything the record brought with it (a new member's
   bundle, a leave request). The member list in a record must equal the previous list with the operation applied.
@@ -498,7 +509,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `Item` it looked up itself, and an explicit choice by the person is authorised like any other (SEC6, F11.1).
 - **No override.** Nothing releases after a refusal: no flag, no presence level, no second call (F11.4, F11.7). A
   look-alike host gets `LookAlikeWarning` in place of a list. Do not add a "fill anyway".
-- Shadowed items are listed (`otherAccounts`) and never released; archived items and items marked
+- Shadowed items are neither listed nor released (owner decision, 2026-11-16: the extension has no "other accounts"
+  list; they are reachable in the app only); archived items and items marked
   `excludedFromSuggestions` rank but are not listed, released or written (F6.8: reachable only in the app); trashed
   items do neither. The gate ranks among items with only the scopes `ScopePolicy` accepts, so a stored `com` scope
   matches nothing; the stored item is not rewritten. An item ID two readable items share names neither
@@ -549,6 +561,7 @@ A credential may only reach the OS through one path, and each stage fails closed
 ServiceIdentifier (OS-supplied, attacker-influenced)
   → HostNormalizer.normalize   rejects user-info, non-http(s) schemes, ASCII percent-escapes,
                                structural characters, over-long labels → NormalizedHost
+  → AutoFillGate.page          a URL whose scheme is http → .insecurePage (F6.9); domains pass
   → ScopeMatcher.match         exclusions first; exact = 2·labels+1, subdomain = 2·labels
   → ItemRanker.rank            top specificity wins; less specific matches are *shadowed*
                                (keeps Amazon retail off the AWS console), ties are ambiguous
@@ -556,11 +569,16 @@ ServiceIdentifier (OS-supplied, attacker-influenced)
   → AutoFillGate.authorize     re-checks scope even for an explicit user choice (SEC6)
 ```
 
-Two invariants to preserve when touching this module:
+Three invariants to preserve when touching this module:
 
 - Comparison functions take `NormalizedHost`, never `String`, so an un-normalised identifier cannot
   reach a match. Keep that typing.
 - Normalisation may never *invent* a match. If an input is not unambiguously a hostname, throw.
+- Only `https` pages are filled (PRD F6.9, owner decision 2026-11-16). `decide` and `authorize` both start with
+  `AutoFillGate.page`, which refuses an `http` URL as `FillRefusal.insecurePage` before matching, so no choice gets
+  past it; anything in `WatchwordAutoFill` that lists, saves or generates for a page reads it through `page` too.
+  Domain identifiers carry no scheme and are unchanged. The form's action and the page behind a QuickType tap are
+  not visible to the extension, so those two cases are not refused (architecture §9): don't claim otherwise.
 
 `PhishingDetector` exists because the above is silent by design: on `аmazon.com` (Cyrillic а) nothing
 matches, the UI shows nothing, and the person types the password by hand. It turns that silence into

@@ -102,14 +102,12 @@ extension CredentialProviderModel {
         else { throw Blocked.refused(.invalidRequest("password")) }
         guard isDisplayable(request.userName) else { throw Blocked.refused(.invalidRequest("userName")) }
 
+        // The gate's reading of the page: a login typed into a page loaded over plain `http` is not saved here, so
+        // that nothing would offer it there again (PRD F6.9).
         let host: NormalizedHost
-        do {
-            host = try HostNormalizer.normalize(request.serviceIdentifier)
-        } catch {
-            throw Blocked.refused(
-                .gate(
-                    .unusableIdentifier(
-                        (error as? HostNormalizationError) ?? .invalidHost(request.serviceIdentifier.identifier))))
+        switch AutoFillGate.page(request.serviceIdentifier) {
+        case .success(let found): host = found
+        case .failure(let refusal): throw Blocked.refused(.gate(refusal))
         }
         // The new scope goes through the same policy as one typed in the app (PRD F11.2).
         let scope = ServiceScope(host: host.value, includeSubdomains: false)
@@ -222,13 +220,21 @@ extension CredentialProviderModel {
 
     /// A password for a generate-password request, obeying the site's rules when it declared any (PRD F3.1, F6.5).
     ///
-    /// Needs no vault and releases nothing from it, so it is never `vaultLocked`. The rules are the page's; they
+    /// Needs no vault and releases nothing from it, so it is never `vaultLocked`. A request that names a page loaded
+    /// over plain `http` is refused (`insecurePage`, PRD F6.9): the password would be typed into a page anyone on the
+    /// network path can read. An identifier the gate cannot read refuses nothing here, as no item is involved and
+    /// the identifier is consulted only for the page's scheme. The rules are the page's; they
     /// are parsed strictly, cannot take the password outside the generator's own bounds, and the result is checked
     /// against them before it is returned. Its entropy is reported so the sheet can warn when a site's rules force a
     /// weak password (F3.4).
     public func generatePassword(
         for request: GeneratePasswordRequest = GeneratePasswordRequest()
     ) -> Outcome<GeneratedPassword> {
+        if let identifier = request.serviceIdentifier,
+            case .failure(.insecurePage(let host)) = AutoFillGate.page(identifier)
+        {
+            return .refused(.gate(.insecurePage(host)))
+        }
         do {
             let rules = try request.passwordRules.map { try PasswordRules(parsing: $0) } ?? PasswordRules()
             let policy = try rules.policy()

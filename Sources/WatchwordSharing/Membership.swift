@@ -40,6 +40,9 @@ public enum MembershipLimits {
     /// lost a fork). Only an account that is or was an administrator can sign one, and a household produces a handful
     /// in years; past this the ledger keeps the best-ranked and says so (`IngestReport.forgotten`).
     public static let maximumRetainedBranchRecords = 1_024
+    /// Records of a later format a ledger holds (`MembershipLedger.laterFormatRecords`). One is enough to stop the
+    /// chain; each needs the owner's signature, so more than a few is an owner's device misbehaving.
+    public static let maximumLaterFormatRecords = 16
     /// The most bytes a `WriteCut` may hold: room for a position and a digest per device of one account.
     public static let maximumWriteCutLength = 2_048
 }
@@ -89,6 +92,9 @@ public enum WriteRefusal: Sendable, Hashable {
     /// fork (`MembershipLedger.owedRemovals`). The removal is about to be planned again; until it is, the member's
     /// writes count as that record left them (`MembershipLedger.OwedRemoval.standing`).
     case removalPending
+    /// The vault has gone on in a format this version cannot read (`MembershipLedger.continuesInLaterFormat`): a
+    /// later version's operation, signed by the owner. Nothing is written until the app is updated (§8.9).
+    case requiresNewerVersion
 }
 
 /// Which of an account's writes count once it may no longer write: the commitment an administrator's device puts in

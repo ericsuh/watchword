@@ -136,34 +136,16 @@ public enum CSVReader {
     }
 }
 
-/// An RFC 4180 writer, with the formula-injection defence plaintext exports need (PRD SEC7).
+/// An RFC 4180 writer. Every cell is written exactly as given, byte for byte: the only change is RFC 4180's quoting.
+///
+/// Nothing is done about spreadsheet formulas. The file is for another password manager's importer, not for a
+/// spreadsheet, and a cell an importer reads with an apostrophe in front is a different password (owner decision,
+/// 2026-11-16; docs/02-architecture.md §14). The export screen says so, and that the file holds every password in
+/// plain text (`InterchangeGuide`).
 public enum CSVWriter {
-    /// What to do with a cell a spreadsheet would run as a formula.
-    public enum FormulaPolicy: Hashable, Sendable {
-        /// Prefix it with an apostrophe, which spreadsheets show as text. The default, and what SEC7 requires of an
-        /// export: the file is plaintext a person may well open in a spreadsheet to look at.
-        case neutralise
-        /// Write it as it is. For a file that goes straight into another password manager's importer and is then
-        /// deleted: an apostrophe in front of a password that begins with `-` is a different password there.
-        case preserve
-    }
-
-    /// Whether a spreadsheet would treat `cell` as a formula or a command: it begins with `=`, `+`, `-`, `@`, a tab
-    /// or a carriage return (OWASP, "CSV Injection").
-    public static func isFormulaLike(_ cell: String) -> Bool {
-        guard let first = cell.unicodeScalars.first else { return false }
-        return first == "=" || first == "+" || first == "-" || first == "@" || first == "\t" || first == "\r"
-    }
-
-    /// `cell`, made inert under `policy`.
-    public static func neutralised(_ cell: String, policy: FormulaPolicy = .neutralise) -> String {
-        policy == .neutralise && isFormulaLike(cell) ? "'" + cell : cell
-    }
-
     /// The rows as CSV text: CRLF after every record, and a field quoted when it contains a comma, a quote, a line
     /// break, or leading or trailing white space, or begins with U+FEFF (unquoted at the start of the file it would
-    /// be read as a byte-order mark and lost; the fuzzer found that). Cells are written as given; neutralise them
-    /// first.
+    /// be read as a byte-order mark and lost; the fuzzer found that). Cells are written as given.
     public static func encode(_ rows: [[String]]) -> String {
         var output = ""
         for row in rows {

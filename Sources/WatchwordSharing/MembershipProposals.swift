@@ -94,6 +94,7 @@ extension MembershipLedger {
     ) throws -> (record: MembershipRecord, state: MembershipState) {
         let state = self.state
         guard !state.isDeleted else { throw SharingError.vaultDeleted }
+        guard !continuesInLaterFormat else { throw SharingError.requiresNewerVersion }
         guard let signer = state.member(keyset.accountID), signer.role.isAdministrator else {
             throw SharingError.notPermitted
         }

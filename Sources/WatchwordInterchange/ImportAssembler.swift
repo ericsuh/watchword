@@ -8,8 +8,7 @@ import WatchwordModel
 /// not unambiguously a web host is refused, then `ScopePolicy`, so a host that spans unrelated owners (`com`,
 /// `co.uk`, `github.io`) is refused. Nothing is repaired on the way: a refused URL stays a URL field.
 public enum ScopeDerivation {
-    public static func scope(forURL text: String, stripsLeadingWWW: Bool = false) -> Result<ServiceScope, ScopeRefusal>
-    {
+    public static func scope(forURL text: String) -> Result<ServiceScope, ScopeRefusal> {
         // A scheme makes it a URL; anything else must be a bare host, and a path or port then refuses it.
         let kind: ServiceIdentifierKind = text.contains("://") ? .url : .domain
         let host: NormalizedHost
@@ -28,24 +27,33 @@ public enum ScopeDerivation {
                 || scalar == "-" || scalar == "_" || scalar == "."
         }
         guard isPlainName else { return .failure(.notAHost(.invalidHost(host.value))) }
-        var candidates = [host.value]
-        if stripsLeadingWWW, host.value.hasPrefix("www.") {
-            candidates.insert(String(host.value.dropFirst(4)), at: 0)
+        // A dotted-decimal address has no subdomains to include.
+        let scope = ServiceScope(host: host.value, includeSubdomains: !isAddress(host.value))
+        do {
+            try ScopePolicy.validate(scope)
+            return .success(scope)
+        } catch let error as ScopeValidationError {
+            return .failure(.policy(error))
+        } catch {
+            return .failure(.policy(.notAHostname(host.value)))
         }
-        var refusal = ScopeValidationError.empty
-        for candidate in candidates {
-            // A dotted-decimal address has no subdomains to include.
-            let scope = ServiceScope(host: candidate, includeSubdomains: !isAddress(candidate))
-            do {
-                try ScopePolicy.validate(scope)
-                return .success(scope)
-            } catch let error as ScopeValidationError {
-                refusal = error
-            } catch {
-                refusal = .notAHostname(candidate)
-            }
-        }
-        return .failure(.policy(refusal))
+    }
+
+    /// The scope an import adds beside one for `www.<apex>` (`ImportOptions.matchApexOfWWWHosts`, owner decision
+    /// 2026-11-16): `<apex>`, with the same subdomain setting, so that an entry saved on a site's `www` host is offered
+    /// on the site itself too. Exactly one leading `www` label is removed, never more: `www.www.example.com` gives
+    /// `www.example.com`, and that is not stripped again. `nil` when the scope is not on a `www` host, when what
+    /// remains is a dotted-decimal address, and when the scope policy refuses it (`www.co.uk` gives nothing: `co.uk`
+    /// is a public suffix).
+    public static func apexScope(beside scope: ServiceScope) -> ServiceScope? {
+        let www = Array("www.".utf8)
+        let host = Array(scope.host.utf8)
+        guard host.count > www.count, host.starts(with: www) else { return nil }
+        let apex = String(decoding: host.dropFirst(www.count), as: UTF8.self)
+        guard !isAddress(apex) else { return nil }
+        let candidate = ServiceScope(host: apex, includeSubdomains: scope.includeSubdomains)
+        guard candidate.host == apex, ScopePolicy.isAcceptable(candidate) else { return nil }
+        return candidate
     }
 
     /// Whether `host` is a dotted-decimal address: digits and dots only.
@@ -54,7 +62,8 @@ public enum ScopeDerivation {
     }
 
     /// The hosts a URL kept as text can stand for among an item's scopes: the host derived from it, and that host
-    /// without a leading `www.` (the scope may have been derived either way). `nil` for a URL no scope can come from.
+    /// without a leading `www.` (the apex scope an import adds beside a `www` one stands for the same URL, and an
+    /// older import derived the apex alone). `nil` for a URL no scope can come from.
     /// Derived from the text every time it is asked, with the rules an import applies, never read from a hint.
     static func websiteHosts(of text: String) -> [String]? {
         guard case .success(let scope) = scope(forURL: text) else { return nil }
@@ -69,8 +78,8 @@ public enum ScopeDerivation {
     }
 
     /// Whether `text` says nothing beyond `scope`: the host alone, or `https://` and the host with at most a bare
-    /// slash. Anything else (another scheme, a port, a path, a query, a `www.` that was stripped) is information the
-    /// scope does not hold, and the import keeps the text. Compared on bytes, ASCII letters without regard to case.
+    /// slash. Anything else (another scheme, a port, a path, a query) is information the scope does not hold, and the
+    /// import keeps the text. Compared on bytes, ASCII letters without regard to case.
     static func isCanonical(_ text: String, for scope: ServiceScope) -> Bool {
         func folded(_ text: String) -> [UInt8] {
             text.utf8.map { (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains($0) ? $0 + 0x20 : $0 }
@@ -258,6 +267,9 @@ struct ImportAssembler {
         // URL of the same host is, so that an export then writes both and not the longer one alone.
         var websites: [(text: String, canonicalFor: String?)] = []
         var hostsWithText = Set<String>()
+        // Apex scopes to add beside `www` ones, once every URL of the entry has been seen: a host the entry lists for
+        // itself is the file's own scope, not an addition.
+        var apexes: [(www: String, apex: ServiceScope)] = []
         for url in record.urls {
             let trimmed = UTF8Text.trimmed(url)
             // A repeat is dropped before it is parsed: parsing a URL is the expensive part.
@@ -269,9 +281,14 @@ struct ImportAssembler {
             }
             considered += 1
             scopeDerivations += 1
-            switch ScopeDerivation.scope(forURL: trimmed, stripsLeadingWWW: options.stripsLeadingWWW) {
+            switch ScopeDerivation.scope(forURL: trimmed) {
             case .success(let scope):
-                if scopeHosts.insert(scope.host).inserted { scopes.append(scope) }
+                if scopeHosts.insert(scope.host).inserted {
+                    scopes.append(scope)
+                    if options.matchApexOfWWWHosts, let apex = ScopeDerivation.apexScope(beside: scope) {
+                        apexes.append((www: scope.host, apex: apex))
+                    }
+                }
                 // A scope is a host. Whatever else the URL said (a scheme, a port, the sign-in page) is kept beside
                 // it, so that nothing is lost and an export writes the URL back as it was (PRD F8.1).
                 if ScopeDerivation.isCanonical(trimmed, for: scope) {
@@ -284,6 +301,10 @@ struct ImportAssembler {
                 websites.append((trimmed, nil))
                 warnings.append(.scopeRefused(url: trimmed, reason: reason))
             }
+        }
+        for (www, apex) in apexes where scopeHosts.insert(apex.host).inserted {
+            scopes.append(apex)
+            warnings.append(.apexScopeAdded(wwwHost: www, apex: apex.host))
         }
         // Before any field is built: what this entry adds to the drafts, against what the whole import may hold. A
         // URL counts once however often the entry repeats it.

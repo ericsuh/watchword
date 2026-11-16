@@ -8,7 +8,11 @@
 // `diceware/wordlists/wordlist_en_eff.txt`, SHA-256
 // addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e) and was compared word for word with a second
 // (https://github.com/redacted/XKCD-password-generator, commit b981361292ae7328313e116178acacc90680df5e,
-// `xkcdpass/static/eff-long`). Compare it with EFF's own file before a generator draws passphrases from it.
+// `xkcdpass/static/eff-long`).
+//
+// Verified against EFF's own file on 2026-11-16: https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt,
+// downloaded that day, has SHA-256 addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e, identical to
+// the mirror's, and all 7,776 words are equal to these, in order.
 extension EmbeddedWordLists {
     /// All 7,776 words, in the published (alphabetical) order, one per line. Passphrases are drawn from it uniformly,
     /// so the estimator gives every word the same rank: the size of the list.

@@ -285,6 +285,8 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - The sharing UI: invitation and fingerprint screens (safety number, QR display and scan), the member list with
   unverified members shown as such (D17), "pending rotation" (F4.3), and the wording F4.3 and F4.5 require.
 - Scenarios S3 and S4 end to end through `VaultSession` over `InMemorySyncTransport`, and the manual CloudKit run.
+- The session's answer to `MembershipLedger.continuesInLaterFormat` (`02-architecture.md` §8.9): the vault read-only,
+  and the person told to update. The ledger already refuses proposals, plans and the device's own writes.
 
 ## Milestone 5 — AutoFill
 
@@ -375,22 +377,25 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - `BGProcessingTask` / `NSBackgroundActivityScheduler` glue that wakes the loop.
 - The report UI, per-item badges in the item list, settings for the site directory and the HIBP API key, and
   the UI snapshot tests.
-- The embedded EFF list came from a mirror (eff.org was unreachable); compare it with EFF's file before the
-  generator draws passphrases from it, and keep one copy when the generator gains its own.
+- The embedded EFF list came from a mirror (eff.org was unreachable). **Verified** on 2026-11-16 against EFF's
+  own file, https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt (downloaded that day; SHA-256
+  `addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`, identical to the mirror's; all 7,776 words
+  equal, in order). Still open: keep one copy when the generator gains its own.
 
 ## Milestone 7 — Interchange (parsers, exporters and fuzz targets done)
 
 - `WatchwordInterchange`: 1PUX, 1Password CSV, Apple CSV, CXF import/export; Credential Exchange
   integration on iOS 26/macOS 26; encrypted Watchword archive; in-app instructions.
-- Exit: fixture-based round-trip tests; adversarial parser tests (zip-slip, bomb, formula
-  injection, oversized rows); fuzz targets registered in the nightly workflow.
+- Exit: fixture-based round-trip tests; adversarial parser tests (zip-slip, bomb, formula-shaped
+  values kept exact, oversized rows); fuzz targets registered in the nightly workflow.
 - Environment: **mostly remote/Linux, and the better fuzzing host.** The parsers and their
-  adversarial tests (zip-slip, bomb, formula injection, oversized rows) are pure, and libFuzzer with
+  adversarial tests (zip-slip, bomb, formula-shaped values, oversized rows) are pure, and libFuzzer with
   the sanitisers on Linux x86\_64 is more comfortable than the macOS nightly leg — so keep the `Fuzz/`
   harnesses free of Apple imports and either host can run them. Credential Exchange on iOS 26/macOS
   26 and the encrypted Watchword archive (crypto) are Mac-only.
 - Done, on Linux (`02-architecture.md` §14): the module with its hard limits; the ZIP reader, DEFLATE
-  inflater and stored-only ZIP writer; the RFC 4180 reader and writer with formula neutralisation; the
+  inflater and stored-only ZIP writer; the RFC 4180 reader and writer, exact in both directions (formula
+  neutralisation removed by owner decision, 2026-11-16: the CSV is not for spreadsheets); the
   1Password 8, 1Password 7 and Apple Passwords CSV mappings and the Apple Passwords CSV export; 1PUX import
   and 1PUX-compatible export; CXF 1.0 import and export; the mapping into item drafts (injected identifiers,
   scopes only through the normaliser and the policy, one-time passwords through `OTPParameters`, passkeys
@@ -414,6 +419,10 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
   (`ExportWarning.websiteNotScoped`), and the CSV export no longer puts an arbitrary `url` field in its URL
   column. The `1pux`, `cxf` and `password-csv` fuzz targets check that an export, read back, names no host
   the items were not scoped to.
+- Done on the owner's decisions of 2026-11-16: an imported `www` host also matches its apex (a further scope,
+  same subdomain setting, through the policy, reported as `apexScopeAdded`; opt-out with
+  `ImportOptions.matchApexOfWWWHosts`, which replaced the opt-in `stripsLeadingWWW`), for the import preview to
+  show. Open: the session wiring passes the option (default on), and the preview lists the additions.
 - Open, all of it integration and most of it Mac-only: the session wiring (password re-entry before a
   plaintext export, `completeUnlessOpen` file protection, the standing warning, an import path through
   `VaultSession` that keeps imported history and timestamps); the encrypted Watchword archive; the OS
@@ -433,6 +442,17 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - Environment: **Mac.** The external crypto review reads source anywhere, but the performance (N1,
   N2) and accessibility (N4) passes measure a running app, and the privacy manifest and TestFlight
   submission go through Xcode and App Store Connect.
+
+## Later (after the first release)
+
+- **Ownership transfer of a shared vault** (owner decision, 2026-11-16: wanted, in a future version). The design is
+  `02-architecture.md` §8.9: a `transferOwnership` record in a later `WWMR` format version, signed by the current
+  owner and accepted by the new one; rules that read "the owner" as the owner of the state before each record; a fork
+  rule that counts transfers first, then records signed by the owner of their time; an invitation that names the
+  current owner. Already in place: devices on this version fail closed on a later-format record the owner signed
+  (`MembershipLedger.continuesInLaterFormat`), so the first release with sharing is the minimum version a transfer
+  can rely on. To do then: the operation and its acceptance, the rule and fork-rule changes with
+  `LongRunningMembershipForkTests` extended to transfers, the invitation change, and the screens.
 
 ## Working agreements
 

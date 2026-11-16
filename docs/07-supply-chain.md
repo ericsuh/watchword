@@ -99,7 +99,7 @@ nothing to load at run time. Each file's header names its source, the commit it 
 | `WordListCommonPasswords.swift` | 10,000 common passwords | zxcvbn `data/passwords.txt`, commit `67c4ece9`, MIT |
 | `WordListEnglish.swift` | 5,000 English words | zxcvbn `data/english_wikipedia.txt`, same commit, MIT |
 | `WordListNames.swift` | 500 surnames, 300 + 300 given names | zxcvbn, same commit, MIT (1990 US census) |
-| `WordListEFF.swift` | EFF large wordlist, 7,776 words | EFF, CC BY 3.0 US; text from a GitHub mirror (ulif/diceware `b3138e95`, SHA-256 `addd3553…b903e`), compared word for word with a second (redacted/XKCD-password-generator `b9813612`) because eff.org was unreachable |
+| `WordListEFF.swift` | EFF large wordlist, 7,776 words | EFF, CC BY 3.0 US; text from a GitHub mirror (ulif/diceware `b3138e95`, SHA-256 `addd3553…b903e`), compared word for word with a second (redacted/XKCD-password-generator `b9813612`) because eff.org was unreachable; verified against EFF's own `eff_large_wordlist.txt` on 2026-11-16 (same SHA-256, all 7,776 words equal, in order) |
 | `SiteDirectoryData.swift` | about 240 domains: TOTP and passkey support | 2factorauth/twofactorauth `9b39477c` (MIT) and 2factorauth/passkeys `ede77017` (CC BY 4.0), retrieved 2026-11-15 |
 
 - **[enforced]** `StrengthEstimatorTests` asserts each list's exact count, that the EFF list has 7,776 unique
@@ -355,6 +355,13 @@ Two properties to keep in mind:
 - **Default setup can be reconfigured from the web UI** by anyone with admin, including turning it
   off, and that leaves no diff in the repository. Treat `code-scanning/default-setup` as part of
   the settings surface to re-verify, not as something the tree protects.
+
+**Alert dispositions.** An alert closed without a code change is recorded here, with its reason,
+so that dismissing it in the web UI is never the only record:
+
+| Alert | Where | Disposition |
+| --- | --- | --- |
+| Use of a broken or weak cryptographic hashing algorithm (SHA-1) | `PasswordDigest.init(password:)`, `Sources/WatchwordHygiene/PasswordDigest.swift` | **Accepted, won't fix** (owner decision, 2026-11-16). The Have I Been Pwned range API is defined over SHA-1, so no other hash can be asked about, and the hash protects nothing here: only the first five hexadecimal characters (twenty bits) leave the device, and the rest is compared locally (`02-architecture.md` §13.2). Nothing else in the package uses SHA-1 except HMAC-SHA-1 for TOTP, which RFC 6238 defines. Dismiss the alert as "won't fix" with a link to this row. |
 
 ## 4. Repository and release integrity (T5, T6)
 

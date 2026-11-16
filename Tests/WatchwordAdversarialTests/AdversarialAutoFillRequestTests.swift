@@ -149,6 +149,43 @@ struct AdversarialAutoFillRequestTests {
         #expect(await harness.vault.saves.isEmpty)
     }
 
+    /// A2, an attacker on the network path (a café's Wi-Fi, a hostile router), serves or rewrites a page of a site the
+    /// person really has an account on, loaded over plain `http`: whatever is filled there, the attacker reads, and the
+    /// page's scripts and form are the attacker's. The host is right, so the scope check alone would fill. The owner's
+    /// rule (PRD F6.9, 2026-11-16): nothing that puts a secret into the page is done for it, the person's explicit
+    /// choice included, and no login is saved from it. The same requests over `https` release, which keeps the sweep
+    /// honest.
+    @Test("a page at http://bank.example gets nothing of an item scoped bank.example, even when it is chosen")
+    func plainHTTPPage() async throws {
+        let item = Item(
+            id: Fixtures.id(9), vaultID: Fixtures.vaultID, title: "Bank", scopes: [ServiceScope(host: "bank.example")],
+            fields: [
+                Field(id: Fixtures.id(901), kind: .username, label: "Username", value: "pat"),
+                Field(id: Fixtures.id(902), kind: .password, label: "Password", value: "bank-password"),
+                Fixtures.totp("bank-example-totp-01", id: Fixtures.id(903)),
+                Field(id: Fixtures.id(904), kind: .accountNumber, label: "Account", value: "12345678"),
+            ], version: 1)
+        let harness = AutoFillHarness(items: [item])
+        for page in ["http://bank.example/login", "HTTP://BANK.example/", "http://www.bank.example/"] {
+            let identifier = Fixtures.url(page)
+            let released = await Self.releases(of: item, to: [identifier], model: harness.model)
+            #expect(released.isEmpty, "\(page): \(released)")
+            let list = await harness.model.credentialList(for: [identifier])
+            let codes = await harness.model.oneTimeCodeList(for: [identifier])
+            let text = await harness.model.textInsertionList(for: [identifier])
+            #expect(list == .refused(.gate(.insecurePage(try HostNormalizer.normalize(identifier)))), "\(page)")
+            #expect(codes == .refused(.gate(.insecurePage(try HostNormalizer.normalize(identifier)))), "\(page)")
+            #expect(text == .refused(.gate(.insecurePage(try HostNormalizer.normalize(identifier)))), "\(page)")
+            let save = SavePasswordRequest(serviceIdentifier: identifier, userName: "pat", password: "typed")
+            #expect(await harness.model.savePassword(save, to: .existingItem(item.id)).refusal?.isGateRefusal == true)
+            #expect(await harness.model.savePasswordWithoutInteraction(save).refusal?.isGateRefusal == true)
+        }
+        #expect(await harness.vault.saves.isEmpty)
+        let secure = await Self.releases(
+            of: item, to: [Fixtures.url("https://bank.example/login")], model: harness.model)
+        #expect(!secure.isEmpty)
+    }
+
     struct Site: Sendable, CustomTestStringConvertible {
         var identifier: ServiceIdentifier
         var legitimate: UUID
@@ -390,7 +427,6 @@ struct AdversarialAutoFillRequestTests {
                         #expect(
                             list.passwords.filter { $0.userName == user }.map(\.itemID) == [item.id],
                             "round \(round): \(user) is not one account on \(probe)")
-                        #expect(!list.otherAccounts.contains { $0.itemID == item.id })
                     }
                 }
             }

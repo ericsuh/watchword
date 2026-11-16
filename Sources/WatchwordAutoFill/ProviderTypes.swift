@@ -14,8 +14,9 @@ import WatchwordModel
 public enum ProviderRefusal: Error, Equatable, Sendable {
     /// The system named no site or app, so there is no host to authorise a release for.
     case noServiceIdentifier
-    /// `AutoFillGate` refused: the identifier is not a usable hostname, nothing is scoped to the host, or the chosen
-    /// item is not for it. Carries the look-alike assessment, so the extension can say why.
+    /// `AutoFillGate` refused: the identifier is not a usable hostname, the page was loaded over plain `http`, nothing
+    /// is scoped to the host, or the chosen item is not for it. Carries the look-alike assessment, so the extension
+    /// can say why.
     case gate(FillRefusal)
     /// The identity or choice names no item or field the vault holds: a stale identity store, or a made-up one.
     case unknownRecord
@@ -112,29 +113,18 @@ public struct PasskeyEntry: Hashable, Sendable {
     public let reportedUnknown: Bool
 }
 
-/// An account that matches the host less specifically than another one does (PRD F6.6): shown under "other accounts
-/// on this site" so the person can see why it is not offered, never pre-selected, and not released from here. To use
-/// it on this host the person adds the host to the item, in the app (F11.7).
-public struct OtherAccountEntry: Hashable, Sendable {
-    public let itemID: UUID
-    public let title: String
-    public let userName: String
-    public let matchedHost: String
-}
-
 public struct CredentialList: Equatable, Sendable {
     /// The normalised hosts the request named.
     public let hosts: [String]
     public let passwords: [PasswordEntry]
     public let passkeys: [PasskeyEntry]
-    public let otherAccounts: [OtherAccountEntry]
-    /// The one login to offer first: set only when a single item is the most specific match. Never one of
-    /// `otherAccounts`, and `nil` whenever accounts tie (PRD F11.5).
+    /// The one login to offer first: set only when a single item is the most specific match, and `nil` whenever
+    /// accounts tie (PRD F11.5).
     public let suggested: PasswordEntry?
     /// Why no passkey is listed although the request asked for some, if the relying party itself was refused.
     public let passkeyRefusal: ProviderRefusal?
 
-    public var isEmpty: Bool { passwords.isEmpty && passkeys.isEmpty && otherAccounts.isEmpty }
+    public var isEmpty: Bool { passwords.isEmpty && passkeys.isEmpty }
 }
 
 public enum CredentialListOutcome: Equatable, Sendable {
@@ -533,8 +523,8 @@ public struct NewItemProposal: Hashable, Sendable {
     public let userName: String
     /// Set when the host resembles a saved site: the sheet shows it before anything is saved.
     public let warning: LookAlikeWarning?
-    /// How many accounts now offered on the request's host this item would outrank there. They would move to
-    /// "other accounts on this site" and no longer be released on that host from the extension (PRD F6.6). Right
+    /// How many accounts now offered on the request's host this item would outrank there. They would no longer be
+    /// listed or released on that host from the extension, only reachable in the app (PRD F6.6). Right
     /// for a different service under the same domain (scenario S1), wrong for a second account on the same one;
     /// the sheet says so, and offers `besideExisting` as the alternative.
     public let hiddenAccounts: Int
@@ -594,9 +584,13 @@ public struct SavedPassword: Hashable, Sendable {
 public struct GeneratePasswordRequest: Hashable, Sendable {
     /// The site's `passwordrules`, if it declared any.
     public var passwordRules: String?
+    /// The page the password is for, when the system names one (`ASGeneratePasswordsRequest.serviceIdentifier`).
+    /// A page loaded over plain `http` is refused (PRD F6.9).
+    public var serviceIdentifier: ServiceIdentifier?
 
-    public init(passwordRules: String? = nil) {
+    public init(passwordRules: String? = nil, serviceIdentifier: ServiceIdentifier? = nil) {
         self.passwordRules = passwordRules
+        self.serviceIdentifier = serviceIdentifier
     }
 }
 
