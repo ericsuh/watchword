@@ -112,6 +112,27 @@ public struct AccountArchive: Sendable {
             passphrase: passphrase, secretKey: secretKey, archiveID: archiveID, accountID: accountID,
             parameters: parameters, salt: salt, keyID: wrapKeyID)
         defer { wrappingKey.zeroise() }
+        return try seal(
+            entryCount: entryCount, payload: payload, archiveID: archiveID, accountID: accountID, createdAt: createdAt,
+            wrappingKey: wrappingKey, salt: salt, parameters: parameters, using: &generator)
+    }
+
+    /// The same, with the wrapping key already derived by `ArchiveKeyDerivation.wrappingKey` under `salt`,
+    /// `parameters`, `archiveID` and `accountID` (its key ID is the archive's wrap key ID). This is how a caller runs
+    /// the derivation, the one costly step, somewhere other than where it seals: the session derives off its actor so
+    /// a `lock()` never waits for it, then seals here. Everything else is drawn from `generator`, as above.
+    public static func seal<R: RandomNumberGenerator>(
+        entryCount: Int, payload: (Int) throws -> SecureBytes, archiveID: UUID, accountID: UUID, createdAt: Date,
+        wrappingKey: EncryptionKey, salt: [UInt8], parameters: KDFParameters, using generator: inout R
+    ) throws -> [UInt8] {
+        try parameters.validate()
+        guard entryCount >= 0, entryCount <= maximumEntries else {
+            throw AccountArchiveError.tooManyEntries(entryCount)
+        }
+        guard salt.count == parameters.saltLength else {
+            throw CryptoError.saltLengthMismatch(expected: parameters.saltLength, actual: salt.count)
+        }
+        let wrapKeyID = wrappingKey.keyID
         let archiveKey = EncryptionKey.generate(using: &generator)
         defer { archiveKey.zeroise() }
         let wrapped = try RecordCipher.seal(

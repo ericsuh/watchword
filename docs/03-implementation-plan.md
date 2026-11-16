@@ -457,13 +457,14 @@ down.
   envelope kind 9, wrapped under the archive passphrase and the Secret Key, ADR 0008), its export and import
   through the same preview and commit, `ArchivedItems` for its items, a known-answer vector and a whole archive
   from an independent Python implementation, the "encrypted Watchword archive" and "interchange through the
-  session" adversarial areas, and an `archive` fuzz target with that archive as its seed. Not run on a Mac yet:
+  session" adversarial areas, and an `archive` fuzz target with that archive as its seed. Every long step runs off
+  the session's actor (`awayFromSession`), so a lock never waits for one: a plaintext file's parse, an archive's
+  parse, derivation and decoding, and an export's password check and archive derivation. Not run on a Mac yet:
   the archive's PBKDF2 there is CommonCrypto's and its AES-GCM CryptoKit's.
 - Open, all of it integration and most of it Mac-only: `completeUnlessOpen` file protection and the standing
   warning on screen (the session documents both; the app does them); restoring an archive's vaults as vaults
-  (today every archived item goes into the one vault the person chooses, naming the vault it came from); parsing
-  a plaintext file off the session actor, so that a lock does not wait for a large file's parse (an archive's key
-  derivation and decryption already run off it); the restore screen showing `ImportPreview.archiveCreatedAt`; the OS
+  (today every archived item goes into the one vault the person chooses, naming the vault it came from); the restore
+  screen showing `ImportPreview.archiveCreatedAt`; the OS
   Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
   and their XCUITests, including a duplicate screen that names each host a merge would add and asks about it
   (`DuplicateMatch.newHosts`, `MergeChoices`), shows each URL and sign-in field before adding it

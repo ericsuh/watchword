@@ -353,6 +353,46 @@ struct AdversarialSessionInterchangeTests {
         #expect(released.isSet, "lock() returned only after the work had given up waiting")
     }
 
+    /// The session derives an export's wrapping key off its actor and hands it to `seal` (follow-up to X1). A caller
+    /// that passes a key derived under another salt, archive or account, or a salt of the wrong length, must not get
+    /// an archive that opens under someone else's derivation or is silently unreadable without error: the salt is
+    /// checked, and the header names what was derived, so an archive whose key does not match it opens for nobody
+    /// (`authenticationFailed`, as tampering).
+    @Test("an archive sealed with a pre-derived key opens only under the derivation its header names")
+    func preDerivedWrappingKey() throws {
+        var generator = SeededGenerator(seed: 41)
+        let (secretKey, accountID) = (AdversarialArchiveTests.secretKey, AdversarialArchiveTests.accountID)
+        let archiveID = UUID()
+        let salt = SecureBytes(randomCount: KDFParameters.baseline.saltLength, using: &generator).unprotectedCopy()
+        func key(for archive: UUID, salt: [UInt8]) throws -> EncryptionKey {
+            try ArchiveKeyDerivation.wrappingKey(
+                passphrase: Self.passphrase, secretKey: secretKey, archiveID: archive,
+                accountID: accountID,
+                parameters: .baseline, salt: salt, keyID: UUID())
+        }
+        func seal(_ wrappingKey: EncryptionKey, salt: [UInt8]) throws -> [UInt8] {
+            try AccountArchive.seal(
+                entryCount: 1, payload: { _ in SecureBytes(copying: Array("entry".utf8)) }, archiveID: archiveID,
+                accountID: accountID, createdAt: Date(timeIntervalSince1970: 1_800_000_000),
+                wrappingKey: wrappingKey, salt: salt, parameters: .baseline, using: &generator)
+        }
+        let honest = try AccountArchive.parse(try seal(try key(for: archiveID, salt: salt), salt: salt))
+        let opened = try honest.open(passphrase: Self.passphrase, secretKey: secretKey)
+        #expect(opened.map(\.count) == [5])
+
+        #expect(throws: CryptoError.saltLengthMismatch(expected: salt.count, actual: 3)) {
+            _ = try seal(try key(for: archiveID, salt: salt), salt: [1, 2, 3])
+        }
+        var otherSalt = salt
+        otherSalt[0] ^= 1
+        for wrong in [try key(for: UUID(), salt: salt), try key(for: archiveID, salt: otherSalt)] {
+            let archive = try AccountArchive.parse(try seal(wrong, salt: salt))
+            #expect(throws: CryptoError.authenticationFailed) {
+                _ = try archive.open(passphrase: Self.passphrase, secretKey: secretKey)
+            }
+        }
+    }
+
     /// The same path end to end: A7 raises an archive's iteration count within the bounds (parse accepts it), and
     /// the preview, deriving off the actor, fails as authentication and leaves the session unlocked with nothing
     /// staged.

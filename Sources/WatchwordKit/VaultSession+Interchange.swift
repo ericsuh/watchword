@@ -160,8 +160,16 @@ struct PendingImport: Sendable {
 
 /// The long steps the session runs off its actor (`awayFromSession`), so that `lock()` never waits for them.
 enum AwayWork: Sendable, Hashable {
-    /// An archive's key derivation at the file's iteration count, and its decryption.
+    /// A plaintext import file's parse into drafts (CSV, 1PUX, CXF).
+    case importParse
+    /// An archive's parse: bounds, envelopes' places, SHA-256 over up to 256 MiB.
+    case archiveParse
+    /// An archive's key derivation at the file's iteration count, its decryption and its entries' assembly.
     case archiveDerivation
+    /// The account password's derivation before an export.
+    case passwordCheck
+    /// A new archive's key derivation, under this account's parameters.
+    case archiveKeyDerivation
 }
 
 /// What an archive entry holds: the first byte of its plaintext.
@@ -193,22 +201,27 @@ extension VaultSession {
     ///
     /// The drafts, which hold every secret in the file, stay in the session until `commitImport`, `discardImport`,
     /// the next preview or `lock()`, whichever comes first; a `discardImport()` or newer preview while this one is
-    /// still being read wins, and this one throws `noPendingImport`. The parse runs on the session and is bounded
-    /// by `InterchangeLimits`.
+    /// still being read wins, and this one throws `noPendingImport`. The parse is bounded by `InterchangeLimits` and
+    /// runs off the session's actor (`awayFromSession`), on the file's bytes and nothing of the session's, with IDs
+    /// from a fork of the session's generator: a `lock()` meanwhile takes effect at once, and this call then throws
+    /// `locked`.
     public func previewImport(
         _ bytes: [UInt8], format: ImportFileFormat, into vaultID: UUID, options: ImportOptions = ImportOptions()
     ) async throws -> ImportPreview {
         let epoch = lockEpoch
         let generation = beginImport()
         try await requireWritableVault(vaultID, since: epoch)
-        let result: ImportResult
-        switch format {
-        case .passwordCSV:
-            result = try PasswordCSV.importFile(bytes, into: vaultID, options: options, using: &random)
-        case .onePUX:
-            result = try OnePUX.importArchive(bytes, into: vaultID, options: options, using: &random)
-        case .credentialExchange:
-            result = try CredentialExchange.importDocument(bytes, into: vaultID, options: options, using: &random)
+        let fork = ForkedGenerator(forkingFrom: &random)
+        let result = try await awayFromSession(.importParse, since: epoch) { () -> ImportResult in
+            var fork = fork
+            switch format {
+            case .passwordCSV:
+                return try PasswordCSV.importFile(bytes, into: vaultID, options: options, using: &fork)
+            case .onePUX:
+                return try OnePUX.importArchive(bytes, into: vaultID, options: options, using: &fork)
+            case .credentialExchange:
+                return try CredentialExchange.importDocument(bytes, into: vaultID, options: options, using: &fork)
+            }
         }
         return try await stage(result, vaultID: vaultID, since: epoch, generation: generation)
     }
@@ -222,8 +235,9 @@ extension VaultSession {
     /// restore screen to show.
     ///
     /// The derivation costs what the archive's header says (up to `KDFParameters.maximumIterations`, seconds on a
-    /// phone) before anything in the file is authenticated, so it runs off the session's actor, with the decryption
-    /// and decoding of the entries: a `lock()` meanwhile takes effect at once, and this call then throws `locked`.
+    /// phone) before anything in the file is authenticated, so it runs off the session's actor, with the parse (up to
+    /// 256 MiB, hashed), the decryption and decoding of the entries and their assembly into drafts: a `lock()`
+    /// meanwhile takes effect at once, and this call then throws `locked`.
     public func previewArchiveImport(
         _ bytes: [UInt8], passphrase: String, secretKey text: String? = nil, into vaultID: UUID,
         options: ImportOptions = ImportOptions()
@@ -232,7 +246,7 @@ extension VaultSession {
         let generation = beginImport()
         try await requireWritableVault(vaultID, since: epoch)
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
-        let archive = try AccountArchive.parse(bytes)
+        let archive = try await awayFromSession(.archiveParse, since: epoch) { try AccountArchive.parse(bytes) }
         let secretKey: SecretKey
         if let text {
             var keyText = text
@@ -249,10 +263,12 @@ extension VaultSession {
         }
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
-        let entries = try await awayFromSession(.archiveDerivation, since: epoch) {
-            try Self.archivedEntries(of: archive, passphrase: passphrase, secretKey: secretKey)
+        let fork = ForkedGenerator(forkingFrom: &random)
+        let result = try await awayFromSession(.archiveDerivation, since: epoch) { () -> ImportResult in
+            var fork = fork
+            let entries = try Self.archivedEntries(of: archive, passphrase: passphrase, secretKey: secretKey)
+            return try ArchivedItems.importEntries(entries, into: vaultID, options: options, using: &fork)
         }
-        let result = try ArchivedItems.importEntries(entries, into: vaultID, options: options, using: &random)
         return try await stage(
             result, vaultID: vaultID, since: epoch, generation: generation,
             archive: (archive.archiveID, archive.createdAt))
@@ -405,6 +421,20 @@ extension VaultSession {
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
 
+        // The derivation, under this account's calibrated parameters, runs off the actor like the password check; the
+        // archive's ID, salt and keys come from the session's generator, here.
+        let parameters = try kdfParameters()
+        let archiveID = UUID.random(using: &random)
+        let salt = SecureBytes(randomCount: parameters.saltLength, using: &random).unprotectedCopy()
+        let wrapKeyID = UUID.random(using: &random)
+        let accountID = record.accountID
+        let wrappingKey = try await awayFromSession(.archiveKeyDerivation, since: epoch) {
+            try ArchiveKeyDerivation.wrappingKey(
+                passphrase: passphrase, secretKey: secretKey, archiveID: archiveID, accountID: accountID,
+                parameters: parameters, salt: salt, keyID: wrapKeyID)
+        }
+        defer { wrappingKey.zeroise() }
+
         // One entry's plaintext in protected storage at a time: `seal` zeroises each as soon as it is sealed.
         let vaults = chosen.vaults
         let items = chosen.items
@@ -420,8 +450,8 @@ extension VaultSession {
                 defer { encoded.zeroise() }
                 return SecureBytes.concatenating([SecureBytes(copying: [ArchivePayload.item]), encoded])
             },
-            archiveID: UUID.random(using: &random), accountID: record.accountID, createdAt: now,
-            passphrase: passphrase, secretKey: secretKey, parameters: try kdfParameters(), using: &random)
+            archiveID: archiveID, accountID: accountID, createdAt: now, wrappingKey: wrappingKey, salt: salt,
+            parameters: parameters, using: &random)
         _ = try requireKeys(since: epoch)
         return ArchiveExport(
             bytes: bytes, itemCount: chosen.items.count, vaultCount: chosen.vaults.count,
@@ -474,10 +504,10 @@ extension VaultSession {
     }
 
     /// Runs `work` off the session's actor, then requires that no `lock()` came meanwhile (CLAUDE.md: `lock()`
-    /// always wins). For work whose cost the caller does not control and that touches none of the session's keys:
-    /// an archive's derivation, whose iteration count is the file's. On the actor it would hold `lock()`, auto-lock
-    /// and sync behind it with the vault keys resident; here a lock zeroises them at once, and what `work` produced
-    /// is dropped.
+    /// always wins). For long work that touches none of the session's keys, on inputs copied for it (`AwayWork` names
+    /// each): on the actor it would hold `lock()`, auto-lock and sync behind it with the vault keys resident; here a
+    /// lock zeroises them at once, and what `work` produced is dropped. Whatever key-bearing input `work` is given (a
+    /// Secret Key read for the call, a password) is the caller's to zeroise once this returns, whatever it returns.
     func awayFromSession<T: Sendable>(
         _ step: AwayWork, since epoch: UInt64, _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
@@ -555,17 +585,24 @@ extension VaultSession {
 
     /// Re-verifies the account password against the stored header, as `deleteAccount` does: the derivation under
     /// the header's own parameters, then the keyset must open. Throws `CryptoError.authenticationFailed` otherwise.
+    ///
+    /// The derivation costs what the account's parameters say, with every key resident, so it runs off the actor
+    /// (`awayFromSession`) on copies: the password, the Secret Key read for this call, and the stored header. What it
+    /// derives and unwraps is zeroised there before it returns, and a `lock()` meanwhile wins (`locked`).
     func verifyAccountPassword(_ password: String, since epoch: UInt64) async throws -> AccountRecord {
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
         let secretKey = try await storedSecretKey(accountID: record.accountID)
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
-        let verified = try deriveUnlockKey(password: password, secretKey: secretKey, account: record)
-        defer { verified.zeroise() }
-        try Keyset.unwrap(
-            record.wrappedKeyset, accountID: record.accountID, with: verified, recordVersion: record.keysetVersion
-        ).zeroise()
-        _ = try requireKeys(since: epoch)
+        try await awayFromSession(.passwordCheck, since: epoch) {
+            let verified = try TwoSecretKeyDerivation.accountUnlockKey(
+                password: password, secretKey: secretKey, accountID: record.accountID, parameters: record.kdf,
+                salt: record.salt, keyID: record.unlockKeyID)
+            defer { verified.zeroise() }
+            try Keyset.unwrap(
+                record.wrappedKeyset, accountID: record.accountID, with: verified, recordVersion: record.keysetVersion
+            ).zeroise()
+        }
         return record
     }
 

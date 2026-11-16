@@ -5,9 +5,9 @@ import WatchwordTestSupport
 
 @testable import WatchwordKit
 
-/// `lock()` never waits for long work on the session's actor (CLAUDE.md, `VaultSession` invariants), through the
-/// public call that does it: an archive preview's key derivation (review finding X1), guarded here at the session
-/// rather than only at `awayFromSession`. A7 chooses the file and its cost; A3, holding the unlocked device, or auto-lock,
+/// `lock()` never waits for long work on the session's actor (CLAUDE.md, `VaultSession` invariants), through each
+/// public call that does such work: an import file's parse, an archive's parse and key derivation, and the
+/// derivations behind an export. A7 chooses the file and its cost; A3, holding the unlocked device, or auto-lock,
 /// locks meanwhile. Each test holds the step off the actor (`awayWorkHook`) until the test has locked, so the lock can
 /// only have returned if the step was off the actor; the call must then end in `locked`, with nothing staged. With
 /// the step back on the actor, the lock waits out the hook's 60-second bound and the test fails. In the suite
@@ -39,9 +39,23 @@ extension AdversarialSessionInterchangeTests {
         await vault.session.setAwayWorkHook(nil)
     }
 
-    @Test("a lock while an archive's key is derived takes effect at once, and the preview then fails")
+    static let file = Array(
+        """
+        Title,URL,Username,Password,Notes,OTPAuth
+        Bank,https://bank.example/,wendy,bank-pw,,
+        """.utf8)
+
+    @Test("a lock while an import file is parsed takes effect at once, and the preview then fails")
+    func lockWinsDuringImportParse() async throws {
+        let (vault, personal) = try await Self.vault()
+        try await Self.lockWins(at: .importParse, in: vault) {
+            try await vault.session.previewImport(Self.file, format: .passwordCSV, into: personal)
+        }
+    }
+
+    @Test("a lock while an archive is parsed, or its key derived, takes effect at once, and the preview then fails")
     func lockWinsDuringArchivePreview() async throws {
-        for step in [AwayWork.archiveDerivation] {
+        for step in [AwayWork.archiveParse, .archiveDerivation] {
             let (vault, personal) = try await Self.vault()
             try await vault.session.save(Self.bank(personal))
             let archive = try await vault.session.exportArchive(
@@ -49,6 +63,22 @@ extension AdversarialSessionInterchangeTests {
             try await Self.lockWins(at: step, in: vault) {
                 try await vault.session.previewArchiveImport(
                     archive.bytes, passphrase: Self.passphrase, into: personal)
+            }
+        }
+    }
+
+    @Test("a lock while an export checks the account password, or derives the archive's key, takes effect at once")
+    func lockWinsDuringExport() async throws {
+        let (vault, personal) = try await Self.vault()
+        try await vault.session.save(Self.bank(personal))
+        try await Self.lockWins(at: .passwordCheck, in: vault) {
+            try await vault.session.exportPlaintext(.onePUX, vaults: [personal], password: TestVault.password)
+        }
+        for step in [AwayWork.passwordCheck, .archiveKeyDerivation] {
+            try await vault.session.unlock(password: TestVault.password)
+            try await Self.lockWins(at: step, in: vault) {
+                try await vault.session.exportArchive(
+                    vaults: [personal], passphrase: Self.passphrase, password: TestVault.password)
             }
         }
     }

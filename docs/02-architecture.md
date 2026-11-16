@@ -2421,14 +2421,24 @@ whatever a caller put there). A merge is an edit of the existing item, `Duplicat
 item as the write reads it, so nothing written since the preview is undone, with only the hosts and fields in
 `MergeChoices`. An entry the source had in its trash (when the person asked for those) is saved, then moved to the
 trash through `trash(id:)`. One item fails alone (`ImportOutcome.failed`); a `lock()` during a commit stops it
-(`importInterrupted(saved:)`) and the preview is gone with the lock. Parsing a plaintext format runs on the session
-actor, bounded by `InterchangeLimits`; a lock waits for a parse in progress. An archive's key derivation does not:
-its cost is the iteration count in the file's cleartext header (up to the 25M ceiling, seconds on a phone) and
-nothing in the file is authenticated until it ends, so on the actor it would hold `lock()`, auto-lock and sync
-behind a file's choice with the vault keys resident. The derivation, decryption and decoding run off the actor
-(`awayFromSession`), touching none of the session's keys, and the lock epoch is checked when they return: a lock
-meanwhile takes effect at once, and the preview throws `locked`. (An unlock's derivation runs on the actor, but
-under the account's own parameters and with no keys resident.)
+(`importInterrupted(saved:)`) and the preview is gone with the lock.
+
+**`lock()` never waits for interchange work.** Every step whose cost the file or the account's parameters set runs
+off the session's actor (`awayFromSession`, each step named by `AwayWork`): a plaintext file's parse into drafts
+(bounded by `InterchangeLimits`, but a 100 MB file is still seconds), an archive's parse (up to 256 MiB, with
+SHA-256 over it), its key derivation at the iteration count in its cleartext header (up to the 25M ceiling,
+seconds on a phone, before anything in the file is authenticated), its decryption and the assembly of its entries,
+and an export's account-password derivation and new archive's derivation, both under this account's parameters
+with every key resident. On the actor each would hold `lock()`, auto-lock and sync behind it with the vault keys
+resident. Each runs on inputs copied for it and touches none of the session's state: the file's bytes, the
+password or passphrase, a Secret Key read for the call (zeroised by the caller when the step returns, whatever it
+returns), the stored header; what it derives or unwraps is zeroised inside it. A parse draws its item and field IDs
+from a `ForkedGenerator` (HMAC-SHA-256 in counter mode, keyed by four words drawn from the session's generator on
+the actor), because the session's generator cannot cross threads and a copy of a seeded one would replay the IDs
+the session draws next; an archive's salt, keys and nonces still come from the session's own generator, on the
+actor, with only the derivation away (`AccountArchive.seal(…wrappingKey:salt:…)`). The lock epoch is checked when
+each step returns: a lock meanwhile takes effect at once, and the call throws `locked` with nothing staged. (An
+unlock's derivation runs on the actor, but under the account's own parameters and with no keys resident.)
 
 **Plaintext export needs the account password, in the same call.** `exportPlaintext(_:vaults:password:)`
 re-derives the Account Unlock Key from the password under the stored header's own KDF parameters and opens the

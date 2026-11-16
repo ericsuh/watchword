@@ -155,7 +155,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   `SoftwareDeviceKey`, `EnrolmentKey`), the device registry (`RegistryEntry`, `DeviceRegistry.evaluate`), the
   published account header (`AccountHeaderObject`), `DeviceLocalKeys` (the hygiene reuse key and the key and
   record names of a device's unsynced local records), and the encrypted Watchword archive (`AccountArchive`,
-  `ArchiveKeyDerivation`; ADR 0008). Depends on `SecureMemory` and `WatchwordEnvelope`.
+  `ArchiveKeyDerivation`; ADR 0008), and `ForkedGenerator` (IDs for work off an actor). Depends on `SecureMemory` and
+  `WatchwordEnvelope`.
 - **`WatchwordStore`** — the `RecordStore` port, `InMemoryRecordStore` and `SQLiteRecordStore` (the App Group
   ciphertext database). Envelopes plus storage locations only; never keys.
 - **`WatchwordSync`** — milestone 3's portable half: object layout, the `SyncTransport` port with
@@ -511,8 +512,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - The archive is sealed under the archive passphrase *and* the Secret Key (ADR 0008); `AccountArchive.parse`
   checks everything, KDF bounds and every envelope's place included, before a key is derived, and every failure
   after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.
-  Its derivation costs what the file says, so it runs off the actor (`awayFromSession`), never on it, and entries are
-  opened and decoded one at a time; only `Item.isTrashedByPerson` comes back as trash.
+  Entries are opened and decoded one at a time; only `Item.isTrashedByPerson` comes back as trash.
+- `lock()` never queues behind interchange work: a plaintext file's parse, an archive's parse, derivation and
+  decoding, and an export's password and archive derivations run off the actor (`awayFromSession`, named by
+  `AwayWork`) on copied inputs, touching no session state, and the epoch is checked on return (`requireKeys(since:)`).
+  IDs drawn there come from a `ForkedGenerator`, never a copy of `random`; key material, salts and nonces only from
+  `random`, on the actor. A new long step goes there too, with a test that holds it (`awayWorkHook`) and locks.
 - Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
   exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
   signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting
