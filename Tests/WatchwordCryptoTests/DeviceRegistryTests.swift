@@ -54,13 +54,14 @@ struct DeviceKeyTests {
             try DeviceSignatures.verify(
                 Self.ed25519Signature, for: Self.message, domain: .logSegment, deviceID: UUID(), key: key)
         }
-        // The software key signs the same bytes to the same signature (Ed25519 is deterministic).
+        // The software key is the same key, and what it signs verifies under it. Its signature is not compared with
+        // the vector's bytes: CryptoKit's Ed25519 signing is randomised (swift-crypto's BoringSSL is not), so only
+        // verification is portable.
         let software = try SoftwareDeviceKey(seed: SecureBytes(copying: (0..<32).map { UInt8($0) }))
         #expect(try software.publicKey() == key)
-        #expect(
-            try software.sign(
-                prepared: DeviceSignatures.signedBytes(
-                    domain: .logSegment, deviceID: Self.deviceID, message: Self.message)) == Self.ed25519Signature)
+        let signed = try software.sign(
+            prepared: DeviceSignatures.signedBytes(domain: .logSegment, deviceID: Self.deviceID, message: Self.message))
+        try DeviceSignatures.verify(signed, for: Self.message, domain: .logSegment, deviceID: Self.deviceID, key: key)
     }
 
     @Test("a P-256 signature as a Secure Enclave key makes verifies; its high-S twin is refused")
@@ -109,14 +110,22 @@ struct DeviceKeyTests {
         #expect(
             try enrolment.publicKey()
                 == [UInt8](hex: "874c5b64c92374c3560c407e9bd1b679f439b75d41b1d6716ffb0c3b4ccce73d"))
-        let signature = try enrolment.sign([0x02] + Array("entry".utf8), domain: .deviceRegistry)
-        #expect(
-            signature
-                == [UInt8](
-                    hex: """
-                        c29d05909768b00c1b19d8e57d018b3b8ec9e51793ef4042971e05acf3851bdd7001fe00c7a5af537f967bc2d020
-                        d86bd9bc8b1e00987e0008d4ba3c0070260a
-                        """))
+        let publicKey = [UInt8](hex: "874c5b64c92374c3560c407e9bd1b679f439b75d41b1d6716ffb0c3b4ccce73d")
+        let message = [0x02] + Array("entry".utf8)
+        // The independent implementation's signature verifies under the derived key, and so does ours. The bytes of
+        // ours are not compared: CryptoKit's Ed25519 signing is randomised, swift-crypto's is not.
+        let independent = [UInt8](
+            hex: """
+                c29d05909768b00c1b19d8e57d018b3b8ec9e51793ef4042971e05acf3851bdd7001fe00c7a5af537f967bc2d020
+                d86bd9bc8b1e00987e0008d4ba3c0070260a
+                """)
+        try Signatures.verify(independent, for: message, domain: .deviceRegistry, signingKey: publicKey)
+        try Signatures.verify(
+            try enrolment.sign(message, domain: .deviceRegistry), for: message, domain: .deviceRegistry,
+            signingKey: publicKey)
+        #expect(throws: CryptoError.signatureInvalid) {
+            try Signatures.verify(independent, for: message, domain: .logSegment, signingKey: publicKey)
+        }
         // Another account, or another AUK, is another key.
         #expect(try EnrolmentKey.derive(from: unlockKey, accountID: UUID()).publicKey() != enrolment.publicKey())
     }
