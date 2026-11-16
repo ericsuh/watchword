@@ -1794,7 +1794,7 @@ source, commit and licence (`07-supply-chain.md` §2.2):
 | Common passwords | 10,000 | zxcvbn `data/passwords.txt` (MIT), most common first |
 | English words | 5,000 | zxcvbn `data/english_wikipedia.txt` (MIT) |
 | Surnames, female and male given names | 500 + 300 + 300 | zxcvbn (MIT; 1990 US census) |
-| EFF large wordlist | 7,776 | EFF (CC BY 3.0 US), via a mirror, cross-checked against a second |
+| EFF large wordlist | 7,776 | EFF (CC BY 3.0 US), via a mirror, cross-checked against a second and verified against EFF's own file (2026-11-16) |
 
 A word's cost is its rank in its list. The EFF list is not a frequency list, so every word in it costs
 7,776: a generated passphrase of `n` words is estimated at about `7776^n`, the figure §12 reports.

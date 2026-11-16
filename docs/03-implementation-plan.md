@@ -375,8 +375,10 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
 - `BGProcessingTask` / `NSBackgroundActivityScheduler` glue that wakes the loop.
 - The report UI, per-item badges in the item list, settings for the site directory and the HIBP API key, and
   the UI snapshot tests.
-- The embedded EFF list came from a mirror (eff.org was unreachable); compare it with EFF's file before the
-  generator draws passphrases from it, and keep one copy when the generator gains its own.
+- The embedded EFF list came from a mirror (eff.org was unreachable). **Verified** on 2026-11-16 against EFF's
+  own file, https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt (downloaded that day; SHA-256
+  `addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`, identical to the mirror's; all 7,776 words
+  equal, in order). Still open: keep one copy when the generator gains its own.
 
 ## Milestone 7 — Interchange (parsers, exporters and fuzz targets done)
 

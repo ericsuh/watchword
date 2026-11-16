@@ -99,7 +99,7 @@ nothing to load at run time. Each file's header names its source, the commit it 
 | `WordListCommonPasswords.swift` | 10,000 common passwords | zxcvbn `data/passwords.txt`, commit `67c4ece9`, MIT |
 | `WordListEnglish.swift` | 5,000 English words | zxcvbn `data/english_wikipedia.txt`, same commit, MIT |
 | `WordListNames.swift` | 500 surnames, 300 + 300 given names | zxcvbn, same commit, MIT (1990 US census) |
-| `WordListEFF.swift` | EFF large wordlist, 7,776 words | EFF, CC BY 3.0 US; text from a GitHub mirror (ulif/diceware `b3138e95`, SHA-256 `addd3553…b903e`), compared word for word with a second (redacted/XKCD-password-generator `b9813612`) because eff.org was unreachable |
+| `WordListEFF.swift` | EFF large wordlist, 7,776 words | EFF, CC BY 3.0 US; text from a GitHub mirror (ulif/diceware `b3138e95`, SHA-256 `addd3553…b903e`), compared word for word with a second (redacted/XKCD-password-generator `b9813612`) because eff.org was unreachable; verified against EFF's own `eff_large_wordlist.txt` on 2026-11-16 (same SHA-256, all 7,776 words equal, in order) |
 | `SiteDirectoryData.swift` | about 240 domains: TOTP and passkey support | 2factorauth/twofactorauth `9b39477c` (MIT) and 2factorauth/passkeys `ede77017` (CC BY 4.0), retrieved 2026-11-15 |
 
 - **[enforced]** `StrengthEstimatorTests` asserts each list's exact count, that the EFF list has 7,776 unique
