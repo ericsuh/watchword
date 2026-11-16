@@ -612,6 +612,15 @@ account password and the Secret Key (typed, or the Emergency Kit's setup code, w
 6. Commit the account, pin the registry in the Keychain, and leave the vault unlocked. The first sync publishes
    the registration, and the others accept the device's writes from then on.
 
+**A store restored onto other hardware** arrives without its device key (Keychain items never leave a device), so
+at its first unlock the installation registers as a new device under a new ID. The engine publishes only its own
+device's rows, so what the old ID wrote and never published would otherwise stay on this device alone (F7.7): in
+the commit that registers it, every row of the old ID that the restored sync state does not record as published is
+written again by the new ID, unchanged (`ItemMerge.written`, one version up), and each of the old ID's verified
+pending deletions is recorded again as the new ID's, stamped above it. A vault's name, being last-writer-wins, is
+carried over only when the sync state says it was unpublished, so a stale backup cannot override a later rename.
+Each vault's sync state then starts over: the old ID's stream is not this device's to continue.
+
 What a store that replays the account's *entire* earlier state can do: show a new device the account as it was
 (only with the password of that time, so the person has to type an old password for it to work). That device
 then holds nothing newer than that state and none of its writes are accepted by devices that have moved on;

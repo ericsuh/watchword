@@ -566,11 +566,17 @@ extension VaultSession {
 
     /// Registers this installation with the enrolment key, which the session can derive because it holds the
     /// Account Unlock Key: the same proof a new device gives (PRD F5.2).
+    ///
+    /// As a new device (a store restored onto other hardware), what the old device ID wrote and never published is
+    /// carried over, or nobody would ever publish it (`SyncEngine` publishes only rows of its own device): each such
+    /// row is written again by the new ID, unchanged (`ItemMerge.written`), in the commit that registers it, and
+    /// each of the old ID's pending deletions is recorded again as the new ID's (PRD F7.7).
     func registerThisDevice(account: AccountRecord, keys: UnlockedKeys, asNewDevice: Bool) async throws {
         let epoch = lockEpoch
         let view = try await registry(account)
         var updated = account
         if asNewDevice { updated.deviceID = UUID.random(using: &random) }
+        let unpublished = asNewDevice ? try await unpublishedRows(of: account) : (rows: [], deletions: [:])
         let now = await clock.now()
         let keys = try requireKeys(since: epoch)
         let enrolment = EnrolmentKey.derive(from: keys.accountUnlockKey, accountID: account.accountID)
@@ -594,16 +600,98 @@ extension VaultSession {
             body: .add(RegistryDevice(id: updated.deviceID, key: deviceKey, label: label)), account: updated,
             keyset: keyset, enrolment: enrolment)
         var change = StoreChange(upserts: [Self.registryRow(entry, account: updated)])
-        if asNewDevice { change.account = .update(updated, expectedKeysetVersion: account.keysetVersion) }
+        if asNewDevice {
+            change.account = .update(updated, expectedKeysetVersion: account.keysetVersion)
+            for row in try carriedOver(unpublished.rows, keys: try requireKeys(since: epoch), as: updated) {
+                change.upserts.append(row.row)
+                change.expectations[row.row.key] = .version(row.replacing)
+            }
+        }
         try await store.commit(change)
         if asNewDevice {
             self.account = updated
-            // What the old device ID published and acknowledged is not this device's to continue.
-            try? await syncSettings?.state.eraseAll()
+            for row in change.upserts where row.kind == .item || row.kind == .vaultMetadata {
+                highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, row.version)
+            }
+            try? await startNewDeviceSyncState(carrying: unpublished.deletions, as: updated)
         }
         registryView = nil
         if let refreshed = try? await registry(updated) {
             try? await pinRegistry(refreshed, accountID: account.accountID)
+        }
+    }
+
+    /// The rows this device wrote that its sync state does not record as published, and its pending deletions
+    /// (those that verify), per vault: what a store restored onto other hardware holds that no other device has.
+    func unpublishedRows(of account: AccountRecord) async throws -> (
+        rows: [StoredRecord], deletions: [UUID: [RecordKey: PendingDeletion]]
+    ) {
+        guard let base = syncSettings?.state, let syncState else { return ([], [:]) }
+        var rows: [StoredRecord] = []
+        var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
+        for vaultID in try await vaultDirectory(account).keys {
+            let state = try await base.loadState(vaultID: vaultID)
+            let published = state?.published ?? [:]
+            // Items merge by what each value's writer had seen, so carrying one over that was published after all
+            // changes nothing. A vault's name is last-writer-wins: carried over without knowing it was unpublished,
+            // an old name would win over a newer rename, so it is carried only when the state says so.
+            let kinds: [EnvelopeKind] = state == nil ? [.item] : [.item, .vaultMetadata]
+            for kind in kinds {
+                for row in try await store.records(in: vaultID, kind: kind) where row.deviceID == account.deviceID {
+                    if let stamp = published[row.key], stamp >= RecordStamp(row) { continue }
+                    rows.append(row)
+                }
+            }
+            let pending = try await syncState.pendingDeletions(vaultID: vaultID)
+            if !pending.isEmpty { deletions[vaultID] = pending }
+        }
+        return (rows, deletions)
+    }
+
+    /// Each row as the version `updated`'s device writes next: the same content, one version up, sealed under the
+    /// vault's current key. A row that does not open is left as it is; it carries nothing this device can read.
+    func carriedOver(_ rows: [StoredRecord], keys: UnlockedKeys, as updated: AccountRecord) throws -> [(
+        row: StoredRecord, replacing: UInt64
+    )] {
+        var result: [(row: StoredRecord, replacing: UInt64)] = []
+        for row in rows {
+            guard let vaultKey = currentVaultKey(row.vaultID, keys: keys, account: updated) else { continue }
+            let revision = try nextRevision(in: row.vaultID, above: row, account: updated)
+            highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, revision.version)
+            switch row.kind {
+            case .item:
+                guard let item = try? openItem(row, keys: keys) else { continue }
+                let written = ItemMerge.written(item, as: revision)
+                result.append((try sealItem(written, vaultKey: vaultKey, account: updated), row.version))
+            case .vaultMetadata:
+                guard var metadata = try? openMetadata(row, keys: keys) else { continue }
+                metadata.version = revision.version
+                result.append((try sealMetadata(metadata, vaultKey: vaultKey, account: updated), row.version))
+            default:
+                continue
+            }
+        }
+        return result
+    }
+
+    /// The sync state of a new device ID: what the old ID published and acknowledged is not this device's to
+    /// continue (its stream, its sequence numbers), so each vault starts over — but the old ID's pending deletions
+    /// are recorded again as this device's, each stamped above the old one so that it replaces it in one write.
+    func startNewDeviceSyncState(carrying deletions: [UUID: [RecordKey: PendingDeletion]], as updated: AccountRecord)
+        async throws
+    {
+        guard let base = syncSettings?.state, let syncState else { return }
+        for pending in deletions.values {
+            for deletion in pending.values where deletion.stamp.version < .max {
+                try await syncState.addPendingDeletion(
+                    PendingDeletion(
+                        stamp: RecordStamp(
+                            version: deletion.stamp.version + 1, device: updated.deviceID, deleted: true),
+                        record: deletion.record))
+            }
+        }
+        for vaultID in try await vaultDirectory(updated).keys {
+            try await base.saveState(SyncState(vaultID: vaultID))
         }
     }
 

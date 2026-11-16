@@ -200,6 +200,52 @@ struct EnrolmentTests {
         #expect(try await a.session.items(in: work.id).items.map(\.title).contains("From the restored phone"))
         #expect(try await a.session.devices().map(\.name) == ["Kitchen Mac", "Restored phone"])
     }
+
+    /// PRD F7.7: a backup taken before the device synced holds edits and deletions nobody else has. Restored onto
+    /// new hardware it is a new device, and the engine publishes only its own device's rows; unless they are carried
+    /// over to the new ID, those edits exist on one device only, for good.
+    @Test("a store restored onto other hardware publishes what its old device had not: edits and deletions")
+    func restoredStoreCarriesUnsyncedWork() async throws {
+        let fleet = try await Fleet.make(2)
+        let (a, c) = (fleet.devices[0], fleet.devices[1])
+        let kit = try await a.session.emergencyKit()
+        let doomed = try await a.session.save(login(fleet.personal, title: "Deleted on A, never synced"))
+        let kept = try await a.session.save(login(fleet.personal, title: "Edited on A, never synced"))
+        try await fleet.settle()
+        try await a.session.trash(id: doomed.id)
+        try await a.session.deletePermanently(id: doomed.id)
+        var edit = try await a.session.item(id: kept.id)
+        edit.notes = "only in the backup"
+        try await a.session.save(edit)
+        let created = try await a.session.save(login(fleet.personal, title: "Saved on A, never synced"))
+
+        // The backup: the database and the sync state beside it, but no Keychain item. A never syncs again.
+        let original = try #require(a.store as? InMemoryRecordStore)
+        let restored = InMemoryRecordStore()
+        try await restored.commit(
+            StoreChange(
+                account: .create(try #require(await original.loadAccount())), upserts: await original.allRecords))
+        let state = try #require(a.sync?.state)
+        let restoredState = InMemorySyncStateStore()
+        if let saved = try await state.loadState(vaultID: fleet.personal) { try await restoredState.saveState(saved) }
+        for deletion in try await state.pendingDeletions(vaultID: fleet.personal).values {
+            try await restoredState.addPendingDeletion(deletion)
+        }
+        #expect(try await restoredState.pendingDeletions(vaultID: fleet.personal).count == 1)
+        let b = TestVault(
+            store: restored, sync: SyncSettings(state: restoredState, transport: fleet.transport), seed: 51,
+            deviceName: "Restored phone", deviceKeys: FakeDeviceKeyStore(seed: 51))
+        try await b.session.unlock(password: TestVault.password, secretKey: kit.secretKey)
+        #expect(try #require(await restored.loadAccount()).deviceID != Fleet.deviceID(0))
+
+        try await fleet.settle([b, c])
+        for device in [b, c] {
+            let items = try await device.session.items().items
+            #expect(Set(items.map(\.id)) == [kept.id, created.id], "the deletion reached the other device")
+            #expect(items.first { $0.id == kept.id }?.notes == "only in the backup")
+        }
+        try await fleet.expectConverged([b, c])
+    }
 }
 
 @Suite("Vault session: devices, revocation and password changes")
