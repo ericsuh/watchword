@@ -160,6 +160,9 @@ public actor VaultSession: SharesExecutor {
     var pendingImport: PendingImport?
     /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.
     var importGeneration: UInt64 = 0
+    /// Tests only: called inside every step `awayFromSession` runs, off the actor, before the step itself, so a test
+    /// can hold one there and show that `lock()` does not wait for it. `nil` in production.
+    var awayWorkHook: (@Sendable (AwayWork) -> Void)?
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(

@@ -158,6 +158,12 @@ struct PendingImport: Sendable {
     let matches: [DuplicateMatch]
 }
 
+/// The long steps the session runs off its actor (`awayFromSession`), so that `lock()` never waits for them.
+enum AwayWork: Sendable, Hashable {
+    /// An archive's key derivation at the file's iteration count, and its decryption.
+    case archiveDerivation
+}
+
 /// What an archive entry holds: the first byte of its plaintext.
 enum ArchivePayload {
     static let vault: UInt8 = 1
@@ -243,7 +249,7 @@ extension VaultSession {
         }
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
-        let entries = try await awayFromSession(since: epoch) {
+        let entries = try await awayFromSession(.archiveDerivation, since: epoch) {
             try Self.archivedEntries(of: archive, passphrase: passphrase, secretKey: secretKey)
         }
         let result = try ArchivedItems.importEntries(entries, into: vaultID, options: options, using: &random)
@@ -472,12 +478,23 @@ extension VaultSession {
     /// an archive's derivation, whose iteration count is the file's. On the actor it would hold `lock()`, auto-lock
     /// and sync behind it with the vault keys resident; here a lock zeroises them at once, and what `work` produced
     /// is dropped.
-    func awayFromSession<T: Sendable>(since epoch: UInt64, _ work: @escaping @Sendable () throws -> T) async throws
-        -> T
-    {
-        let outcome = await Task.detached(priority: Task.currentPriority) { Result { try work() } }.value
+    func awayFromSession<T: Sendable>(
+        _ step: AwayWork, since epoch: UInt64, _ work: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        let hook = awayWorkHook
+        let outcome = await Task.detached(priority: Task.currentPriority) {
+            Result {
+                hook?(step)
+                return try work()
+            }
+        }.value
         _ = try requireKeys(since: epoch)
         return try outcome.get()
+    }
+
+    /// Tests only: see `awayWorkHook`.
+    func setAwayWorkHook(_ hook: (@Sendable (AwayWork) -> Void)?) {
+        awayWorkHook = hook
     }
 
     private func currentImport(_ preview: UUID) throws -> PendingImport {

@@ -336,7 +336,7 @@ struct AdversarialSessionInterchangeTests {
         let release = DispatchSemaphore(value: 0)
         let released = Flag()
         let work = Task {
-            try await vault.session.awayFromSession(since: epoch) { () -> Int in
+            try await vault.session.awayFromSession(.archiveDerivation, since: epoch) { () -> Int in
                 starting.yield()
                 // Bounded, so a regression fails instead of hanging: the lock below never returns while this
                 // blocks the actor.
