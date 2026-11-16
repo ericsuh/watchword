@@ -351,10 +351,10 @@ observable from the extension). Milestone 2 enforces F11.2 at the vault boundary
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
   `otpauth://` parser, and `HostMatcher.normalize`.
 
-Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`, with thirteen targets
+Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`, with fourteen targets
 selected by `WATCHWORD_FUZZ_TARGET`: `csv`, `password-csv`, `inflate`, `zip`, `1pux`, `1pux-archive`, `cxf`,
-`envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the import's
-scope derivation), `otpauth` and `passkey`. Each target runs a parser over arbitrary bytes and then checks
+`amplify`, `envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the
+import's scope derivation), `otpauth` and `passkey`. Each target runs a parser over arbitrary bytes and then checks
 what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports, an inflated
 stream is within its caps, every imported scope passes `ScopePolicy`, every one-time-password and passkey
 field decodes, an accepted envelope serialises to its own bytes); a broken invariant traps, which is a
@@ -365,6 +365,15 @@ finding on any toolchain, and mutates a corpus blindly; the task falls back to t
 the toolchain has no libFuzzer runtime (`--require` fails instead). Item payloads are JSON decoded by
 Foundation after authentication (§5), so there is no CBOR item decoder to fuzz; the canonical CBOR encoder
 has no decoder at all.
+
+Those targets run with limits a hundredth of the standard ones and inputs of at most 64 KiB, which keeps a
+run in the parsers and means they cannot see cost that only a large file incurs: a file that keeps every
+per-entry limit and spends their product (the review finding that led to the import-wide budgets). Two
+things address that. `amplify` reads its input as a recipe (a format, a repeat count and a unit) and expands
+it to as much as 1 MiB of CSV rows, 1PUX or CXF items, or the URLs or fields of 1PUX items, imported under
+the **standard** limits; what comes back must be inside the import-wide budgets and every draft inside the
+stored-size bound, and libFuzzer's memory limit and timeout judge the rest. And `mise run fuzz --max-len
+<bytes>` lifts the input length for a run aimed at one target.
 
 The harness is a package of its own so that the shipped manifest does not know it exists; the dependency
 and unsafe-confinement tripwires cover it (`07-supply-chain.md` §2). The first run found one defect, fixed

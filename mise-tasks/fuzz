@@ -6,6 +6,7 @@
 #USAGE flag "--corpus <dir>" default="corpus" help="Working corpus directory, one subdirectory per target, created if missing and grown by the run. The committed seeds in Fuzz/Corpus are read as well and never written"
 #USAGE flag "--require" help="Fail when the toolchain has no libFuzzer runtime, instead of falling back to replaying the seeds and mutating them blindly"
 #USAGE flag "--seed <number>" default="1" help="Seed for the fallback's mutations (the libFuzzer run chooses its own and prints it)"
+#USAGE flag "--max-len <bytes>" default="65536" help="Longest input libFuzzer generates. The default keeps a run in the parsers; raise it (with --target) to look for cost that only shows on large files"
 #
 # docs/04-test-plan.md §6.8. The harness is the package in Fuzz/ (its manifest says why it is a package of its own).
 # Crashing inputs land in artifacts/<target>-<hash>; reproduce one without a sanitiser build:
@@ -65,7 +66,7 @@ if [ "$libfuzzer" = true ]; then
     # Swift's own crash reporter is switched off so that libFuzzer's handler sees the trap and writes the input out.
     SWIFT_BACKTRACE=enable=no WATCHWORD_FUZZ_TARGET="$name" "$fuzzer" "$usage_corpus/$name" "Fuzz/Corpus/$name" \
       -max_total_time="$per_target" -artifact_prefix="artifacts/$name-" -rss_limit_mb=4096 -timeout=30 \
-      -max_len=65536 -print_final_stats=1 \
+      -max_len="$usage_max_len" -print_final_stats=1 \
       || failed+=("$name")
   done
 else

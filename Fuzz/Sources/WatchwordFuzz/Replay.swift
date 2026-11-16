@@ -120,9 +120,31 @@
                 ]
             ).encoded()
             let signed = SignedObject(signature: [UInt8](repeating: 0x5A, count: 64), envelope: envelope).serialized()
+            // For `amplify`: a format byte, a two-byte repeat count, and the unit that is repeated.
+            func recipe(_ format: UInt8, _ count: UInt16, _ unit: String) -> [UInt8] {
+                [format, UInt8(count >> 8), UInt8(count & 0xFF)] + Array(unit.utf8)
+            }
+            let login =
+                #"{"categoryUuid":"001","overview":{"title":"t","url":"https://example.com"},"details":{"loginFields":"#
+                + #"[{"designation":"username","value":"u"},{"designation":"password","value":"p"}],"notesPlain":"n"}}"#
+            let credential =
+                #"{"title":"t","scope":{"urls":["https://example.com/x"]},"credentials":[{"type":"basic-auth","#
+                + #""username":{"fieldType":"string","value":"u"},"password":{"fieldType":"concealed-string","#
+                + #""value":"p"}},{"type":"note","content":{"fieldType":"string","value":"n"}}]}"#
             let seeds: [(FuzzTarget, String, [UInt8])] = [
                 (.envelope, "item-envelope", envelope), (.syncPayload, "segment", payload),
                 (.signedObject, "signed-envelope", signed),
+                (.amplify, "csv-rows", recipe(0, 64, "t,https://example.com/login,u,p,n,GEZDGNBVGY3TQOJQ,a,b,c,d")),
+                (.amplify, "csv-short-cells", recipe(0, .max, "a,a,a,a,a,a,a,a,a,a")),
+                (.amplify, "1pux-items", recipe(1, 64, login)),
+                (.amplify, "1pux-urls-repeated", recipe(2, .max, "https://a.bc")),
+                (.amplify, "1pux-urls-refused", recipe(2, 4_096, "intranet")),
+                (.amplify, "1pux-fields", recipe(3, .max, #"{"value":{"string":"a"}}"#)),
+                (
+                    .amplify, "1pux-fields-typed",
+                    recipe(3, 256, #"{"title":"t","id":"i","value":{"totp":"GEZDGNBVGY3TQOJQ"}}"#)
+                ),
+                (.amplify, "cxf-items", recipe(4, 64, credential)),
             ]
             for (target, name, bytes) in seeds {
                 let folder = directory.appendingPathComponent(target.rawValue, isDirectory: true)

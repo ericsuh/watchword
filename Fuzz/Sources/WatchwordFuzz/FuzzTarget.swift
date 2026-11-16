@@ -19,6 +19,7 @@ enum FuzzTarget: String, CaseIterable, Sendable {
     case onePUX = "1pux"
     case onePUXArchive = "1pux-archive"
     case credentialExchange = "cxf"
+    case amplify
     case envelope
     case syncPayload = "sync-payload"
     case signedObject = "signed-object"
@@ -108,6 +109,8 @@ enum FuzzTarget: String, CaseIterable, Sendable {
             let reread = try? CredentialExchange.importDocument(
                 exported.bytes, into: FuzzTarget.vaultID, limits: .standard, using: &generator)
             require(reread != nil, "a CXF export does not read back")
+        case .amplify:
+            amplify(bytes, using: &generator)
         case .envelope:
             guard let envelope = try? Envelope.parse(bytes, expecting: FuzzTarget.envelopeContext) else { return }
             require(envelope.serialized() == bytes, "an accepted envelope does not serialise to its own bytes")
@@ -148,9 +151,98 @@ enum FuzzTarget: String, CaseIterable, Sendable {
         }
     }
 
+    /// The largest file `amplify` builds. Far past libFuzzer's input length, and small enough to run thousands of
+    /// times: what is being looked for is cost out of proportion to the file, which shows at any size.
+    static let amplifiedBytes = 1 << 20
+
+    /// A small input expanded into a large file, imported under the **standard** limits: the other targets run with
+    /// tight limits and inputs of at most 64 KiB, and so can never see a file that keeps every per-entry limit and
+    /// spends their product. The first byte chooses the format, the next two a repeat count, and the rest is the
+    /// unit repeated: rows of a CSV file, items of a 1PUX or CXF document, URLs or fields of one item. What comes
+    /// back must stay inside the import-wide budgets; libFuzzer's memory limit and timeout judge the rest.
+    private func amplify(_ bytes: [UInt8], using generator: inout FuzzGenerator) {
+        guard bytes.count > 3 else { return }
+        let unit = Array(bytes[3...])
+        let wanted = 1 + (Int(bytes[1]) << 8 | Int(bytes[2])) * 16
+        let count = min(wanted, FuzzTarget.amplifiedBytes / (unit.count + 1))
+        var repeated: [UInt8] = []
+        repeated.reserveCapacity(count * (unit.count + 1))
+        func text(_ string: String) -> [UInt8] { Array(string.utf8) }
+        /// `count` units as the members of JSON arrays of at most 512, each array wrapped in an item.
+        func grouped(_ opening: String, _ closing: String, _ member: ([UInt8]) -> [UInt8]) -> [UInt8] {
+            var items: [UInt8] = []
+            var written = 0
+            while written < count {
+                let members = min(count - written, 512)
+                if written > 0 { items.append(0x2C) }
+                items += text(opening)
+                for index in 0..<members {
+                    items += (index == 0 ? [] : [0x2C]) + member(unit)
+                }
+                items += text(closing)
+                written += members
+            }
+            return items
+        }
+        let limits = InterchangeLimits.standard
+        let onePUXOpening = text(#"{"accounts":[{"vaults":[{"items":["#)
+        let onePUXClosing = text("]}]}]}")
+        let result: ImportResult?
+        switch bytes[0] % 5 {
+        case 0:
+            // Rows of a CSV file.
+            for _ in 0..<count {
+                repeated += unit + [0x0A]
+            }
+            let file = text("Title,URL,Username,Password,Notes,OTPAuth,a,b,c,d\n") + repeated
+            result = try? PasswordCSV.importFile(file, into: FuzzTarget.vaultID, limits: limits, using: &generator)
+        case 1:
+            // Items of a 1PUX document.
+            for index in 0..<count {
+                repeated += (index == 0 ? [] : [0x2C]) + unit
+            }
+            result = try? OnePUX.importDocument(
+                onePUXOpening + repeated + onePUXClosing, into: FuzzTarget.vaultID, limits: limits, using: &generator)
+        case 2:
+            // URLs of the items of a 1PUX document, a few hundred to each.
+            let items = grouped(#"{"overview":{"title":"t","urls":["#, #"]},"details":{}}"#) {
+                text(#"{"url":""#) + $0 + text(#""}"#)
+            }
+            result = try? OnePUX.importDocument(
+                onePUXOpening + items + onePUXClosing, into: FuzzTarget.vaultID, limits: limits, using: &generator)
+        case 3:
+            // Section fields of the items of a 1PUX document.
+            let items = grouped(#"{"overview":{"title":"t"},"details":{"sections":[{"fields":["#, "]}]}}") { $0 }
+            result = try? OnePUX.importDocument(
+                onePUXOpening + items + onePUXClosing, into: FuzzTarget.vaultID, limits: limits, using: &generator)
+        default:
+            // Items of a CXF document.
+            for index in 0..<count {
+                repeated += (index == 0 ? [] : [0x2C]) + unit
+            }
+            let file =
+                text(#"{"version":{"major":1,"minor":0},"accounts":[{"items":["#) + repeated + text("]}]}")
+            result = try? CredentialExchange.importDocument(
+                file, into: FuzzTarget.vaultID, limits: limits, using: &generator)
+        }
+        guard let result else { return }
+        check(result, limits: limits)
+    }
+
     /// What must hold of every import, whatever the file said (PRD F11.2, SEC7).
-    private func check(_ result: ImportResult) {
-        require(result.entries.count <= FuzzTarget.limits.maximumItems, "more entries than the item limit")
+    private func check(_ result: ImportResult, limits: InterchangeLimits = FuzzTarget.limits) {
+        require(result.entries.count <= limits.maximumItems, "more entries than the item limit")
+        // The import-wide budgets: what bounds the memory the drafts take, whatever the per-entry limits allow.
+        var parts = 0
+        for entry in result.entries {
+            let item = entry.item
+            parts += item.fields.count + item.tags.count + item.history.count
+            require(item.scopes.count <= limits.maximumURLsPerItem, "more scopes than URLs considered")
+            require(
+                StoredItemSize.estimate(item) <= limits.maximumStoredItemBytes, "a draft the vault could not store")
+        }
+        require(parts <= limits.maximumTotalFields, "more fields than the import budget")
+        require(result.report.skipped.count <= limits.maximumItems, "more skip records than entries")
         require(result.report.warnings.count <= ImportReport.maximumWarnings, "more warnings than the cap")
         require(result.report.importedCount == result.entries.count, "the counts disagree with the entries")
         var identifiers = Set<UUID>()
