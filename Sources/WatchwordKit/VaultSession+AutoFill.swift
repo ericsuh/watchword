@@ -51,7 +51,7 @@ extension VaultSession: CredentialVault {
         }
     }
 
-    private func translatingForAutoFill<Value>(_ body: () async throws -> Value) async throws -> Value {
+    private func translatingForAutoFill<Value: Sendable>(_ body: () async throws -> Value) async throws -> Value {
         do {
             return try await body()
         } catch let error as CredentialVaultError {
