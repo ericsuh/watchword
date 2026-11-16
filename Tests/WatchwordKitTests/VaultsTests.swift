@@ -730,12 +730,59 @@ struct VaultsSyncTests {
         #expect(kept.allSatisfy { $0.entry == entry })
         #expect(Set(kept.map(\.id)).count == 2)
         try await a.session.discardQuarantined(kept.filter { $0.vaultID == work.id })
-        #expect(try await a.session.quarantine() == [QuarantinedVersion(vaultID: home.id, entry: entry)])
+        let remaining = try await a.session.quarantine()
+        #expect(remaining.map(\.vaultID) == [home.id] && remaining.map(\.entry) == [entry])
         await a.session.lock()
         await #expect(throws: VaultError.locked) {
-            try await a.session.discardQuarantined([QuarantinedVersion(vaultID: home.id, entry: entry)])
+            try await a.session.discardQuarantined(remaining)
         }
         #expect(try await a.session.quarantine().count == 1, "listing needs no keys; discarding does")
+    }
+}
+
+@Suite("Vault session: held-aside versions and the lock signal")
+struct QuarantineIdentityTests {
+    /// Two versions of one record at one version number from one device, differing only in key or bytes, are two
+    /// rows: the identifier covers the key ID and a digest of the envelope (review of the account screens, finding 7).
+    @Test("held-aside versions that differ in key or bytes have different identifiers")
+    func identifiers() throws {
+        let vaultID = UUID()
+        let base = SyncEntry(
+            recordID: UUID(), kind: .item, keyID: UUID(), version: 9, device: UUID(), envelope: [1, 2, 3])
+        var otherKey = base
+        otherKey.keyID = UUID()
+        var otherBytes = base
+        otherBytes.envelope = [1, 2, 4]
+        let ids = Set(
+            [base, otherKey, otherBytes].map { QuarantinedVersion(vaultID: vaultID, entry: $0, reason: .unmerged).id })
+        #expect(ids.count == 3)
+    }
+
+    @Test("a version beyond the jump the vault allows is reported as implausible, and only that")
+    func reasons() async throws {
+        let fleet = try await Fleet.make(1)
+        let a = fleet.devices[0]
+        let work = try await a.session.createVault(name: "Work")
+        let state = try #require(a.sync?.state)
+        let implausible = SyncEntry(
+            recordID: UUID(), kind: .item, keyID: UUID(), version: 1 << 61, device: UUID(), envelope: [1])
+        let ordinary = SyncEntry(
+            recordID: UUID(), kind: .item, keyID: UUID(), version: 2, device: UUID(), envelope: [2])
+        try await state.quarantine(implausible, vaultID: work.id)
+        try await state.quarantine(ordinary, vaultID: work.id)
+        let kept = try await a.session.quarantine()
+        #expect(kept.first { $0.entry == implausible }?.reason == .implausibleVersion)
+        #expect(kept.first { $0.entry == ordinary }?.reason == .unmerged, "not shared, so not held aside by a judge")
+    }
+
+    @Test("every lock is signalled to those listening, whoever asked for it")
+    func lockEvents() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let events = await vault.session.lockEvents()
+        var iterator = events.makeAsyncIterator()
+        await vault.session.lock()
+        #expect(await iterator.next() != nil)
     }
 }
 

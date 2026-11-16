@@ -227,9 +227,26 @@ extension VaultSession {
         guard let syncSettings else { return [] }
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
         var versions: [QuarantinedVersion] = []
+        let configuration = syncSettings.configuration
+        // From the sharing state store, so that a locked session tells held-aside versions apart too.
+        let sharedIDs = Set((try? await sharing.settings?.state.sharedVaultIDs()) ?? [])
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
-            for entry in try await syncSettings.state.quarantined(vaultID: vaultID) {
-                versions.append(QuarantinedVersion(vaultID: vaultID, entry: entry))
+            let entries = try await syncSettings.state.quarantined(vaultID: vaultID)
+            guard !entries.isEmpty else { continue }
+            // The state store keeps no reason, so it is derived: a version beyond the jump the engine allows above
+            // what the vault holds is U5's; in a shared vault anything else was held aside by the write judge; the
+            // rest are merges that could not be sealed (Y37).
+            var highWater: UInt64 = 0
+            for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
+                for row in try await store.records(in: vaultID, kind: kind) { highWater = max(highWater, row.version) }
+            }
+            let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
+            let shared = sharedIDs.contains(vaultID) || sharing.vaults[vaultID] != nil
+            for entry in entries {
+                let implausible = entry.version > configuration.maximumVersion || (!overflow && entry.version > ceiling)
+                let reason: QuarantineReason =
+                    implausible ? .implausibleVersion : shared ? .heldAside : .unmerged
+                versions.append(QuarantinedVersion(vaultID: vaultID, entry: entry, reason: reason))
             }
         }
         return versions
@@ -599,17 +616,32 @@ struct VaultSyncAdapter: SyncKeyring, ItemSealer {
 public struct QuarantinedVersion: Sendable, Hashable, Identifiable {
     public var vaultID: UUID
     public var entry: SyncEntry
+    public var reason: QuarantineReason
 
-    public init(vaultID: UUID, entry: SyncEntry) {
+    public init(vaultID: UUID, entry: SyncEntry, reason: QuarantineReason) {
         self.vaultID = vaultID
         self.entry = entry
+        self.reason = reason
     }
 
-    /// The vault, the record and the version's stamp: one kept version.
+    /// The vault, the record, the version's stamp, its key and a digest of its bytes: one kept version, distinct from
+    /// another at the same stamp (two can be kept: the quarantine compares whole entries).
     public var id: String {
-        "\(vaultID.uuidString)/\(entry.recordID.uuidString)/\(entry.kind.rawValue)/\(entry.version)/"
-            + "\(entry.device.uuidString)/\(entry.isDeletion ? "d" : "v")"
+        let digest = ObjectDigest(hashing: (entry.envelope ?? []) + [entry.isDeletion ? 0 : 1] + entry.erasure)
+        return "\(vaultID.uuidString)/\(entry.recordID.uuidString)/\(entry.kind.rawValue)/\(entry.version)/"
+            + "\(entry.device.uuidString)/\(entry.keyID.uuidString)/\(digest)"
     }
+}
+
+/// Why a version is in the quarantine, as far as this device can tell (the state store keeps entries, not reasons).
+public enum QuarantineReason: Sendable, Hashable {
+    /// Its version is beyond the jump the engine allows above what the vault holds (review finding U5).
+    case implausibleVersion
+    /// In a shared vault: held aside by the write judge, as carrying work that does not count (§8.7).
+    case heldAside
+    /// Its merge with the local version could not be sealed (Y37), or it is no longer implausible as the vault has
+    /// caught up with it.
+    case unmerged
 }
 
 /// What one sync of the account did: the account's own objects, and each vault's log.

@@ -42,6 +42,13 @@ struct DevicesView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(device.name).strikethrough(device.isRevoked)
+                            if device.isThisDevice {
+                                // From the device's ID, apart from its name, which anyone enrolling a device chose.
+                                Label("This device", systemImage: "checkmark.seal.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tint)
+                                    .accessibilityIdentifier(AccessibilityID.Devices.thisDevice)
+                            }
                             if let addedAt = device.addedAt {
                                 Text("Added \(addedAt.formatted(date: .abbreviated, time: .shortened))")
                                     .font(.caption).foregroundStyle(.secondary)
@@ -80,7 +87,8 @@ struct DevicesView: View {
         .overlay { if model.isWorking { ProgressView() } }
         .task { await model.load() }
         .sheet(item: $revoking) { device in
-            RevokeDeviceView(device: device, model: model)
+            RevokeDeviceView(device: device, model: model, close: { revoking = nil })
+                .onDisappear { model.revocation = RevocationForm() }
         }
     }
 }
@@ -89,40 +97,42 @@ struct DevicesView: View {
 /// choice if the device may have been unlocked by someone else. Keeping the password needs both of the facts that
 /// make it safe confirmed. Either way the current password is asked for.
 struct RevokeDeviceView: View {
-    @Environment(\.dismiss) private var dismiss
     let device: DeviceRow
     let model: DevicesModel
-    @State private var form = RevocationForm()
+    /// Clears the presenting state (see `ScreenSheet`).
+    let close: @MainActor () -> Void
 
     var body: some View {
+        @Bindable var model = model
         NavigationStack {
             Form {
                 Section {
                     Text(
-                        "\(device.name) will no longer be able to send changes, and cannot be added again. It keeps "
+                        "“\(device.name)” will no longer be able to send changes, and cannot be added again. It keeps "
                             + "whatever it already holds; if someone else may have unlocked it, change your password "
                             + "now so they cannot add another device.")
                 }
                 Section {
-                    Toggle("Change the account password too", isOn: $form.changesPassword)
+                    Toggle("Change the account password too", isOn: $model.revocation.changesPassword)
                         .accessibilityIdentifier(AccessibilityID.Devices.changePassword)
-                    SecureField("Current account password", text: $form.currentPassword)
+                    SecureField("Current account password", text: $model.revocation.currentPassword)
                         .accessibilityIdentifier(AccessibilityID.Devices.current)
-                    if form.changesPassword {
-                        SecureField("New account password", text: $form.newPassword)
+                    if model.revocation.changesPassword {
+                        SecureField("New account password", text: $model.revocation.newPassword)
                             .accessibilityIdentifier(AccessibilityID.Devices.new)
-                        SecureField("Confirm new password", text: $form.confirmation)
+                        SecureField("Confirm new password", text: $model.revocation.confirmation)
                             .accessibilityIdentifier(AccessibilityID.Devices.confirmation)
                     } else {
-                        Toggle("The device was locked when I last had it", isOn: $form.deviceWasLocked)
+                        Toggle("The device was locked when I last had it", isOn: $model.revocation.deviceWasLocked)
                             .accessibilityIdentifier(AccessibilityID.Devices.wasLocked)
                         Toggle(
-                            "Nobody who may have it knows the account password", isOn: $form.passwordUnknownToHolder
+                            "Nobody who may have it knows the account password",
+                            isOn: $model.revocation.passwordUnknownToHolder
                         )
                         .accessibilityIdentifier(AccessibilityID.Devices.passwordUnknown)
                     }
                 }
-                if let problem = form.problem, !form.currentPassword.isEmpty {
+                if let problem = model.revocation.problem, !model.revocation.currentPassword.isEmpty {
                     Section { Text(problem).font(.footnote).foregroundStyle(.secondary) }
                 }
                 ErrorText(message: model.errorMessage)
@@ -131,17 +141,17 @@ struct RevokeDeviceView: View {
             .navigationTitle("Remove \(device.name)")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.accessibilityIdentifier(AccessibilityID.Devices.cancel)
+                    Button("Cancel") { close() }.accessibilityIdentifier(AccessibilityID.Devices.cancel)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Remove", role: .destructive) {
-                        let submitted = form
-                        form.currentPassword = ""
-                        form.newPassword = ""
-                        form.confirmation = ""
-                        Task { if await model.revoke(device, with: submitted) { dismiss() } }
+                        let submitted = model.revocation
+                        model.revocation.currentPassword = ""
+                        model.revocation.newPassword = ""
+                        model.revocation.confirmation = ""
+                        Task { if await model.revoke(device, with: submitted) { close() } }
                     }
-                    .disabled(form.problem != nil || model.isWorking)
+                    .disabled(model.revocation.problem != nil || model.isWorking)
                     .accessibilityIdentifier(AccessibilityID.Devices.confirm)
                 }
             }

@@ -87,18 +87,20 @@ struct OwnFingerprintView: View {
 
 /// A sheet asking for a vault's name: creating one, or renaming one.
 struct VaultNameSheet: View {
-    @Environment(\.dismiss) private var dismiss
     let title: String
     let action: String
     let fieldID: String
     let saveID: String
     let onSave: @MainActor (String) async -> Bool
+    /// Clears the presenting state (see `ScreenSheet`).
+    let close: @MainActor () -> Void
     @State private var name: String
 
     init(
         title: String, action: String, initial: String = "", fieldID: String, saveID: String,
-        onSave: @escaping @MainActor (String) async -> Bool
+        close: @escaping @MainActor () -> Void, onSave: @escaping @MainActor (String) async -> Bool
     ) {
+        self.close = close
         self.title = title
         self.action = action
         self.fieldID = fieldID
@@ -119,11 +121,11 @@ struct VaultNameSheet: View {
             .formStyle(.grouped)
             .navigationTitle(title)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { close() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action) {
                         let chosen = name
-                        Task { if await onSave(chosen) { dismiss() } }
+                        Task { if await onSave(chosen) { close() } }
                     }
                     .disabled(VaultsModel.problem(withName: name) != nil)
                     .accessibilityIdentifier(saveID)
@@ -171,19 +173,22 @@ extension EnvironmentValues {
 
 /// An account screen in a sheet of its own over Settings, with a navigation stack for what it opens, and a Done button
 /// on every screen in it (`closesSheet()`), so the whole sheet closes from wherever the person is.
+///
+/// It closes through `close`, which clears the presenting state, rather than through `dismiss`: on macOS a dismiss
+/// action read inside a sheet that is itself over a sheet did not always close it.
 struct ScreenSheet<Content: View>: View {
-    @Environment(\.dismiss) private var dismiss
+    let close: @MainActor () -> Void
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         NavigationStack {
             content()
         }
-        .environment(\.screenCloser, ScreenCloser { dismiss() })
+        .environment(\.screenCloser, ScreenCloser(close: close))
         // Closed with Done: a swipe that scrolls past the top must not throw away an import being reviewed.
         .interactiveDismissDisabled()
         #if os(macOS)
-            .frame(minWidth: 560, minHeight: 600)
+            .frame(minWidth: 560, minHeight: 640)
         #endif
     }
 }

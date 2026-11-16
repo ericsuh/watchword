@@ -120,8 +120,13 @@ public struct ContactSummary: Hashable, Sendable {
     public var groups: [String] { SharingCodes.groups(of: safetyNumber) }
 }
 
-/// How the person confirms a fingerprint (PRD F4.2): what they typed, the code they were given, or their own
-/// comparison. Exactly one is used, in that order of preference, and the session checks it.
+/// How the person confirms a fingerprint (PRD F4.2): the safety number they typed, or their own comparison of the two
+/// numbers. A typed number is preferred, and the session checks it.
+///
+/// A fingerprint code is never evidence here. One pasted from a message names an account and nothing more: anyone who
+/// can message the person can send a code for an account of their own (review of the account screens, finding 2).
+/// `VerificationEvidence.scannedCode` is for a code read by the camera from the other person's screen, which the app
+/// does not do yet, so it never offers it, and a pin records only what the person did (S16: `VerifiedContact.method`).
 public struct FingerprintConfirmation: Hashable, Sendable {
     public var typedSafetyNumber = ""
     public var comparedByEye = false
@@ -129,11 +134,19 @@ public struct FingerprintConfirmation: Hashable, Sendable {
     public init() {}
 
     /// The evidence to offer, or `nil` while the person has given none.
-    public func evidence(code: String?) -> VerificationEvidence? {
+    public func evidence() -> VerificationEvidence? {
         let typed = typedSafetyNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         if !typed.isEmpty { return .safetyNumber(typed) }
-        if let code { return .scannedCode(code) }
         if comparedByEye { return .comparedByEye }
         return nil
+    }
+
+    /// What the person did, for the step after it.
+    public static func describe(_ evidence: VerificationEvidence) -> String {
+        switch evidence {
+        case .safetyNumber: return "You typed their safety number, and it matched."
+        case .comparedByEye: return "You confirmed that the two safety numbers match."
+        case .scannedCode: return "You scanned their code, and it matched."
+        }
     }
 }

@@ -24,6 +24,7 @@ shared vaults through the session
 encrypted Watchword archive
 interchange through the session
 synced breach-check results
+account screens
 device-local store files
 darwin: Apple adapters: HTTP client
 darwin: Apple adapters: iCloud Drive transport

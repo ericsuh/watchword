@@ -10,7 +10,7 @@ import WatchwordPresentation
 /// restore shows when the archive was made, so that an older archive put in place of the newest is seen for what it is.
 struct ImportView: View {
     @Environment(AppModel.self) private var app
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.screenCloser) private var closer
     @State private var model: ImportModel
     @State private var choosingFile = false
     private let restoring: Bool
@@ -34,7 +34,7 @@ struct ImportView: View {
                 Section {
                     Label(summary.text, systemImage: "checkmark.circle")
                         .accessibilityIdentifier(AccessibilityID.Import.summary)
-                    Button("Done") { dismiss() }
+                    Button("Done") { closer?.close() }
                         .accessibilityIdentifier(AccessibilityID.Import.done)
                 } footer: {
                     Text(
@@ -50,11 +50,27 @@ struct ImportView: View {
         .overlay { if model.isWorking { ProgressView() } }
         .task { await model.load() }
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: contentTypes) { read($0) }
+        .confirmationDialog(
+            "Accept \(model.hostAwaitingConfirmation?.host.ascii ?? "this address")?",
+            isPresented: awaitingHostBinding, titleVisibility: .visible
+        ) {
+            Button("Accept Anyway", role: .destructive) { model.confirmAwaitingHost() }
+                .accessibilityIdentifier(AccessibilityID.Import.hostConfirm)
+            Button("Cancel", role: .cancel) { model.cancelAwaitingHost() }
+        } message: {
+            Text(model.hostAwaitingConfirmation?.host.warning ?? "")
+        }
         .onDisappear {
             // Drafts hold every secret in the file: dropped as soon as the screen goes, not only at a lock.
             if model.stage == .review { Task { await model.cancel() } }
             Task { try? await app.reload() }
         }
+    }
+
+    private var awaitingHostBinding: Binding<Bool> {
+        Binding(
+            get: { model.hostAwaitingConfirmation != nil },
+            set: { if !$0 { model.cancelAwaitingHost() } })
     }
 
     private var contentTypes: [UTType] {
@@ -70,7 +86,7 @@ struct ImportView: View {
         Section {
             Picker(restoring ? "Restore into" : "Import into", selection: $model.vaultID) {
                 ForEach(model.vaults) { vault in
-                    Text(vault.name).tag(Optional(vault.id))
+                    Text(vault.label).tag(Optional(vault.id))
                 }
             }
             .accessibilityIdentifier(AccessibilityID.Import.vault)
@@ -184,6 +200,12 @@ struct ImportView: View {
             .accessibilityIdentifier(AccessibilityID.Import.commit)
             Button("Cancel", role: .cancel) { Task { await model.cancel() } }
                 .accessibilityIdentifier(AccessibilityID.Import.cancel)
+            #if DEBUG
+                if app.uiTestPeer != nil {
+                    Button("Lock now (UI test)") { Task { await app.lock() } }
+                        .accessibilityIdentifier(AccessibilityID.Debug.lockNow)
+                }
+            #endif
         }
     }
 
@@ -271,9 +293,8 @@ struct MergeReviewView: View {
                         + "Accept only those you know belong to it."
                 )
                 .font(.footnote)
-                ForEach(review.hosts, id: \.self) { host in
-                    Toggle(host, isOn: hostBinding(host))
-                        .accessibilityIdentifier(AccessibilityID.Import.host(host))
+                ForEach(review.hosts) { host in
+                    hostToggle(host)
                 }
             }
             if !review.signInFields.isEmpty {
@@ -295,6 +316,30 @@ struct MergeReviewView: View {
             }
         }
         .padding(.leading, 8)
+    }
+
+    /// A host as the person should read it before accepting it: ASCII (punycode for any other alphabet), the
+    /// registrable domain in bold, how far the scope reaches, and the look-alike warning (docs/05-anti-phishing.md).
+    private func hostToggle(_ host: MergeHost) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: hostBinding(host.host)) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 0) {
+                        Text(host.prefix).foregroundStyle(.secondary)
+                        Text(host.registrable).bold()
+                    }
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.disabled)
+                    Text(host.reach).font(.caption).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(host.ascii), \(host.reach)")
+            }
+            .accessibilityIdentifier(AccessibilityID.Import.host(host.host))
+            if let warning = host.warning {
+                Banner(text: warning).accessibilityIdentifier(AccessibilityID.Import.hostWarning(host.host))
+            }
+        }
     }
 
     private func fieldToggle(_ field: AdditionField) -> some View {

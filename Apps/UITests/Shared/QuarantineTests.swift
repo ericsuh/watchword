@@ -20,14 +20,14 @@ final class QuarantineTests: XCTestCase {
 
         app.openScreen(AccessibilityID.Settings.quarantine)
         let row = app.element(AccessibilityID.Quarantine.row(0))
-        XCTAssertTrue(row.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(row.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(
             app.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", "Library", "Library"))
                 .firstMatch.exists, "the held-aside version does not name its item")
         app.tap(AccessibilityID.Quarantine.discard(0))
         // Keeping is the default: the dialog's cancel keeps it, and only its Discard removes it.
         app.confirm("Discard")
-        XCTAssertTrue(app.element(AccessibilityID.Quarantine.empty).waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.element(AccessibilityID.Quarantine.empty).waitForExistence(timeout: 15), app.debugDescription)
         app.closeScreen()
     }
 }

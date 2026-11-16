@@ -61,7 +61,8 @@ struct DevicesModelTests {
         let devices = try await TwoDevices.make()
         let model = DevicesModel(context: ContextProbe().context(devices.first.session))
         await model.load()
-        #expect(model.rows.map(\.name) == ["Pat's Mac (this device)", "Pat's iPad"])
+        #expect(model.rows.map(\.name) == ["Pat's Mac", "Pat's iPad"])
+        #expect(model.rows.map(\.isThisDevice) == [true, false])
         #expect(model.rows.map(\.mayRevoke) == [false, true])
 
         var form = RevocationForm()
@@ -71,11 +72,46 @@ struct DevicesModelTests {
         let iPad = try #require(model.rows.last)
         #expect(await model.revoke(iPad, with: form))
         #expect(model.rows.last?.isRevoked == true)
-        #expect(model.rows.last?.detail == "Removed by Pat's Mac (this device)")
+        #expect(model.rows.last?.detail == "Removed by this device")
         #expect(model.notice?.contains("password changed") == true)
 
         await devices.first.session.lock()
         try await devices.first.session.unlock(password: "a brand new passphrase")
+    }
+
+    /// Whoever enrols a device names it (A4: anyone with the password and the Secret Key, or a device of the person's
+    /// that someone else is using): a name must not pass for this device, nor reorder the text around it.
+    @Test("a device named to impersonate this one is shown cleaned, and only this device is marked as this device")
+    func impersonatingName() async throws {
+        let transport = InMemorySyncTransport()
+        let first = TestVault.syncing(over: transport, seed: 81, name: "Pat's Mac")
+        try await first.createAccount()
+        let second = try await first.enrolledDevice(
+            deviceID: TwoDevices.secondID, over: transport, name: "Pat's Mac (this device)\u{202E}\n")
+        try await second.session.unlock(password: TestVault.password)
+        try await second.session.sync()
+        try await first.session.sync()
+        let model = DevicesModel(context: ContextProbe().context(first.session))
+        await model.load()
+        let other = try #require(model.rows.first { !$0.isThisDevice })
+        #expect(other.name == "Pat's Mac")
+        #expect(!other.name.unicodeScalars.contains { $0.properties.generalCategory == .format })
+        #expect(model.rows.filter(\.isThisDevice).count == 1)
+        #expect(model.names[other.id] == "“Pat's Mac”")
+        #expect(DeviceRow.clean("A\u{0}B\tC  “D”") == "A B C D")
+    }
+
+    @Test("the removal form, passwords included, is cleared by a lock of the session")
+    func revocationFormClearedOnLock() async throws {
+        let devices = try await TwoDevices.make()
+        let locks = await LockSignal.watching(devices.first.session)
+        let model = DevicesModel(context: ScreenContext(session: devices.first.session, locks: locks))
+        model.revocation.currentPassword = TestVault.password
+        model.revocation.newPassword = "a brand new passphrase"
+        await devices.first.session.lock()
+        for _ in 0..<1000 where !model.revocation.currentPassword.isEmpty { await Task.yield() }
+        #expect(model.revocation == RevocationForm())
+        locks.stop()
     }
 
     @Test("keeping the password needs both statements confirmed")
@@ -161,7 +197,7 @@ struct QuarantineModelTests {
         #expect(model.rows.count == 1)
         #expect(row.subject == "Allotment")
         #expect(row.vaultName == "Garden")
-        #expect(row.author == "Pat's iPad")
+        #expect(row.author == "“Pat's iPad”")
         #expect(!row.isSharedVault && !row.isDeletion)
         #expect(row.summary.hasPrefix("Version "))
         #expect(model.sharedRows.isEmpty)

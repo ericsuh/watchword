@@ -49,7 +49,8 @@ struct InterchangeScreenTests {
 
         await model.choose(.merge(into: library.id), for: duplicate.id)
         let review = try #require(model.merges[duplicate.id])
-        #expect(review.hosts == ["www.citylibrary.org"])
+        #expect(review.hosts.map(\.host) == ["www.citylibrary.org"])
+        #expect(review.hosts.first?.registrable == "citylibrary.org" && review.hosts.first?.warning == nil)
         let password = try #require(review.signInFields.first { $0.isSecret })
         #expect(password.value == "imported-Library-9!" && password.label == "Password")
         #expect(!review.urlFields.isEmpty)
@@ -67,6 +68,96 @@ struct InterchangeScreenTests {
         #expect(Set(merged.scopes.map(\.host)) == ["citylibrary.org", "www.citylibrary.org"])
         #expect(merged.field(.password)?.value == "x7#Vq9!mLp2$Zr8@Wn4&", "the password not accepted was not added")
         #expect(model.entries.isEmpty && model.merges.isEmpty, "nothing of the file is kept after the commit")
+    }
+
+    /// A hostile file (A7) offers, beside the real site, a look-alike with a Cyrillic `а` for an existing item: the
+    /// merge shows it in ASCII with a warning, and accepting it takes a second confirmation.
+    @Test("a look-alike host in a merge is shown in ASCII, warned about, and needs a second confirmation")
+    func lookAlikeHost() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let personal = try #require(await vault.session.personalVaultID)
+        let amazon = try await vault.session.save(
+            login(personal, "Amazon", host: "amazon.com", username: "pat", password: "x7#Vq9!mLp2$Zr8@Wn4&"))
+        // A CXF document, which can name several websites for one entry.
+        let file =
+            #"{"version":{"major":1,"minor":0},"exporterRpId":"x.example","exporterDisplayName":"X","timestamp":1,"#
+            + #""accounts":[{"id":"YQ","username":"","email":"","collections":[],"items":[{"id":"aQ","title":"Amazon","#
+            + #""scope":{"urls":["https://amazon.com/","https://аmazon.com/"],"androidApps":[]},"credentials":["#
+            + #"{"type":"basic-auth","username":{"fieldType":"string","value":"pat"}}]}]}]}"#
+        let model = ImportModel(context: ContextProbe().context(vault.session))
+        await model.load()
+        model.format = .credentialExchange
+        await model.read(Array(file.utf8))
+        let duplicate = try #require(model.duplicates.first, "\(model.errorMessage ?? "") \(model.reportLines)")
+        await model.choose(.merge(into: amazon.id), for: duplicate.id)
+        let host = try #require(model.merges[duplicate.id]?.hosts.first)
+        #expect(host.ascii == "xn--mazon-3ve.com")
+        #expect(host.warning?.contains("amazon.com") == true, "\(host.warning ?? "no warning")")
+        model.setHost(host.host, accepted: true, for: duplicate.id)
+        #expect(!model.isAccepted(host: host.host, for: duplicate.id), "accepted on one switch")
+        #expect(model.hostAwaitingConfirmation?.host == host)
+        model.cancelAwaitingHost()
+        #expect(model.hostAwaitingConfirmation == nil && !model.isAccepted(host: host.host, for: duplicate.id))
+        model.setHost(host.host, accepted: true, for: duplicate.id)
+        model.confirmAwaitingHost()
+        #expect(model.isAccepted(host: host.host, for: duplicate.id))
+    }
+
+    /// The staged copy is the only file the app writes: in a folder of its own, removed once the file mover is done
+    /// with it, and the bytes zeroised once saved (review of the account screens, finding 5).
+    @Test("an export is staged in a folder of its own, removed after the save, and its bytes then dropped")
+    func staging() async throws {
+        let (vault, _) = try await vaultWithLibrary()
+        let model = ExportModel(context: ContextProbe().context(vault.session))
+        await model.load()
+        model.kind = .applePasswordsCSV
+        model.password = TestVault.password
+        await model.export()
+        let file = try #require(model.file)
+        #expect(model.archiveBytes == nil, "a plaintext export's bytes leave only through stage")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let staged = try model.stage(in: root, options: [])
+        #expect(staged.lastPathComponent == file.filename)
+        #expect(try String(contentsOf: staged, encoding: .utf8).contains("citylibrary.org"))
+        model.finishSaving(saved: false)
+        #expect(!FileManager.default.fileExists(atPath: staged.path), "a cancelled save left the staged copy")
+        #expect(model.holdsContents, "a cancelled save keeps the file to save again")
+        _ = try model.stage(in: root, options: [])
+        model.finishSaving(saved: true)
+        #expect(!model.holdsContents && model.file == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+
+    /// A lock while the merge review or the export report is on screen (A2, someone who picks up the unlocked device
+    /// after it locks): the models drop the merge's values, what was revealed and the export's bytes from the
+    /// session's lock signal, whether or not any view goes away (finding 6).
+    @Test("a lock of the session clears the merge review and the export's bytes")
+    func clearedOnLock() async throws {
+        let (vault, library) = try await vaultWithLibrary()
+        let locks = await LockSignal.watching(vault.session)
+        defer { locks.stop() }
+        let context = ScreenContext(session: vault.session, locks: locks)
+        let importing = ImportModel(context: context)
+        await importing.load()
+        await importing.read(Array(sampleCSV.utf8))
+        let duplicate = try #require(importing.duplicates.first)
+        await importing.choose(.merge(into: library.id), for: duplicate.id)
+        let secret = try #require(importing.merges[duplicate.id]?.signInFields.first { $0.isSecret })
+        importing.revealed.insert(secret.id)
+        let exporting = ExportModel(context: context)
+        await exporting.load()
+        exporting.kind = .applePasswordsCSV
+        exporting.password = TestVault.password
+        await exporting.export()
+        #expect(exporting.holdsContents)
+
+        await vault.session.lock()
+        for _ in 0..<1000 where exporting.holdsContents || !importing.merges.isEmpty { await Task.yield() }
+        #expect(importing.merges.isEmpty && importing.revealed.isEmpty && importing.duplicates.isEmpty)
+        #expect(importing.stage == .choose)
+        #expect(!exporting.holdsContents && exporting.file == nil)
     }
 
     @Test("cancelling drops the session's drafts, so a commit of that preview is refused")
@@ -100,7 +191,9 @@ struct InterchangeScreenTests {
         let file = try #require(model.file)
         #expect(file.itemCount == 2 && file.kind.isPlaintext)
         #expect(file.filename.hasSuffix(".csv"))
-        let text = String(decoding: file.bytes, as: UTF8.self)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let text = try String(contentsOf: try model.stage(in: root, options: []), encoding: .utf8)
         #expect(text.contains("\"=HYPERLINK(\"\"https://evil.example\"\")\""), "kept exactly, quoted per RFC 4180")
         #expect(text.contains(",+1,") && text.contains("@x"))
         #expect(ExportModel.plaintextWarning.contains("not encrypted"))
@@ -122,14 +215,15 @@ struct InterchangeScreenTests {
         await export.export()
         let file = try #require(export.file, "\(export.errorMessage ?? "")")
         #expect(!file.kind.isPlaintext && file.itemCount == 1 && file.filename.hasSuffix(".wwarchive"))
+        let archive = try #require(export.archiveBytes)
 
         let restore = ImportModel(context: ContextProbe().context(vault.session))
         await restore.load()
         restore.archivePassphrase = "wrong passphrase entirely"
-        await restore.readArchive(file.bytes)
+        await restore.readArchive(archive)
         #expect(restore.errorMessage == "Incorrect password.")
         restore.archivePassphrase = "garden shed padlock"
-        await restore.readArchive(file.bytes)
+        await restore.readArchive(archive)
         #expect(restore.stage == .review, "\(restore.errorMessage ?? "")")
         #expect(restore.archiveCreatedAt == (await vault.clock.now()))
         #expect(restore.archivePassphrase.isEmpty)

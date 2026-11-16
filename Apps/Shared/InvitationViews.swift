@@ -72,18 +72,21 @@ struct InviteView: View {
             }
             Section {
                 if model.usesFingerprintCode {
-                    Text("The fingerprint code you entered will be checked against their keys.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    TextField("Type their safety number", text: $model.confirmation.typedSafetyNumber, axis: .vertical)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                            .keyboardType(.numberPad)
-                        #endif
-                        .accessibilityIdentifier(AccessibilityID.Invite.typedNumber)
-                    Toggle("I compared the two numbers and they match", isOn: $model.confirmation.comparedByEye)
-                        .accessibilityIdentifier(AccessibilityID.Invite.comparedByEye)
+                    // A code pasted from a message says which account, not that its keys are the person's.
+                    Text(
+                        "The code you pasted only says which account this is. Compare the safety number with them as "
+                            + "well before you go on."
+                    )
+                    .foregroundStyle(.secondary)
                 }
+                TextField("Type their safety number", text: $model.confirmation.typedSafetyNumber, axis: .vertical)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                        .keyboardType(.numberPad)
+                    #endif
+                    .accessibilityIdentifier(AccessibilityID.Invite.typedNumber)
+                Toggle("I compared the two numbers and they match", isOn: $model.confirmation.comparedByEye)
+                    .accessibilityIdentifier(AccessibilityID.Invite.comparedByEye)
                 Button("Confirm") { Task { await model.confirmFingerprint() } }
                     .disabled(model.isWorking)
                     .accessibilityIdentifier(AccessibilityID.Invite.confirm)
@@ -93,6 +96,9 @@ struct InviteView: View {
 
     private var chooseRole: some View {
         Section {
+            Text("Inviting \(model.inviteeName).")
+                .accessibilityIdentifier(AccessibilityID.Invite.invitee)
+            Text(model.verificationText).font(.footnote).foregroundStyle(.secondary)
             Picker("Role", selection: $model.role) {
                 ForEach(InvitationModel.roles, id: \.self) { role in
                     Text(MemberRow.name(of: role)).tag(role)
@@ -103,9 +109,7 @@ struct InviteView: View {
                 .disabled(model.isWorking)
                 .accessibilityIdentifier(AccessibilityID.Invite.send)
         } footer: {
-            Text(
-                "Safety numbers match. Administrators can invite and remove others; read-only members cannot "
-                    + "change items.")
+            Text("Administrators can invite and remove others; read-only members cannot change items.")
         }
     }
 
@@ -179,6 +183,18 @@ struct AcceptInvitationView: View {
                     Button("Join Vault") { Task { await model.accept() } }
                         .disabled(model.isWorking)
                         .accessibilityIdentifier(AccessibilityID.Accept.join)
+                }
+            case .confirmJoin(let owner):
+                Section {
+                    Text(
+                        "Join a vault shared by the account \(shortIdentifier(owner.accountID))? You compared its "
+                            + "safety number before, and its keys have not changed."
+                    )
+                    .accessibilityIdentifier(AccessibilityID.Accept.confirmText)
+                    Button("Join Vault") { Task { await model.confirmJoin() } }
+                        .disabled(model.isWorking)
+                        .accessibilityIdentifier(AccessibilityID.Accept.join)
+                    Button("Don’t Join", role: .cancel) { model.decline() }
                 }
             case .joined:
                 Section {

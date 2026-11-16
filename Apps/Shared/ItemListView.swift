@@ -18,7 +18,8 @@ struct ItemListView: View {
                     Picker("Vault", selection: $model.vaultFilter) {
                         Text("All Vaults").tag(UUID?.none)
                         ForEach(model.vaults) { vault in
-                            Text(vault.name).tag(Optional(vault.id))
+                            // By ownership and role as well as name: a shared vault can be named anything.
+                            Text(vault.label).tag(Optional(vault.id))
                         }
                     }
                     .accessibilityIdentifier("items.vaultFilter")
@@ -38,7 +39,7 @@ struct ItemListView: View {
                                 Text(host).font(.caption).foregroundStyle(.secondary)
                             }
                             if model.vaultFilter == nil, model.vaults.count > 1, let vault = model.vault(item.vaultID) {
-                                Text(vault.name).font(.caption2).foregroundStyle(.secondary)
+                                Text(vault.label).font(.caption2).foregroundStyle(.secondary)
                             }
                         }
                         if item.hasConflicts {

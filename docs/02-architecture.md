@@ -1150,6 +1150,29 @@ wrap a key to a member in `substituted`, so the comparison cannot be left out of
 person resolves it by removing the member (no key goes to the swapped keys) or by verifying the new keys and
 replacing the pin.
 
+The session makes the comparison whenever the head changes, **and when it restores a vault at unlock**: a device that
+restored the ledger and left the check to the next sync reported nobody as substituted until then, so after a
+relaunch the member list called a member with swapped keys verified, and the sync keyring (S39) had no check to refuse
+their signatures by (review of the account screens, finding 1). `SharedVaultStatus` carries `verifiedMembers`, the
+members the check on the current head found pinned to the keys listed, or `nil` when no such check exists (the vault
+locked since the head changed); the member list calls a member verified only from that list, and anyone it does not
+name "not checked yet". An empty `unverifiedMembers` is not evidence of anything.
+
+**What the screens accept as a comparison** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). The typed
+safety number (`.safetyNumber`) or the person's own "the numbers match" (`.comparedByEye`), in that order. A
+fingerprint code pasted from a message only names the account to look up: it is not `.scannedCode`, which is for a
+code read by the camera from the other person's screen and is never recorded until the app can scan one (finding 2).
+`VerifiedContact.method` therefore says what the person did (S16).
+
+**Names of shared vaults.** A vault's name is a record any member who may write can change (§8.7; S37 attributes it
+to its writer), so a member can call a shared vault "Personal". The owner's decision on the review (2026-11-16, made
+here for the owner to confirm): renaming stays a write like any other, because making it the owner's or an
+administrator's would need every device's write judge to refuse a member's rename, a protocol change, and a rule kept
+by the screens alone would not bind a hostile client. The screens instead never let a name stand alone: every list and
+the item editor label a vault by ownership and role (`VaultRow.badge`: "Your own vault", "Shared by you", "Shared
+with you · Can edit"), and the editor says where a new item goes, with "everyone in this vault can see it" for a
+shared one (finding 4).
+
 ### 8.5 Key grants
 
 A grant is found at `(vault, key ID, recipient)` and those come from its storage location, never from the grant
@@ -2657,6 +2680,16 @@ that are not deleted; records that would not open are returned beside the report
 not left out silently. The standing warning is `InterchangeGuide.plaintextExportWarning`
 (`VaultSession.plaintextExportWarning`). File protection is the app's: the doc comment says
 `FileProtectionType.completeUnlessOpen` or stronger, a place the person chooses, never the App Group container.
+The app does it so (`ExportModel`, `ExportView`): the bytes stay in zeroising memory (`SecureBytes`) until the person
+saves, are then written by the app itself into a folder of its own in the temporary directory, with
+`.completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves the file where the
+person chooses; the staged copy is removed when the mover is done, on cancel, when the screen closes and at every lock,
+and the bytes are zeroised once saved. Not `fileExporter` with `FileWrapper.fileAttributes`, which says nothing about
+what the exporter stages. Where the mover copies rather than moves (another file provider), the copy's protection is
+the provider's. macOS has no protection classes: the file is as safe as the folder the person picks, which is why the
+warning says not to pick a synced one. The screen models also drop the export's bytes, the merge review and typed
+passwords on every lock, from `VaultSession.lockEvents()` rather than from views going away (review of the account
+screens, findings 5 and 6).
 
 **The encrypted Watchword archive (PRD F8.4; ADR 0008).** A versioned, portable, whole-account backup that only
 Watchword reads, made of the vault's own envelope format (`AccountArchive` in `WatchwordCrypto`):

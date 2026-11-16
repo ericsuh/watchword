@@ -14,6 +14,9 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         /// The chain lists keys for them that differ from the ones this device compared: a warning, never accepted
         /// silently (SEC3).
         case keysChanged
+        /// No comparison of the chain with this device's pins has been made on the current head (the vault is
+        /// locked, or the contacts could not be read). Never shown as verified (D17).
+        case notChecked
     }
 
     public let id: UUID
@@ -32,6 +35,7 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         case .you, .verified: return nil
         case .unverified: return "Not verified by you"
         case .keysChanged: return "Keys changed: compare safety numbers again"
+        case .notChecked: return "Not checked yet"
         }
     }
 
@@ -188,15 +192,35 @@ public final class SharedVaultModel {
         pending = status.pendingRotation.map(Self.describe)
     }
 
-    static func rows(_ status: SharedVaultStatus, me: UUID?) -> [MemberRow] {
-        let substituted = Set(status.substitutedMembers)
-        let unverified = Set(status.unverifiedMembers)
-        return status.membership.members.map { member in
-            let trust: MemberRow.Trust =
-                member.accountID == me
-                ? .you
-                : substituted.contains(member.accountID)
-                    ? .keysChanged : unverified.contains(member.accountID) ? .unverified : .verified
+    nonisolated static func rows(_ status: SharedVaultStatus, me: UUID?) -> [MemberRow] {
+        rows(
+            members: status.membership.members.map { ($0.accountID, $0.role) }, substituted: status.substitutedMembers,
+            unverified: status.unverifiedMembers, verified: status.verifiedMembers, me: me)
+    }
+
+    /// The member list: changed keys first of all, then unverified; verified only for a member the comparison on the
+    /// current head lists as verified (`SharedVaultStatus.verifiedMembers`), and "not checked yet" for anyone else. An
+    /// account that is in no list is never taken for verified.
+    public nonisolated static func rows(
+        members: [(accountID: UUID, role: MemberRole)], substituted: [UUID], unverified: [UUID], verified: [UUID]?,
+        me: UUID?
+    ) -> [MemberRow] {
+        let substituted = Set(substituted)
+        let unverified = Set(unverified)
+        let verified = Set(verified ?? [])
+        return members.map { member in
+            let trust: MemberRow.Trust
+            if member.accountID == me {
+                trust = .you
+            } else if substituted.contains(member.accountID) {
+                trust = .keysChanged
+            } else if unverified.contains(member.accountID) {
+                trust = .unverified
+            } else if verified.contains(member.accountID) {
+                trust = .verified
+            } else {
+                trust = .notChecked
+            }
             return MemberRow(id: member.accountID, role: member.role, trust: trust)
         }
         .sorted { ($0.role.rawValue, $0.id.uuidString) < ($1.role.rawValue, $1.id.uuidString) }
@@ -260,9 +284,21 @@ public final class InvitationModel {
     /// The roles an invitation can carry: never owner.
     public static let roles: [MemberRole] = [.readWrite, .readOnly, .administrator]
 
-    /// Whether the person named the account with a fingerprint code, which is then what their keys are checked
-    /// against.
+    /// Whether the person named the account with a fingerprint code. It only says which account: the comparison is
+    /// still theirs to make.
     public var usesFingerprintCode: Bool { reference?.fingerprintCode != nil }
+
+    /// Who is being invited, as the role step names them: the chain names accounts, not people.
+    public var inviteeName: String {
+        switch step {
+        case .compareFingerprint(let contact), .chooseRole(let contact):
+            return "the account \(shortIdentifier(contact.accountID)) (Watchword ID \(contact.accountID.uuidString))"
+        case .nameAccount, .issued: return ""
+        }
+    }
+
+    /// How the invitee's keys were confirmed, for the role step; never claims a comparison that was not made.
+    public private(set) var verificationText = ""
 
     public func lookUp() async {
         guard let reference = SharingCodes.account(from: accountText) else {
@@ -272,18 +308,21 @@ public final class InvitationModel {
         self.reference = reference
         await perform {
             let contact = ContactSummary(try await context.session.contactCandidate(reference.accountID))
+            verificationText =
+                contact.isVerified ? "You compared their safety number before, and their keys have not changed." : ""
             step = contact.isVerified ? .chooseRole(contact) : .compareFingerprint(contact)
         }
     }
 
     public func confirmFingerprint() async {
         guard case .compareFingerprint(let contact) = step else { return }
-        guard let evidence = confirmation.evidence(code: reference?.fingerprintCode) else {
+        guard let evidence = confirmation.evidence() else {
             errorMessage = "Type their safety number, or confirm that you compared the two."
             return
         }
         await perform {
             try await context.session.verifyContact(contact.accountID, evidence: evidence)
+            verificationText = FingerprintConfirmation.describe(evidence)
             confirmation = FingerprintConfirmation()
             step = .chooseRole(ContactSummary(try await context.session.contactCandidate(contact.accountID)))
         }
@@ -323,6 +362,9 @@ public final class AcceptInvitationModel {
     public enum Step: Hashable, Sendable {
         case enterCode
         case compareOwner(ContactSummary)
+        /// The owner was verified before: the person still says yes to joining their vault, which nothing an
+        /// invitation says can skip (review of the account screens, finding 8).
+        case confirmJoin(ContactSummary)
         case joined(vaultID: UUID)
     }
 
@@ -347,21 +389,30 @@ public final class AcceptInvitationModel {
         self.invitation = invitation
         await perform {
             let owner = ContactSummary(try await context.session.contactCandidate(invitation.ownerAccountID))
-            if owner.isVerified {
-                try await join(invitation, evidence: nil)
-            } else {
-                step = .compareOwner(owner)
-            }
+            step = owner.isVerified ? .confirmJoin(owner) : .compareOwner(owner)
         }
     }
 
     public func accept() async {
         guard case .compareOwner = step, let invitation else { return }
-        guard let evidence = confirmation.evidence(code: nil) else {
+        guard let evidence = confirmation.evidence() else {
             errorMessage = "Type the owner's safety number, or confirm that you compared the two."
             return
         }
         await perform { try await join(invitation, evidence: evidence) }
+    }
+
+    /// Joins a vault whose owner was verified before, once the person has said yes.
+    public func confirmJoin() async {
+        guard case .confirmJoin = step, let invitation else { return }
+        await perform { try await join(invitation, evidence: nil) }
+    }
+
+    /// Goes back to the code without joining.
+    public func decline() {
+        step = .enterCode
+        invitation = nil
+        codeText = ""
     }
 
     private func join(_ invitation: Invitation, evidence: VerificationEvidence?) async throws {

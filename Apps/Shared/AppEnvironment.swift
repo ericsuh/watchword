@@ -31,6 +31,17 @@ enum AppEnvironment {
 
     static let keychainService = "com.ericsuh.Watchword"
 
+    /// The session this launch has, if any.
+    var session: VaultSession? {
+        switch self {
+        case .ready(let session): return session
+        #if DEBUG
+            case .uiTest(let session, _, _): return session
+        #endif
+        case .unavailable: return nil
+        }
+    }
+
     static var appVersion: String {
         let info = Bundle.main.infoDictionary ?? [:]
         let version = info["CFBundleShortVersionString"] as? String ?? "0"

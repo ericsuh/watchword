@@ -143,6 +143,9 @@ public actor VaultSession: SharesExecutor {
     private var backgroundedAt: Date?
     /// Lamport high-water mark per vault, so one record with an absurd version cannot freeze writes elsewhere.
     var highestVersionSeen: [UUID: UInt64] = [:]
+    /// Whoever asked to be told of every lock (`lockEvents()`), by a number of their own.
+    var lockListeners: [Int: AsyncStream<Void>.Continuation] = [:]
+    var nextLockListener = 0
     var syncInFlight = false
     /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
     var registryView: RegistryView?
@@ -731,6 +734,25 @@ public actor VaultSession: SharesExecutor {
         backgroundedAt = nil
         // After the keyset is zeroised, never before (§13.8): nothing the engine does can keep the keys resident.
         stopHygiene()
+        for listener in lockListeners.values { listener.yield() }
+    }
+
+    /// One element for every lock from now on, whatever caused it (`lock()`, auto-lock, a lock during an operation),
+    /// for state outside the session that must go with the keys: a screen's decrypted values, an export's bytes. The
+    /// stream ends when its consumer stops listening; at most one unread lock is kept.
+    public func lockEvents() -> AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let number = nextLockListener
+        nextLockListener += 1
+        lockListeners[number] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.stopListening(number) }
+        }
+        return stream
+    }
+
+    private func stopListening(_ number: Int) {
+        lockListeners[number] = nil
     }
 
     /// Call on user interaction. Resets the idle timer — unless the timeout has already passed, in which case it

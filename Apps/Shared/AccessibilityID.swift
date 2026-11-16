@@ -60,6 +60,7 @@ enum AccessibilityID {
         static let comparedByEye = "invite.comparedByEye"
         static let confirm = "invite.confirm"
         static let role = "invite.role"
+        static let invitee = "invite.invitee"
         static let send = "invite.send"
         static let code = "invite.code"
         static let copy = "invite.copy"
@@ -74,6 +75,7 @@ enum AccessibilityID {
         static let typedNumber = "accept.typedNumber"
         static let comparedByEye = "accept.comparedByEye"
         static let join = "accept.join"
+        static let confirmText = "accept.confirmText"
         static let joined = "accept.joined"
         static let done = "accept.done"
     }
@@ -82,6 +84,7 @@ enum AccessibilityID {
         static let list = "devices.list"
         static let syncNow = "devices.syncNow"
         static let syncStatus = "devices.syncStatus"
+        static let thisDevice = "devices.thisDevice"
         static let notice = "devices.notice"
         static func row(_ name: String) -> String { "devices.row.\(name)" }
         static func revoke(_ name: String) -> String { "devices.revoke.\(name)" }
@@ -130,6 +133,8 @@ enum AccessibilityID {
         static func duplicate(_ title: String) -> String { "import.duplicate.\(title)" }
         static func choice(_ title: String) -> String { "import.choice.\(title)" }
         static func host(_ host: String) -> String { "merge.host.\(host)" }
+        static func hostWarning(_ host: String) -> String { "merge.hostWarning.\(host)" }
+        static let hostConfirm = "merge.hostConfirm"
         static func field(_ label: String) -> String { "merge.field.\(label)" }
         static func reveal(_ label: String) -> String { "merge.reveal.\(label)" }
     }
@@ -157,5 +162,6 @@ enum AccessibilityID {
         static let peerPassword = "debug.peerPassword"
         static let peerImplausible = "debug.peerImplausible"
         static let householdAccept = "debug.householdAccept"
+        static let lockNow = "debug.lockNow"
     }
 }

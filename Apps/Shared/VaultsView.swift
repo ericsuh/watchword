@@ -23,12 +23,16 @@ struct VaultsView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
+                                Image(systemName: row.isShared ? "person.2.fill" : "lock.fill")
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityHidden(true)
                                 Text(row.name)
                                 if row.sharing?.requiresNewerVersion == true {
                                     Image(systemName: "arrow.down.app").foregroundStyle(.orange)
                                         .accessibilityLabel("Update Watchword to change this vault")
                                 }
                             }
+                            Text(row.badge).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                             Text(row.detail).font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -67,7 +71,7 @@ struct VaultsView: View {
         .sheet(isPresented: $creating) {
             VaultNameSheet(
                 title: "New Vault", action: "Create", fieldID: AccessibilityID.Vaults.newName,
-                saveID: AccessibilityID.Vaults.create
+                saveID: AccessibilityID.Vaults.create, close: { creating = false }
             ) { name in
                 let created = await model.create(name: name) != nil
                 try? await app.reloadVaults()
@@ -142,7 +146,8 @@ struct VaultDetailView: View {
         .sheet(isPresented: $renaming) {
             VaultNameSheet(
                 title: "Rename Vault", action: "Save", initial: row?.name ?? "",
-                fieldID: AccessibilityID.Vault.renameField, saveID: AccessibilityID.Vault.renameSave
+                fieldID: AccessibilityID.Vault.renameField, saveID: AccessibilityID.Vault.renameSave,
+                close: { renaming = false }
             ) { name in
                 let renamed = await vaults.rename(model.vaultID, to: name)
                 try? await app.reloadVaults()

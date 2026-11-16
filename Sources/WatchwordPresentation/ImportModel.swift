@@ -63,8 +63,8 @@ public struct AdditionField: Hashable, Sendable, Identifiable {
 /// `MergeAdditions`). Hosts, sign-in fields and URLs are added only one by one; the rest is added by the merge.
 public struct MergeReview: Hashable, Sendable {
     public let existingID: UUID
-    /// Hosts the existing item would also be offered on.
-    public let hosts: [String]
+    /// Hosts the existing item would also be offered on, each as the person should read it (`MergeHost`).
+    public let hosts: [MergeHost]
     public let signInFields: [AdditionField]
     public let urlFields: [AdditionField]
     /// Labels of the other fields a merge adds as they are.
@@ -72,9 +72,10 @@ public struct MergeReview: Hashable, Sendable {
     public let tags: [String]
     public let addsNotes: Bool
 
-    public init(existingID: UUID, additions: MergeAdditions) {
+    /// `saved` is what the hosts are compared with for look-alikes: the vault's items, the existing one included.
+    public init(existingID: UUID, additions: MergeAdditions, saved: [Item]) {
         self.existingID = existingID
-        hosts = additions.scopes.map(\.host)
+        hosts = additions.scopes.map { MergeHost($0, against: saved) }
         func row(_ field: Field) -> AdditionField {
             AdditionField(
                 id: field.id, label: field.label.isEmpty ? field.kind.rawValue : field.label, value: field.value,
@@ -118,7 +119,7 @@ public struct ImportSummary: Hashable, Sendable {
 /// not accept by name: there is no "accept all".
 @MainActor
 @Observable
-public final class ImportModel {
+public final class ImportModel: LockSensitive {
     public enum Stage: Hashable, Sendable {
         case choose
         case review
@@ -146,6 +147,8 @@ public final class ImportModel {
     public private(set) var accepted: [UUID: MergeChoices] = [:]
     /// Secret values the person chose to see, by field ID.
     public var revealed: Set<UUID> = []
+    /// A host that resembles a saved site, switched on and waiting for the person's second confirmation.
+    public private(set) var hostAwaitingConfirmation: (importedID: UUID, host: MergeHost)?
     public private(set) var isWorking = false
     public var errorMessage: String?
 
@@ -154,6 +157,16 @@ public final class ImportModel {
 
     public init(context: ScreenContext) {
         self.context = context
+        context.locks?.register(self)
+    }
+
+    /// On every lock: the merge values (secrets among them), what was revealed, every choice and the typed
+    /// passphrase and Secret Key go, as the session's drafts did (finding 6).
+    public func dropOnLock() {
+        reset()
+        archivePassphrase = ""
+        archiveSecretKey = ""
+        if stage == .review { stage = .choose }
     }
 
     public var undecided: [DuplicateRow] { duplicates.filter { choices[$0.id] == nil } }
@@ -161,19 +174,7 @@ public final class ImportModel {
 
     public func load() async {
         await perform {
-            vaults = try await context.session.vaults().map { VaultRow($0, sharing: nil) }
-            if let shared = try? await context.session.sharedVaultIDs() {
-                var writable: [VaultRow] = []
-                for vault in vaults {
-                    if shared.contains(vault.id), let status = try? await context.session.sharedVaultStatus(vault.id),
-                        !status.writePermission.isAllowed
-                    {
-                        continue
-                    }
-                    writable.append(vault)
-                }
-                vaults = writable
-            }
+            vaults = try await VaultRow.load(from: context.session).filter { !$0.isReadOnly }
             if vaultID == nil || !vaults.contains(where: { $0.id == vaultID }) { vaultID = vaults.first?.id }
         }
     }
@@ -214,7 +215,9 @@ public final class ImportModel {
             if case .merge(let existingID) = choice {
                 let additions = try await context.session.importAdditions(
                     preview: previewID, importedID: importedID, existingID: existingID)
-                merges[importedID] = MergeReview(existingID: existingID, additions: additions)
+                let existing = try await context.session.item(id: existingID)
+                let saved = (try? await context.session.items().items) ?? [existing]
+                merges[importedID] = MergeReview(existingID: existingID, additions: additions, saved: saved)
             } else {
                 merges[importedID] = nil
             }
@@ -232,9 +235,32 @@ public final class ImportModel {
         accepted[importedID]?.fieldIDs.contains(field) ?? false
     }
 
+    /// Accepts or drops one host. A host that resembles a saved site is not accepted at once: it waits in
+    /// `hostAwaitingConfirmation` for `confirmAwaitingHost()`.
     public func setHost(_ host: String, accepted isAccepted: Bool, for importedID: UUID) {
         context.recordActivity()
-        guard let review = merges[importedID], review.hosts.contains(host) else { return }
+        guard let review = merges[importedID], let shown = review.hosts.first(where: { $0.host == host }) else {
+            return
+        }
+        if isAccepted, shown.needsConfirmation {
+            hostAwaitingConfirmation = (importedID, shown)
+            return
+        }
+        apply(host, accepted: isAccepted, for: importedID)
+    }
+
+    /// The person confirmed the look-alike host a second time, having read its warning.
+    public func confirmAwaitingHost() {
+        guard let (importedID, host) = hostAwaitingConfirmation else { return }
+        hostAwaitingConfirmation = nil
+        apply(host.host, accepted: true, for: importedID)
+    }
+
+    public func cancelAwaitingHost() {
+        hostAwaitingConfirmation = nil
+    }
+
+    private func apply(_ host: String, accepted isAccepted: Bool, for importedID: UUID) {
         var current = accepted[importedID] ?? .none
         if isAccepted { current.hosts.insert(host) } else { current.hosts.remove(host) }
         accepted[importedID] = current
@@ -296,6 +322,7 @@ public final class ImportModel {
         merges = [:]
         accepted = [:]
         revealed = []
+        hostAwaitingConfirmation = nil
         archiveCreatedAt = nil
     }
 
