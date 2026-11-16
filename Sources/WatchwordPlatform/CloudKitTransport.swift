@@ -308,7 +308,7 @@
     public enum CloudKitErrors {
         /// `zoneNotFound` that CloudKit marks as a reset of its own encryption key: the data is gone, not absent.
         public static func isReset(_ error: CKError) -> Bool {
-            error.userInfo[CKErrorUserDidResetEncryptedDataKeyKey] as? Bool == true
+            error.userInfo[CKErrorUserDidResetEncryptedDataKey] as? Bool == true
         }
 
         /// Whether a (possibly partial) failure says only that the record or its zone is not there.

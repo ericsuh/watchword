@@ -121,7 +121,7 @@
                 (CKError(.notAuthenticated), .notAuthenticated),
                 (CKError(.accountTemporarilyUnavailable), .notAuthenticated),
                 (CKError(.userDeletedZone), .storeReset),
-                (CKError(.zoneNotFound, userInfo: [CKErrorUserDidResetEncryptedDataKeyKey: true]), .storeReset),
+                (CKError(.zoneNotFound, userInfo: [CKErrorUserDidResetEncryptedDataKey: true]), .storeReset),
                 (CKError(.networkUnavailable), .unavailable),
                 (CKError(.networkFailure), .unavailable),
                 (CKError(.serverRecordChanged), .objectExists("n")),
