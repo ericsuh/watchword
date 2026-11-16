@@ -370,13 +370,13 @@ extension XCUIApplication {
     func closeSettings(file: StaticString = #filePath, line: UInt = #line) {
         let done = buttons["settings.done"]
         if !waitUntilHittable(done, timeout: 5) {
-            attachTree("close Settings")
+            attachTree("close Settings", target: "settings.done")
             XCTFail("Settings' Done cannot be clicked", file: file, line: line)
             return
         }
         done.click()
         if !done.waitForNonExistence(timeout: 10) {
-            attachTree("close Settings")
+            attachTree("close Settings", target: "settings.done")
             XCTFail("Settings is still open", file: file, line: line)
         }
     }

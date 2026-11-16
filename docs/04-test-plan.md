@@ -132,7 +132,13 @@ with password re-entry, import of 1PUX/CSV fixtures.
   (which fails outright for an iOS row scrolled out of view): above the visible area it scrolls back, below it
   scrolls on, not there yet it scrolls the way the caller says, and on screen it waits; on macOS it scrolls only a
   scroll view no sheet covers and learns which way the wheel moves the form. Only after its bounded scrolls does it
-  fail, with the element tree, the window's frame and a screenshot attached. A text expected below the fold (an
+  fail, with the element tree, the window's frame and a screenshot attached. A form's row is judged against its
+  scrolling container, kept clear of the bars at its edges; a toolbar item (Done, a sheet's + button) against the
+  window, since it is in no container (judging Done against the form failed every close of Settings on macOS). Every
+  helper failure also prints a compact account to the log (the target's frame and state, the window's and sheets'
+  frames, the area judged by, the buttons on screen, the start of the tree), and `mise run app:diagnose` prints the
+  failed tests' text attachments (`xcresulttool export attachments --only-failures`, capped), so a failure can be
+  read from the job log alone. A text expected below the fold (an
   export's report) is scrolled to as well.
 - Their logic is tested on Linux without a simulator: every account screen's state and decisions are a model in
   `WatchwordPresentation` (`02-architecture.md` §15), and `WatchwordPresentationTests` drives those models over real

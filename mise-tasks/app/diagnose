@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-#MISE description="Print what each result bundle from app:test knows about a failure: summary, runner logs, crash reports"
+#MISE description="Print what each result bundle from app:test knows about a failure: summary, text attachments, runner logs, crash reports"
 #USAGE arg "[results]" default="TestResults" help="The directory `app:test --results` wrote its .xcresult bundles to"
 #
 # The app-tests CI job runs this when `app:test` fails, so the job log, which anyone (or any tool) can read, carries
 # what is otherwise only inside the uploaded .xcresult, readable only with Xcode's xcresulttool. A UI-test runner that
 # dies before any test runs ("operation never finished bootstrapping") reports one line in xcodebuild's output; its
-# own log and crash report say why. Informational only: it never fails, because the job has already failed.
+# own log and crash report say why. The failed tests' text attachments (the UI-test helpers attach the element tree
+# and their diagnostics there) are printed too, capped so one cannot bury the rest. Informational only: it never fails,
+# because the job has already failed.
 set -uo pipefail
 
 results="$usage_results"
@@ -35,6 +37,17 @@ for bundle in "${bundles[@]}"; do
     echo "::warning::xcresulttool could not export the diagnostics of $bundle"
     continue
   fi
+
+  attachments=$(mktemp -d)
+  # `export attachments` is Xcode 16's; `--only-failures` keeps a long passing tour's screens out of the log.
+  if xcrun xcresulttool export attachments --path "$bundle" --output-path "$attachments" --only-failures > /dev/null 2>&1 \
+    || xcrun xcresulttool export attachments --path "$bundle" --output-path "$attachments" > /dev/null 2>&1; then
+    python3 -I "$(dirname "${BASH_SOURCE[0]}")/diagnose-attachments.py" "$attachments" "$name"
+  else
+    echo "::warning::this xcresulttool cannot export attachments; its export subcommands follow"
+    xcrun xcresulttool export --help 2> /dev/null | head -n 20 || true
+  fi
+  rm -rf "$attachments"
 
   echo "::group::$name: diagnostic files"
   (cd "$out" && find . -type f | sort)

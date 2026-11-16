@@ -113,7 +113,7 @@ extension XCUIApplication {
             NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", expecting, expecting)
         ).firstMatch
         if !status.waitForExistence(timeout: 20) {
-            attachTree("sync expecting \(expecting)")
+            attachTree("sync expecting \(expecting)", target: "settings.syncStatus")
             XCTFail("no sync status containing \(expecting)", file: file, line: line)
         }
     }

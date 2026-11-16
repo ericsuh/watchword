@@ -55,44 +55,69 @@ extension XCUIApplication {
             scrolls += 1
         }
         if !target.waitForExistence(timeout: 2) {
-            attachTree("reveal \(identifier)")
+            attachTree("reveal \(identifier)", target: identifier)
             XCTFail("\(identifier) was not found", file: file, line: line)
         } else if !mayBeDisabled, !waitUntilHittable(target, timeout: 2) {
             // In the hierarchy but not reachable: off the screen, or under a sheet that is still there.
-            attachTree("reveal \(identifier)")
+            attachTree("reveal \(identifier)", target: identifier)
             XCTFail("\(identifier) is not hittable", file: file, line: line)
         }
         return target
     }
 
-    /// The part of the screen the frontmost form shows: on macOS the frontmost sheet's scroll view (a row behind the
-    /// sheet's toolbar at its foot is not clickable), else the window.
-    private var visibleFrame: CGRect {
-        #if os(macOS)
-            if let sheet = sheets.allElementsBoundByIndex.last {
-                let form = sheet.scrollViews.firstMatch
-                return form.exists ? form.frame : sheet.frame
-            }
+    /// The scrolling container holding `element`, innermost last: a form's rows are in one, toolbar items and header
+    /// buttons are not. Found by the element's identifier; `nil` for one with none or outside any container.
+    private func container(of element: XCUIElement) -> XCUIElement? {
+        let identifier = element.identifier
+        guard !identifier.isEmpty else { return nil }
+        #if os(iOS)
+            let queries = [collectionViews, tables, scrollViews]
+        #else
+            let queries = [scrollViews, tables, outlines]
         #endif
-        return windows.firstMatch.exists ? windows.firstMatch.frame : .zero
+        for query in queries {
+            if let found = query.containing(.any, identifier: identifier).allElementsBoundByIndex.last, found.exists {
+                return found
+            }
+        }
+        return nil
     }
 
-    /// Keeps clear of a bar along an edge of the visible area (a toolbar, the home indicator).
+    /// The window's frame, joined with the frontmost sheet's on macOS (a sheet may reach past its window's edge).
+    private var windowFrame: CGRect {
+        var frame = windows.firstMatch.exists ? windows.firstMatch.frame : .zero
+        #if os(macOS)
+            if let sheet = sheets.allElementsBoundByIndex.last, sheet.exists { frame = frame.union(sheet.frame) }
+        #endif
+        return frame
+    }
+
+    /// Where `element` can be seen and clicked: inside its scrolling container, kept clear of the bars along that
+    /// container's edges (a sheet's toolbar at its foot, the home indicator), for a form's row; the window itself,
+    /// with no margin, for anything outside a container (a toolbar item such as Done, a header button).
+    func visibleFrame(for element: XCUIElement) -> CGRect {
+        guard let container = container(of: element) else { return windowFrame }
+        let frame = container.frame.intersection(windowFrame)
+        return frame.height > 3 * Self.edgeMargin ? frame.insetBy(dx: 0, dy: Self.edgeMargin) : frame
+    }
+
+    /// Keeps clear of a bar along an edge of a scrolling container (a toolbar, the home indicator).
     private static let edgeMargin: CGFloat = 36
 
-    /// Whether `element`'s middle is well inside the visible area. Asks nothing of an element not there.
+    /// Whether `element`'s middle is inside the area where it can be seen. Asks nothing of an element not there.
     func isOnScreen(_ element: XCUIElement) -> Bool {
         guard element.exists else { return false }
         let frame = element.frame
-        let visible = visibleFrame.insetBy(dx: 0, dy: Self.edgeMargin)
+        let visible = visibleFrame(for: element)
         return !frame.isEmpty && !visible.isEmpty && visible.contains(CGPoint(x: frame.midX, y: frame.midY))
     }
 
     /// Which way to scroll to bring `element` into view: towards the end if it is below, back if it is above, `nil`
-    /// if it is in view or has no frame.
+    /// if it is in view, has no frame, or is in no scrolling container (then scrolling would not move it).
     private func direction(toward element: XCUIElement) -> Bool? {
+        guard container(of: element) != nil else { return nil }
         let frame = element.frame
-        let visible = visibleFrame.insetBy(dx: 0, dy: Self.edgeMargin)
+        let visible = visibleFrame(for: element)
         guard !frame.isEmpty, !visible.isEmpty else { return nil }
         if frame.midY > visible.maxY { return true }
         if frame.midY < visible.minY { return false }
@@ -132,12 +157,42 @@ extension XCUIApplication {
         #endif
     }
 
-    /// Attaches the whole element tree to the running test, kept whether or not it passes, for a failure that the
-    /// assertion's own message cannot explain (which window or sheet an element is in, and whether it is hittable).
-    func attachTree(_ reason: String) {
-        // The window's frame beside the tree: an element outside the screen exists but cannot be hit.
-        let frames = "window frame: \(windows.firstMatch.exists ? "\(windows.firstMatch.frame)" : "none")\n"
-        let attachment = XCTAttachment(string: frames + debugDescription)
+    /// Attaches the whole element tree and a screenshot to the running test, kept whether or not it passes, and prints
+    /// a compact account of the same to the log, which can be read where the result bundle cannot: the target's
+    /// frame and state, the window's and the frontmost sheet's frames, the area `reveal` judged by, the buttons on
+    /// screen, and the start of the tree.
+    func attachTree(_ reason: String, target identifier: String? = nil) {
+        var lines = ["=== UI-test diagnostics: \(reason)"]
+        if let identifier {
+            let target = element(identifier)
+            if target.exists {
+                let hittable = isOnScreen(target) ? "\(target.isHittable)" : "not asked (off the visible area)"
+                lines.append(
+                    "target \(identifier): frame \(target.frame), exists true, hittable \(hittable), "
+                        + "enabled \(target.isEnabled), visible area \(visibleFrame(for: target)), "
+                        + "container \(container(of: target).map { "\($0.elementType.rawValue) \($0.frame)" } ?? "none")"
+                )
+            } else {
+                lines.append("target \(identifier): does not exist")
+            }
+        }
+        lines.append("window frame: \(windows.firstMatch.exists ? "\(windows.firstMatch.frame)" : "none")")
+        #if os(macOS)
+            let sheetFrames = sheets.allElementsBoundByIndex.map { "\($0.frame)" }
+            lines.append(
+                "sheet frames, frontmost last: \(sheetFrames.isEmpty ? "none" : sheetFrames.joined(separator: ", "))")
+        #endif
+        for button in buttons.allElementsBoundByIndex.prefix(40) where button.exists {
+            lines.append(
+                "button \(button.identifier.isEmpty ? "(no id)" : button.identifier) “\(button.label)” \(button.frame)")
+        }
+        let tree = debugDescription
+        lines.append("element tree, first 150 lines:")
+        lines += tree.split(separator: "\n", omittingEmptySubsequences: false).prefix(150).map(String.init)
+        lines.append("=== end of UI-test diagnostics: \(reason)")
+        print(lines.joined(separator: "\n"))
+
+        let attachment = XCTAttachment(string: lines.joined(separator: "\n") + "\n\n" + tree)
         attachment.name = "element tree: \(reason)"
         attachment.lifetime = .keepAlways
         let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
@@ -183,7 +238,7 @@ extension XCUIApplication {
             row.click()
             if done.waitForExistence(timeout: 5) { return }
         }
-        attachTree("open \(identifier)")
+        attachTree("open \(identifier)", target: identifier)
         XCTFail("\(identifier) did not open its screen", file: file, line: line)
     }
 
@@ -192,7 +247,7 @@ extension XCUIApplication {
     func closeScreen(file: StaticString = #filePath, line: UInt = #line) {
         let done = buttons[AccessibilityID.screenDone].firstMatch
         guard done.waitForExistence(timeout: 5) else {
-            attachTree("close the screen")
+            attachTree("close the screen", target: AccessibilityID.screenDone)
             XCTFail("no screen is open", file: file, line: line)
             return
         }
@@ -201,7 +256,7 @@ extension XCUIApplication {
             done.click()
             if done.waitForNonExistence(timeout: 5) { return }
         }
-        attachTree("close the screen")
+        attachTree("close the screen", target: AccessibilityID.screenDone)
         XCTFail("the screen is still open", file: file, line: line)
     }
 
@@ -217,7 +272,7 @@ extension XCUIApplication {
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: target)
         XCTAssertEqual(XCTWaiter().wait(for: [enabled], timeout: 15), .completed, "\(identifier) stayed disabled")
         if !waitUntilHittable(target, timeout: 3) {
-            attachTree("tap \(identifier)")
+            attachTree("tap \(identifier)", target: identifier)
             XCTFail("\(identifier) is not hittable", file: file, line: line)
         }
         target.click()
@@ -253,7 +308,7 @@ extension XCUIApplication {
                 scroll(towardsEnd: true, to: identifier)
             }
             if !match.waitForExistence(timeout: max(1, timeout - 3)) {
-                attachTree("text \(text) in \(identifier)")
+                attachTree("text \(text) in \(identifier)", target: identifier)
                 XCTFail("no \(identifier) containing \(text)", file: file, line: line)
             }
         }
