@@ -84,7 +84,8 @@ public enum ImportWarning: Equatable, Sendable {
     case passkeyDetailDropped(String)
     /// A credential type this importer has no mapping for; its text fields were kept as custom fields.
     case unsupportedCredentialType(String)
-    /// A field type with no mapping; its value was kept as a custom field when it had text, and dropped otherwise.
+    /// A field type with no mapping, or a value that is not of its field's type. The value was kept as a field of
+    /// text when it had text (a string, a number, a boolean), and dropped otherwise.
     case unsupportedFieldType(label: String, type: String)
     /// A file attachment, which this importer does not carry.
     case attachmentNotImported(name: String)
@@ -92,8 +93,14 @@ public enum ImportWarning: Equatable, Sendable {
     case linkedItemNotImported(label: String)
     /// A state this importer does not know; the entry was imported as active.
     case unknownState(String)
-    /// A timestamp outside any plausible range was ignored.
+    /// A timestamp outside any plausible range was ignored. For a date field, the number was kept as a text field.
     case implausibleDate(label: String)
+    /// The entry, or the import as a whole, listed more URLs than an import considers as scopes
+    /// (`InterchangeLimits.maximumURLsPerItem`, `maximumScopeDerivations`). `count` of them were kept as `url`
+    /// fields; AutoFill will not offer the item for them.
+    case urlsNotConsidered(count: Int)
+    /// The entry was scoped to Android apps, which have no place in a Watchword item; `count` were left out.
+    case androidAppsNotImported(count: Int)
     /// A cell looks like one this app's own export made inert (an apostrophe before `=`, `+`, `-` or `@`). It was
     /// imported as written, apostrophe included.
     case possiblyNeutralisedFormula(column: String)
@@ -231,4 +238,13 @@ public enum InterchangeMeta {
     public static let websiteType = "website"
     /// The source's own identifier for the field (`accountNo`, `membership_no`, …).
     public static let sourceID = "sourceID"
+    /// The category the source filed the entry under (1PUX's `categoryUuid`), on each of the entry's fields, for the
+    /// categories with a shape of their own. An item has no category; an export prefers this to guessing one.
+    public static let category = "category"
+    /// The `sourceType` of a text field holding an entry's subtitle (CXF), where it said something the entry's
+    /// title and fields did not.
+    public static let subtitleType = "subtitle"
+
+    /// Every key this module writes.
+    static let all: Set<String> = [section, sourceType, sourceID, category]
 }

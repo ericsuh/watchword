@@ -32,6 +32,8 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
         /// A Credential Exchange transfer that delivers nothing leaves the source untouched.
         case transferMayDeliverNothing
         case compareCounts
+        /// An export lists what the format could not carry; it is to be read before anything is deleted here.
+        case exportReport
     }
 
     public struct Caveat: Hashable, Sendable {
@@ -113,6 +115,12 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
         .compareCounts,
         "Compare the number of items imported with the number you expected before you delete anything from the app "
             + "you are leaving.")
+    private static let exportReport = Caveat(
+        .exportReport,
+        "Watchword's export report lists what the file or transfer could not carry as it was: earlier versions of "
+            + "an item, tags and archived marks where the other app has no place for them, an item limited to one "
+            + "host or with hosts excluded, and values still waiting for you to choose between. Read it before you "
+            + "delete anything from Watchword.")
     private static let passkeysNotInCSV = Caveat(
         .passkeysNotInCSV,
         "Passkeys cannot be written to a CSV file. Move them with Export to Another App, or sign in and create new "
@@ -212,7 +220,9 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
                     "Choose 1Password from the list of apps, and confirm with Face ID, Touch ID or your passcode.",
                     "1Password opens and shows what it received. Follow its steps to finish the import.",
                 ],
-                caveats: [Caveat(.compareCounts, nothingOnDisk + " " + compareCounts.text), deliversNothing]),
+                caveats: [
+                    Caveat(.compareCounts, nothingOnDisk + " " + compareCounts.text), deliversNothing, exportReport,
+                ]),
             Route(
                 id: "watchword.to-1password.1pux",
                 title: "With a 1PUX file",
@@ -236,6 +246,7 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
                         "Passkeys are not written to a 1PUX file; the export report lists the items that have one. "
                             + "Move them app to app, or create new passkeys in 1Password."),
                     compareCounts,
+                    exportReport,
                 ]),
         ])
 
@@ -303,7 +314,9 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
                     "Choose Passwords from the list of apps, and confirm with Face ID, Touch ID or your passcode.",
                     "Passwords opens and shows what it received. Follow its steps to finish the import.",
                 ],
-                caveats: [Caveat(.compareCounts, nothingOnDisk + " " + compareCounts.text), deliversNothing]),
+                caveats: [
+                    Caveat(.compareCounts, nothingOnDisk + " " + compareCounts.text), deliversNothing, exportReport,
+                ]),
             Route(
                 id: "watchword.to-apple.csv",
                 title: "With a CSV file",
@@ -332,6 +345,7 @@ public struct InterchangeGuide: Hashable, Sendable, Identifiable {
                             + "apostrophe as part of the value. The export report lists each value changed: correct "
                             + "them in Passwords afterwards, or choose to write values unchanged if the file will "
                             + "only ever be opened by Passwords."),
+                    exportReport,
                 ]),
         ])
 }

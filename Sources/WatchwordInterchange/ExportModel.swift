@@ -17,6 +17,25 @@ public enum ExportWarning: Hashable, Sendable {
     case trashedItemOmitted(itemID: UUID)
     /// A one-time-password field that is not a usable `otpauth://totp/` URI was written as a concealed field.
     case oneTimePasswordUnusable(itemID: UUID)
+    /// The item holds field values that sync is keeping until the person chooses between them (`Item.conflicts`,
+    /// `Item.retainedValues`; PRD F7.6, F7.7). `count` of them were written as extra concealed fields labelled
+    /// "(unresolved value)" (as lines of the notes in CSV), so the export leaves none behind.
+    case unresolvedValuesAdded(itemID: UUID, count: Int)
+    /// `count` unresolved values of something other than a field's text (a title, the scopes, the tags, the
+    /// archived mark, a passkey) were left out: only the value shown was written.
+    case unresolvedValuesOmitted(itemID: UUID, count: Int)
+    /// `entries` earlier versions of the item's fields (`Item.history`) were left out, or written without all of
+    /// their fields: CXF and CSV have no place for history, and 1PUX keeps earlier passwords only.
+    case historyOmitted(itemID: UUID, entries: Int)
+    /// The scope for `host` did not include subdomains, or excluded hosts. No format here can say so: the file names
+    /// the host only, and whatever imports it (this app included) will offer the item on its subdomains too.
+    case scopeRestrictionOmitted(itemID: UUID, host: String)
+    /// The item is archived and the format has no archived mark (CXF, CSV): it was written as an active item.
+    case archivedStateOmitted(itemID: UUID)
+    /// The format has no place for tags (CSV); the item was written without them.
+    case tagsOmitted(itemID: UUID)
+    /// Something the field records beside its value was left out: which recovery codes are spent, for one.
+    case fieldDetailOmitted(itemID: UUID, label: String)
 }
 
 public struct ExportReport: Hashable, Sendable {
@@ -42,6 +61,100 @@ public struct ExportResult: Hashable, Sendable {
     public init(bytes: [UInt8], report: ExportReport) {
         self.bytes = bytes
         self.report = report
+    }
+}
+
+/// What every exporter does the same way: the URLs it writes for an item, the values sync is keeping, and the
+/// warnings for what no format here can carry. Kept in one place so that no format forgets a line of the report.
+enum ExportSupport {
+    static let unresolvedLabel = "Unresolved values"
+
+    /// The URLs to write for `item`, and the `url` fields they came from.
+    ///
+    /// A scope is a host, so the URL for one is `https://host/`, unless the item still holds the URL it was imported
+    /// with (`ImportAssembler` keeps any that said more than its host, as a `url` field of type
+    /// `InterchangeMeta.websiteType`): then that text is written in its place, and the sign-in page, port or scheme
+    /// survives. Which field stands for which scope is decided here, by deriving each field's host again, never
+    /// from a hint. Website fields that stand for no scope (URLs the scope policy refused) follow.
+    static func websites(of item: Item) -> (urls: [String], fieldIDs: Set<UUID>) {
+        var websiteFields: [Field] = []
+        var byHost: [String: [Int]] = [:]
+        // As many are parsed as an import would have parsed for one entry; an item is not trusted to be small (it
+        // may come from another member of a shared vault), and parsing a URL is the costly step.
+        var parsed = 0
+        for field in item.fields
+        where field.kind == .url && field.meta[InterchangeMeta.sourceType] == InterchangeMeta.websiteType {
+            if !item.scopes.isEmpty, parsed < InterchangeLimits.standard.maximumURLsPerItem {
+                parsed += 1
+                if case .success(let scope) = ScopeDerivation.scope(forURL: field.value) {
+                    // The scope may have been derived with or without the leading `www.`.
+                    var hosts = [scope.host]
+                    if scope.host.hasPrefix("www.") { hosts.append(String(scope.host.dropFirst(4))) }
+                    for host in hosts {
+                        byHost[host, default: []].append(websiteFields.count)
+                    }
+                }
+            }
+            websiteFields.append(field)
+        }
+        var urls: [String] = []
+        var written = Set<Int>()
+        for scope in item.scopes {
+            let own = (byHost[scope.host] ?? []).filter { written.insert($0).inserted }
+            if own.isEmpty {
+                urls.append(ScopeDerivation.canonicalURL(for: scope))
+            } else {
+                urls += own.map { websiteFields[$0].value }
+            }
+        }
+        for (index, field) in websiteFields.enumerated() where !written.contains(index) {
+            urls.append(field.value)
+        }
+        return (urls, Set(websiteFields.map(\.id)))
+    }
+
+    /// The field values sync is keeping beside the ones `item` shows, each labelled for the person, and the number of
+    /// kept values that are not a field's text. In a fixed order, so an export is deterministic.
+    static func unresolvedValues(of item: Item) -> (fields: [(label: String, value: String)], omitted: Int) {
+        var shown: [UUID: [UInt8]] = [:]
+        for field in item.fields {
+            shown[field.id] = Array(field.value.utf8)
+        }
+        var fields: [(label: String, value: String)] = []
+        var listed = Set<[UInt8]>()
+        var omitted = 0
+        let conflicting = item.conflicts.keys.sorted().flatMap { item.conflicts[$0] ?? [] }
+        for kept in conflicting + item.retainedValues {
+            guard case .field(let field) = kept.value else {
+                omitted += 1
+                continue
+            }
+            // A removal holds no value; an empty value, or the one already shown, has nothing to add.
+            guard let field, !field.value.isEmpty else { continue }
+            let value = Array(field.value.utf8)
+            guard shown[field.id] != value else { continue }
+            guard field.kind != .passkey else {
+                omitted += 1
+                continue
+            }
+            let name = field.label.isEmpty ? field.kind.rawValue : field.label
+            guard listed.insert(Array(name.utf8) + [0] + value).inserted else { continue }
+            fields.append(("\(name) (unresolved value)", field.value))
+        }
+        return (fields, omitted)
+    }
+
+    /// The warnings for what no format here carries: restricted scopes and what fields record beside their value.
+    static func commonWarnings(for item: Item, into report: inout ExportReport) {
+        for scope in item.scopes {
+            let restricted = !scope.includeSubdomains && !ScopeDerivation.isAddress(scope.host)
+            if restricted || !scope.excludedHosts.isEmpty {
+                report.warnings.append(.scopeRestrictionOmitted(itemID: item.id, host: scope.host))
+            }
+        }
+        for field in item.fields where field.meta.keys.contains(where: { !InterchangeMeta.all.contains($0) }) {
+            report.warnings.append(.fieldDetailOmitted(itemID: item.id, label: field.label))
+        }
     }
 }
 

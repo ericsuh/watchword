@@ -35,8 +35,7 @@ public enum ScopeDerivation {
         var refusal = ScopeValidationError.empty
         for candidate in candidates {
             // A dotted-decimal address has no subdomains to include.
-            let isAddress = candidate.allSatisfy { $0.isASCII && ($0.isNumber || $0 == ".") }
-            let scope = ServiceScope(host: candidate, includeSubdomains: !isAddress)
+            let scope = ServiceScope(host: candidate, includeSubdomains: !isAddress(candidate))
             do {
                 try ScopePolicy.validate(scope)
                 return .success(scope)
@@ -47,6 +46,29 @@ public enum ScopeDerivation {
             }
         }
         return .failure(.policy(refusal))
+    }
+
+    /// Whether `host` is a dotted-decimal address: digits and dots only.
+    static func isAddress(_ host: String) -> Bool {
+        host.utf8.allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) || $0 == UInt8(ascii: ".") }
+    }
+
+    /// The URL an export writes for a scope that has no URL of its own on record.
+    static func canonicalURL(for scope: ServiceScope) -> String {
+        "https://\(scope.host)/"
+    }
+
+    /// Whether `text` says nothing beyond `scope`: the host alone, or `https://` and the host with at most a bare
+    /// slash. Anything else (another scheme, a port, a path, a query, a `www.` that was stripped) is information the
+    /// scope does not hold, and the import keeps the text. Compared on bytes, ASCII letters without regard to case.
+    static func isCanonical(_ text: String, for scope: ServiceScope) -> Bool {
+        func folded(_ text: String) -> [UInt8] {
+            text.utf8.map { (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains($0) ? $0 + 0x20 : $0 }
+        }
+        let written = folded(text)
+        let host = Array(scope.host.utf8)
+        let prefixed = Array("https://".utf8) + host
+        return written == host || written == prefixed || written == prefixed + [UInt8(ascii: "/")]
     }
 }
 
@@ -107,6 +129,10 @@ struct ImportAssembler {
     private var seenIdentifiers = Set<String>()
     /// Every entry and container visited, imported or not: the bound on the work one file can ask for.
     private var visited = 0
+    /// Fields, URLs, tags and history entries in the drafts so far, against `maximumTotalFields`.
+    private var totalFields = 0
+    /// URLs handed to `ScopeDerivation` so far, against `maximumScopeDerivations`.
+    private var scopeDerivations = 0
     private(set) var entryIndex = 0
 
     init(format: InterchangeFormat, vaultID: UUID, limits: InterchangeLimits, options: ImportOptions) {
@@ -159,14 +185,17 @@ struct ImportAssembler {
     }
 
     /// Adds tags to the entries added since `mark`, by the source's identifier for each. Like a container's name,
-    /// a collection may be read after the items it lists. A tag larger than a field may be is left off.
-    mutating func addTags(_ tags: [String: [String]], since mark: Mark) {
+    /// a collection may be read after the items it lists. A tag larger than a field may be is left off. The tags
+    /// count against `maximumTotalFields` like any others.
+    mutating func addTags(_ tags: [String: [String]], since mark: Mark) throws {
         guard !tags.isEmpty else { return }
         for index in mark.entries..<entries.count {
             guard let identifier = entries[index].reference.sourceID, let names = tags[identifier] else { continue }
             for name in names where name.utf8.count <= limits.maximumFieldBytes {
                 let trimmed = UTF8Text.trimmed(name)
-                if !trimmed.isEmpty { entries[index].item.tags.insert(trimmed) }
+                guard !trimmed.isEmpty, entries[index].item.tags.insert(trimmed).inserted else { continue }
+                totalFields += 1
+                guard totalFields <= limits.maximumTotalFields else { throw limits.exceeded(.totalFields) }
             }
         }
     }
@@ -177,8 +206,19 @@ struct ImportAssembler {
         return Date(timeIntervalSince1970: TimeInterval(seconds))
     }
 
-    /// Applies the vault's rules to `record` and adds the resulting draft, or records why it was skipped.
-    mutating func add(_ record: SourceRecord, using generator: inout some RandomNumberGenerator) {
+    /// Seconds since 1970 for 0001-01-01T00:00:00Z: the first day a `yyyy-MM-dd` date can name.
+    static let earliestCalendarDate: Int64 = -62_135_596_800
+
+    /// `yyyy-MM-dd` for a date field from a file. Unlike a timestamp, a date may lie before 1970 (a date of birth
+    /// does): any day of the years 1 to 9999 is one a person could mean.
+    static func calendarDate(seconds: Int64) -> String? {
+        guard (earliestCalendarDate...latestPlausibleTimestamp).contains(seconds) else { return nil }
+        return CivilDate.string(seconds: seconds)
+    }
+
+    /// Applies the vault's rules to `record` and adds the resulting draft, or records why it was skipped. Throws only
+    /// when the import as a whole has reached `maximumTotalFields`.
+    mutating func add(_ record: SourceRecord, using generator: inout some RandomNumberGenerator) throws {
         var reference = record.reference
         if let identifier = reference.sourceID {
             guard seenIdentifiers.insert(identifier).inserted else {
@@ -199,23 +239,55 @@ struct ImportAssembler {
         var fields: [Field] = []
         var scopes: [ServiceScope] = []
         // Sets, not searches of the arrays: an entry may list a thousand URLs, and a file fifty thousand entries.
+        // Keyed by bytes: two spellings that are equal as strings and differ as bytes are both kept.
         var scopeHosts = Set<String>()
-        var refusedURLs = Set<String>()
+        var seenURLs = Set<[UInt8]>()
+        var considered = 0
+        var unconsidered = 0
+        // Each URL kept as text, in the file's order. One that says nothing beyond its scope is kept only if another
+        // URL of the same host is, so that an export then writes both and not the longer one alone.
+        var websites: [(text: String, canonicalFor: String?)] = []
+        var hostsWithText = Set<String>()
         for url in record.urls {
             let trimmed = UTF8Text.trimmed(url)
-            guard !trimmed.isEmpty else { continue }
+            // A repeat is dropped before it is parsed: parsing a URL is the expensive part.
+            guard !trimmed.isEmpty, seenURLs.insert(Array(trimmed.utf8)).inserted else { continue }
+            guard considered < limits.maximumURLsPerItem, scopeDerivations < limits.maximumScopeDerivations else {
+                websites.append((trimmed, nil))
+                unconsidered += 1
+                continue
+            }
+            considered += 1
+            scopeDerivations += 1
             switch ScopeDerivation.scope(forURL: trimmed, stripsLeadingWWW: options.stripsLeadingWWW) {
             case .success(let scope):
                 if scopeHosts.insert(scope.host).inserted { scopes.append(scope) }
+                // A scope is a host. Whatever else the URL said (a scheme, a port, the sign-in page) is kept beside
+                // it, so that nothing is lost and an export writes the URL back as it was (PRD F8.1).
+                if ScopeDerivation.isCanonical(trimmed, for: scope) {
+                    websites.append((trimmed, scope.host))
+                } else {
+                    websites.append((trimmed, nil))
+                    hostsWithText.insert(scope.host)
+                }
             case .failure(let reason):
-                guard refusedURLs.insert(trimmed).inserted else { continue }
-                fields.append(
-                    Field(
-                        id: RandomUUID.make(using: &generator), kind: .url, label: "Website", value: trimmed,
-                        meta: [InterchangeMeta.sourceType: InterchangeMeta.websiteType]))
+                websites.append((trimmed, nil))
                 warnings.append(.scopeRefused(url: trimmed, reason: reason))
             }
         }
+        // Before any field is built: what this entry adds to the drafts, against what the whole import may hold. A
+        // URL counts once however often the entry repeats it.
+        let kept =
+            record.fields.count(where: { !$0.value.isEmpty }) + websites.count + record.tags.count
+            + record.pastPasswords.count + (record.favorite ? 1 : 0)
+        guard kept <= limits.maximumTotalFields - totalFields else { throw limits.exceeded(.totalFields) }
+        for (text, canonicalFor) in websites where canonicalFor.map({ hostsWithText.contains($0) }) ?? true {
+            fields.append(
+                Field(
+                    id: RandomUUID.make(using: &generator), kind: .url, label: "Website", value: text,
+                    meta: [InterchangeMeta.sourceType: InterchangeMeta.websiteType]))
+        }
+        if unconsidered > 0 { warnings.append(.urlsNotConsidered(count: unconsidered)) }
         for source in record.fields where !source.value.isEmpty {
             let id = RandomUUID.make(using: &generator)
             switch source.kind {
@@ -277,6 +349,13 @@ struct ImportAssembler {
             id: RandomUUID.make(using: &generator), vaultID: vaultID, title: title, scopes: scopes, fields: fields,
             tags: tags, notes: record.notes, createdAt: created, modifiedAt: record.modifiedAt ?? created,
             archived: record.state == .archived, history: history)
+        // Measured as the vault will store it, not as the file wrote it: a draft listed as imported must be one
+        // the vault accepts.
+        guard StoredItemSize.estimate(item) <= limits.maximumStoredItemBytes else {
+            skip(reference, .tooLarge(.storedItemBytes, limit: limits.maximumStoredItemBytes))
+            return
+        }
+        totalFields += kept
         entries.append(ImportedEntry(item: item, kind: record.kind, state: record.state, reference: reference))
         report.countsByKind[record.kind, default: 0] += 1
         for warning in warnings {

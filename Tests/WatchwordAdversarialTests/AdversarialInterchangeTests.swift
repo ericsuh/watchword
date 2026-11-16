@@ -1,7 +1,9 @@
 import Foundation
 import Testing
+import WatchwordKit
 import WatchwordMatching
 import WatchwordModel
+import WatchwordSync
 import WatchwordTestSupport
 
 @testable import WatchwordInterchange
@@ -532,7 +534,7 @@ struct AdversarialInterchangeTests {
         let unterminated = Array((header + "x,y,z,\"" + String(repeating: "A", count: 600_000)).utf8)
         #expect(throws: InterchangeError.limitExceeded(.fieldBytes, limit: 256 * 1024)) { try importCSV(unterminated) }
         let longRow = Array((header + String(repeating: "abcdefghi,", count: 60_000) + "\n").utf8)
-        #expect(throws: InterchangeError.limitExceeded(.fieldsPerItem, limit: 1_000)) { try importCSV(longRow) }
+        #expect(throws: InterchangeError.limitExceeded(.csvColumns, limit: 100)) { try importCSV(longRow) }
         let wideRow = Array(
             (header + String(repeating: String(repeating: "a", count: 200_000) + ",", count: 3) + "\n").utf8)
         #expect(throws: InterchangeError.limitExceeded(.entryBytes, limit: 512 * 1024)) { try importCSV(wideRow) }
@@ -621,21 +623,274 @@ struct AdversarialInterchangeTests {
     /// modest file is far larger than the file.
     @Test("The report's warnings are capped, and the overflow is counted")
     func warningFlood() throws {
-        let entries = (0..<11).map { entry -> String in
-            let urls = (0..<990).map { #"{"url":"h\#(entry)x\#($0)"}"# }.joined(separator: ",")
+        // Thirty-two URLs of an entry are considered, and each refusal is a warning; the rest earn one between them.
+        let entries = (0..<320).map { entry -> String in
+            let urls = (0..<40).map { #"{"url":"h\#(entry)x\#($0)"}"# }.joined(separator: ",")
             return #"{"uuid":"u\#(entry)","overview":{"title":"T\#(entry)","urls":[\#(urls)]},"details":{}}"#
         }
         let result = try importDocument(items(entries.joined(separator: ",")))
-        #expect(result.entries.count == 11)
-        #expect(result.entries.allSatisfy { $0.item.scopes.isEmpty && $0.item.fields.count == 990 })
+        #expect(result.entries.count == 320)
+        #expect(result.entries.allSatisfy { $0.item.scopes.isEmpty && $0.item.fields.count == 40 })
         #expect(result.report.warnings.count == ImportReport.maximumWarnings)
-        #expect(result.report.omittedWarningCount == 11 * 990 - ImportReport.maximumWarnings)
+        #expect(result.report.omittedWarningCount == 320 * 33 - ImportReport.maximumWarnings)
         // A URL listed a thousand times is one field and one warning.
         let repeated = (0..<999).map { _ in #"{"url":"intranet"}"# }.joined(separator: ",")
         let once = try importDocument(
             items(#"{"uuid":"r","overview":{"title":"R","urls":[\#(repeated)]},"details":{}}"#))
         #expect(once.entries.first?.item.fields.count == 1)
         #expect(once.report.warnings.count == 1)
+    }
+
+    // MARK: Amplification
+
+    /// A7 keeps every one of the per-file, per-entry and per-count limits and spends their product: rows of a
+    /// hundred two-byte cells are a megabyte of file for every half million `Field`s, and 100 MB of them is
+    /// gigabytes of drafts, which on a phone is the app killed (PRD SEC7). The import as a whole has a budget.
+    @Test("A file inside every per-entry limit cannot expand into more than a million fields")
+    func aggregateFields() throws {
+        let header = "Title,Password," + Array(repeating: "x", count: 98).joined(separator: ",") + "\n"
+        let row = Array(repeating: "a", count: 100).joined(separator: ",") + "\n"
+        // Ninety-nine fields a row: 10,101 rows are 999,999 fields, and the next row is refused before it is built.
+        let fits = try importCSV(Array((header + String(repeating: row, count: 10_101)).utf8))
+        #expect(fits.entries.count == 10_101)
+        #expect(fits.entries.reduce(0) { $0 + $1.item.fields.count } == 999_999)
+        #expect(throws: InterchangeError.limitExceeded(.totalFields, limit: 1_000_000)) {
+            try importCSV(Array((header + String(repeating: row, count: 10_102)).utf8))
+        }
+        // The reviewer's file, a thousand columns wide, never gets past its header.
+        let wide = Array(repeating: "x", count: 1_000).joined(separator: ",") + "\n"
+        #expect(throws: InterchangeError.limitExceeded(.csvColumns, limit: 100)) {
+            try importCSV(Array(("Title,Password," + wide + String(repeating: wide, count: 3)).utf8))
+        }
+    }
+
+    /// A7 lists one URL a thousand times in each of thousands of entries. Parsing a URL is the most expensive thing
+    /// an import does per byte, and before this was fixed a 1.4 MB archive bought 66 seconds of it.
+    @Test("URLs are parsed once each, and only so many of them")
+    func urlAmplification() throws {
+        let repeated = (0..<999).map { _ in #"{"url":"https://a.bc"}"# }.joined(separator: ",")
+        let entry = { (id: Int) in
+            #"{"uuid":"u\#(id)","overview":{"title":"T\#(id)","urls":[\#(repeated)]},"details":{}}"#
+        }
+        // With a budget of five derivations for the whole file, five entries of 999 repeats each get their scope:
+        // a repeat costs nothing.
+        let limits = InterchangeLimits(maximumScopeDerivations: 5)
+        let result = try importDocument(items((0..<6).map(entry).joined(separator: ",")), limits: limits)
+        #expect(
+            result.entries.prefix(5).allSatisfy { $0.item.scopes.map(\.host) == ["a.bc"] && $0.item.fields.isEmpty })
+        // The sixth is past the budget: its URL is kept, as text, and the report says so.
+        #expect(result.entries[5].item.scopes.isEmpty)
+        #expect(result.entries[5].item.fields.filter { $0.kind == .url }.map(\.value) == ["https://a.bc"])
+        #expect(result.report.warnings.map(\.warning) == [.urlsNotConsidered(count: 1)])
+
+        // Distinct URLs are bounded per entry, at the standard limits.
+        let distinct = (0..<999).map { #"{"url":"https://h\#($0).example.com"}"# }.joined(separator: ",")
+        let many = try importDocument(
+            items(#"{"uuid":"d","overview":{"title":"D","urls":[\#(distinct)]},"details":{}}"#))
+        let item = try #require(many.entries.first?.item)
+        #expect(item.scopes.count == InterchangeLimits.standard.maximumURLsPerItem)
+        #expect(item.fields.filter { $0.kind == .url }.count == 999 - 32)
+        #expect(many.report.warnings.map(\.warning) == [.urlsNotConsidered(count: 999 - 32)])
+    }
+
+    /// A7 compresses nothing at all into millions of empty dynamic blocks: each is under twelve bytes, costs three
+    /// Huffman tables to read, and emits no output, so neither the ratio cap nor the document cap sees it. Valid
+    /// DEFLATE (zlib inflates it to an empty string), and refused.
+    @Test("A stream of empty blocks is refused after a thousand of them")
+    func emptyBlockFlood() throws {
+        let flood = DeflateFixture.emptyDynamicBlocks(count: 100_000)
+        #expect(flood.count == 1_150_000)
+        #expect(throws: InterchangeError.malformedDeflate(.excessiveBlocks)) { try Inflater.inflate(flood) }
+        // As a member of an archive, whatever size it declares.
+        for declared: UInt32 in [0, 64, 1 << 20] {
+            let archive = ZIPFixture([
+                ZIPFixture.Member(
+                    name: "export.data", contents: [], data: flood, method: 8, crc: 0,
+                    declaredUncompressedSize: declared)
+            ]).bytes()
+            #expect(throws: InterchangeError.malformedDeflate(.excessiveBlocks)) { try importArchive(archive) }
+        }
+        // One literal a block does not buy the work back: the output must account for the blocks.
+        var trickle = DeflateFixture()
+        for index in 0..<2_000 {
+            trickle.append(bits: index == 1_999 ? 1 : 0, count: 1)
+            trickle.append(bits: 1, count: 2)
+            trickle.append(code: 0b0011_0000, length: 8)
+            trickle.append(code: 0, length: 7)
+        }
+        #expect(throws: InterchangeError.malformedDeflate(.excessiveBlocks)) { try Inflater.inflate(trickle.bytes) }
+    }
+
+    /// A7 writes an entry that is small as a file and huge as the vault stores it: control characters are six bytes
+    /// each in the vault's JSON, and every line of the notes is stored again with its own identifiers. Reported as
+    /// imported, such a draft would then be refused by the vault (`ItemCodec.payloadTooLarge`), or fail a whole
+    /// batch. Every draft an import returns must be one the vault can store.
+    @Test("Every draft an import returns fits the vault's item payload once the vault has stamped it")
+    func draftsFitTheVault() throws {
+        func row(_ title: String, password: String = "pw", notes: String = "") -> String {
+            "\(title),\"\(password)\",\"\(notes)\"\r\n"
+        }
+        let fields = (0..<990).map { #"{"title":"\u0001","id":"i\#($0)","value":{"concealed":"\u0001"}}"# }
+        let history = (0..<900).map { #"{"value":"\u0001\u0002","time":\#($0)}"# }
+        let csv =
+            "Title,Password,Notes\r\n"
+            + row("controls", password: String(repeating: "\u{1}", count: 256_000))
+            + row("fewer controls", password: String(repeating: "\u{1}", count: 100_000))
+            + row("quotes", password: String(repeating: "\"\"", count: 120_000))
+            + row("slashes", password: String(repeating: "\\/", count: 120_000))
+            + row("blank lines", notes: String(repeating: "\n", count: 250_000))
+            + row("short lines", notes: String(repeating: "a\n", count: 2_400))
+            + row(
+                "mixed", password: String(repeating: "\u{7F}\t", count: 50_000),
+                notes: String(repeating: "\r\n", count: 500))
+        let document = items(
+            #"{"uuid":"f","overview":{"title":"many fields"},"details":{"sections":[{"title":"\u0001","fields":["#
+                + fields.joined(separator: ",") + #"]}]}},"#
+                + #"{"uuid":"h","overview":{"title":"long history"},"details":{"passwordHistory":["#
+                + history.joined(separator: ",") + "]}}")
+        let results = [try importCSV(Array(csv.utf8)), try importDocument(document)]
+        let skipped = results.flatMap(\.report.skipped)
+        #expect(skipped.map(\.entry.title) == ["controls", "blank lines"])
+        #expect(skipped.allSatisfy { $0.reason == .tooLarge(.storedItemBytes, limit: 768 * 1024) })
+        let drafts = results.flatMap(\.entries).map(\.item)
+        #expect(
+            drafts.map(\.title) == [
+                "fewer controls", "quotes", "slashes", "short lines", "mixed", "many fields", "long history",
+            ])
+
+        // What the vault does on a first save: stamp every group and line, then encode. The largest version sync
+        // accepts, so the numbers are as long as they get.
+        let revision = Revision(version: 1 << 53, device: UUID(uuidString: "FFFFFFFF-FFFF-4FFF-BFFF-FFFFFFFFFFFF")!)
+        for draft in drafts {
+            let stored = try ItemCodec.encode(ItemMerge.stamped(draft, previous: nil, revision: revision))
+            let size = stored.unprotectedCopy().count
+            #expect(size <= ItemCodec.maximumPayloadLength, "\(draft.title)")
+            // The estimate that let the draft through is an upper bound on the real thing.
+            #expect(
+                StoredItemSize.estimate(draft) >= size, "\(draft.title): \(StoredItemSize.estimate(draft)) < \(size)")
+        }
+    }
+
+    /// The same bound as a property: whatever text an entry holds, the estimate an import relies on is never below
+    /// what `ItemMerge.stamped` and `ItemCodec` produce, so a change to the stored form that outgrows it fails here.
+    @Test("The stored-size estimate is never below what the vault encodes")
+    func storedSizeIsAnUpperBound() throws {
+        var generator = SeededGenerator(seed: TestEnvironment.seed(fallback: 0x51_2E))
+        let alphabet: [String] = [
+            "a", "\u{1}", "\n", "\r\n", "\"", "\\", "/", "\u{7F}", "\u{E9}", "\u{1F600}", "\u{2028}", "\t", " ",
+            "\u{301}",
+        ]
+        func text(_ longest: Int) -> String {
+            (0..<Int.random(in: 0...longest, using: &generator)).map { _ in alphabet.randomElement(using: &generator)! }
+                .joined()
+        }
+        let revision = Revision(version: 1 << 53, device: UUID(uuidString: "FFFFFFFF-FFFF-4FFF-BFFF-FFFFFFFFFFFF")!)
+        for _ in 0..<TestEnvironment.iterations(standard: 150, long: 15_000) {
+            let fields = (0..<Int.random(in: 0...12, using: &generator)).map { _ in
+                Field(
+                    kind: FieldKind.allCases.randomElement(using: &generator)!, label: text(20), value: text(200),
+                    meta: Bool.random(using: &generator) ? [text(8): text(30)] : [:])
+            }
+            let history = (0..<Int.random(in: 0...3, using: &generator)).map { index in
+                ItemHistoryEntry(
+                    replacedAt: Date(timeIntervalSince1970: Double(index) + 0.123456), version: 0,
+                    fields: [Field(kind: .password, label: text(10), value: text(50))])
+            }
+            let draft = Item(
+                vaultID: Self.vaultID, title: text(40),
+                scopes: (0..<Int.random(in: 0...3, using: &generator)).map { ServiceScope(host: "h\($0).example.com") },
+                fields: fields, tags: Set((0..<Int.random(in: 0...4, using: &generator)).map { _ in text(12) }),
+                notes: text(400), createdAt: Date(timeIntervalSince1970: 1_614_298_956.5),
+                modifiedAt: Date(timeIntervalSince1970: 1_635_346_445.25), archived: Bool.random(using: &generator),
+                history: history)
+            let stored = try ItemCodec.encode(ItemMerge.stamped(draft, previous: nil, revision: revision))
+            let size = stored.unprotectedCopy().count
+            #expect(StoredItemSize.estimate(draft) >= size)
+        }
+    }
+
+    // MARK: Duplicates
+
+    /// A7 knows the person has a login at `bank.example` (an email address is enough to guess the item) and sends
+    /// one entry with that user name and two URLs: the bank's and its own. The app reports a duplicate; the person
+    /// picks "merge", the obvious choice. If merging widened the existing item's scopes, AutoFill would then offer
+    /// the bank's real password on the attacker's site (PRD SEC6, F11.2).
+    @Test("Merging a hostile entry into an existing item never changes where its password is offered")
+    func mergeNeverWidens() throws {
+        let result = try importDocument(
+            items(
+                #"{"uuid":"x","categoryUuid":"001","overview":{"title":"My Bank","urls":[{"url":"https://bank.example/"},"#
+                    + #"{"url":"https://evil.example/"}]},"details":{"loginFields":["#
+                    + #"{"designation":"username","value":"victim@example.org"},"#
+                    + #"{"designation":"password","value":"ATTACKER-PASSWORD"}],"sections":[{"title":"","fields":["#
+                    + #"{"title":"code","id":"t","value":{"totp":"GEZDGNBVGY3TQOJQ"}}]}]}}"#))
+        // Nothing about the file is wrong, so nothing in the import report warns of it.
+        #expect(result.report.warnings.isEmpty && result.report.skipped.isEmpty)
+        let imported = try #require(result.entries.first?.item)
+        let existing = Item(
+            vaultID: Self.vaultID, title: "Bank", scopes: [ServiceScope(host: "bank.example")],
+            fields: [
+                Field(kind: .username, label: "Username", value: "victim@example.org"),
+                Field(kind: .password, label: "Password", value: "REAL-BANK-PASSWORD"),
+            ])
+        let other = Item(
+            vaultID: Self.vaultID, title: "Other", scopes: [ServiceScope(host: "other.example")],
+            fields: [Field(kind: .password, label: "Password", value: "pw")])
+
+        // The match itself says what the file is trying to add, so a UI can show it.
+        let matches = DuplicateDetector.matches(imported: [imported], existing: [existing, other])
+        #expect(
+            matches == [
+                DuplicateMatch(
+                    importedID: imported.id, existingID: existing.id, kind: .sameAccount, newHosts: ["evil.example"],
+                    hasNewSignInFields: true)
+            ])
+
+        let merged = try #require(DuplicateDetector.resolve(.merge, imported: imported, existing: existing))
+        #expect(merged.id == existing.id)
+        #expect(merged.scopes == existing.scopes)
+        // What it signs in with is unchanged too: no second password, no attacker's one-time password.
+        #expect(merged.fields == existing.fields)
+        #expect(merged.field(.password)?.value == "REAL-BANK-PASSWORD")
+
+        // The property: the hosts on which AutoFill fills the existing item are the same before and after.
+        let hosts = [
+            "https://bank.example/", "https://www.bank.example/login", "https://evil.example/login",
+            "https://anything.evil.example/", "https://other.example/",
+        ]
+        func filled(_ items: [Item]) -> [Bool] {
+            hosts.map { host in
+                guard
+                    case .fill(let match) = AutoFillGate.decide(for: ServiceIdentifier(host, kind: .url), among: items)
+                else { return false }
+                return match.item.id == existing.id
+            }
+        }
+        #expect(filled([existing, other]) == [true, true, false, false, false])
+        #expect(filled([merged, other]) == filled([existing, other]))
+
+        // Only a host the person accepted by name is added, and accepting one accepts no other.
+        let choice = MergeChoices(hosts: ["evil.example"])
+        let chosen = DuplicateDetector.merged(imported, into: existing, accepting: choice)
+        #expect(chosen.scopes.map(\.host) == ["bank.example", "evil.example"])
+        #expect(chosen.fields == existing.fields)
+        #expect(
+            DuplicateDetector.merged(imported, into: existing, accepting: MergeChoices(hosts: ["other.example"]))
+                == merged)
+    }
+
+    /// A7 makes the notes of an entry the worst case of a string search (a long run of one letter, then another),
+    /// so that the merge the person asked for takes minutes. The comparison is one pass over each text.
+    @Test("Merging notes is linear in their length")
+    func mergeNotesAreLinear() {
+        let n = 250_000
+        let existing = Item(
+            vaultID: Self.vaultID, title: "n", scopes: [], fields: [], notes: String(repeating: "a", count: 2 * n))
+        let imported = Item(
+            vaultID: Self.vaultID, title: "n", scopes: [], fields: [], notes: String(repeating: "a", count: n) + "b")
+        // Quadratic work on this input is tens of minutes; the test's own time limit is the assertion.
+        let merged = DuplicateDetector.merged(imported, into: existing)
+        #expect(merged.notes.utf8.count == 3 * n + 3)
     }
 
     /// A7 fills the objects that are walked, not materialised, with members, so the repeated-key check grows

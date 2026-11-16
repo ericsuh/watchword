@@ -243,13 +243,22 @@ half delivered** on a Mac; the transports are open.
   scopes only through the normaliser and the policy, one-time passwords through `OTPParameters`, passkeys
   through `PasskeyCredential`) with its report; duplicate detection; the instructions as data. Tests: fixtures
   and round trips for each format, DEFLATE vectors from Python's `zlib`, archives from Python's `zipfile`, the
-  `import parsers` adversarial area, and the `Fuzz/` package with thirteen libFuzzer targets and a seed
+  `import parsers` adversarial area, and the `Fuzz/` package with fourteen libFuzzer targets and a seed
   corpus, run by `mise run fuzz` and the nightly workflow.
+- Done after the first security review of the module (`02-architecture.md` §14): a merge never widens an
+  existing item's scopes or adds to its sign-in fields without a per-host, per-field choice (`MergeChoices`);
+  import-wide budgets for fields and for URL parsing, CSV rows streamed, a block budget in the inflater, and
+  drafts measured as the vault will store them; URLs keep their text beside the scope and are written back
+  on export; dates before 1970; saved-form text, mistyped values, CXF numbers, subtitles and Android apps no
+  longer dropped in silence; export reports for unresolved sync values (which are now written), history,
+  scope restrictions, archived state, tags and recovery-code marks; 1PUX export of email sign-in names and of
+  remembered categories.
 - Open, all of it integration and most of it Mac-only: the session wiring (password re-entry before a
   plaintext export, `completeUnlessOpen` file protection, the standing warning, an import path through
   `VaultSession` that keeps imported history and timestamps); the encrypted Watchword archive; the OS
   Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
-  and their XCUITests. Before shipping: a check of the CXF and 1PUX field names against the published
+  and their XCUITests, including a duplicate screen that names each host a merge would add and asks about it
+  (`DuplicateMatch.newHosts`, `MergeChoices`) and an export screen that shows the `ExportReport`. Before shipping: a check of the CXF and 1PUX field names against the published
   formats and real exports from 1Password and Apple Passwords (the specifications were unreachable from the
   session that wrote the parsers), and of the 1PUX export against 1Password's importer. The nightly `fuzz`
   job runs on the macOS runner, whose toolchain may lack the libFuzzer runtime; the task then replays the

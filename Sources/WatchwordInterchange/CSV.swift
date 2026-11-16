@@ -21,18 +21,36 @@ public struct CSVRecord: Hashable, Sendable {
 /// returned exactly as written: nothing is trimmed, and a cell beginning with `=` is not a formula here.
 ///
 /// Size limits are enforced as bytes are consumed, so an unterminated quote cannot swallow more than one entry's
-/// worth of memory before it is refused.
+/// worth of memory before it is refused, and a row is refused at its hundred-and-first cell.
 public enum CSVReader {
     private static let quote = UInt8(ascii: "\"")
     private static let comma = UInt8(ascii: ",")
     private static let lineFeed = UInt8(ascii: "\n")
     private static let carriageReturn = UInt8(ascii: "\r")
 
+    /// Every record of the file, held at once. The cells are counted against `maximumTotalFields` as they are kept,
+    /// because rows of two-byte cells are otherwise the cheapest way to turn a file into memory.
     public static func parse(_ bytes: [UInt8], limits: InterchangeLimits = .standard) throws -> [CSVRecord] {
+        var records: [CSVRecord] = []
+        var cells = 0
+        try forEachRecord(bytes, limits: limits) { record in
+            cells += record.fields.count
+            guard cells <= limits.maximumTotalFields else { throw limits.exceeded(.totalFields) }
+            records.append(record)
+        }
+        return records
+    }
+
+    /// Hands each record to `body` as it is read, holding one record at a time: what an import uses, so that the
+    /// file's rows are never in memory beside the drafts made from them. A record with more than
+    /// `maximumCSVColumns` cells, or one more record than `maximumItems` and a header, ends the read.
+    public static func forEachRecord(
+        _ bytes: [UInt8], limits: InterchangeLimits = .standard, _ body: (CSVRecord) throws -> Void
+    ) throws {
         try limits.checkInput(bytes.count)
         let range = try UTF8Text.validatedRange(of: bytes)
 
-        var records: [CSVRecord] = []
+        var count = 0
         var fields: [String] = []
         var field: [UInt8] = []
         var line = 1
@@ -44,16 +62,17 @@ public enum CSVReader {
 
         func endField() throws {
             fields.append(UTF8Text.string(field))
-            guard fields.count <= limits.maximumFieldsPerItem else { throw limits.exceeded(.fieldsPerItem) }
+            guard fields.count <= limits.maximumCSVColumns else { throw limits.exceeded(.csvColumns) }
             field.removeAll(keepingCapacity: true)
             afterQuote = false
         }
         func endRecord() throws {
             if rowHasContent {
                 try endField()
-                records.append(CSVRecord(line: recordLine, fields: fields))
+                count += 1
                 // One more than the item limit: the header row is not an item.
-                guard records.count <= limits.maximumItems + 1 else { throw limits.exceeded(.items) }
+                guard count <= limits.maximumItems + 1 else { throw limits.exceeded(.items) }
+                try body(CSVRecord(line: recordLine, fields: fields))
                 fields.removeAll(keepingCapacity: true)
             }
             rowHasContent = false
@@ -114,7 +133,6 @@ public enum CSVReader {
         }
         guard !inQuotes else { throw InterchangeError.malformedCSV(.unterminatedQuote, line: recordLine) }
         try endRecord()
-        return records
     }
 }
 

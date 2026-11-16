@@ -238,6 +238,58 @@ public struct DeflateFixture: Sendable {
         append(bits: UInt32(length - bases[index]), count: extras[index])
     }
 
+    /// Appends a dynamic-Huffman block that emits nothing: its literal code has the end-of-block symbol alone, and
+    /// its distance code is empty. Ninety-two bits, and as much header work as any dynamic block.
+    public mutating func appendEmptyDynamicBlock(final: Bool) {
+        append(bits: final ? 1 : 0, count: 1)
+        append(bits: 2, count: 2)
+        // 257 literal/length codes, one distance code, eighteen code-length codes.
+        append(bits: 0, count: 5)
+        append(bits: 0, count: 5)
+        append(bits: 14, count: 4)
+        // Code lengths for the code-length alphabet, in the order RFC 1951 §3.2.7 reads them: symbol 18 gets a
+        // one-bit code, symbols 0 and 1 two-bit codes.
+        let order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1]
+        for symbol in order {
+            append(bits: symbol == 18 ? 1 : (symbol == 0 || symbol == 1 ? 2 : 0), count: 3)
+        }
+        // 256 zero lengths (138 and 118 of them), length one for the end-of-block symbol, zero for the distance.
+        append(code: 0, length: 1)
+        append(bits: 127, count: 7)
+        append(code: 0, length: 1)
+        append(bits: 107, count: 7)
+        append(code: 0b11, length: 2)
+        append(code: 0b10, length: 2)
+        // The block's contents: end of block.
+        append(code: 0, length: 1)
+    }
+
+    /// `count` empty dynamic blocks, the last one final: a valid stream (zlib inflates it to nothing) that costs a
+    /// decoder three code tables for every eleven and a half bytes.
+    public static func emptyDynamicBlocks(count: Int) -> [UInt8] {
+        precondition(count >= 1)
+        var stream = DeflateFixture()
+        for index in 0..<count {
+            stream.appendEmptyDynamicBlock(final: index == count - 1)
+        }
+        return stream.bytes
+    }
+
+    /// `bytes` as stored blocks of `blockSize` bytes each.
+    public static func stored(_ bytes: [UInt8], blockSize: Int) -> [UInt8] {
+        precondition((1...0xFFFF).contains(blockSize))
+        var output: [UInt8] = []
+        var offset = 0
+        repeat {
+            let length = min(bytes.count - offset, blockSize)
+            output.append(offset + length == bytes.count ? 1 : 0)
+            output += [UInt8(length & 0xFF), UInt8(length >> 8), UInt8(~length & 0xFF), UInt8((~length >> 8) & 0xFF)]
+            output += bytes[offset..<offset + length]
+            offset += length
+        } while offset < bytes.count
+        return output
+    }
+
     /// `bytes` as stored blocks.
     public static func stored(_ bytes: [UInt8]) -> [UInt8] {
         var output: [UInt8] = []

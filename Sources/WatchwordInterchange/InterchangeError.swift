@@ -77,6 +77,9 @@ public enum DeflateDefect: String, Hashable, Sendable {
     case trailingData
     /// The stream decodes to fewer or more bytes than declared.
     case lengthMismatch
+    /// More than a thousand blocks, averaging under 256 bytes of output each. Valid DEFLATE, and refused: every block
+    /// header is work, and a stream of empty blocks is work without output.
+    case excessiveBlocks
 }
 
 public enum CSVDefect: String, Hashable, Sendable {

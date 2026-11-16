@@ -12,7 +12,8 @@ import WatchwordModel
 /// shape (the fields 1Password gives those categories map to the matching Watchword field kinds); every other
 /// category becomes an item of custom fields, typed by each field's value type. Nothing is dropped without a line
 /// in the report, with one exception stated here: the checkbox, radio-button and button entries of a saved web
-/// form, which are a page's state and not account data.
+/// form (`fieldType` `C`, `R` and `B`), which are a page's state and not account data. Every other entry of a saved
+/// form that has a value is kept, text areas and selections included.
 public enum OnePUX {
     public static let dataEntryName = "export.data"
     public static let attributesEntryName = "export.attributes"
@@ -31,6 +32,13 @@ public enum OnePUX {
         "membership_no": .accountNumber,
     ]
     private static let bankFieldIDs: Set<String> = ["accountNo", "routingNo", "iban", "swift"]
+    private static let membershipFieldIDs: Set<String> = [
+        "membership_no", "org_name", "member_name", "member_since", "expiry_date",
+    ]
+    /// The categories an export may take from `InterchangeMeta.category`: the ones with a shape of their own.
+    private static let hintedCategories: Set<String> = ["003", "005", "101", "105", "112"]
+    /// Saved-form entries that are a page's state: checkboxes, radio buttons and buttons.
+    private static let pageStateFieldTypes: Set<String> = ["C", "R", "B"]
     private static let loginFieldType = "loginField"
     private static let longestKeptIdentifier = 128
 
@@ -84,7 +92,7 @@ public enum OnePUX {
                                         assembler.skip(reference, .malformed(path: "items[]"))
                                         return
                                     }
-                                    assembler.add(record(from: item, reference: reference), using: &generator)
+                                    try assembler.add(record(from: item, reference: reference), using: &generator)
                                 }
                             default:
                                 break
@@ -108,9 +116,8 @@ public enum OnePUX {
         var reference = reference
         reference.sourceID = item.string("uuid")
         reference.title = overview.string("title") ?? ""
-        var record = SourceRecord(
-            reference: reference, kind: categories[item.string("categoryUuid") ?? ""] ?? .other,
-            title: reference.title)
+        let category = item.string("categoryUuid") ?? ""
+        var record = SourceRecord(reference: reference, kind: categories[category] ?? .other, title: reference.title)
 
         if let state = item.string("state") {
             switch state {
@@ -134,27 +141,38 @@ public enum OnePUX {
         record.notes = details.string("notesPlain") ?? ""
 
         for entry in details.array("loginFields") ?? [] {
-            guard let field = entry.object, let value = text(field["value"]), !value.isEmpty else { continue }
+            guard let field = entry.object, let raw = field["value"], !raw.isNull else { continue }
             let name = field.string("name") ?? ""
-            switch field.string("designation") {
+            let type = field.string("fieldType") ?? "T"
+            let designation = field.string("designation") ?? ""
+            let label = designation.isEmpty ? (name.isEmpty ? "Web form field" : name) : designation
+            guard let value = text(raw) else {
+                record.warnings.append(.unsupportedFieldType(label: label, type: type))
+                record.hadUnimportableContent = true
+                continue
+            }
+            guard !value.isEmpty else { continue }
+            switch designation {
             case "username":
-                record.fields.append(SourceField(kind: .plain(.username), label: "Username", value: value))
+                // A sign-in name the form typed as an email address is one: kept as such, as CXF's is.
+                let kind: FieldKind = type == "E" ? .email : .username
+                record.fields.append(SourceField(kind: .plain(kind), label: "Username", value: value))
             case "password":
                 record.fields.append(SourceField(kind: .plain(.password), label: "Password", value: value))
             default:
+                guard !pageStateFieldTypes.contains(type) else { continue }
                 let kind: FieldKind
-                switch field.string("fieldType") ?? "T" {
-                case "T", "N": kind = .text
+                switch type {
                 case "E": kind = .email
                 case "U": kind = .url
                 case "TEL": kind = .phoneNumber
                 case "P": kind = .custom
-                // Checkboxes, radio buttons and buttons of a saved web form: page state, not account data.
-                default: continue
+                // Text, numbers, text areas, selections, and any type not known here: what was typed is text.
+                default: kind = .text
                 }
                 record.fields.append(
                     SourceField(
-                        kind: .plain(kind), label: name.isEmpty ? "Web form field" : name, value: value,
+                        kind: .plain(kind), label: label, value: value,
                         meta: [InterchangeMeta.sourceType: loginFieldType]))
             }
         }
@@ -187,6 +205,12 @@ public enum OnePUX {
             record.warnings.append(.attachmentNotImported(name: document.string("fileName") ?? ""))
             record.hadUnimportableContent = true
         }
+        // An item has no category, so the entry's is noted on its fields for an export to find.
+        if hintedCategories.contains(category) {
+            for index in record.fields.indices {
+                record.fields[index].meta[InterchangeMeta.category] = category
+            }
+        }
         return record
     }
 
@@ -199,14 +223,7 @@ public enum OnePUX {
         return date
     }
 
-    /// The text of a value that should be text: a string, or an integer written without quotes.
-    private static func text(_ value: JSONValue?) -> String? {
-        switch value {
-        case .string(let text): return text
-        case .integer(let number): return String(number)
-        default: return nil
-        }
-    }
+    private static func text(_ value: JSONValue?) -> String? { value?.scalarText }
 
     /// Maps one typed value of a section field (`{"concealed": "…"}`, `{"date": 1700000000}`, …).
     private static func appendField(
@@ -227,46 +244,79 @@ public enum OnePUX {
             guard let known = wellKnownFields[identifier], known.isSecret == secret else { return kind }
             return known
         }
+        /// A value that is not of its type: reported, and kept as it was written when it has text. `concealed` for
+        /// a type whose values are secrets.
+        func mistyped(concealed: Bool = false) {
+            guard !value.isNull else { return }
+            record.warnings.append(.unsupportedFieldType(label: label, type: type))
+            if let text = text(value), !text.isEmpty {
+                add(concealed ? .custom : .text, text)
+            } else {
+                record.hadUnimportableContent = true
+            }
+        }
+        /// A value of a type that is text.
+        func textual(_ kind: FieldKind) {
+            if let text = text(value) { add(kind, text) } else { mistyped(concealed: kind.isSecret) }
+        }
 
         switch type {
         case "string":
-            add(wellKnown(secret: false, otherwise: .text), text(value))
+            textual(wellKnown(secret: false, otherwise: .text))
         case "concealed":
-            add(wellKnown(secret: true, otherwise: .custom), text(value))
+            textual(wellKnown(secret: true, otherwise: .custom))
         case "totp":
-            if let secret = text(value), !secret.isEmpty {
+            guard let secret = text(value) else { return mistyped(concealed: true) }
+            if !secret.isEmpty {
                 record.fields.append(SourceField(kind: .oneTimePassword, label: label, value: secret, meta: meta))
             }
         case "url":
-            add(.url, text(value))
+            textual(.url)
         case "email":
-            add(.email, text(value) ?? value.object?.string("email_address"))
-        case "phone":
-            add(.phoneNumber, text(value))
-        case "date":
-            guard let seconds = value.integer else { return }
-            if ImportAssembler.date(seconds: seconds) != nil {
-                add(.date, CivilDate.string(seconds: seconds))
+            if let address = value.object {
+                add(.email, address.string("email_address"))
             } else {
-                record.warnings.append(.implausibleDate(label: label))
+                textual(.email)
+            }
+        case "phone":
+            textual(.phoneNumber)
+        case "date":
+            if let seconds = value.integer {
+                if let date = ImportAssembler.calendarDate(seconds: seconds) {
+                    add(.date, date)
+                } else {
+                    // Not a date a person could mean; the number is kept all the same.
+                    record.warnings.append(.implausibleDate(label: label))
+                    add(.text, String(seconds))
+                }
+            } else if let written = value.string, CivilDate.seconds(fromDate: written) != nil {
+                add(.date, written)
+            } else {
+                mistyped()
             }
         case "monthYear":
-            guard let number = value.integer else { return }
-            if let text = CivilDate.string(monthYear: number) {
-                add(.date, text)
+            if let number = value.integer {
+                if let text = CivilDate.string(monthYear: number) {
+                    add(.date, text)
+                } else {
+                    record.warnings.append(.implausibleDate(label: label))
+                    add(.text, String(number))
+                }
+            } else if let written = value.string, CivilDate.monthYear(from: written) != nil {
+                add(.date, written)
             } else {
-                record.warnings.append(.implausibleDate(label: label))
+                mistyped()
             }
         case "creditCardNumber":
-            add(.custom, text(value))
+            textual(.custom)
         case "creditCardType", "gender", "menu":
-            add(.text, text(value))
+            textual(.text)
         case "address":
-            guard let address = value.object else { return }
+            guard let address = value.object else { return mistyped() }
             let lines = ["street", "city", "state", "zip", "country"].compactMap { address.string($0) }
             add(.text, lines.filter { !$0.isEmpty }.joined(separator: "\n"))
         case "sshKey":
-            guard let key = value.object else { return }
+            guard let key = value.object else { return mistyped(concealed: true) }
             add(.custom, key.string("privateKey"))
             if let publicKey = key.object("metadata")?.string("publicKey"), !publicKey.isEmpty {
                 record.fields.append(
@@ -281,15 +331,12 @@ public enum OnePUX {
             if let file = value.object {
                 record.warnings.append(.attachmentNotImported(name: file.string("fileName") ?? label))
                 record.hadUnimportableContent = true
+            } else {
+                mistyped()
             }
         default:
-            guard !value.isNull else { return }
-            record.warnings.append(.unsupportedFieldType(label: label, type: type))
-            if let text = text(value), !text.isEmpty {
-                add(.custom, text)
-            } else {
-                record.hadUnimportableContent = true
-            }
+            // A type with no mapping: concealed, the safe reading of an unknown value.
+            mistyped(concealed: true)
         }
     }
 
@@ -387,30 +434,50 @@ public enum OnePUX {
         Base32.encode(RandomUUID.bytes(of: uuid)).lowercased()
     }
 
-    /// The category an item is exported as. Watchword items carry no category, so it is read off the fields.
+    /// The category an item is exported as. Watchword items carry no category. An item imported from 1PUX has its
+    /// category noted on its fields (`InterchangeMeta.category`), and that is used when the fields agree on one and
+    /// the item has not since become a login (a site and a password); otherwise it is read off the fields.
     static func category(for item: Item) -> String {
         let kinds = Set(item.fields.map(\.kind))
         let identifiers = Set(item.fields.compactMap { $0.meta[InterchangeMeta.sourceID] })
         let websites = item.fields.contains { $0.meta[InterchangeMeta.sourceType] == InterchangeMeta.websiteType }
         let hasSite = !item.scopes.isEmpty || websites
         let hasLogin = kinds.contains(.password) || kinds.contains(.passkey) || kinds.contains(.totp)
+        let hints = Set(item.fields.compactMap { $0.meta[InterchangeMeta.category] })
+        if hints.count == 1, let hint = hints.first, hintedCategories.contains(hint),
+            !(hasSite && kinds.contains(.password)), hint != "005" || kinds.contains(.password)
+        {
+            return hint
+        }
         if item.fields.isEmpty, !hasSite { return "003" }
         if kinds.contains(.apiKey), !hasLogin { return "112" }
         if !hasLogin, !hasSite, !identifiers.isDisjoint(with: bankFieldIDs) { return "101" }
-        if !hasLogin, !hasSite, kinds.contains(.accountNumber) { return "105" }
+        if !hasLogin, !hasSite, kinds.contains(.accountNumber) || !identifiers.isDisjoint(with: membershipFieldIDs) {
+            return "105"
+        }
         if kinds == [.password], !hasSite { return "005" }
+        // Text and nothing to sign in with or to: a note with fields.
+        let hasName = kinds.contains(.username) || kinds.contains(.email)
+        if !hasLogin, !hasSite, !hasName, !item.notes.isEmpty { return "003" }
         return "001"
     }
 
     private static func export(_ item: Item, options: ExportOptions, report: inout ExportReport) -> JSONObject {
         let category = category(for: item)
         let isLogin = category == "001"
-        let username = isLogin ? item.fields.first { $0.kind == .username } : nil
+        // The sign-in name is the first user name, or failing that the first email address: the rule the other
+        // exporters and `Item.loginNames` follow.
+        let username =
+            isLogin ? item.fields.first { $0.kind == .username } ?? item.fields.first { $0.kind == .email } : nil
         let password = isLogin || category == "005" ? item.field(.password) : nil
 
-        var urls = item.scopes.map { "https://\($0.host)/" }
+        let (urls, websiteFields) = ExportSupport.websites(of: item)
+        ExportSupport.commonWarnings(for: item, into: &report)
         var loginFields: [JSONValue] = []
-        if let username { loginFields.append(loginField(username, designation: "username", type: "T")) }
+        if let username {
+            loginFields.append(
+                loginField(username, designation: "username", type: username.kind == .email ? "E" : "T"))
+        }
         if let password, isLogin { loginFields.append(loginField(password, designation: "password", type: "P")) }
 
         var sections: [(title: String, fields: [JSONValue])] = []
@@ -419,10 +486,8 @@ public enum OnePUX {
         var usedIdentifiers = Set<String>()
         for field in item.fields where field.id != username?.id && field.id != password?.id {
             let sourceType = field.meta[InterchangeMeta.sourceType]
-            if field.kind == .url, sourceType == InterchangeMeta.websiteType {
-                urls.append(field.value)
-                continue
-            }
+            // Written among the item's URLs.
+            if websiteFields.contains(field.id) { continue }
             if sourceType == loginFieldType, isLogin {
                 let type: String
                 switch field.kind {
@@ -464,6 +529,25 @@ public enum OnePUX {
             }
         }
 
+        // What sync is keeping for the person to choose between goes too, concealed and labelled: an export that
+        // left it behind would lose it for good once the person deletes this app's copy (PRD F7.7).
+        let unresolved = ExportSupport.unresolvedValues(of: item)
+        if !unresolved.fields.isEmpty {
+            let fields = unresolved.fields.enumerated().map { index, kept in
+                JSONValue.object(
+                    JSONObject([
+                        ("title", .string(kept.label)), ("id", .string("unresolved_\(index + 1)")),
+                        ("value", .object(JSONObject([("concealed", .string(kept.value))]))), ("guarded", .bool(false)),
+                        ("multiline", .bool(false)), ("dontGenerate", .bool(true)),
+                    ]))
+            }
+            sections.append((ExportSupport.unresolvedLabel, fields))
+            report.warnings.append(.unresolvedValuesAdded(itemID: item.id, count: unresolved.fields.count))
+        }
+        if unresolved.omitted > 0 {
+            report.warnings.append(.unresolvedValuesOmitted(itemID: item.id, count: unresolved.omitted))
+        }
+
         var details = JSONObject()
         details.append("loginFields", .array(loginFields))
         if category == "005", let password { details.append("password", .string(password.value)) }
@@ -480,6 +564,9 @@ public enum OnePUX {
                 }))
         var history: [JSONValue] = []
         var previous = item.field(.password)?.value
+        // 1PUX keeps earlier passwords and nothing else of an item's past.
+        let reduced = item.history.count { entry in entry.fields.contains { $0.kind != .password } }
+        if reduced > 0 { report.warnings.append(.historyOmitted(itemID: item.id, entries: reduced)) }
         for entry in item.history {
             guard let value = entry.fields.first(where: { $0.kind == .password })?.value, value != previous else {
                 continue

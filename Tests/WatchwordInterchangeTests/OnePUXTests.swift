@@ -52,7 +52,10 @@ struct OnePUXTests {
         #expect(entry.reference.sourceID == "fkruyzrldvizuqlnavfj3gltfe")
         #expect(item.scopes.map(\.host) == ["www.example.com", "accounts.example.co.uk"])
         #expect(item.scopes.allSatisfy { $0.includeSubdomains })
-        #expect(item.values(.username) == ["wendy@example.com"])
+        // A sign-in name the form typed as an email address is kept as one.
+        #expect(item.values(.username).isEmpty)
+        #expect(item.loginNames.first == "wendy@example.com")
+        #expect(item.field(labelled: "Username")?.kind == .email)
         #expect(item.values(.password) == ["correct horse battery staple"])
         #expect(item.notes == "Line one\nLine two")
         #expect(item.tags == ["work", "shared/finance", "Favorite"])
@@ -60,10 +63,12 @@ struct OnePUXTests {
         #expect(item.modifiedAt == Date(timeIntervalSince1970: 1_635_346_445))
         #expect(!item.archived)
 
-        // The public suffix is kept as a URL, not as a scope (F11.2).
-        let website = try #require(item.field(labelled: "Website"))
-        #expect(website.kind == .url)
-        #expect(website.value == "https://github.io")
+        // The public suffix is kept as a URL, not as a scope (F11.2). So is the sign-in page, beside the scope its
+        // host became: a scope is a host, and the path is the person's data. The URL that says nothing beyond its
+        // host is the scope and nothing else.
+        let websites = item.fields.filter { $0.meta[InterchangeMeta.sourceType] == InterchangeMeta.websiteType }
+        #expect(websites.allSatisfy { $0.kind == .url && $0.label == "Website" })
+        #expect(websites.map(\.value) == ["https://www.example.com/login", "https://github.io"])
         #expect(
             result.warnings(for: "Example") == [
                 .scopeRefused(url: "https://github.io", reason: .policy(.publicSuffix("github.io")))
@@ -86,7 +91,7 @@ struct OnePUXTests {
         #expect(parameters.issuer == "Example")
         #expect(parameters.account == "wendy")
 
-        #expect(item.values(.email) == ["backup@example.org"])
+        #expect(item.values(.email) == ["wendy@example.com", "backup@example.org"])
         #expect(item.values(.date) == ["2020-02-16"])
         #expect(item.field(labelled: "empty") == nil)
 
@@ -266,6 +271,216 @@ struct OnePUXTests {
         #expect(OnePUX.category(for: item("token", [(.apiKey, "k"), (.username, "bot")])) == "112")
         #expect(OnePUX.category(for: item("card", [(.accountNumber, "L-1"), (.pin, "1")])) == "105")
         #expect(OnePUX.category(for: item("unscoped login", [(.username, "u"), (.password, "p")])) == "001")
+        // A note with a field is a note; a name with nothing to sign in to is not.
+        #expect(OnePUX.category(for: item("Wi-Fi", [(.custom, "pw")], notes: "the router is in the hall")) == "003")
+        #expect(OnePUX.category(for: item("named", [(.username, "u")], notes: "text")) == "001")
+    }
+
+    private func importItems(_ items: String, options: ImportOptions = ImportOptions()) throws -> ImportResult {
+        var generator = SeededGenerator(seed: 1)
+        let json = #"{"accounts":[{"vaults":[{"items":["# + items + "]}]}]}"
+        return try OnePUX.importDocument(Array(json.utf8), into: Fixtures.vaultID, options: options, using: &generator)
+    }
+
+    @Test("A Secure Note with a field and a Membership without a number export under their own categories")
+    func categoryIsRemembered() throws {
+        let result = try importItems(
+            #"""
+            {"uuid": "a", "categoryUuid": "003", "overview": {"title": "Home Wi-Fi"},
+             "details": {"notesPlain": "", "sections": [{"title": "", "fields": [
+               {"title": "network password", "id": "np", "value": {"concealed": "pw"}}]}]}},
+            {"uuid": "b", "categoryUuid": "105", "overview": {"title": "Gym"},
+             "details": {"sections": [{"title": "", "fields": [
+               {"title": "group", "id": "org_name", "value": {"string": "Gym"}},
+               {"title": "member name", "id": "member_name", "value": {"string": "Wendy"}},
+               {"title": "member since", "id": "member_since", "value": {"monthYear": 201905}}]}]}}
+            """#)
+        #expect(result.entries.map(\.kind) == [.secureNote, .membership])
+        let items = result.entries.map(\.item)
+        #expect(items.map { OnePUX.category(for: $0) } == ["003", "105"])
+        #expect(items[0].fields.allSatisfy { $0.meta[InterchangeMeta.category] == "003" })
+
+        // And they read back as what they were.
+        let exported = OnePUX.exportDocument(items, options: exportOptions)
+        #expect(exported.report.warnings.isEmpty)
+        var generator = SeededGenerator(seed: 2)
+        let again = try OnePUX.importDocument(exported.document, into: Fixtures.vaultID, using: &generator)
+        #expect(again.entries.map(\.kind) == [.secureNote, .membership])
+        #expect(again.entries.map { ItemShape($0.item) } == items.map { ItemShape($0) })
+
+        // The note is a hint and nothing more. Without it, the template's field names say Membership; and an item
+        // that has since become a login (a site and a password) is exported as one, whatever it once was.
+        var unhinted = items[1]
+        for index in unhinted.fields.indices {
+            unhinted.fields[index].meta[InterchangeMeta.category] = nil
+        }
+        #expect(OnePUX.category(for: unhinted) == "105")
+        var becameLogin = items[0]
+        becameLogin.scopes = [ServiceScope(host: "example.com")]
+        becameLogin.fields.append(Field(kind: .password, label: "Password", value: "pw"))
+        #expect(OnePUX.category(for: becameLogin) == "001")
+        // Fields that disagree, or name a category with no shape of its own, are not believed.
+        var disagreeing = items[0]
+        disagreeing.fields.append(
+            Field(kind: .text, label: "x", value: "y", meta: [InterchangeMeta.category: "105"]))
+        #expect(OnePUX.category(for: disagreeing) == "001")
+        var unknown = items[0]
+        unknown.fields[0].meta[InterchangeMeta.category] = "999"
+        #expect(OnePUX.category(for: unknown) == "001")
+    }
+
+    @Test("A login whose sign-in name is an email address exports with a username")
+    func emailSignInName() throws {
+        let item = Item(
+            id: UUID(uuidString: "00010203-0405-4607-8809-0A0B0C0D0E0F")!, vaultID: Fixtures.vaultID,
+            title: "EmailLogin", scopes: [ServiceScope(host: "example.com")],
+            fields: [
+                Field(kind: .email, label: "Email", value: "wendy@example.com"),
+                Field(kind: .password, label: "Password", value: "pw"),
+            ])
+        let exported = OnePUX.exportDocument([item], options: exportOptions)
+        let text = String(decoding: exported.document, as: UTF8.self)
+        #expect(
+            text.contains(
+                #""loginFields":[{"value":"wendy@example.com","id":"","name":"username","fieldType":"E","designation":"username"},"#
+                    + #"{"value":"pw","id":"","name":"password","fieldType":"P","designation":"password"}]"#))
+        #expect(text.contains(#""overview":{"subtitle":"wendy@example.com","#))
+        // Not written a second time, as an unrelated section field.
+        #expect(text.contains(#""sections":[]"#))
+
+        var generator = SeededGenerator(seed: 2)
+        let again = try OnePUX.importDocument(exported.document, into: Fixtures.vaultID, using: &generator)
+        let fields = try #require(again.entries.first).item.fields
+        #expect(fields.map(\.kind) == [.email, .password])
+        #expect(fields.map(\.value) == ["wendy@example.com", "pw"])
+    }
+
+    @Test("A URL keeps its scheme, port, path and query beside the scope its host becomes")
+    func urlsKeepTheirText() throws {
+        let result = try importItems(
+            #"""
+            {"uuid": "a", "categoryUuid": "001",
+             "overview": {"title": "Router", "url": "http://192.168.1.1:8080/admin/index.html", "urls": [
+               {"url": "http://192.168.1.1:8080/admin/index.html"},
+               {"url": "https://example.com/"},
+               {"url": "https://example.com/account/login?next=%2Fdashboard"},
+               {"url": "https://example.com:8443/other"},
+               {"url": "https://Plain.Example.ORG"},
+               {"url": "plain.example.net"}]},
+             "details": {"loginFields": [{"designation": "password", "value": "pw"}]}}
+            """#)
+        let item = try #require(result.entries.first).item
+        #expect(item.scopes.map(\.host) == ["192.168.1.1", "example.com", "plain.example.org", "plain.example.net"])
+        // Every URL that says more than its host is still there, in the file's order. `https://example.com/` says
+        // no more than its scope, and is kept because another URL of that host is: an export then writes both.
+        let urls = [
+            "http://192.168.1.1:8080/admin/index.html", "https://example.com/",
+            "https://example.com/account/login?next=%2Fdashboard", "https://example.com:8443/other",
+        ]
+        #expect(item.values(.url) == urls)
+        // Nothing was changed or refused, so there is nothing to warn about.
+        #expect(result.report.warnings.isEmpty)
+
+        // Every exporter writes the URLs back as they were, and synthesises one only for a scope that has none.
+        let written = urls + ["https://plain.example.org/", "https://plain.example.net/"]
+        let onePUX = String(decoding: OnePUX.exportDocument([item], options: exportOptions).document, as: UTF8.self)
+        #expect(
+            onePUX.contains(
+                #""urls":["# + written.map { #"{"label":"website","url":"\#($0)"}"# }.joined(separator: ",") + "]"))
+        #expect(onePUX.contains(#""url":"http://192.168.1.1:8080/admin/index.html","tags""#))
+        #expect(!onePUX.contains("https://192.168.1.1/"))
+        let cxfOptions = CredentialExchange.ExportOptions(
+            exporterRelyingPartyID: "watchword.example", accountID: Fixtures.vaultID,
+            timestamp: Date(timeIntervalSince1970: 1))
+        let cxf = String(decoding: CredentialExchange.exportDocument([item], options: cxfOptions).bytes, as: UTF8.self)
+        #expect(cxf.contains(#""urls":["# + written.map { "\"\($0)\"" }.joined(separator: ",") + "]"))
+        let csv = try CSVReader.parse(PasswordCSV.exportApplePasswords([item]).bytes)
+        #expect(csv.dropFirst().map { $0.fields[1] } == written)
+        #expect(csv.dropFirst().allSatisfy { $0.fields[4].isEmpty })
+
+        // And the export reads back as the same item.
+        var generator = SeededGenerator(seed: 2)
+        let exported = OnePUX.exportDocument([item], options: exportOptions)
+        let again = try OnePUX.importDocument(exported.document, into: Fixtures.vaultID, using: &generator)
+        #expect(try ItemShape(#require(again.entries.first).item) == ItemShape(item))
+    }
+
+    @Test("Stripping www keeps the URL as it was written")
+    func strippedWWWKeepsText() throws {
+        let result = try importItems(
+            #"{"uuid":"a","categoryUuid":"001","overview":{"title":"W","url":"https://www.example.com/"},"details":{}}"#,
+            options: ImportOptions(stripsLeadingWWW: true))
+        let item = try #require(result.entries.first).item
+        #expect(item.scopes.map(\.host) == ["example.com"])
+        #expect(item.values(.url) == ["https://www.example.com/"])
+        let text = String(decoding: OnePUX.exportDocument([item], options: exportOptions).document, as: UTF8.self)
+        #expect(text.contains(#""urls":[{"label":"website","url":"https://www.example.com/"}]"#))
+    }
+
+    @Test("A date before 1970 is a date")
+    func earlyDates() throws {
+        let result = try importItems(
+            #"""
+            {"uuid": "a", "categoryUuid": "004", "overview": {"title": "Wendy"},
+             "details": {"sections": [{"title": "", "fields": [
+               {"title": "birth date", "id": "birthdate", "value": {"date": -157766400}},
+               {"title": "issued", "id": "issued", "value": {"date": -62135596800}},
+               {"title": "too early", "id": "early", "value": {"date": -62135596801}},
+               {"title": "expires", "id": "expiry", "value": {"monthYear": 196512}}]}]}}
+            """#)
+        let item = try #require(result.entries.first).item
+        // 1965-01-01 and 0001-01-01, from Python: datetime(1965, 1, 1, tzinfo=utc).timestamp() and
+        // datetime(1, 1, 1, tzinfo=utc).timestamp().
+        #expect(item.values(.date) == ["1965-01-01", "0001-01-01", "1965-12"])
+        #expect(item.field(labelled: "too early").map { [$0.kind.rawValue, $0.value] } == ["text", "-62135596801"])
+        #expect(result.warnings(for: "Wendy") == [.implausibleDate(label: "too early")])
+
+        // It goes back out as the same day.
+        let exported = OnePUX.exportDocument([item], options: exportOptions)
+        var generator = SeededGenerator(seed: 2)
+        let again = try OnePUX.importDocument(exported.document, into: Fixtures.vaultID, using: &generator)
+        #expect(again.entries.first?.item.values(.date) == ["1965-01-01", "0001-01-01", "1965-12"])
+    }
+
+    @Test("Saved-form text and values of the wrong type are kept, and only page state is passed over")
+    func nothingDroppedSilently() throws {
+        let result = try importItems(
+            #"""
+            {"uuid": "a", "categoryUuid": "001", "overview": {"title": "Form"},
+             "details": {"loginFields": [
+               {"value": "My long answer", "name": "comments", "fieldType": "A", "designation": ""},
+               {"value": "Wales", "name": "country", "fieldType": "S", "designation": ""},
+               {"value": 7, "name": "seats", "fieldType": "N", "designation": ""},
+               {"value": true, "name": "flag", "fieldType": "X", "designation": ""},
+               {"value": "on", "name": "remember", "fieldType": "C", "designation": ""},
+               {"value": "a", "name": "choice", "fieldType": "R", "designation": ""},
+               {"value": "Go", "name": "submit", "fieldType": "B", "designation": ""},
+               {"value": ["x"], "name": "list", "fieldType": "T", "designation": ""}],
+              "sections": [{"title": "", "fields": [
+               {"title": "height", "id": "h", "value": {"string": 61.5}},
+               {"title": "agreed", "id": "g", "value": {"string": true}},
+               {"title": "when", "id": "w", "value": {"date": "2020-01-01"}},
+               {"title": "sometime", "id": "s", "value": {"date": "last spring"}},
+               {"title": "card", "id": "c", "value": {"creditCardNumber": 4111111111111111}},
+               {"title": "secret", "id": "x", "value": {"concealed": {"nested": "value"}}},
+               {"title": "home", "id": "a", "value": {"address": "1 High Street"}},
+               {"title": "novel", "id": "n", "value": {"hologram": 3.5}}]}]}}
+            """#)
+        let item = try #require(result.entries.first).item
+        #expect(
+            item.fields.map { "\($0.label)=\($0.value) [\($0.kind.rawValue)]" } == [
+                "comments=My long answer [text]", "country=Wales [text]", "seats=7 [text]", "flag=true [text]",
+                "height=61.5 [text]", "agreed=true [text]", "when=2020-01-01 [date]", "sometime=last spring [text]",
+                "card=4111111111111111 [custom]", "home=1 High Street [text]", "novel=3.5 [custom]",
+            ])
+        #expect(
+            result.warnings(for: "Form") == [
+                .unsupportedFieldType(label: "list", type: "T"),
+                .unsupportedFieldType(label: "sometime", type: "date"),
+                .unsupportedFieldType(label: "secret", type: "concealed"),
+                .unsupportedFieldType(label: "home", type: "address"),
+                .unsupportedFieldType(label: "novel", type: "hologram"),
+            ])
     }
 
     @Test("What 1PUX cannot hold is left out and reported")
@@ -365,6 +580,9 @@ struct OnePUXTests {
                 .implausibleDate(label: "month"),
                 .unusableOneTimePassword(label: "code", reason: .unsupportedType("hotp")),
             ])
+        // A date field that is no date is still the person's data: the number is kept, as text.
+        #expect(entry.item.field(labelled: "when").map { [$0.kind.rawValue, $0.value] } == ["text", "99999999999999"])
+        #expect(entry.item.field(labelled: "month").map { [$0.kind.rawValue, $0.value] } == ["text", "202613"])
         // The unusable value is kept, concealed, and is not a working code field.
         let kept = try #require(entry.item.field(labelled: "code"))
         #expect(kept.kind == .custom)

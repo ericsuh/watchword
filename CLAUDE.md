@@ -149,8 +149,8 @@ Eleven shipped modules, dependency-ordered, plus test support:
   PDF, the App Group path. In the package rather than `Apps/` so every CI gate covers them.
 - **`WatchwordInterchange`** — import and export of other password managers' formats (milestone 7): `CSVReader`/
   `CSVWriter` and `PasswordCSV` (1Password and Apple Passwords CSV), `OnePUX`, `CredentialExchange` (CXF 1.0), the
-  `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `DuplicateDetector`, `InterchangeGuide`. Depends on
-  `WatchwordModel` and `WatchwordMatching`; Foundation only, no keys, files or clocks.
+  `ZIPArchive` reader and `Inflater` they need, `ImportAssembler`, `StoredItemSize`, `DuplicateDetector`,
+  `InterchangeGuide`. Depends on `WatchwordModel` and `WatchwordMatching`; Foundation only, no keys, files or clocks.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `TestVault`; for sync `FakeSyncKeyring` over a keyed
   checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for imports `ZIPFixture`
@@ -168,10 +168,20 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 
 - Limits are enforced before or while the cost is incurred (`InterchangeLimits`; an initialiser can tighten one, never
   loosen it). A file ends in one `InterchangeError`; a bad entry is skipped or degraded and listed in the
-  `ImportReport`. Never drop, change or refuse something without a line in the report.
+  `ImportReport`. Never drop, change or refuse something without a line in the report, on import or on export
+  (`ExportReport`, `ExportSupport`).
+- Per-entry and per-file limits do not bound their product, so the import as a whole has budgets
+  (`maximumTotalFields`, `maximumScopeDerivations`), counted in `ImportAssembler.add` before an entry is built. A new
+  per-entry cost needs a place in one of them. CSV rows are streamed (`CSVReader.forEachRecord`), never held beside
+  the drafts. A draft is measured as the vault will store it (`StoredItemSize`, checked against `ItemMerge.stamped`
+  and `ItemCodec` by the adversarial suite): if the stored form of an item changes, that estimate changes with it.
+- A merge never widens (`DuplicateDetector`): scopes and sign-in fields from a file reach an existing item only
+  through `MergeChoices`, one host or field at a time. Don't add an "accept all", and don't make `merged` add either
+  by default.
 - Every format hands its entries to `ImportAssembler`, the one place drafts are made: IDs from the injected generator
   and the vault ID from the caller, never from the file; a URL becomes a scope only through `ScopeDerivation`
-  (`HostNormalizer`, then `ScopePolicy`) and otherwise stays a `url` field with a warning; TOTP values go through
+  (`HostNormalizer`, then `ScopePolicy`) and otherwise stays a `url` field with a warning (a URL that says more than
+  its host is also kept as text beside its scope, and `ExportSupport.websites` writes it back); TOTP values go through
   `OTPParameters`, passkeys through `PasskeyCredential`. Don't build an `Item` in a format's parser.
 - The ZIP reader validates every member and decompresses only the one asked for. Nothing is extracted to disk, nested
   archives are never opened, and anything with two readings is refused. Don't add leniency to "support" a real-world

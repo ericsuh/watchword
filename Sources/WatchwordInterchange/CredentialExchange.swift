@@ -82,7 +82,7 @@ public enum CredentialExchange {
                                     assembler.skip(reference, .malformed(path: "items[].credentials"))
                                     return
                                 }
-                                assembler.add(
+                                try assembler.add(
                                     record(from: item, credentials: credentials, reference: reference, limits: limits),
                                     using: &generator)
                             }
@@ -90,7 +90,7 @@ public enum CredentialExchange {
                             break
                         }
                     }
-                    assembler.addTags(collectionTags, since: mark)
+                    try assembler.addTags(collectionTags, since: mark)
                     if let accountName, accountName.utf8.count <= limits.maximumFieldBytes {
                         assembler.setContainer(accountName, since: mark)
                     }
@@ -147,6 +147,10 @@ public enum CredentialExchange {
         record.createdAt = date(item, "creationAt", into: &record)
         record.modifiedAt = date(item, "modifiedAt", into: &record)
         record.urls = (item.object("scope")?.array("urls") ?? []).compactMap(\.string)
+        // Android apps a credential belongs to have no place in an item, and are not passed over in silence.
+        if let apps = item.object("scope")?.array("androidApps"), !apps.isEmpty {
+            record.warnings.append(.androidAppsNotImported(count: apps.count))
+        }
 
         var types = Set<String>()
         for entry in credentials {
@@ -159,12 +163,12 @@ public enum CredentialExchange {
             case "basic-auth":
                 // Earlier drafts of the format kept a login's URLs here; they are honoured as URLs, not trusted more.
                 record.urls += (credential.array("urls") ?? []).compactMap(\.string)
-                if let username = editable(credential["username"]) {
+                if let username = editable(credential["username"], named: "Username", in: &record) {
                     let kind: FieldKind = username.type == "email" ? .email : .username
                     record.fields.append(
                         SourceField(kind: .plain(kind), label: username.label ?? "Username", value: username.value))
                 }
-                if let password = editable(credential["password"]) {
+                if let password = editable(credential["password"], named: "Password", in: &record) {
                     record.fields.append(
                         SourceField(kind: .plain(.password), label: password.label ?? "Password", value: password.value)
                     )
@@ -179,7 +183,7 @@ public enum CredentialExchange {
                     ("url", .url, "URL"), ("validFrom", .date, "Valid from"), ("expiryDate", .date, "Expires"),
                 ]
                 for (member, kind, label) in members {
-                    guard let field = editable(credential[member]) else { continue }
+                    guard let field = editable(credential[member], named: label, in: &record) else { continue }
                     // The member's name is kept, so an export can put the value back where it was.
                     let meta =
                         member == "key"
@@ -188,17 +192,27 @@ public enum CredentialExchange {
                         SourceField(kind: .plain(kind), label: field.label ?? label, value: field.value, meta: meta))
                 }
             case "note":
-                guard let content = editable(credential["content"]) else { continue }
+                guard let content = editable(credential["content"], named: "Note", in: &record) else { continue }
                 record.notes += (record.notes.isEmpty ? "" : "\n\n") + content.value
             case "custom-fields":
                 let section = credential.string("label") ?? ""
                 for entry in credential.array("fields") ?? [] {
-                    guard let field = editable(entry) else { continue }
+                    guard let field = editable(entry, named: "Field", in: &record) else { continue }
                     record.fields.append(customField(field, label: field.label ?? "Field", section: section))
                 }
             default:
                 appendUnknown(credential, type: type, to: &record)
             }
+        }
+        // A subtitle is kept when it says something the title and the fields do not: most exporters fill it with the
+        // user name, and that is already here.
+        if let subtitle = item.string("subtitle"), !subtitle.isEmpty, subtitle != record.title,
+            !record.fields.contains(where: { $0.value == subtitle })
+        {
+            record.fields.append(
+                SourceField(
+                    kind: .plain(.text), label: "Subtitle", value: subtitle,
+                    meta: [InterchangeMeta.sourceType: InterchangeMeta.subtitleType]))
         }
         if types.contains("basic-auth") {
             record.kind = .login
@@ -223,12 +237,28 @@ public enum CredentialExchange {
         return date
     }
 
-    /// An `EditableField`: `{"fieldType": …, "value": …, "label": …}`. `nil` unless it is an object with a string
-    /// value.
+    /// An `EditableField`: `{"fieldType": …, "value": …, "label": …}`. `nil` unless it is an object whose value has
+    /// text: a string, or a number or boolean written without quotes (a `number` or `boolean` field may be).
     private static func editable(_ value: JSONValue?) -> (type: String, value: String, label: String?)? {
-        guard let field = value?.object, let text = field.string("value") else { return nil }
+        guard let field = value?.object, let text = field["value"]?.scalarText else { return nil }
         let label = field.string("label").flatMap { $0.isEmpty ? nil : $0 }
         return (field.string("fieldType") ?? "string", text, label)
+    }
+
+    /// `editable`, with a line in the report for a field that is there and has no text to keep: an `EditableField`
+    /// whose value is an array or an object, or something that is not an `EditableField` at all.
+    private static func editable(_ value: JSONValue?, named name: String, in record: inout SourceRecord) -> (
+        type: String, value: String, label: String?
+    )? {
+        if let field = editable(value) { return field }
+        guard let value, !value.isNull else { return nil }
+        if let field = value.object, field["value"]?.isNull ?? true { return nil }
+        let field = value.object
+        record.warnings.append(
+            .unsupportedFieldType(
+                label: field?.string("label") ?? name, type: field?.string("fieldType") ?? "unknown"))
+        record.hadUnimportableContent = true
+        return nil
     }
 
     private static func customField(
@@ -369,7 +399,7 @@ public enum CredentialExchange {
                 text = field.value
                 label = field.label
             } else {
-                text = member.value.string
+                text = member.value.scalarText
                 label = nil
             }
             guard let text, !text.isEmpty else { continue }
@@ -457,14 +487,20 @@ public enum CredentialExchange {
         var credentials: [JSONValue] = []
         var custom: [(section: String, fields: [JSONValue])] = []
         var customIndex: [String: Int] = [:]
-        var urls = item.scopes.map { "https://\($0.host)/" }
+        let (urls, websiteFields) = ExportSupport.websites(of: item)
+        var subtitle: String?
+        ExportSupport.commonWarnings(for: item, into: &report)
+        if item.archived { report.warnings.append(.archivedStateOmitted(itemID: item.id)) }
+        if !item.history.isEmpty {
+            report.warnings.append(.historyOmitted(itemID: item.id, entries: item.history.count))
+        }
         func appendCustom(_ field: Field, concealed: Bool) {
             let section = field.meta[InterchangeMeta.section] ?? ""
             let type: String
             switch field.kind {
             case .email: type = "email"
             case .date: type = CivilDate.monthYear(from: field.value) != nil ? "year-month" : "date"
-            default: type = concealed ? "concealed-string" : "string"
+            default: type = concealed ? "concealed-string" : textType(of: field)
             }
             let exported = editable(field.value, type: type, label: field.label)
             if let index = customIndex[section] {
@@ -522,8 +558,11 @@ public enum CredentialExchange {
                 credentials.append(.object(export(passkey)))
             case .apiKey where apiKey["key"] == nil:
                 apiKey.append("key", editable(field.value, type: "concealed-string"))
-            case .url where field.meta[InterchangeMeta.sourceType] == InterchangeMeta.websiteType:
-                urls.append(field.value)
+            case .url where websiteFields.contains(field.id):
+                // Written among the item's URLs.
+                break
+            case .text where field.meta[InterchangeMeta.sourceType] == InterchangeMeta.subtitleType && subtitle == nil:
+                subtitle = field.value
             default:
                 appendCustom(field, concealed: field.kind.isSecret)
             }
@@ -539,12 +578,27 @@ public enum CredentialExchange {
             credential.append("fields", .array(group.fields))
             credentials.append(.object(credential))
         }
+        // What sync is keeping for the person to choose between goes too, concealed and labelled (PRD F7.7).
+        let unresolved = ExportSupport.unresolvedValues(of: item)
+        if !unresolved.fields.isEmpty {
+            var credential = JSONObject([("type", .string("custom-fields"))])
+            credential.append("label", .string(ExportSupport.unresolvedLabel))
+            credential.append(
+                "fields",
+                .array(unresolved.fields.map { editable($0.value, type: "concealed-string", label: $0.label) }))
+            credentials.append(.object(credential))
+            report.warnings.append(.unresolvedValuesAdded(itemID: item.id, count: unresolved.fields.count))
+        }
+        if unresolved.omitted > 0 {
+            report.warnings.append(.unresolvedValuesOmitted(itemID: item.id, count: unresolved.omitted))
+        }
 
         var exported = JSONObject()
         exported.append("id", .string(Base64URL.encode(RandomUUID.bytes(of: item.id))))
         exported.append("creationAt", .integer(seconds(item.createdAt)))
         exported.append("modifiedAt", .integer(seconds(item.modifiedAt)))
         exported.append("title", .string(item.title))
+        exported.append("subtitle", ifPresent: subtitle.map { .string($0) })
         let isFavorite = options.favoriteTag.map { item.tags.contains($0) } ?? false
         exported.append("favorite", .bool(isFavorite))
         exported.append(
@@ -552,6 +606,21 @@ public enum CredentialExchange {
         exported.append("credentials", .array(credentials))
         exported.append("tags", .array(item.tags.sorted().map { .string($0) }))
         return exported
+    }
+
+    /// The field type a text field is written with: the one it was imported with, where the value still is one,
+    /// and `string` otherwise. A hint, checked like any other input.
+    private static func textType(of field: Field) -> String {
+        let value = field.value
+        switch field.meta[InterchangeMeta.sourceType] {
+        case "boolean" where value == "true" || value == "false": return "boolean"
+        case "number" where Double(value)?.isFinite == true && value.utf8.allSatisfy({ $0 > 0x20 && $0 < 0x7F }):
+            return "number"
+        case "country-code": return "country-code"
+        case "subdivision-code": return "subdivision-code"
+        case "wifi-network-security-type": return "wifi-network-security-type"
+        default: return "string"
+        }
     }
 
     private static func export(_ passkey: PasskeyCredential) -> JSONObject {

@@ -61,8 +61,8 @@ struct CredentialExchangeTests {
         #expect(pet.meta[InterchangeMeta.section] == "Security questions")
         #expect(item.field(labelled: "Town of birth?")?.kind == .text)
 
-        // `co.uk` is a URL the item keeps, not a scope it gains (F11.2).
-        #expect(item.values(.url) == ["https://co.uk"])
+        // `co.uk` is a URL the item keeps, not a scope it gains (F11.2); the sign-in page is kept beside its scope.
+        #expect(item.values(.url) == ["https://example.com/login", "https://co.uk"])
         #expect(
             result.warnings(for: "Example") == [
                 .scopeRefused(url: "https://co.uk", reason: .policy(.publicSuffix("co.uk")))
@@ -174,6 +174,61 @@ struct CredentialExchangeTests {
         // The unusable code was written as a concealed field, so nothing is left to warn about.
         #expect(again.report.warnings.isEmpty)
         #expect(again.entries.first?.item.field(labelled: "Code")?.kind == .custom)
+    }
+
+    private func importItems(_ items: String) throws -> ImportResult {
+        let json =
+            #"{"version":{"major":1,"minor":0},"exporterRpId":"x.example","exporterDisplayName":"X","timestamp":1,"#
+            + #""accounts":[{"id":"YQ","username":"","email":"","collections":[],"items":["# + items + "]}]}"
+        return try importCXF(Array(json.utf8))
+    }
+
+    @Test("Numbers and booleans are kept as text; subtitles and Android apps are not passed over in silence")
+    func nothingDroppedSilently() throws {
+        let result = try importItems(
+            #"""
+            {"id": "aQ", "title": "Typed", "subtitle": "the blue one",
+             "scope": {"urls": ["https://example.com"], "androidApps": [{"bundleId": "com.example"}, {"bundleId": "b"}]},
+             "credentials": [
+               {"type": "basic-auth", "username": {"fieldType": "string", "value": "wendy"},
+                "password": {"fieldType": "concealed-string", "value": ["not", "text"]}},
+               {"type": "custom-fields", "fields": [
+                 {"fieldType": "number", "value": 42, "label": "Floor"},
+                 {"fieldType": "boolean", "value": true, "label": "Parking"},
+                 {"fieldType": "number", "value": 2.5, "label": "Rate"},
+                 {"fieldType": "string", "value": {"deep": 1}, "label": "Odd"},
+                 {"fieldType": "string", "value": null, "label": "Nothing"},
+                 "not a field"]}]},
+            {"id": "bQ", "title": "Plain", "subtitle": "wendy", "credentials": [
+               {"type": "basic-auth", "username": {"fieldType": "string", "value": "wendy"}}]},
+            {"id": "cQ", "title": "Same", "subtitle": "Same", "credentials": [
+               {"type": "note", "content": {"fieldType": "string", "value": "n"}}]}
+            """#)
+        let typed = try result.entry(titled: "Typed").item
+        #expect(
+            typed.fields.map { "\($0.label)=\($0.value) [\($0.kind.rawValue)]" } == [
+                "Username=wendy [username]", "Floor=42 [text]", "Parking=true [text]", "Rate=2.5 [text]",
+                "Subtitle=the blue one [text]",
+            ])
+        #expect(
+            result.warnings(for: "Typed") == [
+                .androidAppsNotImported(count: 2),
+                .unsupportedFieldType(label: "Password", type: "concealed-string"),
+                .unsupportedFieldType(label: "Odd", type: "string"),
+                .unsupportedFieldType(label: "Field", type: "unknown"),
+            ])
+        // A subtitle that repeats the title or a field says nothing new, and adds no field.
+        #expect(try result.entry(titled: "Plain").item.fields.map(\.value) == ["wendy"])
+        #expect(try result.entry(titled: "Same").item.fields.isEmpty)
+        #expect(result.warnings(for: "Plain").isEmpty)
+
+        // The subtitle goes back out as a subtitle.
+        let exported = CredentialExchange.exportDocument([typed], options: exportOptions)
+        let text = String(decoding: exported.bytes, as: UTF8.self)
+        #expect(text.contains(#""title":"Typed","subtitle":"the blue one","#))
+        #expect(!text.contains(#""label":"Subtitle""#))
+        let again = try importCXF(exported.bytes, seed: 9)
+        #expect(try ItemShape(again.entry(titled: "Typed").item) == ItemShape(typed))
     }
 
     @Test("Passkeys outside their bounds are refused alone, and the rest of the item is imported")

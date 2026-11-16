@@ -46,6 +46,48 @@ struct CSVTests {
         #expect(try CSVReader.parse([0xEF, 0xBB, 0xBF]).isEmpty)
     }
 
+    @Test("Records can be read one at a time, and reading stops where the caller stops it")
+    func streaming() throws {
+        struct Stop: Error {}
+        var seen: [CSVRecord] = []
+        try CSVReader.forEachRecord(Array("a,b\n\n\"c\nd\",e\nf,g".utf8)) { seen.append($0) }
+        #expect(
+            seen == [
+                CSVRecord(line: 1, fields: ["a", "b"]), CSVRecord(line: 3, fields: ["c\nd", "e"]),
+                CSVRecord(line: 5, fields: ["f", "g"]),
+            ])
+        #expect(try CSVReader.parse(Array("a,b\n\n\"c\nd\",e\nf,g".utf8)) == seen)
+        var count = 0
+        #expect(throws: Stop.self) {
+            // The third record is malformed, and is never reached.
+            try CSVReader.forEachRecord(Array("a\nb\nc\"d\n".utf8)) { _ in
+                count += 1
+                if count == 2 { throw Stop() }
+            }
+        }
+        #expect(count == 2)
+    }
+
+    @Test("Columns, rows and cells stop at their limits, as they are read")
+    func limits() throws {
+        let wide = Array((Array(repeating: "a", count: 101).joined(separator: ",") + "\n").utf8)
+        #expect(throws: InterchangeError.limitExceeded(.csvColumns, limit: 100)) { try CSVReader.parse(wide) }
+        #expect(try CSVReader.parse(Array(wide.dropFirst(2))).first?.fields.count == 100)
+
+        let tight = InterchangeLimits(maximumItems: 3, maximumTotalFields: 7)
+        // Four rows and a header are one row too many.
+        var rows = 0
+        #expect(throws: InterchangeError.limitExceeded(.items, limit: 3)) {
+            try CSVReader.forEachRecord(Array("h\n1\n2\n3\n4\n".utf8), limits: tight) { _ in rows += 1 }
+        }
+        #expect(rows == 4)
+        // Read whole, the cells are counted as they are kept.
+        #expect(try CSVReader.parse(Array("a,b\nc,d\ne,f\ng\n".utf8), limits: tight).count == 4)
+        #expect(throws: InterchangeError.limitExceeded(.totalFields, limit: 7)) {
+            try CSVReader.parse(Array("a,b\nc,d\ne,f\ng,h\n".utf8), limits: tight)
+        }
+    }
+
     @Test("An empty file has no records")
     func empty() throws {
         #expect(try rows("").isEmpty)

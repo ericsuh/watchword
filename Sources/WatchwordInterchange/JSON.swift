@@ -37,6 +37,18 @@ enum JSONValue: Hashable, Sendable {
     }
 
     var isNull: Bool { self == .null }
+
+    /// The text of a value that should be text: a string, or a number or boolean written without quotes. `nil` for
+    /// an array, an object or null, which have no text.
+    var scalarText: String? {
+        switch self {
+        case .string(let text): return text
+        case .integer(let number): return String(number)
+        case .double(let number): return String(number)
+        case .bool(let flag): return flag ? "true" : "false"
+        case .null, .array, .object: return nil
+        }
+    }
 }
 
 struct JSONObject: Hashable, Sendable {

@@ -67,22 +67,31 @@ public enum PasswordCSV {
         _ bytes: [UInt8], into vaultID: UUID, limits: InterchangeLimits = .standard,
         options: ImportOptions = ImportOptions(), using generator: inout some RandomNumberGenerator
     ) throws -> ImportResult {
-        let records = try CSVReader.parse(bytes, limits: limits)
-        guard let header = records.first else { throw InterchangeError.malformedCSV(.empty, line: 1) }
-        let (format, columns) = try columns(of: header)
-        var assembler = ImportAssembler(format: format, vaultID: vaultID, limits: limits, options: options)
-
-        for row in records.dropFirst() {
-            let index = try assembler.beginEntry()
+        // Row by row: the file's rows are never held beside the drafts made from them (PRD SEC7).
+        var header: CSVRecord?
+        var columns: [Column] = []
+        var assembler: ImportAssembler?
+        try CSVReader.forEachRecord(bytes, limits: limits) { row in
+            guard let header, var current = assembler else {
+                let (format, mapped) = try self.columns(of: row)
+                header = row
+                columns = mapped
+                assembler = ImportAssembler(format: format, vaultID: vaultID, limits: limits, options: options)
+                return
+            }
+            // Taken out while it is changed, so its arrays are not copied for every row.
+            assembler = nil
+            defer { assembler = current }
+            let index = try current.beginEntry()
             var record = SourceRecord(
                 reference: ImportEntryReference(index: index, line: row.line), kind: .login, title: "")
             guard row.fields.count == columns.count else {
                 if let title = columns.firstIndex(of: .title), title < row.fields.count {
                     record.reference.title = row.fields[title]
                 }
-                assembler.skip(
+                current.skip(
                     record.reference, .columnCountMismatch(expected: columns.count, found: row.fields.count))
-                continue
+                return
             }
             for (position, cell) in row.fields.enumerated() {
                 if isNeutralisedFormula(cell) {
@@ -106,7 +115,7 @@ public enum PasswordCSV {
                 case .archived:
                     if isTrue(cell) { record.state = .archived }
                 case .tags:
-                    record.tags = cell.split(whereSeparator: { $0 == ";" || $0 == "," }).map(String.init)
+                    record.tags = splitTags(cell)
                 case .notes:
                     record.notes = cell
                 case .custom(let name):
@@ -114,9 +123,18 @@ public enum PasswordCSV {
                 }
             }
             record.kind = kind(of: record)
-            assembler.add(record, using: &generator)
+            try current.add(record, using: &generator)
         }
+        guard let assembler else { throw InterchangeError.malformedCSV(.empty, line: 1) }
         return assembler.result
+    }
+
+    /// The tags of a cell: separated by commas or semicolons, on scalars, so a separator followed by a combining
+    /// mark still separates.
+    private static func splitTags(_ cell: String) -> [String] {
+        cell.unicodeScalars.split(whereSeparator: { $0 == ";" || $0 == "," }).map {
+            String(String.UnicodeScalarView($0))
+        }
     }
 
     private static func kind(of record: SourceRecord) -> ImportedKind {
@@ -142,8 +160,8 @@ public enum PasswordCSV {
         return CSVWriter.isFormulaLike(String(cell.dropFirst()))
     }
 
-    /// Exports `items` as an Apple Passwords CSV file (PRD F8.4): one row per scope, since Apple Passwords keeps one
-    /// entry per website.
+    /// Exports `items` as an Apple Passwords CSV file (PRD F8.4): one row per website, since Apple Passwords keeps
+    /// one entry per website.
     ///
     /// The format has six columns. What does not fit is not lost quietly: a passkey is left out and reported
     /// (passkeys do not survive CSV, docs/00-research.md §1.3), and every other field without a column is written
@@ -162,9 +180,15 @@ public enum PasswordCSV {
             let username = item.fields.first { $0.kind == .username } ?? item.fields.first { $0.kind == .email }
             let password = item.field(.password)
             let oneTimePassword = item.fields.first { $0.kind == .totp && (try? $0.otpParameters()) != nil }
-            var urls = item.scopes.map { "https://\($0.host)/" }
+            var (urls, websiteFields) = ExportSupport.websites(of: item)
             let urlField = urls.isEmpty ? item.fields.first { $0.kind == .url } : nil
             if let urlField { urls = [urlField.value] }
+            ExportSupport.commonWarnings(for: item, into: &report)
+            if item.archived { report.warnings.append(.archivedStateOmitted(itemID: item.id)) }
+            if !item.tags.isEmpty { report.warnings.append(.tagsOmitted(itemID: item.id)) }
+            if !item.history.isEmpty {
+                report.warnings.append(.historyOmitted(itemID: item.id, entries: item.history.count))
+            }
 
             var notes = item.notes
             var moved = 0
@@ -174,12 +198,24 @@ public enum PasswordCSV {
                     continue
                 }
                 let hasColumn = [username?.id, password?.id, oneTimePassword?.id, urlField?.id].contains(field.id)
-                guard !hasColumn, !field.value.isEmpty else { continue }
+                guard !hasColumn, !websiteFields.contains(field.id), !field.value.isEmpty else { continue }
                 if !notes.isEmpty { notes += "\n" }
                 notes += "\(field.label.isEmpty ? field.kind.rawValue : field.label): \(field.value)"
                 moved += 1
             }
             if moved > 0 { report.warnings.append(.fieldsMovedToNotes(itemID: item.id, count: moved)) }
+            // What sync is keeping for the person to choose between goes too, labelled (PRD F7.7).
+            let unresolved = ExportSupport.unresolvedValues(of: item)
+            for kept in unresolved.fields {
+                if !notes.isEmpty { notes += "\n" }
+                notes += "\(kept.label): \(kept.value)"
+            }
+            if !unresolved.fields.isEmpty {
+                report.warnings.append(.unresolvedValuesAdded(itemID: item.id, count: unresolved.fields.count))
+            }
+            if unresolved.omitted > 0 {
+                report.warnings.append(.unresolvedValuesOmitted(itemID: item.id, count: unresolved.omitted))
+            }
 
             for url in urls.isEmpty ? [""] : urls {
                 let cells = [

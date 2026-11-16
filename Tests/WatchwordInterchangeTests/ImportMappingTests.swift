@@ -97,10 +97,16 @@ struct ImportMappingTests {
         #expect(standard.maximumItems == 50_000)
         #expect(standard.maximumCompressionRatio == 100)
         #expect(InterchangeLimits() == standard)
+        #expect(standard.maximumTotalFields == 1_000_000)
+        #expect(standard.maximumCSVColumns == 100)
+        #expect(standard.maximumURLsPerItem == 32)
+        #expect(standard.maximumScopeDerivations == 100_000)
+        #expect(standard.maximumStoredItemBytes == 768 * 1024)
         let loose = InterchangeLimits(
             maximumInputBytes: .max, maximumDocumentBytes: .max, maximumArchiveEntries: .max, maximumItems: .max,
             maximumCompressionRatio: .max, maximumEntryBytes: .max, maximumFieldBytes: .max, maximumFieldsPerItem: .max,
-            maximumNestingDepth: .max, maximumEntryNameBytes: .max)
+            maximumNestingDepth: .max, maximumEntryNameBytes: .max, maximumTotalFields: .max, maximumCSVColumns: .max,
+            maximumURLsPerItem: .max, maximumScopeDerivations: .max, maximumStoredItemBytes: .max)
         #expect(loose == standard)
         let tight = InterchangeLimits(maximumItems: 3, maximumCompressionRatio: 0, maximumNestingDepth: -4)
         #expect(tight.maximumItems == 3)
@@ -171,6 +177,117 @@ struct ImportMappingTests {
     }
 }
 
+@Suite("Import budgets")
+struct ImportBudgetTests {
+    private func importCSV(_ text: String, limits: InterchangeLimits) throws -> ImportResult {
+        var generator = SeededGenerator(seed: 2)
+        return try PasswordCSV.importFile(Array(text.utf8), into: Fixtures.vaultID, limits: limits, using: &generator)
+    }
+
+    private func importItems(_ items: String, limits: InterchangeLimits = .standard) throws -> ImportResult {
+        var generator = SeededGenerator(seed: 2)
+        let json = #"{"accounts":[{"vaults":[{"items":["# + items + "]}]}]}"
+        return try OnePUX.importDocument(Array(json.utf8), into: Fixtures.vaultID, limits: limits, using: &generator)
+    }
+
+    private func item(_ identifier: String, urls: [String]) -> String {
+        let list = urls.map { #"{"url":"\#($0)"}"# }.joined(separator: ",")
+        return
+            #"{"uuid":"\#(identifier)","categoryUuid":"001","overview":{"title":"\#(identifier)","urls":[\#(list)]},"#
+            + #""details":{"loginFields":[{"designation":"password","value":"pw"}]}}"#
+    }
+
+    @Test("The fields of a whole import are counted, and the file fails at the limit")
+    func totalFields() throws {
+        let header = "Title,URL,Username,Password,Extra\n"
+        let row = "t,https://example.com,u,p,x\n"
+        // Four kept values a row (the title is not a field): two rows fit in eight, three do not.
+        let limits = InterchangeLimits(maximumTotalFields: 8)
+        #expect(try importCSV(header + row + row, limits: limits).entries.count == 2)
+        #expect(throws: InterchangeError.limitExceeded(.totalFields, limit: 8)) {
+            try importCSV(header + row + row + row, limits: limits)
+        }
+        // Empty cells are not fields, and rows that are skipped hold none.
+        let sparse = "t,,,p,\n"
+        #expect(try importCSV(header + String(repeating: sparse, count: 8), limits: limits).entries.count == 8)
+        let short = "t,p\n"
+        let result = try importCSV(header + row + row + String(repeating: short, count: 20), limits: limits)
+        #expect(result.entries.count == 2)
+        #expect(result.report.skipped.count == 20)
+
+        // The same counter serves every format: URLs, fields, tags and earlier passwords.
+        let entry =
+            #"{"uuid":"U","categoryUuid":"001","overview":{"title":"T","url":"https://example.com/x","tags":["a"]},"#
+            + #""details":{"loginFields":[{"designation":"password","value":"pw"}],"#
+            + #""passwordHistory":[{"value":"old","time":1}]}}"#
+        let two =
+            entry.replacingOccurrences(of: #""U""#, with: #""a""#) + ","
+            + entry.replacingOccurrences(of: #""U""#, with: #""b""#)
+        #expect(try importItems(two, limits: limits).entries.count == 2)
+        let three = two + "," + entry.replacingOccurrences(of: #""U""#, with: #""c""#)
+        #expect(throws: InterchangeError.limitExceeded(.totalFields, limit: 8)) {
+            try importItems(three, limits: limits)
+        }
+    }
+
+    @Test("A repeated URL is parsed once, and URLs past the limit are kept as fields without becoming scopes")
+    func urlLimits() throws {
+        let repeated = Array(repeating: "https://example.com/login", count: 500)
+        let once = try importItems(item("a", urls: repeated), limits: InterchangeLimits(maximumScopeDerivations: 1))
+        #expect(once.entries.first?.item.scopes.map(\.host) == ["example.com"])
+        #expect(once.entries.first?.item.values(.url) == ["https://example.com/login"])
+        #expect(once.report.warnings.isEmpty)
+
+        let hosts = (0..<40).map { "https://h\($0).example.com" }
+        let capped = try importItems(item("a", urls: hosts))
+        let entry = try #require(capped.entries.first)
+        #expect(entry.item.scopes.map(\.host) == (0..<32).map { "h\($0).example.com" })
+        // The rest are still the person's data, and AutoFill is not offered on them.
+        #expect(entry.item.values(.url) == Array(hosts[32...]))
+        #expect(capped.warnings(for: "a") == [.urlsNotConsidered(count: 8)])
+        #expect(try importItems(item("a", urls: Array(hosts[..<32]))).report.warnings.isEmpty)
+
+        // Over the whole file: three URLs may be parsed, and the fourth and fifth are kept as text.
+        let limits = InterchangeLimits(maximumScopeDerivations: 3)
+        let file = try importItems(
+            item("a", urls: Array(hosts[0..<2])) + "," + item("b", urls: Array(hosts[2..<5])), limits: limits)
+        #expect(file.entries.map(\.item.scopes.count) == [2, 1])
+        #expect(file.entries.last?.item.values(.url) == Array(hosts[3..<5]))
+        #expect(file.warnings(for: "b") == [.urlsNotConsidered(count: 2)])
+    }
+
+    @Test("A draft is measured as the vault will store it")
+    func storedSize() throws {
+        // Control characters are six bytes each in the vault's JSON; quotes, backslashes and slashes two.
+        #expect(StoredItemSize.escapedBytes("") == 2)
+        #expect(StoredItemSize.escapedBytes("abc") == 5)
+        #expect(StoredItemSize.escapedBytes("\u{1}\n\u{7F}") == 20)
+        #expect(StoredItemSize.escapedBytes("\"\\/") == 8)
+        #expect(StoredItemSize.escapedBytes("\u{E9}\u{1F600}") == 8)
+
+        func draft(password: String = "pw", notes: String = "") -> Item {
+            Item(
+                vaultID: Fixtures.vaultID, title: "t", scopes: [ServiceScope(host: "example.com")],
+                fields: [Field(kind: .password, label: "Password", value: password)], notes: notes)
+        }
+        let small = StoredItemSize.estimate(draft())
+        // Never below what the draft alone encodes to, before the vault adds its stamps.
+        #expect(try small >= JSONEncoder().encode(draft()).count)
+        #expect(small < 8 * 1024)
+        #expect(StoredItemSize.estimate(draft(password: String(repeating: "\u{1}", count: 1_000))) >= small + 5_998)
+        // Each line of the notes is stored again, with two identifiers.
+        let lines = StoredItemSize.estimate(draft(notes: String(repeating: "\n", count: 999)))
+        #expect(lines >= small + 1_000 * StoredItemSize.noteLineOverhead)
+
+        // An entry inside every limit on what is read, and far outside what the vault stores, is skipped and listed.
+        let cell = String(repeating: "\u{1}", count: 200_000)
+        let result = try importCSV("Title,Password,Notes\r\nbig,\(cell),\r\nok,pw,note\r\n", limits: .standard)
+        #expect(result.entries.map(\.item.title) == ["ok"])
+        #expect(result.report.skipped.map(\.reason) == [.tooLarge(.storedItemBytes, limit: 768 * 1024)])
+        #expect(result.report.skipped.first?.entry.title == "big")
+    }
+}
+
 @Suite("Duplicate detection")
 struct DuplicateDetectorTests {
     private func item(
@@ -205,7 +322,11 @@ struct DuplicateDetectorTests {
         #expect(
             matches == [
                 DuplicateMatch(importedID: imported[0].id, existingID: existing[0].id, kind: .identical),
-                DuplicateMatch(importedID: imported[1].id, existingID: existing[0].id, kind: .sameAccount),
+                // What the file adds to the account it resembles is on the match, for the person to see: a host
+                // the existing item is not offered on, and a password it does not hold.
+                DuplicateMatch(
+                    importedID: imported[1].id, existingID: existing[0].id, kind: .sameAccount,
+                    newHosts: ["example.org"], hasNewSignInFields: true),
                 DuplicateMatch(importedID: imported[3].id, existingID: existing[2].id, kind: .sameAccount),
             ])
     }
@@ -222,17 +343,87 @@ struct DuplicateDetectorTests {
         #expect(DuplicateDetector.resolve(.skip, imported: imported, existing: existing) == nil)
         #expect(DuplicateDetector.resolve(.keepBoth, imported: imported, existing: existing) == imported)
 
+        let additions = DuplicateDetector.additions(of: imported, to: existing)
+        #expect(additions.scopes.map(\.host) == ["login.example.com"])
+        #expect(additions.signInFields.map(\.value) == ["new"])
+        #expect(additions.otherFields.map(\.value) == ["0420"])
+        #expect(additions.tags == ["b"])
+        #expect(additions.notes == "added")
+        #expect(additions.needsChoice)
+
         let merged = DuplicateDetector.merged(imported, into: existing)
         #expect(DuplicateDetector.resolve(.merge, imported: imported, existing: existing) == merged)
         #expect(merged.id == existing.id)
         #expect(merged.title == "Example")
-        #expect(merged.scopes.map(\.host) == ["example.com", "login.example.com"])
-        // Nothing of the existing item is replaced: the differing password arrives beside the old one.
-        #expect(merged.fields.map(\.value) == ["wendy", "old", "new", "0420"])
+        // A merge never widens where the existing item is offered, and never changes what it signs in with: the
+        // new host and the differing password are the person's to accept, one by one.
+        #expect(merged.scopes == existing.scopes)
+        #expect(merged.fields.map(\.value) == ["wendy", "old", "0420"])
         #expect(merged.tags == ["a", "b"])
         #expect(merged.notes == "kept\n\nadded")
         // Merging again adds nothing.
         #expect(DuplicateDetector.merged(imported, into: merged) == merged)
+        #expect(DuplicateDetector.additions(of: imported, to: merged).otherFields.isEmpty)
+    }
+
+    @Test("A merge adds a host or a sign-in field only when the person accepted that one")
+    func mergeChoices() throws {
+        let existing = item("Example", hosts: ["example.com"], username: "wendy", password: "old")
+        let imported = item(
+            "Example", hosts: ["example.com", "login.example.com", "example.org"], username: "wendy", password: "new")
+        let password = try #require(imported.field(.password))
+
+        let host = MergeChoices(hosts: ["login.example.com"])
+        let withHost = DuplicateDetector.merged(imported, into: existing, accepting: host)
+        #expect(withHost.scopes.map(\.host) == ["example.com", "login.example.com"])
+        #expect(withHost.fields == existing.fields)
+        #expect(DuplicateDetector.resolve(.merge, imported: imported, existing: existing, accepting: host) == withHost)
+
+        let withField = DuplicateDetector.merged(
+            imported, into: existing, accepting: MergeChoices(fieldIDs: [password.id]))
+        #expect(withField.scopes == existing.scopes)
+        // Beside the old one, never in its place.
+        #expect(withField.fields.map(\.value) == ["wendy", "old", "new"])
+
+        // A choice names what it accepts: a host the imported item does not have, or a field that is not one of its
+        // additions, adds nothing.
+        let stray = MergeChoices(hosts: ["evil.example"], fieldIDs: [UUID()])
+        #expect(DuplicateDetector.merged(imported, into: existing, accepting: stray) == existing)
+        #expect(MergeChoices.none == MergeChoices())
+    }
+
+    @Test("Notes are appended unless every line of them is already there, in linear time")
+    func mergedNotes() {
+        func merged(_ imported: String, into existing: String) -> String {
+            DuplicateDetector.merged(item("n", notes: imported), into: item("n", notes: existing)).notes
+        }
+        #expect(merged("b", into: "a") == "a\n\nb")
+        #expect(merged("a", into: "a") == "a")
+        #expect(merged("two\r\none", into: "one\ntwo\nthree") == "one\ntwo\nthree")
+        #expect(merged("one\n\nfour", into: "one\ntwo") == "one\ntwo\n\none\n\nfour")
+        // Part of a line is not a line.
+        #expect(merged("on", into: "one") == "one\n\non")
+        #expect(merged("x", into: "") == "x")
+        #expect(merged("", into: "kept") == "kept")
+        // Lines are bytes: a line that differs only in normalisation is a different line.
+        #expect(merged("e\u{301}", into: "\u{E9}") == "\u{E9}\n\ne\u{301}")
+
+        // The shape a string search is quadratic on (Linux Foundation took 5 s at n = 16,000): 2n of one letter
+        // against n of it and one more. Work, not time, is what is asserted: the answer for a text a hundred times
+        // that size comes back at all.
+        let n = 1_600_000
+        let long = merged(String(repeating: "a", count: n) + "b", into: String(repeating: "a", count: 2 * n))
+        #expect(long.utf8.count == 3 * n + 3)
+    }
+
+    @Test("Values are compared as bytes when deciding what an existing item already holds")
+    func bytewiseValues() {
+        let existing = item("Example", hosts: ["example.com"], username: "wendy", password: "caf\u{E9}")
+        let imported = item("Example", hosts: ["example.com"], username: "wendy", password: "cafe\u{301}")
+        // Equal as Swift strings, and two different passwords.
+        #expect(existing.fields[1].value == imported.fields[1].value)
+        #expect(DuplicateDetector.matches(imported: [imported], existing: [existing]).map(\.kind) == [.sameAccount])
+        #expect(DuplicateDetector.additions(of: imported, to: existing).signInFields.count == 1)
     }
 
     @Test("The work stays bounded when everything resembles everything")
@@ -352,6 +543,7 @@ struct InterchangeGuideTests {
         4. Passwords opens and shows what it received. Follow its steps to finish the import.
         ! Nothing is written to a file: the data passes directly between the two apps. Compare the number of items imported with the number you expected before you delete anything from the app you are leaving.
         ! If the other app does not open, or opens and shows nothing, update both apps and try again. A transfer that delivers nothing has removed nothing: your data is still where it was.
+        ! Watchword's export report lists what the file or transfer could not carry as it was: earlier versions of an item, tags and archived marks where the other app has no place for them, an item limited to one host or with hosts excluded, and values still waiting for you to choose between. Read it before you delete anything from Watchword.
 
         ## With a CSV file
         Needs: A Mac, to import the file into Passwords.
@@ -364,6 +556,7 @@ struct InterchangeGuideTests {
         ! Passkeys cannot be written to a CSV file. Move them with Export to Another App, or sign in and create new passkeys afterwards.
         ! Passwords keeps one username, one password, one verification code and notes for each website. Security questions, PINs, recovery codes and other fields are written into the notes, and an item with several websites becomes one entry for each.
         ! A value that begins with =, +, - or @ is written with an apostrophe in front, so that a spreadsheet opening the file cannot run it as a formula. Passwords imports the apostrophe as part of the value. The export report lists each value changed: correct them in Passwords afterwards, or choose to write values unchanged if the file will only ever be opened by Passwords.
+        ! Watchword's export report lists what the file or transfer could not carry as it was: earlier versions of an item, tags and archived marks where the other app has no place for them, an item limited to one host or with hosts excluded, and values still waiting for you to choose between. Read it before you delete anything from Watchword.
         """
     static let from1Password = """
         Move from 1Password to Watchword
@@ -416,6 +609,7 @@ struct InterchangeGuideTests {
         4. 1Password opens and shows what it received. Follow its steps to finish the import.
         ! Nothing is written to a file: the data passes directly between the two apps. Compare the number of items imported with the number you expected before you delete anything from the app you are leaving.
         ! If the other app does not open, or opens and shows nothing, update both apps and try again. A transfer that delivers nothing has removed nothing: your data is still where it was.
+        ! Watchword's export report lists what the file or transfer could not carry as it was: earlier versions of an item, tags and archived marks where the other app has no place for them, an item limited to one host or with hosts excluded, and values still waiting for you to choose between. Read it before you delete anything from Watchword.
 
         ## With a 1PUX file
         Needs: The 1Password app for Mac, Windows or Linux.
@@ -428,5 +622,6 @@ struct InterchangeGuideTests {
         ! The 1PUX file is not encrypted: anyone who can read it can read every password in it. Save it to a folder on this device that is not synced or shared, and delete it as soon as the import is done.
         ! Passkeys are not written to a 1PUX file; the export report lists the items that have one. Move them app to app, or create new passkeys in 1Password.
         ! Compare the number of items imported with the number you expected before you delete anything from the app you are leaving.
+        ! Watchword's export report lists what the file or transfer could not carry as it was: earlier versions of an item, tags and archived marks where the other app has no place for them, an item limited to one host or with hosts excluded, and values still waiting for you to choose between. Read it before you delete anything from Watchword.
         """
 }

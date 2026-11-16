@@ -280,6 +280,19 @@ every case above and the attacks a parser author would add to them:
   tree built to multiply its own size; and one-time passwords that could not work, which never become working
   fields.
 - Every parser over seeded random and mutated files: a value or an `InterchangeError`, nothing else.
+- Amplification, added after the module's first security review: a CSV file inside every per-entry limit
+  stopped at one million fields under the standard limits, and one a thousand columns wide stopped at its
+  header; a URL repeated 999 times in each entry parsed once, distinct URLs capped per entry and per file with
+  the rest kept as fields and reported; 100,000 empty dynamic DEFLATE blocks (valid to zlib) refused bare
+  and as an archive member of any declared size, as is a stream of one literal per block; entries that are
+  small as written and megabytes as stored (control characters, quotes, slashes, a quarter of a million
+  blank lines, 990 fields, 900 earlier passwords) skipped and listed, with every draft that *is* returned
+  stamped by `ItemMerge.stamped` and encoded by `ItemCodec` within its limit; and, as a seeded property,
+  the stored-size estimate never below what the vault encodes.
+- Duplicates: a hostile entry sharing one host and user name with an existing item, merged, leaves the set of
+  hosts on which `AutoFillGate.decide` fills that item unchanged and adds no sign-in field; the match names
+  the host the file tried to add, and only a host accepted by name is added. Merging notes built to make a
+  string search quadratic completes in one pass.
 
 Still to come with the integration step: that a plaintext export cannot be produced without re-entering the
 account password, and that the file is written with the protection class §14 names.

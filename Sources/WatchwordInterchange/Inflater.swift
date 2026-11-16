@@ -10,7 +10,9 @@ import Foundation
 ///
 /// Strictness follows zlib's `inflate`: over-subscribed and incomplete code sets are refused (a lone one-bit code is
 /// the permitted exception), a block must be able to end, and distances may not reach before the output. Bytes left
-/// after the final block are refused too, which zlib leaves to its caller.
+/// after the final block are refused too, which zlib leaves to its caller. One thing zlib accepts is refused here: a
+/// stream of more than a thousand blocks that average under 256 bytes of output each (`DeflateDefect.excessiveBlocks`),
+/// which no compressor writes and which is otherwise the cheapest way to buy work with input.
 public enum Inflater {
     /// Inflates a raw DEFLATE stream. The output may be at most `limits.maximumCompressionRatio` times the size of
     /// `compressed`, and at most `limits.maximumDocumentBytes`; reaching either cap stops the work and throws
@@ -162,9 +164,24 @@ private struct InflateStream {
         self.capError = capError
     }
 
+    /// Blocks a stream may hold whatever they emit: far more than a compressor's flushes leave in a document.
+    static let unaccountedBlocks = 1_024
+    /// Beyond those, the output a stream must have produced for each block it has begun. zlib ends a block every
+    /// sixteen thousand symbols and a stored block holds up to 64 KiB, so only a writer that flushes every few
+    /// bytes, thousands of times, comes near this; at this figure the worst a 100 MB document can ask for is four
+    /// hundred thousand block headers.
+    static let bytesPerAccountedBlock = 256
+
     mutating func run() throws {
         var final = false
+        var blocks = 0
         repeat {
+            // A block's header costs a fixed amount of work (three code tables for a dynamic one) whatever the block
+            // emits, and an empty dynamic block is under twelve bytes: without this, 100 MB of them is half a
+            // minute of work for no output, which neither the ratio cap nor the document cap would notice.
+            blocks += 1
+            guard blocks - InflateStream.unaccountedBlocks <= output.count / InflateStream.bytesPerAccountedBlock
+            else { throw InterchangeError.malformedDeflate(.excessiveBlocks) }
             final = try bits(1) == 1
             switch try bits(2) {
             case 0: try storedBlock()

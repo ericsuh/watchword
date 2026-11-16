@@ -35,6 +35,37 @@ struct InflaterTests {
         #expect(CRC32.checksum(Array("123456789".utf8)) == 0xCBF4_3926)
     }
 
+    @Test("An empty dynamic block is valid, and a thousand of them are tolerated")
+    func emptyDynamicBlocks() throws {
+        // One final empty dynamic block, bit for bit as an independent script packed it; Python's
+        // `zlib.decompressobj(-15).decompress(bytes.fromhex("05c0810800000000207feb03"))` returns `b""`.
+        let one: [UInt8] = [0x05, 0xC0, 0x81, 0x08, 0x00, 0x00, 0x00, 0x00, 0x20, 0x7F, 0xEB, 0x03]
+        #expect(DeflateFixture.emptyDynamicBlocks(count: 1) == one)
+        #expect(try Inflater.inflate(one) == [])
+        // A compressor's flushes leave empty blocks behind; a stream may hold a thousand without accounting for them.
+        #expect(try Inflater.inflate(DeflateFixture.emptyDynamicBlocks(count: 1_024)) == [])
+    }
+
+    @Test("A stream of more blocks than its output accounts for is refused")
+    func excessiveBlocks() throws {
+        #expect(throws: InterchangeError.malformedDeflate(.excessiveBlocks)) {
+            try Inflater.inflate(DeflateFixture.emptyDynamicBlocks(count: 1_025))
+        }
+        // The same for stored and fixed blocks: the rule is about blocks, not about one kind of them.
+        let emptyStored = [UInt8](repeating: 0, count: 0) + (0..<2_000).flatMap { _ in [UInt8]([0, 0, 0, 0xFF, 0xFF]) }
+        #expect(throws: InterchangeError.malformedDeflate(.excessiveBlocks)) {
+            try Inflater.inflate(emptyStored + [1, 0, 0, 0xFF, 0xFF])
+        }
+        // Blocks that carry their weight are welcome in any number: 5,000 stored blocks of 256 bytes each.
+        let data = (0..<1_280_000).map { UInt8(truncatingIfNeeded: $0 &* 31) }
+        let limits = InterchangeLimits(maximumCompressionRatio: 100)
+        #expect(try Inflater.inflate(DeflateFixture.stored(data, blockSize: 256), limits: limits) == data)
+        // And ones that do not are refused once the allowance is spent, wherever they sit.
+        #expect(throws: InterchangeError.malformedDeflate(.excessiveBlocks)) {
+            try Inflater.inflate(DeflateFixture.stored(data, blockSize: 128), limits: limits)
+        }
+    }
+
     @Test("A declared length must be exact")
     func declaredLength() throws {
         let vector = try #require(DeflateVector.all.first { $0.name == "sentences/best" })
