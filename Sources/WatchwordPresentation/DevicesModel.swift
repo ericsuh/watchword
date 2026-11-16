@@ -30,7 +30,7 @@ public struct DeviceRow: Hashable, Sendable, Identifiable {
         }
     }
 
-    static func displayName(_ device: DeviceInfo) -> String {
+    public static func displayName(_ device: DeviceInfo) -> String {
         let name = device.name.isEmpty ? "Device \(shortIdentifier(device.id))" : device.name
         return device.isThisDevice ? "\(name) (this device)" : name
     }

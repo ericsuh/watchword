@@ -72,6 +72,9 @@ public final class VaultsModel {
     /// Whether this build can share vaults at all (sharing needs sync and a key directory, which production builds
     /// do not have yet).
     public private(set) var sharingAvailable = false
+    /// This account's safety number, for someone inviting it to compare (PRD F4.2); `nil` while sharing is not
+    /// available.
+    public private(set) var fingerprint: OwnFingerprint?
     public private(set) var isWorking = false
     public var errorMessage: String?
 
@@ -91,6 +94,9 @@ public final class VaultsModel {
                     shared[id] = VaultSharing(try await session.sharedVaultStatus(id))
                 }
                 sharingAvailable = true
+                if fingerprint == nil, let bundle = try? await session.publicKeyBundle() {
+                    fingerprint = OwnFingerprint(bundle)
+                }
             } catch is SharedVaultError {
                 sharingAvailable = false
             }

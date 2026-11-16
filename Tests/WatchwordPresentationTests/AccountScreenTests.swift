@@ -181,3 +181,35 @@ struct QuarantineModelTests {
         #expect(model.rows.isEmpty && model.errorMessage == nil)
     }
 }
+
+@Suite("Screen models: a password changed by someone else")
+@MainActor
+struct PasswordChangedElsewhereTests {
+    /// The flow the unlock screen and the Devices screen offer together (docs/02-architecture.md §7.8): the other
+    /// device changed the password; this one unlocks with the password it has, removes that device and sets its own.
+    @Test("the person unlocks with this device's password, removes the other device and sets a new password")
+    func takeTheAccountBack() async throws {
+        let devices = try await TwoDevices.make()
+        try await devices.second.session.changePassword(current: TestVault.password, new: "not the person's own")
+        try await devices.second.session.sync()
+        let model = DevicesModel(context: ContextProbe().context(devices.first.session))
+        await model.syncNow()
+        #expect(model.sync?.notices.contains(.awaitingNewPassword) == true)
+
+        await devices.first.session.lock()
+        await #expect(throws: VaultError.passwordChangedOnAnotherDevice) {
+            try await devices.first.session.unlock(password: TestVault.password)
+        }
+        try await devices.first.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
+        await model.load()
+        #expect(model.awaitingNewPassword)
+        var form = RevocationForm()
+        form.currentPassword = TestVault.password
+        form.newPassword = "the person's own password"
+        form.confirmation = "the person's own password"
+        let other = try #require(model.rows.first { $0.mayRevoke })
+        #expect(await model.revoke(other, with: form), "\(model.errorMessage ?? "")")
+        #expect(!model.awaitingNewPassword)
+        #expect(model.rows.first { $0.id == other.id }?.isRevoked == true)
+    }
+}
