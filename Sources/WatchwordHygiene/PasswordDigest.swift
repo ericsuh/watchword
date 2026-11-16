@@ -98,6 +98,8 @@ public struct PasswordDigest: Sendable {
 
     /// Hashes `password`, which stays the caller's to zeroise.
     public init(password: SecureBytes) {
+        // SHA-1 because the Pwned Passwords range API is defined over it; only a 5-hex-character prefix leaves the
+        // device. CodeQL's weak-hash alert here is accepted, not fixed (docs/07-supply-chain.md §3.4).
         var hasher = Insecure.SHA1()
         hasher.update(data: password)
         var digest = Array(hasher.finalize())

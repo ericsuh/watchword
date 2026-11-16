@@ -356,6 +356,13 @@ Two properties to keep in mind:
   off, and that leaves no diff in the repository. Treat `code-scanning/default-setup` as part of
   the settings surface to re-verify, not as something the tree protects.
 
+**Alert dispositions.** An alert closed without a code change is recorded here, with its reason,
+so that dismissing it in the web UI is never the only record:
+
+| Alert | Where | Disposition |
+| --- | --- | --- |
+| Use of a broken or weak cryptographic hashing algorithm (SHA-1) | `PasswordDigest.init(password:)`, `Sources/WatchwordHygiene/PasswordDigest.swift` | **Accepted, won't fix** (owner decision, 2026-11-16). The Have I Been Pwned range API is defined over SHA-1, so no other hash can be asked about, and the hash protects nothing here: only the first five hexadecimal characters (twenty bits) leave the device, and the rest is compared locally (`02-architecture.md` §13.2). Nothing else in the package uses SHA-1 except HMAC-SHA-1 for TOTP, which RFC 6238 defines. Dismiss the alert as "won't fix" with a link to this row. |
+
 ## 4. Repository and release integrity (T5, T6)
 
 **[planned]** — these require repository-admin settings, not code. The `gh` commands,

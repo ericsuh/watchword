@@ -1628,6 +1628,10 @@ accessor the request path is built from) and the other 35 hexadecimal characters
 `String`s (PRD SEC4), so `init(utf8Of:)` takes one; the copy fed to the hash is in `SecureBytes` and wiped,
 and `init(password:)` takes `SecureBytes` for callers that have it.
 
+SHA-1 is the API's, not a choice: the range API is defined over SHA-1 and only the five-character prefix leaves
+the device, so the hash's weakness protects nothing here. CodeQL's weak-hash alert on this call is **accepted, won't
+fix** (owner decision, 2026-11-16; `07-supply-chain.md` §3.4).
+
 `PwnedPasswordsClient.check` sends at most one request per check:
 `GET https://api.pwnedpasswords.com/range/<PREFIX>` with `Add-Padding: true` and
 `User-Agent: Watchword/<version>`, and no other header. The host and scheme are constants (`HygieneHost` has
