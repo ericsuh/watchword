@@ -2166,8 +2166,10 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   `HMAC(local key, label ‖ message)`, so a name says nothing about the prefix it holds. The cache
   (`SealedPwnedRangeCache`) holds nothing in memory: each lookup and store goes through the session, which
   refuses while locked, so its `lock()` has nothing to drop. One record per prefix (`CachedPwnedRange.encoded()`)
-  and a sealed index (prefix, fetch time, size) bound it to 512 prefixes and 32 MiB, expired ranges first, then
-  the oldest. A record planted from another account, or sealed by another device of this account (which has the
+  and a sealed index (prefix, fetch time, size) bound it to 512 prefixes and 32 MiB by default, expired ranges
+  first, then the oldest. The index lists at most 4,096 prefixes and one listing more does not decode, so
+  `HygieneSettings.cacheCapacity` is clamped to that (`maximumCacheCapacity`): above it, the index would be read as
+  empty and every record it named left on disk, never evicted. A record planted from another account, or sealed by another device of this account (which has the
   keyset and this device's ID but not its secret), does not open and answers nothing. An older ledger of this
   device's own, put back by someone who can write the files (A8), does open: it is accepted as what it is, an
   authentic earlier reading, whose every check is older than the one it replaces, so nothing becomes due later than

@@ -180,4 +180,32 @@ struct SessionHygieneTests {
         await #expect(throws: VaultError.locked) { try await fixture.session.runHygieneStep() }
         await #expect(throws: VaultError.locked) { try await fixture.session.itemsUsingPassword("password") }
     }
+
+    /// The sealed cache index lists at most `RangeCacheIndex.maximumEntries` prefixes, and one that lists more does not
+    /// decode, so the session would read it as empty and leave every range record it named on disk for good. The
+    /// capacity a session is configured with can therefore never exceed what the index can hold.
+    @Test("the prefix cache's capacity is clamped to what its sealed index can list")
+    func cacheCapacityIsClamped() throws {
+        let http = FakeHTTPClient()
+        var settings = HygieneSettings(
+            http: http, userAgent: try #require(HygieneUserAgent(version: "1.0")),
+            localStore: InMemoryDeviceLocalStore(), cacheCapacity: 100_000)
+        #expect(settings.cacheCapacity == RangeCacheIndex.maximumEntries)
+        #expect(HygieneSettings.maximumCacheCapacity == 4096)
+        settings.cacheCapacity = 5000
+        #expect(settings.cacheCapacity == 4096)
+        settings.cacheCapacity = 0
+        #expect(settings.cacheCapacity == 1)
+        settings.cacheCapacity = 300
+        #expect(settings.cacheCapacity == 300)
+
+        // Why: an index at the bound round-trips, and one past it is refused as a whole.
+        var index = RangeCacheIndex()
+        for prefix in 0..<UInt32(RangeCacheIndex.maximumEntries) {
+            index.entries[prefix] = RangeCacheIndex.Entry(fetchedAt: 1, size: 100)
+        }
+        #expect(RangeCacheIndex(decoding: index.encoded()) == index)
+        index.entries[UInt32(RangeCacheIndex.maximumEntries)] = RangeCacheIndex.Entry(fetchedAt: 1, size: 100)
+        #expect(RangeCacheIndex(decoding: index.encoded()) == nil)
+    }
 }

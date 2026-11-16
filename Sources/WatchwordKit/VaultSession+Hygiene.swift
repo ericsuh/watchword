@@ -15,9 +15,23 @@ public struct HygieneSettings: Sendable {
     public var localStore: any DeviceLocalStore
     public var policy: HygienePolicy
     public var scanPolicy: ScanPolicy
-    /// The persisted prefix cache's bounds (`InMemoryPwnedRangeCache`'s defaults): beyond either, the oldest go.
-    public var cacheCapacity: Int
+    /// The persisted prefix cache's bounds (`InMemoryPwnedRangeCache`'s defaults): beyond either, the oldest go. The
+    /// capacity is clamped to 1 through `maximumCacheCapacity`, the most prefixes the sealed index can list: an index
+    /// of more would not decode, so it would be read as empty and every record it named would be left on disk, sealed
+    /// but never evicted or found again.
+    public var cacheCapacity: Int {
+        get { storedCacheCapacity }
+        set { storedCacheCapacity = Self.clampedCapacity(newValue) }
+    }
     public var cacheMaximumBytes: Int
+    private var storedCacheCapacity: Int
+
+    /// The most prefixes the persisted cache holds whatever `cacheCapacity` asks for (`RangeCacheIndex.maximumEntries`).
+    public static let maximumCacheCapacity = RangeCacheIndex.maximumEntries
+
+    static func clampedCapacity(_ capacity: Int) -> Int {
+        min(max(1, capacity), maximumCacheCapacity)
+    }
 
     public init(
         http: any HTTPClient, userAgent: HygieneUserAgent, localStore: any DeviceLocalStore,
@@ -30,7 +44,7 @@ public struct HygieneSettings: Sendable {
         self.localStore = localStore
         self.policy = policy
         self.scanPolicy = scanPolicy
-        self.cacheCapacity = max(1, cacheCapacity)
+        self.storedCacheCapacity = Self.clampedCapacity(cacheCapacity)
         self.cacheMaximumBytes = max(0, cacheMaximumBytes)
     }
 }
