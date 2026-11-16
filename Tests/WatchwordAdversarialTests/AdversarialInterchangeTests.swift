@@ -879,6 +879,255 @@ struct AdversarialInterchangeTests {
                 == merged)
     }
 
+    private static let realPassword = "REAL-BANK-PASSWORD"
+
+    private static var bank: Item {
+        Item(
+            id: UUID(uuidString: "BA000000-0000-4000-8000-00000000BA2C")!, vaultID: vaultID, title: "Bank",
+            scopes: [ServiceScope(host: "bank.example")],
+            fields: [
+                Field(kind: .username, label: "Username", value: "victim@example.org"),
+                Field(kind: .password, label: "Password", value: realPassword),
+            ])
+    }
+
+    private static let onePUXExport = OnePUX.ExportOptions(
+        accountID: vaultID, vaultID: vaultID, createdAt: Date(timeIntervalSince1970: 1))
+    private static let cxfExport = CredentialExchange.ExportOptions(
+        exporterRelyingPartyID: "watchword.example", accountID: vaultID, timestamp: Date(timeIntervalSince1970: 1))
+
+    /// Every URL a JSON export keeps where its format keeps an entry's sign-in URLs: `overview.url` and
+    /// `overview.urls[].url` in 1PUX, `scope.urls` in CXF.
+    private func signInURLs(in value: JSONValue) -> [String] {
+        switch value {
+        case .array(let values):
+            return values.flatMap { signInURLs(in: $0) }
+        case .object(let object):
+            var urls: [String] = []
+            if let overview = object.object("overview") {
+                urls += [overview.string("url") ?? ""].filter { !$0.isEmpty }
+                urls += (overview.array("urls") ?? []).compactMap { $0.object?.string("url") }
+            }
+            if let scope = object.object("scope") { urls += (scope.array("urls") ?? []).compactMap(\.string) }
+            return urls + object.members.flatMap { signInURLs(in: $0.value) }
+        default:
+            return []
+        }
+    }
+
+    /// The URLs each export of `items` writes as sign-in URLs, by format. Read off the files' own structure, not
+    /// through this module's importers: it is what another password manager would take the items' sites to be.
+    private func signInURLs(of items: [Item]) throws -> [String: [String]] {
+        func json(_ bytes: [UInt8]) throws -> JSONValue {
+            var reader = JSONReader(bytes: bytes, range: 0..<bytes.count, limits: .standard)
+            return try reader.readValue()
+        }
+        let csv = try CSVReader.parse(PasswordCSV.exportApplePasswords(items).bytes)
+        return [
+            "1PUX": signInURLs(in: try json(OnePUX.exportDocument(items, options: Self.onePUXExport).document)),
+            "CXF": signInURLs(in: try json(CredentialExchange.exportDocument(items, options: Self.cxfExport).bytes)),
+            "CSV": csv.dropFirst().map { $0.fields[1] }.filter { !$0.isEmpty },
+        ]
+    }
+
+    /// The warnings of each export of `items`, together.
+    private func exportWarnings(of items: [Item]) -> [ExportWarning] {
+        OnePUX.exportDocument(items, options: Self.onePUXExport).report.warnings
+            + CredentialExchange.exportDocument(items, options: Self.cxfExport).report.warnings
+            + PasswordCSV.exportApplePasswords(items).report.warnings
+    }
+
+    private static let probes = [
+        "https://bank.example/", "https://evil.example/login", "http://evil.example:8080/",
+        "https://www.evil.example/", "https://bank.example.evil.example/", "https://example.org/",
+    ]
+
+    /// For each format, and each of `probes`, whether AutoFill offers an item holding `secret` there once `items`
+    /// have been exported in that format and imported again.
+    private func offered(_ secret: String, in items: [Item]) throws -> [String: [Bool]] {
+        var generator = SeededGenerator(seed: 11)
+        let again = [
+            "1PUX": try OnePUX.importDocument(
+                OnePUX.exportDocument(items, options: Self.onePUXExport).document, into: Self.vaultID,
+                using: &generator),
+            "CXF": try CredentialExchange.importDocument(
+                CredentialExchange.exportDocument(items, options: Self.cxfExport).bytes, into: Self.vaultID,
+                using: &generator),
+            "CSV": try PasswordCSV.importFile(
+                PasswordCSV.exportApplePasswords(items).bytes, into: Self.vaultID, using: &generator),
+        ]
+        return again.mapValues { result in
+            let imported = result.entries.map(\.item)
+            func holds(_ match: RankedMatch) -> Bool { match.item.fields.contains { $0.value == secret } }
+            return Self.probes.map { probe in
+                switch AutoFillGate.decide(for: ServiceIdentifier(probe, kind: .url), among: imported) {
+                case .fill(let match): return holds(match)
+                case .chooseAmong(let matches): return matches.contains(where: holds)
+                case .refuse: return false
+                }
+            }
+        }
+    }
+
+    /// A7 again, and the same merge, with URLs an import keeps as text: because they say more than a host (a
+    /// sign-in page, a port), because the scope policy refused them, or because the entry carries them as an
+    /// ordinary link. Such a URL is a field, not a scope, so inside this app a merge that added it would widen
+    /// nothing. But an exporter writes an item's website fields among its sign-in URLs, and the next password
+    /// manager to read that file (this one included) would then offer the bank's real password on the attacker's
+    /// site (PRD SEC6, F11.2, F8.4). So a merge adds no URL unless the person accepts that one, and an accepted URL
+    /// is one of the item's websites only where the item is scoped to its host.
+    @Test(
+        "A merge adds none of the file's URLs to an existing item, and no export names the attacker's site",
+        arguments: [
+            #""urls":[{"url":"https://bank.example/"},{"url":"https://evil.example/login"}]"#,
+            #""urls":[{"url":"https://bank.example/"},{"url":"http://evil.example:8080/"},"#
+                + #"{"url":"https://www.evil.example/"}]"#,
+            #""urls":[{"url":"https://bank.example/"},{"url":"https://bank.example.evil.example/login"}]"#,
+            // Refused as a scope here (user information), and `evil.example` to a more lenient reader.
+            #""urls":[{"url":"https://bank.example/"},{"url":"https://bank.example@evil.example/login"}]"#,
+            #""url":"https://evil.example/login","urls":[{"url":"https://bank.example/"}]"#,
+            // No URL of its own beyond the bank's: the link below is all it carries.
+            #""urls":[{"url":"https://bank.example/"}]"#,
+        ])
+    func mergedURLsNeverReachAnExport(_ overview: String) throws {
+        let result = try importDocument(
+            items(
+                #"{"uuid":"x","categoryUuid":"001","overview":{"title":"My Bank","# + overview
+                    + #"},"details":{"loginFields":[{"designation":"username","value":"victim@example.org"}],"#
+                    + #""sections":[{"title":"Help","fields":["#
+                    + #"{"title":"Sign in here","id":"l","value":{"url":"https://evil.example/login"}}]}]}}"#))
+        let imported = try #require(result.entries.first?.item)
+        let existing = Self.bank
+        let match = try #require(DuplicateDetector.matches(imported: [imported], existing: [existing]).first)
+        // The match says there is a URL to ask about, so a UI can.
+        #expect(match.hasNewURLFields && !match.hasNewSignInFields)
+        let additions = DuplicateDetector.additions(of: imported, to: existing)
+        #expect(additions.needsChoice && !additions.urlFields.isEmpty)
+        // Every URL the entry holds, once each: none is among the fields a merge adds unasked.
+        #expect(
+            Set(additions.urlFields.map(\.value)) == Set(imported.fields.filter { $0.kind == .url }.map(\.value)))
+        #expect(additions.otherFields.isEmpty)
+
+        // "Merge", with nothing accepted: the item is as it was, and so is every file exported from it.
+        let merged = try #require(DuplicateDetector.resolve(.merge, imported: imported, existing: existing))
+        #expect(merged == existing)
+        let before = try signInURLs(of: [existing])
+        #expect(
+            before == [
+                "1PUX": ["https://bank.example/", "https://bank.example/"],
+                "CXF": ["https://bank.example/"], "CSV": ["https://bank.example/"],
+            ])
+        #expect(try signInURLs(of: [merged]) == before)
+        let offeredBefore = try offered(Self.realPassword, in: [existing])
+        #expect(offeredBefore.count == 3)
+        #expect(offeredBefore.values.allSatisfy { $0 == [true, false, false, false, false, false] })
+        #expect(try offered(Self.realPassword, in: [merged]) == offeredBefore)
+
+        // The worst a person can do short of accepting a host: accept every URL the file offers. Each is then a
+        // field of the item, and still none is one of its sign-in URLs, in this app or in any export.
+        let everyURL = MergeChoices(fieldIDs: Set(additions.urlFields.map(\.id)))
+        let linked = DuplicateDetector.merged(imported, into: existing, accepting: everyURL)
+        #expect(linked.scopes == existing.scopes)
+        #expect(linked.fields.map(\.value) == existing.fields.map(\.value) + additions.urlFields.map(\.value))
+        #expect(linked.fields.allSatisfy { $0.meta[InterchangeMeta.sourceType] != InterchangeMeta.websiteType })
+        #expect(try signInURLs(of: [linked]) == before)
+        #expect(try offered(Self.realPassword, in: [linked]) == offeredBefore)
+        #expect(
+            exportWarnings(of: [linked]).allSatisfy { warning in
+                if case .websiteNotScoped = warning { return false }
+                return true
+            })
+
+        // Accepting the attacker's host by name is what adds it, and with it the URLs of that host only.
+        let host = MergeChoices(hosts: ["evil.example"], fieldIDs: everyURL.fieldIDs)
+        let widened = DuplicateDetector.merged(imported, into: existing, accepting: host)
+        let accepted = additions.scopes.contains { $0.host == "evil.example" }
+        #expect(widened.scopes.map(\.host) == ["bank.example"] + (accepted ? ["evil.example"] : []))
+        for urls in try signInURLs(of: [widened]).values {
+            for url in urls {
+                let hosts = try #require(ScopeDerivation.websiteHosts(of: url), "\(url) was written as a sign-in URL")
+                #expect(hosts.contains { widened.scopes.map(\.host).contains($0) }, "\(url)")
+            }
+        }
+    }
+
+    /// A7 makes the same entry for an item that has no site at all (a router, a door code), which a merge matches
+    /// by title and user name. The entry's link is a field; an export that put "some URL the item holds" in its URL
+    /// column would hand the next password manager the attacker's site for the real password.
+    @Test("An item with no site is given none by a merged link, in any export")
+    func mergedLinkIntoAnItemWithoutASite() throws {
+        let existing = Item(
+            vaultID: Self.vaultID, title: "Router", scopes: [],
+            fields: [
+                Field(kind: .username, label: "Username", value: "admin"),
+                Field(kind: .password, label: "Password", value: Self.realPassword),
+            ])
+        let imported = try #require(
+            importDocument(
+                items(
+                    #"{"uuid":"x","categoryUuid":"001","overview":{"title":"router"},"details":{"loginFields":["#
+                        + #"{"designation":"username","value":"admin"}],"sections":[{"title":"","fields":["#
+                        + #"{"title":"Website","id":"w","value":{"url":"https://evil.example/"}}]}]}}"#)
+            ).entries.first?.item)
+        let match = try #require(DuplicateDetector.matches(imported: [imported], existing: [existing]).first)
+        #expect(match.kind == .sameAccount && match.hasNewURLFields)
+        #expect(DuplicateDetector.merged(imported, into: existing) == existing)
+
+        let link = try #require(imported.fields.first { $0.kind == .url })
+        let linked = DuplicateDetector.merged(imported, into: existing, accepting: MergeChoices(fieldIDs: [link.id]))
+        #expect(linked.fields.last?.value == "https://evil.example/")
+        #expect(try signInURLs(of: [linked]) == ["1PUX": [], "CXF": [], "CSV": []])
+        #expect(try offered(Self.realPassword, in: [linked]).values.allSatisfy { !$0.contains(true) })
+        // The link is not lost: CSV has no column for it, so it is a line of the notes, and reported.
+        let csv = PasswordCSV.exportApplePasswords([linked])
+        #expect(try CSVReader.parse(csv.bytes).last?.fields[4] == "Website: https://evil.example/")
+        #expect(csv.report.warnings == [.fieldsMovedToNotes(itemID: linked.id, count: 1)])
+    }
+
+    /// The same URL reaching an exporter by another road: an item that holds a website field for a host it is not
+    /// scoped to. A7 gets there through a merge made by an earlier version of this module, through a scope the
+    /// person has since removed (the URL beside it stays), or as a member of a shared vault (A6) who writes the
+    /// field directly. The exporter derives each website's host again and writes none the item is not scoped to.
+    @Test("An exporter never writes a sign-in URL for a host the item is not scoped to")
+    func exportersWriteOnlyScopedWebsites() throws {
+        func website(_ url: String) -> Field {
+            Field(
+                kind: .url, label: "Website", value: url,
+                meta: [InterchangeMeta.sourceType: InterchangeMeta.websiteType])
+        }
+        var item = Self.bank
+        item.fields += [
+            website("https://bank.example/login"), website("https://evil.example/login"),
+            website("https://www.evil.example/"), website("http://evil.example:8080/"),
+        ]
+        #expect(
+            try signInURLs(of: [item]) == [
+                "1PUX": ["https://bank.example/login", "https://bank.example/login"],
+                "CXF": ["https://bank.example/login"], "CSV": ["https://bank.example/login"],
+            ])
+        #expect(
+            try offered(Self.realPassword, in: [item]).values.allSatisfy {
+                $0 == [true, false, false, false, false, false]
+            })
+        // Reported in each format, and still in the file, as a field.
+        let unscoped = exportWarnings(of: [item]).filter { $0 == .websiteNotScoped(itemID: item.id, count: 3) }
+        #expect(unscoped.count == 3)
+        let onePUX = String(decoding: OnePUX.exportDocument([item], options: Self.onePUXExport).document, as: UTF8.self)
+        #expect(onePUX.contains(#""value":{"url":"https://evil.example/login"}"#))
+
+        // With no scope at all, there is nothing a website could stand for.
+        item.scopes = []
+        #expect(try signInURLs(of: [item]) == ["1PUX": [], "CXF": [], "CSV": []])
+        #expect(try offered(Self.realPassword, in: [item]).values.allSatisfy { !$0.contains(true) })
+
+        // More website fields than an import considers for one entry: the rest are not parsed, and not written.
+        var many = Self.bank
+        many.fields += (0..<40).map { website("https://bank.example/page\($0)") }
+        let written = try signInURLs(of: [many])
+        #expect(written["CXF"] == (0..<32).map { "https://bank.example/page\($0)" })
+        #expect(exportWarnings(of: [many]).contains(.websiteNotScoped(itemID: many.id, count: 8)))
+    }
+
     /// A7 makes the notes of an entry the worst case of a string search (a long run of one letter, then another),
     /// so that the merge the person asked for takes minutes. The comparison is one pass over each text.
     @Test("Merging notes is linear in their length")

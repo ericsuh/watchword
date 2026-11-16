@@ -30,6 +30,10 @@ public enum ExportWarning: Hashable, Sendable {
     /// The scope for `host` did not include subdomains, or excluded hosts. No format here can say so: the file names
     /// the host only, and whatever imports it (this app included) will offer the item on its subdomains too.
     case scopeRestrictionOmitted(itemID: UUID, host: String)
+    /// `count` URLs the item holds as its websites were written as ordinary fields (lines of the notes in CSV), not
+    /// among its sign-in URLs: each names a host the item is not scoped to, or came after the first
+    /// `InterchangeLimits.maximumURLsPerItem`. Whatever imports the file would otherwise offer the item there.
+    case websiteNotScoped(itemID: UUID, count: Int)
     /// The item is archived and the format has no archived mark (CXF, CSV): it was written as an active item.
     case archivedStateOmitted(itemID: UUID)
     /// The format has no place for tags (CSV); the item was written without them.
@@ -69,30 +73,43 @@ public struct ExportResult: Hashable, Sendable {
 enum ExportSupport {
     static let unresolvedLabel = "Unresolved values"
 
-    /// The URLs to write for `item`, and the `url` fields they came from.
+    /// The URLs to write where a format keeps an entry's sign-in URLs, and the `url` fields they came from.
     ///
     /// A scope is a host, so the URL for one is `https://host/`, unless the item still holds the URL it was imported
     /// with (`ImportAssembler` keeps any that said more than its host, as a `url` field of type
     /// `InterchangeMeta.websiteType`): then that text is written in its place, and the sign-in page, port or scheme
     /// survives. Which field stands for which scope is decided here, by deriving each field's host again, never
-    /// from a hint. Website fields that stand for no scope (URLs the scope policy refused) follow.
-    static func websites(of item: Item) -> (urls: [String], fieldIDs: Set<UUID>) {
+    /// from a hint. Website fields no scope can come from (URLs the scope policy refused on import) follow.
+    ///
+    /// **Nothing here names a host the item is not scoped to.** Whatever reads the file offers the item's secrets on
+    /// every URL written here, so a website field whose URL derives to a host that is not one of the item's scopes
+    /// is not written: the item is not offered there in this app (the person removed the scope, or the field came
+    /// from somewhere that never checked), and an export must not widen that (PRD SEC6, F11.2). Such a field is
+    /// left to the caller to write like any other field, and reported. So is one beyond the number of URLs an
+    /// import considers for one entry, which is not parsed at all.
+    static func websites(of item: Item, report: inout ExportReport) -> (urls: [String], fieldIDs: Set<UUID>) {
+        let scoped = Set(item.scopes.map(\.host))
         var websiteFields: [Field] = []
         var byHost: [String: [Int]] = [:]
+        var unscoped = 0
         // As many are parsed as an import would have parsed for one entry; an item is not trusted to be small (it
         // may come from another member of a shared vault), and parsing a URL is the costly step.
         var parsed = 0
         for field in item.fields
         where field.kind == .url && field.meta[InterchangeMeta.sourceType] == InterchangeMeta.websiteType {
-            if !item.scopes.isEmpty, parsed < InterchangeLimits.standard.maximumURLsPerItem {
-                parsed += 1
-                if case .success(let scope) = ScopeDerivation.scope(forURL: field.value) {
-                    // The scope may have been derived with or without the leading `www.`.
-                    var hosts = [scope.host]
-                    if scope.host.hasPrefix("www.") { hosts.append(String(scope.host.dropFirst(4))) }
-                    for host in hosts {
-                        byHost[host, default: []].append(websiteFields.count)
-                    }
+            guard parsed < InterchangeLimits.standard.maximumURLsPerItem else {
+                unscoped += 1
+                continue
+            }
+            parsed += 1
+            if let hosts = ScopeDerivation.websiteHosts(of: field.value) {
+                let own = hosts.filter(scoped.contains)
+                guard !own.isEmpty else {
+                    unscoped += 1
+                    continue
+                }
+                for host in own {
+                    byHost[host, default: []].append(websiteFields.count)
                 }
             }
             websiteFields.append(field)
@@ -110,6 +127,7 @@ enum ExportSupport {
         for (index, field) in websiteFields.enumerated() where !written.contains(index) {
             urls.append(field.value)
         }
+        if unscoped > 0 { report.warnings.append(.websiteNotScoped(itemID: item.id, count: unscoped)) }
         return (urls, Set(websiteFields.map(\.id)))
     }
 

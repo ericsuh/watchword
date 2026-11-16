@@ -35,6 +35,54 @@ struct ExportReportTests {
             seen: VersionVector())
     }
 
+    @Test("A website the item is not scoped to is written as a field, never as a sign-in URL, and reported")
+    func websiteNotScoped() throws {
+        func website(_ url: String) -> Field {
+            Field(
+                kind: .url, label: "Website", value: url,
+                meta: [InterchangeMeta.sourceType: InterchangeMeta.websiteType])
+        }
+        let item = Item(
+            vaultID: Fixtures.vaultID, title: "Example", scopes: [ServiceScope(host: "example.com")],
+            fields: [
+                Field(kind: .password, label: "Password", value: "pw"),
+                website("https://www.example.com/login"), website("https://example.org/login"),
+                // No scope can come from this one, so it names no host an importer here would offer the item on:
+                // it is written where it was found (PRD F8.1).
+                website("ftp://example.com/files"),
+                // A link, not a website: it was never among the sign-in URLs.
+                Field(kind: .url, label: "Help", value: "https://help.example.net/"),
+            ])
+        for export in exports(item) {
+            #expect(export.warnings.contains(.websiteNotScoped(itemID: item.id, count: 1)), "\(export.format)")
+            #expect(export.text.contains("https://example.org/login"), "\(export.format)")
+        }
+        let onePUX = OnePUX.exportDocument([item], options: onePUXOptions)
+        #expect(
+            String(decoding: onePUX.document, as: UTF8.self).contains(
+                #""urls":[{"label":"website","url":"https://www.example.com/login"},"#
+                    + #"{"label":"website","url":"ftp://example.com/files"}]"#))
+        let cxf = CredentialExchange.exportDocument([item], options: cxfOptions)
+        #expect(
+            String(decoding: cxf.bytes, as: UTF8.self).contains(
+                #""urls":["https://www.example.com/login","ftp://example.com/files"]"#))
+        let csv = try CSVReader.parse(PasswordCSV.exportApplePasswords([item]).bytes)
+        #expect(csv.dropFirst().map { $0.fields[1] } == ["https://www.example.com/login", "ftp://example.com/files"])
+        #expect(
+            csv.dropFirst().allSatisfy {
+                $0.fields[4] == "Website: https://example.org/login\nHelp: https://help.example.net/"
+            })
+
+        // An item with no scope has no sign-in URL to write, whatever `url` fields it holds.
+        var unscoped = item
+        unscoped.scopes = []
+        unscoped.fields.removeAll { $0.value == "ftp://example.com/files" }
+        let rows = try CSVReader.parse(PasswordCSV.exportApplePasswords([unscoped]).bytes)
+        #expect(rows.count == 2 && rows[1].fields[1].isEmpty)
+        #expect(
+            exports(unscoped).allSatisfy { $0.warnings.contains(.websiteNotScoped(itemID: item.id, count: 2)) })
+    }
+
     @Test("Values sync is keeping for the person to choose between are exported, labelled, and reported")
     func unresolvedValues() throws {
         let passwordID = UUID(uuidString: "F0000000-0000-4000-8000-000000000001")!

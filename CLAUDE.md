@@ -175,9 +175,13 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   per-entry cost needs a place in one of them. CSV rows are streamed (`CSVReader.forEachRecord`), never held beside
   the drafts. A draft is measured as the vault will store it (`StoredItemSize`, checked against `ItemMerge.stamped`
   and `ItemCodec` by the adversarial suite): if the stored form of an item changes, that estimate changes with it.
-- A merge never widens (`DuplicateDetector`): scopes and sign-in fields from a file reach an existing item only
-  through `MergeChoices`, one host or field at a time. Don't add an "accept all", and don't make `merged` add either
-  by default.
+- A merge never widens (`DuplicateDetector`), here or in a file exported afterwards: scopes, sign-in fields and
+  `url` fields from a file reach an existing item only through `MergeChoices`, one host or field at a time, and an
+  accepted URL stays a website (`InterchangeMeta.websiteType`) only where the merged item is scoped to its host.
+  Don't add an "accept all", and don't make `merged` add any of them by default.
+- An export never widens either: `ExportSupport.websites` is the one place that decides what a format writes as a
+  sign-in URL, and it writes none for a host the item is not scoped to (reported as `websiteNotScoped`). Don't let an
+  exporter put some other `url` field where a format keeps an entry's sites.
 - Every format hands its entries to `ImportAssembler`, the one place drafts are made: IDs from the injected generator
   and the vault ID from the caller, never from the file; a URL becomes a scope only through `ScopeDerivation`
   (`HostNormalizer`, then `ScopePolicy`) and otherwise stays a `url` field with a warning (a URL that says more than

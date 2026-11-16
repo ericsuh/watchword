@@ -471,7 +471,7 @@ public enum OnePUX {
             isLogin ? item.fields.first { $0.kind == .username } ?? item.fields.first { $0.kind == .email } : nil
         let password = isLogin || category == "005" ? item.field(.password) : nil
 
-        let (urls, websiteFields) = ExportSupport.websites(of: item)
+        let (urls, websiteFields) = ExportSupport.websites(of: item, report: &report)
         ExportSupport.commonWarnings(for: item, into: &report)
         var loginFields: [JSONValue] = []
         if let username {

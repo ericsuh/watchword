@@ -58,7 +58,14 @@ enum FuzzTarget: String, CaseIterable, Sendable {
                     bytes, into: FuzzTarget.vaultID, limits: limits, using: &generator)
             else { return }
             check(result)
-            _ = PasswordCSV.exportApplePasswords(result.entries.map(\.item))
+            let exported = PasswordCSV.exportApplePasswords(result.entries.map(\.item))
+            // An export may be larger than a file an import accepts (fields moved into the notes); one that reads
+            // back must not have widened.
+            if let reread = try? PasswordCSV.importFile(
+                exported.bytes, into: FuzzTarget.vaultID, limits: .standard, using: &generator)
+            {
+                requireNoNewHosts(in: reread, beyond: result)
+            }
         case .inflate:
             guard let output = try? Inflater.inflate(bytes, limits: limits) else { return }
             require(output.count <= limits.maximumDocumentBytes, "inflated past the document limit")
@@ -90,6 +97,7 @@ enum FuzzTarget: String, CaseIterable, Sendable {
             let reread = try? OnePUX.importDocument(
                 exported.document, into: FuzzTarget.vaultID, limits: .standard, using: &generator)
             require(reread != nil, "a 1PUX export does not read back")
+            if let reread { requireNoNewHosts(in: reread, beyond: result) }
         case .onePUXArchive:
             guard
                 let result = try? OnePUX.importArchive(
@@ -109,6 +117,7 @@ enum FuzzTarget: String, CaseIterable, Sendable {
             let reread = try? CredentialExchange.importDocument(
                 exported.bytes, into: FuzzTarget.vaultID, limits: .standard, using: &generator)
             require(reread != nil, "a CXF export does not read back")
+            if let reread { requireNoNewHosts(in: reread, beyond: result) }
         case .amplify:
             amplify(bytes, using: &generator)
         case .envelope:
@@ -233,6 +242,23 @@ enum FuzzTarget: String, CaseIterable, Sendable {
         }
         guard let result else { return }
         check(result, limits: limits)
+    }
+
+    /// An export never widens (PRD SEC6, F11.2): read back, a file names no host that none of the exported items
+    /// was scoped to. An exporter writes an item's scopes and the URLs that stand for them, and no other URL an item
+    /// happens to hold where the next reader would take it for a sign-in URL.
+    private func requireNoNewHosts(in reread: ImportResult, beyond result: ImportResult) {
+        var hosts = Set<String>()
+        for entry in result.entries {
+            for scope in entry.item.scopes {
+                hosts.insert(scope.host)
+            }
+        }
+        for entry in reread.entries {
+            for scope in entry.item.scopes {
+                require(hosts.contains(scope.host), "an export named a host no item was scoped to")
+            }
+        }
     }
 
     /// What must hold of every import, whatever the file said (PRD F11.2, SEC7).

@@ -723,6 +723,9 @@ That prefix is part of the value to whatever imports the file, and generated pas
 or `+`, so `.preserve` exists for a file that goes straight into another password manager; which to offer,
 and how to warn, is the UI's decision. A passkey is left out of a CSV export and reported; fields with no
 column are written into the notes and reported; an item with several websites becomes one row for each.
+The URL column holds the item's sign-in URLs and nothing else: a `url` field that is not one of them (a
+link, a website the item is not scoped to) is a line of the notes, because whatever reads the file offers
+the row's password on that column's host.
 
 **1PUX (`OnePUX`).** Import reads `export.data` and walks `accounts[].vaults[].items[]`: `overview` (title,
 URLs, tags), `details.loginFields` by designation, `details.sections[].fields[]` by value type (`concealed`,
@@ -768,7 +771,13 @@ so a file cannot plant a scope that reads as a wildcard); a refused URL is kept 
 warning (F11.2). A scope is a host and nothing more, so a URL that says more than `https://host/` (another
 scheme, a port, the sign-in page, a `www.` that was stripped) is *also* kept as a `url` field, and every
 exporter writes that text back in place of the URL it would otherwise synthesise for the scope; which
-field stands for which scope is decided on export by deriving the host again, never from a hint. A one-time-password value is validated through `OTPParameters` and stored as a canonical
+field stands for which scope is decided on export by deriving the host again, never from a hint. **No
+exporter writes a sign-in URL for a host the item is not scoped to** (`ExportSupport.websites`): whatever
+reads the file offers the item's secrets on every URL in that position, so a website field whose URL
+derives to some other host (the person removed the scope and the field stayed, or the field arrived by a
+road that never checked) is written as an ordinary field and reported (`ExportWarning.websiteNotScoped`),
+as is one beyond the number of URLs an import considers for an entry. A URL the policy refused, from which
+no scope can come, is still written where it was found. A one-time-password value is validated through `OTPParameters` and stored as a canonical
 `otpauth://totp/` URI; an unusable one is kept as a concealed custom field with a warning. A passkey goes
 through `PasskeyCredential`. Entries in the source's trash are skipped unless the caller asks for them, and
 are then marked, not trashed: only the vault moves an item to the trash.
@@ -779,18 +788,34 @@ dropped or merged without the person's choice. A match is made on one host and o
 controls everything else about its entry, so merge is where a hostile file would reach an existing secret:
 an entry listing the bank's URL and the attacker's, merged into the bank's item, would have AutoFill offer
 the real password on the attacker's site. The rule is that **a merge never changes where an existing item
-is offered or what it signs in with**. `merged` adds tags, notes (unless every line is already there; one
-linear pass, not a string search) and fields other than sign-in fields. New scopes and new user names, email
-addresses, passwords, one-time passwords and passkeys are *reported* (`DuplicateMatch.newHosts` and
-`hasNewSignInFields`, `additions(of:to:)`) and added only when `MergeChoices` names the host or the field
-the person accepted; there is no "accept all". Field values are compared as bytes.
+is offered or what it signs in with, in this app or in a file exported from it**. `merged` adds tags, notes
+(unless every line is already there; one linear pass, not a string search) and fields other than sign-in
+fields and URLs. New scopes, new user names, email addresses, passwords, one-time passwords and passkeys,
+and new `url` fields are *reported* (`DuplicateMatch.newHosts`, `hasNewSignInFields` and `hasNewURLFields`,
+`additions(of:to:)`) and added only when `MergeChoices` names the host or the field the person accepted;
+there is no "accept all". Field values are compared as bytes.
+
+URLs are in that list because of what an export does with them. An entry's URL that says more than its
+host is kept as a website field, and a second review found the consequence: merged by default, the
+attacker's `https://evil.example/login` became a field of the bank's item, widened nothing in this app, and
+was then written by every exporter among the item's sign-in URLs, beside the real password, for the next
+password manager (this one included) to offer it there. So every `url` field is a choice, whether the
+entry's own website or a link it carries; a link labelled "Website" inside a trusted item is a lure even
+when nothing fills on it. Accepting a URL accepts a field and never a host: it stays one of the item's
+websites only if its host, derived again from its text, is one of the merged item's scopes (the existing
+ones and the hosts accepted by name), and is otherwise added as a plain link. The other hints by which an
+imported field speaks for its whole entry (the 1PUX category, the CXF subtitle) are dropped from every
+field a merge adds, so the file decides nothing about the existing item beyond the fields themselves. The
+exporters' own rule above is the second barrier: an item that came to hold such a field some other way
+still exports no URL for a host it is not scoped to.
 
 **Export reports (`ExportReport`).** An export never fails over one item, and never leaves something behind
 without a line: the person deletes this app's copy on the strength of the report. Beyond passkeys, moved
 fields and neutralised cells, each exporter reports a scope limited to its host or with exclusions (no
 format can say so, and whatever imports the file will offer the item on subdomains), history a format
 cannot hold (all of it in CXF and CSV, everything but earlier passwords in 1PUX), the archived mark (CXF,
-CSV), tags (CSV), and anything a field records beside its value (which recovery codes are spent). Field
+CSV), tags (CSV), a website written as an ordinary field because the item is not scoped to its host, and
+anything a field records beside its value (which recovery codes are spent). Field
 values that sync is keeping for the person to choose between (`Item.conflicts`, `Item.retainedValues`, §7.5)
 are *written*, as concealed fields labelled "(unresolved value)" under "Unresolved values" (lines of the
 notes in CSV), and reported; unresolved values of anything else (a title, the scopes, a passkey) are
@@ -805,7 +830,8 @@ before any plaintext export exists, writes the file with `completeUnlessOpen` (o
 place the person chooses, shows the standing warning, saves drafts through an import path that keeps the
 source's history and timestamps (`VaultSession.save` replaces both), and calls the OS Credential Exchange
 APIs. The duplicate screen must show each of `DuplicateMatch.newHosts` and ask about it by name before it
-puts a host in `MergeChoices`, and the export screen must show the `ExportReport` before the person is told
+puts a host in `MergeChoices`, show each of `MergeAdditions.urlFields` and `signInFields` with its full
+value before it puts a field there, and never pre-select either; the export screen must show the `ExportReport` before the person is told
 the export is complete. The encrypted Watchword archive needs the vault's keys and is built there too.
 
 ## 15. Module and target layout

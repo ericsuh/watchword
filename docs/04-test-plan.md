@@ -293,6 +293,16 @@ every case above and the attacks a parser author would add to them:
   hosts on which `AutoFillGate.decide` fills that item unchanged and adds no sign-in field; the match names
   the host the file tried to add, and only a host accepted by name is added. Merging notes built to make a
   string search quadratic completes in one pass.
+- Duplicates, through an export (added after the second review): the same entry with URLs an import keeps
+  as text (a sign-in page, another port, a look-alike subdomain, a URL the policy refuses, a link in a
+  section), merged with nothing accepted, leaves the existing item equal to what it was; merged with every
+  URL accepted and no host, it leaves the sign-in URLs of the 1PUX, CXF and CSV exports (read off the files'
+  own structure) and the hosts on which `AutoFillGate.decide` offers the real password after export and
+  re-import unchanged; with the host accepted by name, every sign-in URL written derives to a scope of the
+  item. An item with no site is given none by a merged link, in any export. An item holding a website field
+  for a host it is not scoped to (a removed scope, a shared-vault member's write) exports no sign-in URL
+  for that host and reports it, in every format, and website fields beyond the per-entry URL count are not
+  written as sign-in URLs.
 
 Still to come with the integration step: that a plaintext export cannot be produced without re-entering the
 account password, and that the file is written with the protection class §14 names.
@@ -357,7 +367,8 @@ Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`,
 selected by `WATCHWORD_FUZZ_TARGET`: `csv`, `password-csv`, `inflate`, `zip`, `1pux`, `1pux-archive`, `cxf`,
 `amplify`, `envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the
 import's scope derivation), `otpauth` and `passkey`. Each target runs a parser over arbitrary bytes and then checks
-what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports, an inflated
+what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports and names no
+host that no exported item was scoped to, an inflated
 stream is within its caps, every imported scope passes `ScopePolicy`, every one-time-password and passkey
 field decodes, an accepted envelope serialises to its own bytes); a broken invariant traps, which is a
 finding. `mise run fuzz` builds it with `-sanitize=fuzzer`, splits its time budget between the targets,

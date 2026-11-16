@@ -21,16 +21,21 @@ public struct DuplicateMatch: Hashable, Sendable {
     /// Whether the imported item holds a user name, email address, password, one-time password or passkey the
     /// existing item lacks. A merge adds none of those either without the person's choice (`MergeChoices.fieldIDs`).
     public var hasNewSignInFields: Bool
+    /// Whether the imported item holds a `url` field the existing item lacks: one of the entry's own website URLs
+    /// kept as text, or a link it carries as a field. A merge adds none of those without the person's choice either
+    /// (`MergeAdditions.urlFields`).
+    public var hasNewURLFields: Bool
 
     public init(
         importedID: UUID, existingID: UUID, kind: DuplicateKind, newHosts: [String] = [],
-        hasNewSignInFields: Bool = false
+        hasNewSignInFields: Bool = false, hasNewURLFields: Bool = false
     ) {
         self.importedID = importedID
         self.existingID = existingID
         self.kind = kind
         self.newHosts = newHosts
         self.hasNewSignInFields = hasNewSignInFields
+        self.hasNewURLFields = hasNewURLFields
     }
 }
 
@@ -41,7 +46,8 @@ public enum DuplicateResolution: String, Hashable, Sendable, CaseIterable {
     /// Import it as a separate item.
     case keepBoth
     /// Add what the imported item has and the existing one lacks to the existing item, except what would change
-    /// where or with what the existing item signs in: that needs `MergeChoices`.
+    /// where or with what the existing item signs in, here or in a file exported from it: that needs
+    /// `MergeChoices`.
     case merge
 }
 
@@ -53,7 +59,14 @@ public struct MergeAdditions: Hashable, Sendable {
     /// User names, email addresses, passwords, one-time passwords and passkeys the existing item does not hold.
     /// Never added by default: they are what AutoFill offers, and a file must not choose that for an existing item.
     public var signInFields: [Field]
-    /// Every other field the existing item does not hold. Added by a merge.
+    /// `url` fields the existing item does not hold: the entry's own website URLs that an import keeps as text
+    /// (`InterchangeMeta.websiteType`), and any link the entry carries as a field. **Never added by default.** A
+    /// URL is where a person, or the next password manager to read an export, takes the item to sign in, and the
+    /// file chose it: one for the attacker's sign-in page, attached to the bank's item, is written by an export
+    /// beside the bank's real password.
+    public var urlFields: [Field]
+    /// Every other field the existing item does not hold. Added by a merge, as a field and nothing more
+    /// (`DuplicateDetector.merged`).
     public var otherFields: [Field]
     /// Added by a merge.
     public var tags: Set<String>
@@ -61,9 +74,10 @@ public struct MergeAdditions: Hashable, Sendable {
     public var notes: String
 
     /// Whether a merge leaves something out unless the person chooses it.
-    public var needsChoice: Bool { !scopes.isEmpty || !signInFields.isEmpty }
+    public var needsChoice: Bool { !scopes.isEmpty || !signInFields.isEmpty || !urlFields.isEmpty }
     public var isEmpty: Bool {
-        scopes.isEmpty && signInFields.isEmpty && otherFields.isEmpty && tags.isEmpty && notes.isEmpty
+        scopes.isEmpty && signInFields.isEmpty && urlFields.isEmpty && otherFields.isEmpty && tags.isEmpty
+            && notes.isEmpty
     }
 }
 
@@ -71,7 +85,9 @@ public struct MergeAdditions: Hashable, Sendable {
 public struct MergeChoices: Hashable, Sendable {
     /// Hosts from `MergeAdditions.scopes` to add to the existing item's scopes.
     public var hosts: Set<String>
-    /// Fields from `MergeAdditions.signInFields` to add to the existing item.
+    /// Fields from `MergeAdditions.signInFields` and `MergeAdditions.urlFields` to add to the existing item.
+    /// Accepting a URL accepts a field, never a host: it becomes one of the item's websites only where the item is
+    /// scoped to its host (`DuplicateDetector.merged`).
     public var fieldIDs: Set<UUID>
 
     public init(hosts: Set<String> = [], fieldIDs: Set<UUID> = []) {
@@ -89,8 +105,9 @@ public struct MergeChoices: Hashable, Sendable {
 ///
 /// A match is made on one shared host and login name, and the file controls everything else about the imported
 /// item, so "merge" is where a hostile file (adversary A7) would reach an existing secret. The rule that stops it: a
-/// merge never changes where the existing item is offered or what it signs in with. New scopes and new sign-in
-/// fields are reported (`DuplicateMatch.newHosts`, `additions`) and added only when the person accepts each one.
+/// merge never changes where the existing item is offered or what it signs in with, in this app or in a file
+/// exported from it. New scopes, new sign-in fields and new URLs are reported (`DuplicateMatch`, `additions`) and
+/// added only when the person accepts each one.
 public enum DuplicateDetector {
     /// The most existing items one imported item is compared with. An import file is hostile, and fifty thousand
     /// entries that each resemble every item in the vault must not become a quadratic amount of work or of results.
@@ -129,10 +146,11 @@ public enum DuplicateDetector {
                         if listed.insert(scope.host).inserted { newHosts.append(scope.host) }
                     }
                     let newSignIn = item.fields.contains { isSignInKind($0.kind) && !holdings.holds($0) }
+                    let newURLs = item.fields.contains { $0.kind == .url && !holdings.holds($0) }
                     found.append(
                         DuplicateMatch(
                             importedID: item.id, existingID: other.id, kind: kind, newHosts: newHosts,
-                            hasNewSignInFields: newSignIn))
+                            hasNewSignInFields: newSignIn, hasNewURLFields: newURLs))
                 }
             }
             matches += found.filter { $0.kind == .identical } + found.filter { $0.kind == .sameAccount }
@@ -163,13 +181,16 @@ public enum DuplicateDetector {
     /// What `imported` has that `existing` lacks. Linear in the two items.
     public static func additions(of imported: Item, to existing: Item) -> MergeAdditions {
         var holdings = Holdings(existing)
-        var additions = MergeAdditions(scopes: [], signInFields: [], otherFields: [], tags: [], notes: "")
+        var additions = MergeAdditions(
+            scopes: [], signInFields: [], urlFields: [], otherFields: [], tags: [], notes: "")
         for scope in imported.scopes where holdings.hosts.insert(scope.host).inserted {
             additions.scopes.append(scope)
         }
         for field in imported.fields where holdings.insert(field) {
             if isSignInKind(field.kind) {
                 additions.signInFields.append(field)
+            } else if field.kind == .url {
+                additions.urlFields.append(field)
             } else {
                 additions.otherFields.append(field)
             }
@@ -182,24 +203,62 @@ public enum DuplicateDetector {
     }
 
     /// `existing` plus what `imported` has that it lacks: tags, notes whose lines it does not already hold, and
-    /// fields whose kind and value it does not already hold, other than sign-in fields. Nothing of `existing` is
-    /// removed or replaced.
+    /// fields whose kind and value it does not already hold, other than sign-in fields and URLs. Nothing of
+    /// `existing` is removed or replaced.
     ///
-    /// **Its scopes are never widened and its sign-in fields never added to, except by `choices`**: the hosts and
-    /// fields the person accepted one by one from `additions(of:to:)`. Without them, AutoFill offers the result
-    /// exactly where, and with exactly what, it offered `existing` (PRD SEC6, F11.2). The result keeps `existing`'s
-    /// identity and goes through `VaultSession.save` like any edit, which checks every scope against the policy.
+    /// **Its scopes are never widened, and no sign-in field or URL is added to it, except by `choices`**: the hosts
+    /// and fields the person accepted one by one from `additions(of:to:)`. Without them, AutoFill offers the result
+    /// exactly where, and with exactly what, it offered `existing`, and every exporter writes the same sign-in URLs
+    /// and the same credentials for it (PRD SEC6, F11.2).
+    ///
+    /// What is added is added as a field and nothing more. An imported field can speak for its whole entry, through
+    /// the hints an import leaves in `Field.meta`: its category, its subtitle, that it is one of the entry's
+    /// websites. Those hints are dropped here, so the file decides nothing about the existing item beyond the fields
+    /// themselves. The one exception is a URL the person accepted whose host, derived again from its text, is one of
+    /// the result's scopes (the existing ones and the hosts accepted in `choices`): it stays a website, and an
+    /// export writes it for that scope. Accepting a URL by itself never makes the item a website of another host.
+    ///
+    /// The result keeps `existing`'s identity and goes through `VaultSession.save` like any edit, which checks every
+    /// scope against the policy.
     public static func merged(_ imported: Item, into existing: Item, accepting choices: MergeChoices = .none) -> Item {
         let additions = additions(of: imported, to: existing)
         var result = existing
         result.scopes += additions.scopes.filter { choices.hosts.contains($0.host) }
-        result.fields += additions.signInFields.filter { choices.fieldIDs.contains($0.id) }
-        result.fields += additions.otherFields
+        result.fields += additions.signInFields.filter { choices.fieldIDs.contains($0.id) }.map(asField)
+        let scoped = Set(result.scopes.map(\.host))
+        // As many URLs are parsed as an import parses for one entry; one beyond that is a link.
+        var derivations = 0
+        for field in additions.urlFields where choices.fieldIDs.contains(field.id) {
+            var added = asField(field)
+            if field.meta[InterchangeMeta.sourceType] == InterchangeMeta.websiteType {
+                var standsForScope = false
+                if derivations < InterchangeLimits.standard.maximumURLsPerItem {
+                    derivations += 1
+                    standsForScope =
+                        ScopeDerivation.websiteHosts(of: field.value)?.contains(where: scoped.contains) ?? false
+                }
+                if !standsForScope { added.meta[InterchangeMeta.sourceType] = nil }
+            }
+            result.fields.append(added)
+        }
+        result.fields += additions.otherFields.map(asField)
         result.tags.formUnion(additions.tags)
         if !additions.notes.isEmpty {
             result.notes += (result.notes.isEmpty ? "" : "\n\n") + additions.notes
         }
         return result
+    }
+
+    /// `field` without the hints by which it speaks for the entry it came from: the entry's category (1PUX), and
+    /// that it is the entry's subtitle (CXF). What it says about itself (its section, its own type and identifier)
+    /// stays.
+    private static func asField(_ field: Field) -> Field {
+        var field = field
+        field.meta[InterchangeMeta.category] = nil
+        if field.meta[InterchangeMeta.sourceType] == InterchangeMeta.subtitleType {
+            field.meta[InterchangeMeta.sourceType] = nil
+        }
+        return field
     }
 
     /// Whether every line of `notes` is a line of `existing`, compared on bytes. One pass over each text and a set

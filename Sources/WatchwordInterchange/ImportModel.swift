@@ -233,8 +233,9 @@ public enum InterchangeMeta {
     public static let section = "section"
     /// The source's own type name for the value (`concealed`, `monthYear`, `creditCardNumber`, …).
     public static let sourceType = "sourceType"
-    /// The `sourceType` of a `url` field holding one of the entry's own website URLs that could not become a scope
-    /// (PRD F11.2). An export writes it back where the format keeps an entry's URLs.
+    /// The `sourceType` of a `url` field holding one of the entry's own website URLs as text: one that could not
+    /// become a scope (PRD F11.2), or one that said more than the scope it became. An export writes it back where
+    /// the format keeps an entry's URLs, unless it names a host the item is not scoped to (`ExportSupport.websites`).
     public static let websiteType = "website"
     /// The source's own identifier for the field (`accountNo`, `membership_no`, …).
     public static let sourceID = "sourceID"

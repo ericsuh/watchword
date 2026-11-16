@@ -487,7 +487,7 @@ public enum CredentialExchange {
         var credentials: [JSONValue] = []
         var custom: [(section: String, fields: [JSONValue])] = []
         var customIndex: [String: Int] = [:]
-        let (urls, websiteFields) = ExportSupport.websites(of: item)
+        let (urls, websiteFields) = ExportSupport.websites(of: item, report: &report)
         var subtitle: String?
         ExportSupport.commonWarnings(for: item, into: &report)
         if item.archived { report.warnings.append(.archivedStateOmitted(itemID: item.id)) }

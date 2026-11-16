@@ -253,12 +253,21 @@ half delivered** on a Mac; the transports are open.
   longer dropped in silence; export reports for unresolved sync values (which are now written), history,
   scope restrictions, archived state, tags and recovery-code marks; 1PUX export of email sign-in names and of
   remembered categories.
+- Done after the second review: a merge adds no `url` field without a per-field choice either, an accepted
+  URL is a website only where the item is scoped to its host, and merged fields drop the hints that speak
+  for their entry (category, subtitle). The first fix had left a road open: a URL kept as text was merged
+  as a field and then written by every exporter as a sign-in URL of the existing item. Exporters now write
+  a sign-in URL only for a host the item is scoped to (or a URL no scope can come from), report the rest
+  (`ExportWarning.websiteNotScoped`), and the CSV export no longer puts an arbitrary `url` field in its URL
+  column. The `1pux`, `cxf` and `password-csv` fuzz targets check that an export, read back, names no host
+  the items were not scoped to.
 - Open, all of it integration and most of it Mac-only: the session wiring (password re-entry before a
   plaintext export, `completeUnlessOpen` file protection, the standing warning, an import path through
   `VaultSession` that keeps imported history and timestamps); the encrypted Watchword archive; the OS
   Credential Exchange calls and the extension's Info.plist keys; the import, export and instruction screens
   and their XCUITests, including a duplicate screen that names each host a merge would add and asks about it
-  (`DuplicateMatch.newHosts`, `MergeChoices`) and an export screen that shows the `ExportReport`. Before shipping: a check of the CXF and 1PUX field names against the published
+  (`DuplicateMatch.newHosts`, `MergeChoices`), shows each URL and sign-in field before adding it
+  (`MergeAdditions.urlFields`, `signInFields`), and an export screen that shows the `ExportReport`. Before shipping: a check of the CXF and 1PUX field names against the published
   formats and real exports from 1Password and Apple Passwords (the specifications were unreachable from the
   session that wrote the parsers), and of the 1PUX export against 1Password's importer. The nightly `fuzz`
   job runs on the macOS runner, whose toolchain may lack the libFuzzer runtime; the task then replays the

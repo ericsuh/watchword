@@ -358,6 +358,7 @@ struct DuplicateDetectorTests {
         let additions = DuplicateDetector.additions(of: imported, to: existing)
         #expect(additions.scopes.map(\.host) == ["login.example.com"])
         #expect(additions.signInFields.map(\.value) == ["new"])
+        #expect(additions.urlFields.isEmpty)
         #expect(additions.otherFields.map(\.value) == ["0420"])
         #expect(additions.tags == ["b"])
         #expect(additions.notes == "added")
@@ -402,6 +403,86 @@ struct DuplicateDetectorTests {
         let stray = MergeChoices(hosts: ["evil.example"], fieldIDs: [UUID()])
         #expect(DuplicateDetector.merged(imported, into: existing, accepting: stray) == existing)
         #expect(MergeChoices.none == MergeChoices())
+    }
+
+    @Test("A URL is added only when accepted, and is a website only where the item is scoped to its host")
+    func mergedURLs() throws {
+        func website(_ url: String) -> Field {
+            Field(
+                kind: .url, label: "Website", value: url,
+                meta: [InterchangeMeta.sourceType: InterchangeMeta.websiteType, InterchangeMeta.category: "001"])
+        }
+        let existing = item("Example", hosts: ["example.com"], username: "wendy", password: "old")
+        var imported = item("Example", hosts: ["example.com", "example.org"], username: "wendy", password: "old")
+        let own = website("https://www.example.com/login")
+        let other = website("https://example.org/login")
+        // Not a URL a scope can come from, so not one that can stand for a scope.
+        let refused = website("ftp://example.com/")
+        let link = Field(
+            kind: .url, label: "Help", value: "https://help.example.net/", meta: [InterchangeMeta.section: "Support"])
+        imported.fields += [own, other, refused, link]
+
+        let additions = DuplicateDetector.additions(of: imported, to: existing)
+        #expect(additions.urlFields == [own, other, refused, link])
+        #expect(additions.otherFields.isEmpty && additions.signInFields.isEmpty)
+        #expect(additions.needsChoice && !additions.isEmpty)
+        let match = try #require(DuplicateDetector.matches(imported: [imported], existing: [existing]).first)
+        #expect(match.hasNewURLFields && !match.hasNewSignInFields && match.newHosts == ["example.org"])
+        // Nothing accepted, nothing added.
+        #expect(DuplicateDetector.merged(imported, into: existing) == existing)
+
+        func websites(_ item: Item) -> [String] {
+            item.fields.filter { $0.meta[InterchangeMeta.sourceType] == InterchangeMeta.websiteType }.map(\.value)
+        }
+        // Every URL accepted, and no host: all four are fields, and only the one for a host the item is already
+        // scoped to is still one of its websites.
+        let every = Set(additions.urlFields.map(\.id))
+        let linked = DuplicateDetector.merged(imported, into: existing, accepting: MergeChoices(fieldIDs: every))
+        #expect(linked.scopes == existing.scopes)
+        #expect(linked.values(.url) == additions.urlFields.map(\.value))
+        #expect(websites(linked) == [own.value])
+        // The link keeps what it says about itself; no added field speaks for the entry it came from.
+        #expect(linked.fields.last?.meta == [InterchangeMeta.section: "Support"])
+        #expect(linked.fields.allSatisfy { $0.meta[InterchangeMeta.category] == nil })
+
+        // With the host accepted too, its URL is a website; accepting a host alone brings no field with it.
+        let both = MergeChoices(hosts: ["example.org"], fieldIDs: [other.id])
+        let widened = DuplicateDetector.merged(imported, into: existing, accepting: both)
+        #expect(widened.scopes.map(\.host) == ["example.com", "example.org"])
+        #expect(websites(widened) == [other.value])
+        let hostOnly = DuplicateDetector.merged(
+            imported, into: existing, accepting: MergeChoices(hosts: ["example.org"]))
+        #expect(hostOnly.fields == existing.fields)
+        // Merging again offers the same URLs again, and adds none of them.
+        #expect(DuplicateDetector.merged(imported, into: linked) == linked)
+    }
+
+    @Test("A merged field does not speak for the existing item: category and subtitle hints are dropped")
+    func mergedFieldsCarryNoEntryHints() {
+        let existing = item("Example", username: "wendy", password: "old")
+        var imported = item("Example", username: "wendy", password: "old")
+        imported.fields += [
+            Field(
+                kind: .text, label: "Subtitle", value: "sub",
+                meta: [InterchangeMeta.sourceType: InterchangeMeta.subtitleType]),
+            Field(
+                kind: .accountNumber, label: "Account", value: "12345678",
+                meta: [
+                    InterchangeMeta.category: "101", InterchangeMeta.section: "Bank",
+                    InterchangeMeta.sourceID: "accountNo", InterchangeMeta.sourceType: "string",
+                ]),
+        ]
+        let merged = DuplicateDetector.merged(imported, into: existing)
+        #expect(merged.fields.map(\.value) == ["wendy", "old", "sub", "12345678"])
+        #expect(merged.fields[2].meta.isEmpty)
+        #expect(
+            merged.fields[3].meta == [
+                InterchangeMeta.section: "Bank", InterchangeMeta.sourceID: "accountNo",
+                InterchangeMeta.sourceType: "string",
+            ])
+        // So the login is still exported as a login, not as the bank account the file said its entry was.
+        #expect(OnePUX.category(for: merged) == OnePUX.category(for: existing))
+        #expect(OnePUX.category(for: existing) == "001")
     }
 
     @Test("Notes are appended unless every line of them is already there, in linear time")

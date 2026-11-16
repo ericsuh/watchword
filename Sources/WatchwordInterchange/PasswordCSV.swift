@@ -180,9 +180,9 @@ public enum PasswordCSV {
             let username = item.fields.first { $0.kind == .username } ?? item.fields.first { $0.kind == .email }
             let password = item.field(.password)
             let oneTimePassword = item.fields.first { $0.kind == .totp && (try? $0.otpParameters()) != nil }
-            var (urls, websiteFields) = ExportSupport.websites(of: item)
-            let urlField = urls.isEmpty ? item.fields.first { $0.kind == .url } : nil
-            if let urlField { urls = [urlField.value] }
+            // The URL column is where whatever reads the file will offer the password: the item's scopes and its own
+            // website URLs, never some other `url` field it happens to hold.
+            let (urls, websiteFields) = ExportSupport.websites(of: item, report: &report)
             ExportSupport.commonWarnings(for: item, into: &report)
             if item.archived { report.warnings.append(.archivedStateOmitted(itemID: item.id)) }
             if !item.tags.isEmpty { report.warnings.append(.tagsOmitted(itemID: item.id)) }
@@ -197,7 +197,7 @@ public enum PasswordCSV {
                     report.warnings.append(.passkeyOmitted(itemID: item.id))
                     continue
                 }
-                let hasColumn = [username?.id, password?.id, oneTimePassword?.id, urlField?.id].contains(field.id)
+                let hasColumn = [username?.id, password?.id, oneTimePassword?.id].contains(field.id)
                 guard !hasColumn, !websiteFields.contains(field.id), !field.value.isEmpty else { continue }
                 if !notes.isEmpty { notes += "\n" }
                 notes += "\(field.label.isEmpty ? field.kind.rawValue : field.label): \(field.value)"

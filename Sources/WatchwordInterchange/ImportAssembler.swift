@@ -53,6 +53,16 @@ public enum ScopeDerivation {
         host.utf8.allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) || $0 == UInt8(ascii: ".") }
     }
 
+    /// The hosts a URL kept as text can stand for among an item's scopes: the host derived from it, and that host
+    /// without a leading `www.` (the scope may have been derived either way). `nil` for a URL no scope can come from.
+    /// Derived from the text every time it is asked, with the rules an import applies, never read from a hint.
+    static func websiteHosts(of text: String) -> [String]? {
+        guard case .success(let scope) = scope(forURL: text) else { return nil }
+        var hosts = [scope.host]
+        if scope.host.hasPrefix("www.") { hosts.append(String(scope.host.dropFirst(4))) }
+        return hosts
+    }
+
     /// The URL an export writes for a scope that has no URL of its own on record.
     static func canonicalURL(for scope: ServiceScope) -> String {
         "https://\(scope.host)/"
