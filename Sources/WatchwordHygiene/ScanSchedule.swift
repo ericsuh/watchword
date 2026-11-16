@@ -762,7 +762,10 @@ public struct ScanSchedule: Sendable {
     /// `nil` once they have done so for longer than `maximumSyncDeferral`: this device checks the item itself.
     public mutating func syncDeferral(of item: UUID, now: Date) -> Date? {
         guard let since = ledger.deferred[item] else {
-            if ledger.deferred.count < ScanLedger.maximumEntries { ledger.deferred[item] = now }
+            // An item that cannot be marked is not deferred: unmarked, it would be deferred from "now" at every pass,
+            // and the limit would never run out for it (review finding N2).
+            guard ledger.deferred.count < ScanLedger.maximumEntries else { return nil }
+            ledger.deferred[item] = now
             return now
         }
         return now.timeIntervalSince(since) > policy.maximumSyncDeferral ? nil : since
@@ -824,7 +827,7 @@ public struct ScanSchedule: Sendable {
             networkRequests: networkRequests, error: error, now: now, jitter: jitter, policy: policy)
     }
 
-    /// Drops what is remembered about items that no longer exist, or are no longer candidates.
+    /// Drops what is remembered about items that no longer exist.
     public mutating func prune(keeping items: Set<UUID>) {
         ledger.entries = ledger.entries.filter { items.contains($0.key) }
         ledger.failures = ledger.failures.filter { items.contains($0.key) }
@@ -832,7 +835,17 @@ public struct ScanSchedule: Sendable {
         ledger.deferred = ledger.deferred.filter { items.contains($0.key) }
     }
 
-    /// Forgets one item's result, so it is due again.
+    /// An item that still exists has left the candidates for now: trashed, or without a password. Only its failed
+    /// check goes. What this device found, the breaches it took in and since when synced checks have stood in for its
+    /// own all stay: each is about a password (by binding), and the password may come back with a restore or an edit.
+    /// Forgotten here, a breach this device saw would be hidden on another device's word when it did, and the
+    /// deferral limit would start again at every trash and restore (review finding N1, docs/02-architecture.md
+    /// §13.9).
+    public mutating func setAside(_ item: UUID) {
+        ledger.failures[item] = nil
+    }
+
+    /// Forgets one item's result, so it is due again: the item is gone for good.
     public mutating func forget(_ item: UUID) {
         ledger.entries[item] = nil
         ledger.failures[item] = nil

@@ -345,6 +345,88 @@ struct SyncedScanTests {
         #expect(try await rig.engine.ledger().deferred.isEmpty)
     }
 
+    /// Review finding N1 (docs/06-adversarial-review.md §N): the item's password taken out and put back, or the item
+    /// trashed and restored, used to make the engine forget the item's results and its deferral mark, so the limit
+    /// started again each time.
+    @Test(
+        "the deferral limit holds when the password is taken out and put back, or the item trashed and restored",
+        arguments: [false, true])
+    func deferralLimitSurvivesRemoval(trash: Bool) async throws {
+        let rig = await EngineRig()
+        var item = HygieneFixtures.item(1)
+        try await rig.unlock([item])
+        var now = Self.now
+        var checkedAt: Date?
+        for day in 0..<60 {
+            if day % 10 == 9 {
+                // Away for a moment, then back: the same password, at a new version each time.
+                var away = item
+                away.version += 1
+                if trash { away.trashedAt = now } else { away.fields.removeLast() }
+                try await rig.engine.update(away)
+                item.version = away.version + 1
+                try await rig.engine.update(item)
+            }
+            try await rig.engine.updateSynced(Self.evidence(item, .notFound, at: now), now: now)
+            if case .scan(let id, _) = await rig.engine.next(now: now), id == item.id {
+                #expect(await rig.engine.scan(item, now: now) == .scanned(breachedPasswords: 0, networkRequests: 1))
+                checkedAt = now
+                break
+            }
+            now = now.addingTimeInterval(86400)
+            await rig.clock.set(now)
+        }
+        let checked = try #require(checkedAt)
+        #expect(checked.timeIntervalSince(Self.now) <= ScanPolicy.standard.maximumSyncDeferral + 86400)
+    }
+
+    /// Review finding N1 again: a breach this device found itself outlasts the password being taken out and put back,
+    /// or a trash and restore, whatever another device syncs meanwhile.
+    @Test(
+        "a breach this device found outlasts the password's removal and return, and a trash and restore",
+        arguments: [false, true])
+    func ownBreachSurvivesRemoval(trash: Bool) async throws {
+        let rig = await EngineRig(breached: ["hunter2": 5])
+        var item = HygieneFixtures.item(1, password: "hunter2")
+        try await rig.unlock([item])
+        await rig.runUntilIdle([item])
+        var away = item
+        away.version = 2
+        if trash { away.trashedAt = Self.now } else { away.fields.removeLast() }
+        try await rig.engine.update(away)
+        item.version = 3
+        try await rig.engine.update(item)
+        try await rig.engine.updateSynced(Self.evidence(item, .notFound, at: Self.now), now: Self.now)
+        let entry = try await rig.engine.report(now: Self.now).items[0]
+        #expect(entry.breachStatus == .breached(checkedAt: Self.now))
+        #expect(entry.breachSource == .thisDevice)
+    }
+
+    /// Review finding N2: with the ledger's deferral marks full, an item that could not be marked was deferred from
+    /// "now" at every pass, so the limit never ran out for it.
+    @Test("an item that cannot be marked as deferring is not deferred at all")
+    func deferralWithoutRoom() {
+        var ledger = ScanLedger()
+        for _ in 0..<ScanLedger.maximumEntries { ledger.deferred[UUID()] = Self.now.addingTimeInterval(-60) }
+        var schedule = ScanSchedule(ledger: ledger)
+        #expect(schedule.syncDeferral(of: HygieneFixtures.id(1), now: Self.now) == nil)
+        #expect(!schedule.isDeferring(HygieneFixtures.id(1)))
+    }
+
+    /// Review finding N3: the ledger's binding key was `HMAC(reuse key, label)`, which is the reuse token of a password
+    /// spelt like the label, so the two derivations were not separated.
+    @Test("the ledger's binding key is no reuse token, whatever the password")
+    func ledgerBindingKeyIsNoReuseToken() throws {
+        let key = try ReuseKey(SecureBytes(copying: (0..<32).map { UInt8($0) }))
+        defer { key.zeroise() }
+        let label = String(decoding: ReuseKey.scanBindingLabel.filter { $0 < 0x80 }, as: UTF8.self)
+        var token = key.token(forUTF8Of: label).bytes
+        let asKey = try ScanBindingKey(SecureBytes(wiping: &token))
+        defer { asKey.zeroise() }
+        let item = HygieneFixtures.id(1)
+        #expect(key.scanBinding(item: item, utf8Of: "hunter2") != asKey.binding(item: item, utf8Of: "hunter2"))
+    }
+
     @Test("reports and deferrals survive the ledger's encoding, and a ledger without them decodes as before")
     func ledgerEncoding() throws {
         var ledger = ScanLedger()

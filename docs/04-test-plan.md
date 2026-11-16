@@ -666,6 +666,8 @@ shows the breach as its own finding throughout, checks again one pass after its 
 postponed nothing), and makes its own check within the deferral limit plus a pass; an observation the member forges in
 the owner's device's name is held aside by the write judge and changes nothing. *A former member (A5)* whose store
 withholds the removal reports a breach after it: the owner's report stays clear and the version is held aside (S28).
+*A4 again* trashes and restores the item, or takes its password out and puts it back, and then reports it clear: the
+owner's device still shows the breach as its own (review finding N1, `removalCannotEraseAnOwnBreach`).
 Functional: "Synced scan results" (`WatchwordHygieneTests`): the binding against Python's `hmac`, and bound to one
 item, one password and one key; the record's canonical encoding and every damage case (trailing or missing bytes,
 magic, devices out of order, a revision above the record's version, too many results); the join per device and its
@@ -675,7 +677,9 @@ synced check standing in for this device's (nothing asked, the source labelled),
 that keeps the password keeping its result, this device's own breach never hidden, a reported breach outlasting a later
 synced "not found" until this device's own check, a report older than this device's own clear check not taken in,
 future times ignored or counted as now, postponement by at most an interval, the deferral limit under a daily
-"not found", and the ledger's new keys round-tripping. "Vault session: synced hygiene" (`WatchwordKitTests`, two
+"not found", that limit and this device's own breach kept through a trash and restore or a password taken out and put
+back (N1), no deferral for an item the ledger has no room to mark (N2), the ledger's binding key no reuse token (N3),
+and the ledger's new keys round-tripping. "Vault session: synced hygiene" (`WatchwordKitTests`, two
 devices of one account): B does not repeat A's check and labels it A's; a breach A found reaches B; a password changed
 after A's check is checked again on B and A then takes B's result; checks and their sync add no item version, history
 entry or conflict on either device over two passes; deleting an item deletes its results on every device.

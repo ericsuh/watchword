@@ -92,6 +92,8 @@ public actor HygieneEngine: SharesExecutor {
         /// Items that were trashed or deleted at the version above: a copy of that version that is not trashed is
         /// the item from before it went.
         var gone: Set<UUID> = []
+        /// Of those, the items permanently deleted (`remove`), whose results go with them.
+        var removed: Set<UUID> = []
         /// `unlock` has not finished analysing its items.
         var loading = true
         /// What other devices of each item's vault reported, for the version the session matched it against.
@@ -224,8 +226,9 @@ public actor HygieneEngine: SharesExecutor {
             guard isCurrent(started) else { throw HygieneEngineError.locked }
         }
         withResident { state in
-            // Results for items that no longer exist, or no longer have a password, describe nothing.
-            state.schedule.prune(keeping: Set(state.analyses.values.filter { !$0.passwords.isEmpty }.map(\.id)))
+            // Results for items that no longer exist describe nothing. An item in the trash or without a password
+            // keeps them: they are about its passwords, which may come back (`ScanSchedule.setAside`).
+            state.schedule.prune(keeping: Set(items.map(\.id)).subtracting(state.removed))
             for evidence in synced { _ = Self.takeIn(evidence, to: &state, now: now) }
             state.loading = false
         }
@@ -282,20 +285,22 @@ public actor HygieneEngine: SharesExecutor {
             state.gone.insert(item.id)
             state.analyses[item.id] = nil
             state.reuse.remove(item.id)
-            state.schedule.forget(item.id)
+            state.schedule.setAside(item.id)
             return .removed
         }
         state.gone.remove(item.id)
+        state.removed.remove(item.id)
         let analysis = state.analyzer.analyse(item, reuseKey: state.reuseKey)
         state.analyses[item.id] = analysis
         state.reuse.set(analysis.reuseTokens, for: item.id)
         // Evidence matched against another version says nothing about this one's passwords; the session matches
         // again. Reports stay for the passwords the item still holds.
         if state.synced[item.id]?.itemVersion != item.version { state.synced[item.id] = nil }
-        if state.schedule.keepReports(of: item.id, for: Set(analysis.passwords.map(\.ledgerBinding))) {
+        if analysis.passwords.isEmpty {
+            state.schedule.setAside(item.id)
+        } else if state.schedule.keepReports(of: item.id, for: Set(analysis.passwords.map(\.ledgerBinding))) {
             state.ledgerChanged = true
         }
-        if analysis.passwords.isEmpty { state.schedule.forget(item.id) }
         return .analysed
     }
 
@@ -363,6 +368,7 @@ public actor HygieneEngine: SharesExecutor {
     public func remove(_ id: UUID) {
         withResident { state in
             state.synced[id] = nil
+            state.removed.insert(id)
             state.gone.insert(id)
             state.analyses[id] = nil
             state.reuse.remove(id)

@@ -283,7 +283,8 @@ lists what is open (file protection and the screens, Credential Exchange, restor
   nothing more: times beyond `clockTolerance` ahead are ignored and the rest count as no later than now, and synced
   checks stand in for this device's own for at most `maximumSyncDeferral` (`ScanLedger.deferred`, ended only by an
   own check). A breach found elsewhere is shown (`breachSource`) and remembered (`ScanLedger.reported`) until this
-  device's own later check. `PasswordBreachEvidence` is the one place the report and the schedule weigh results:
+  device's own later check. An item that still exists keeps all of that while trashed or without a password
+  (`ScanSchedule.setAside`); only a permanent deletion forgets it (N1). `PasswordBreachEvidence` is the one place the report and the schedule weigh results:
   don't read results anywhere else.
 - Nothing password-derived or identifying prints: digests, tokens, prefixes (`hex` is the accessor), assessments
   (the exact estimate is internal; a rank names a common password), analyses, ledgers, addresses, URLs

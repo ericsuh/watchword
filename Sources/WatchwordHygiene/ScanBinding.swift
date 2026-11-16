@@ -106,11 +106,13 @@ public struct ScanBindingKey: Sendable {
 }
 
 extension ReuseKey {
-    static let scanBindingLabel = Array("WW-ledger-binding-key-v1".utf8)
+    /// `0xFF` first: a byte no UTF-8 text holds, so the label is no password and the key derived from it is no reuse
+    /// token (`HMAC(reuse key, UTF-8 of password)`), whatever the password (review finding N3).
+    static let scanBindingLabel = [0xFF] + Array("WW-ledger-binding-key-v1".utf8)
 
     /// The binding of `password` on `item` for this device's own scan ledger: under a key derived from the reuse key
-    /// (`HMAC(reuse key, "WW-ledger-binding-key-v1")`), so neither key stands in for the other and a binding is not a
-    /// reuse token.
+    /// (`HMAC(reuse key, 0xFF ‖ "WW-ledger-binding-key-v1")`), so neither key stands in for the other and a binding is
+    /// not a reuse token.
     func scanBinding(item: UUID, utf8Of password: String) -> ScanBinding {
         var code = Array(HMAC<SHA256>.authenticationCode(for: Self.scanBindingLabel, using: bytes.symmetricKey))
         let derived = SecureBytes(wiping: &code)

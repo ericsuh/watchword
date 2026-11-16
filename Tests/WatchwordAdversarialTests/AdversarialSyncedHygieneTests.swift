@@ -117,6 +117,44 @@ struct AdversarialSyncedHygieneTests {
         #expect(entry?.breachSource == .thisDevice)
     }
 
+    /// Threat (review finding N1, docs/06-adversarial-review.md §N): A4, a current read-write member, makes the owner's
+    /// device forget a breach it found itself without ever changing the password: they trash the item and restore it
+    /// (or take the password field out and put it back), let the owner's device sync each step, and then sync a fresh
+    /// "not found" of their own for the same password. The owner's device used to drop its own result for an item
+    /// that left the analysis, so it then showed the password as clear on the member's word, and postponed its own
+    /// check, with the deferral limit started afresh; repeated, for ever. It must keep showing the breach as its own.
+    @Test(
+        "a member's trash and restore, or a password taken out and put back, does not erase a breach this device saw",
+        arguments: [true, false])
+    func removalCannotEraseAnOwnBreach(trash: Bool) async throws {
+        let home = try await Household.make(password: "hunter2")
+        #expect(Self.isBreached(try await home.ownerEntry()?.breachStatus))
+        let member = home.member.session
+        if trash {
+            try await member.trash(id: home.itemID)
+        } else {
+            var item = try await member.item(id: home.itemID)
+            item.fields.removeAll { $0.kind == .password }
+            _ = try await member.save(item)
+        }
+        try await member.sync()
+        try await home.owner.session.sync()
+        if trash {
+            try await member.restore(id: home.itemID)
+        } else {
+            var item = try await member.item(id: home.itemID)
+            item.fields.append(Field(kind: .password, label: "Password", value: "hunter2"))
+            _ = try await member.save(item)
+        }
+        try await member.forgeScanObservation(
+            itemID: home.itemID, occurrences: 0, scannedAt: await home.member.vault.clock.now())
+        try await member.sync()
+        try await home.owner.session.sync()
+        let entry = try await home.ownerEntry()
+        #expect(Self.isBreached(entry?.breachStatus))
+        #expect(entry?.breachSource == .thisDevice)
+    }
+
     /// Threat: A4 again, writing an observation in the owner's device's name (its device ID, a revision of its
     /// choosing) that says the breached password is clear, inside a version of the record the member seals and signs.
     /// No segment of the owner's device's stream carried it, and the owner's device does not hold it, so the shared

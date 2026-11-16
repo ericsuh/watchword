@@ -90,7 +90,9 @@ never synced, and the ledger stays a sealed, per-device, unsynced record. Repres
   device's own results are read only from its own sealed ledger, never back from the synced record, so no record
   anyone else writes can remove a breach this device saw.
 - **The ledger gains keyed digests.** Entries keep the binding of each password checked (under a key derived from the
-  reuse key, which no vault rotation changes), plus the reports taken in and the deferral marks. The ledger is sealed
+  reuse key, which no vault rotation changes), plus the reports taken in and the deferral marks. All of it stays while
+  the item exists, trashed or without a password included, and goes only with a permanent deletion: a trash and
+  restore must neither erase a breach this device saw nor restart the deferral limit (review finding N1). The ledger is sealed
   under the device-local key; whoever can open it holds the keyset and could decrypt the items, so this weakens
   nothing. It still holds no hash or prefix.
 - **Shared vaults.** Results are records like any other: a read-only member writes none, the write judge attributes

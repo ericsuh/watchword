@@ -2185,7 +2185,9 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   keyset and this device's ID but not its secret), does not open and answers nothing. An older ledger of this
   device's own, put back by someone who can write the files (A8), does open: it is accepted as what it is, an
   authentic earlier reading, whose every check is older than the one it replaces, so nothing becomes due later than
-  it was (docs/06 L3). Deleting the account erases the store and the secret.
+  it was on this device's own checks (docs/06 L3). With synced results it can also drop a deferral mark or a reported
+  breach taken in since; a mark dropped starts the deferral limit again, so A8 together with a member reporting
+  "not found" (A4) can postpone this device's check further (docs/06 N6). Deleting the account erases the store and the secret.
 - **What the UI calls:** `hygieneReport()`, `itemsUsingPassword(_:)` for the editor's reuse warning, and
   `runHygieneStep()`. All throw `locked` while locked and `hygieneNotConfigured` without settings.
 
@@ -2226,7 +2228,8 @@ into account. The prefix cache is not synced; nor is the ledger.
   record `K = HKDF-SHA256(vault key, salt: vaultID ‖ keyID, "WW-hygiene-scan-binding-v1")` (`HygieneKeys`,
   `WatchwordCrypto`, `package`), under the key the observation names; a reader derives it from that key only if it
   holds it for the item's own vault, so results survive a rotation's re-seal and say nothing to anyone without the
-  key. In this device's ledger `K = HMAC(reuse key, "WW-ledger-binding-key-v1")`, which no vault rotation changes. A
+  key. In this device's ledger `K = HMAC(reuse key, 0xFF ‖ "WW-ledger-binding-key-v1")`, which no vault rotation
+  changes; the `0xFF`, a byte no UTF-8 text holds, keeps `K` from being the reuse token of any password (N3). A
   changed password has a new binding; an edit that leaves it leaves its result.
 - **Writing.** After a check completes (`runHygieneStep`), and only with sync configured, where this device may write
   (`writableVaultKey`: not a read-only member, not a deleted vault), for the version checked and while unlocked, the
@@ -2246,16 +2249,25 @@ into account. The prefix cache is not synced; nor is the ledger.
     of its own that found the password clear. A reported breach is remembered in the ledger (`ScanLedger.reported`)
     when taken in, so a later synced "not found", even from the device that reported it, does not remove it: only
     this device's own later check of that password does. A synced "not found" never outweighs any breach;
+  - an item that leaves the candidates but still exists (trashed, or without a password) keeps its results, reports
+    and deferral mark (`ScanSchedule.setAside`): they are about its passwords, which a restore or an edit can bring
+    back. Only a permanent deletion forgets them, and an unlock prunes only items that no longer exist. Otherwise a
+    trash and restore, or a password taken out and put back, would erase a breach this device saw and restart the
+    deferral limit (N1). An item the ledger has no room to mark is not deferred at all (N2);
   - the report labels each status's source (`ItemHygiene.breachSource`).
 - **Shared vaults.** The write judge attributes each observation to its device and revision
   (`attributedValues`, one value per observation), so a removed member's late observation counts nowhere (S28) and
   one forged in another device's name is held aside; a rotation re-seals the records (the observations keep their
   devices, revisions and keys); a change of head takes out what no longer counts, records included.
 
-What this leaves: a current member (A4) can make a breached password look clear on a device that has not checked it
-itself, for up to the deferral limit; they can read and change the password, so this is no new power, and they cannot
-hide a breach that device saw. Two devices checking at once both write; the join keeps both. A client that does not
-know the kind refuses segments that carry it.
+What this leaves (`06-adversarial-review.md` §N): a current member (A4) can make a breached password look clear on a
+device that has not checked it itself, for up to the deferral limit; they can read and change the password, so this is
+no new power, and they cannot hide a breach that device saw while the item holds that password. The ledger keeps one
+check per item, so a breach of a password the item no longer holds is forgotten once this device checks the new one; a
+member who changes the password back and reports it clear then has it shown clear for up to the limit again (N4).
+Two devices checking at once both write; the join keeps both, and a check that races the item's permanent deletion
+leaves a record with no item, which nothing collects (N5). A client that does not know the kind refuses every segment
+and snapshot that carries it and, merging each stream strictly in sequence, merges nothing more from that device (N7).
 
 ## 14. Import and export (`WatchwordInterchange`)
 

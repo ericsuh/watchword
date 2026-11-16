@@ -123,7 +123,7 @@ struct HygieneEngineTests {
         #expect(await rig.http.requests.isEmpty)
     }
 
-    @Test("trashing or deleting an item takes it out of the report and the ledger")
+    @Test("trashing an item takes it out of the report; deleting it takes it out of the ledger too")
     func removal() async throws {
         let rig = await EngineRig()
         var first = HygieneFixtures.item(1, password: "shared-secret-1")
@@ -138,10 +138,12 @@ struct HygieneEngineTests {
         var report = try await rig.engine.report(now: HygieneFixtures.now)
         #expect(report.items.map(\.id) == [second.id])
         #expect(report.totals.itemsByKind[.reusedPassword] == nil)
-        #expect(try await rig.engine.ledger().entries[first.id] == nil)
+        // Kept while trashed: its results are about its passwords, which a restore brings back (review finding N1).
+        #expect(try await rig.engine.ledger().entries[first.id] != nil)
         #expect(await rig.engine.scan(first, now: HygieneFixtures.now) == .nothingToCheck)
 
         await rig.engine.remove(second.id)
+        await rig.engine.remove(first.id)
         report = try await rig.engine.report(now: HygieneFixtures.now)
         #expect(report.items.isEmpty)
         #expect(try await rig.engine.ledger().entries.isEmpty)
