@@ -46,7 +46,7 @@ that a test target may contain both as long as a single test does not mix their 
 | --- | --- |
 | F1.x items/fields | Codable round trips; property test "any item survives encode→decode"; history kept whatever its age or length, with `FakeClock`, and an edit past the payload limit refused rather than pruned |
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
-| F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes |
+| F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes (protocol core, milestone 4, `WatchwordSharingTests`: "Membership record format", "Sharing formats: known answers", "Membership chain rules", "Membership ledger", "Fingerprint verification and invitations", "Key grants and rotation", and "Shared vault simulation" — two and three members with real keysets over a hostile store: create, invite, verify, accept, write, role change, removal with rotation, leaving, an interrupted rotation, concurrent administrators, deletion; through `VaultSession` and a real transport: open) |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "Scenarios S1 and S2 through the request model", and "Request model over a real vault session" — S1 and S2 again over a `VaultSession` with a stand-in for its `CredentialVault` conformance; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
@@ -343,8 +343,75 @@ context; a locked device with no trusted key in the Keychain, which refuses ever
 until the next unlock; pending deletions planted in the local sync state (A8) — unsigned, badly signed, signed by
 another key, or another device's — none of which is published; the sync adapter used after `lock()`; and the
 keyring refusing to sign as another device. The Keychain item protection suite checks the new `accountSigningKey`
-item like the others and that every item has its own account name. Still to come with
-milestone 4: member key substitution, membership records, revocation and read-only enforcement.
+item like the others and that every item has its own account name.
+
+**Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
+membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):
+
+- *Forged membership*: every single-bit flip of a genuine record; unsigned records, records signed with the
+  attacker's key under an administrator's name, by an account that was never a member; a genesis the verified owner
+  did not sign; a signature made under another `SignatureDomain`; a copy with a spoilt signature listed ahead of the
+  genuine record.
+- *Stale administrators and former members*: signing after demotion or removal; going back to an epoch at which
+  they were still an administrator with a hash ground down to win (refused on a device that has the real chain, on a
+  fresh device in either order, and corrected on a device shown only the attacker's branch); adding themselves back
+  with a new record, the owner's old signature, or the old record.
+- *Key substitution*: the directory substituting the invitee's key (caught by the comparison; nothing is wrapped),
+  substituting a pinned contact's key (refused and reported), returning another account's bundle or a low-order key,
+  substituting the owner's key towards an invitee; an administrator putting a key of their own under the invitee's
+  account in the chain; an invitation to a vault ID already held under another owner.
+- *After revocation*: the old vault key against records sealed since, also relabelled with the new key ID; an old
+  grant replayed under the new key's name; a fresh grant of a planted key from a former administrator, from an
+  administrator demoted since, and from an administrator of another vault; a former member asking for the new key;
+  writes by a former member and by a read-only member reaching the store and counting for no remaining member; a
+  write in another member's name.
+- *Writes around a revocation* (the write cut, §8.7): a former member's write, and a demoted member's, aimed at a
+  device the store has not yet shown the record (merged there, taken out again and held aside once the record
+  arrives, never published by that device, read by nobody else); the same write sealed again by that device as a
+  version of its own before it knew (refused everywhere for the work it carries); objects claiming places in the
+  former member's own stream that the cut covers; a stream prepared in advance of which the removing device was
+  shown only the end; part of a stream withheld from a member who joins later (delays, never widens); a cut on a
+  record that ends no permission, a cut altered or over its bound; a removal displaced by a fork, whose cut still
+  governs while it is owed; a former administrator's cut on a dead branch built from a genuine leave request.
+- *Fork and rollback*: a store serving an older chain; a saved ledger truncated, spliced, altered byte by byte or
+  planted; a store showing two halves of a household different branches; a former administrator's rewrite fed a
+  page, or an object, at a time in any order; a record signed on a stale head and released after the chain was built
+  on (displaces nothing) or before (the removal it displaces is owed, the member's writes stay refused, nothing is
+  re-sealed towards their key, and another administrator carries it out again); a stale device of the owner's, one
+  record and two; removals a former administrator signs on a dead branch (owed by nobody); a member invited back
+  while the store hides everything since their removal.
+- *Role escalation*: every way a member or an administrator can sign for more than their role, including roles
+  changed on the side inside another operation's member list; an administrator using up the chain's epochs.
+- *Leave requests*: replayed after the member was invited back, into another vault, relabelled, or signed by
+  someone else; a genuine request behind thousands of junk objects in the leave directory and hundreds filed as the
+  member's own.
+- *Two administrators*: removing each other at once (nobody is removed, the owner can still act); the owner's
+  removal of an administrator against that administrator's own record at the same epoch, in every order.
+- *Names and proposals*: a predictable record's object created first with a signature nobody made (a role change
+  and a deletion); a change that loses a fork proposed again by its author's device.
+- *Pins against the chain*: a member removed and added back under the same account ID with other keys: reported,
+  nothing wrapped to them by a rotation or a grant, a stale comparison refused, resolved by removal or by replacing
+  the pin.
+- *Local state*: pins planted in the contacts store; a rotation plan altered byte by byte, with the departing
+  account replaced, or planted (another administrator's, a stranger's, re-signed).
+- *Oversized and malformed*: seeded damage to every format (throws, or returns exactly what the bytes say);
+  megabyte inputs to every parser; inflated counts; tens of thousands of candidates in one call; thousands of junk
+  objects in the membership directory, some shaped like the next record (the next record is still adopted, and the
+  flood is paid for once); a flood of unsigned records naming a reused key (one signature check each, no walk); a
+  comb of signed branches reusing one key ID (work bounded by each record's own path); grant objects filed in a
+  member's own grant directory.
+
+Beside the adversarial suite, `LongRunningMembershipForkTests` holds the property the fork rule is built on: over
+randomly generated histories with forks at many depths (stale owner and administrator devices), a ledger fed random
+subsets in random order, with repeats, is at every step exactly what a fresh device makes of the same records, and
+ends equal to the ledger fed everything at once (`orderAndBatchingDoNotMatter`; the nightly `test:long` widens it).
+`SharingScenarioTests` covers what a demoted and a removed member wrote reaching those who remain and a member
+invited afterwards, and two concurrent removals ending with both members gone.
+
+Known answers for the formats (records, hashes, a leave request, published bundles, the fingerprint code) come from
+an independent Python implementation (`SharingKnownAnswerTests`). Still to come with integration: the same
+adversaries against `VaultSession` and `SyncEngine` (a former member's *segments* refused in `SyncKeyring.verify`,
+read-only writes refused by the transport fake), and anything that depends on the device registry.
 
 ### 6.5 Interchange (milestone 7)
 - Zip-slip entry names, nested zip bombs beyond the ratio cap, 1PUX with 10^6 items, CSV cells

@@ -24,6 +24,7 @@ let package = Package(
         .library(name: "WatchwordCrypto", targets: ["WatchwordCrypto"]),
         .library(name: "WatchwordStore", targets: ["WatchwordStore"]),
         .library(name: "WatchwordSync", targets: ["WatchwordSync"]),
+        .library(name: "WatchwordSharing", targets: ["WatchwordSharing"]),
         .library(name: "WatchwordHygiene", targets: ["WatchwordHygiene"]),
         .library(name: "WatchwordKit", targets: ["WatchwordKit"]),
         .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
@@ -65,6 +66,14 @@ let package = Package(
             dependencies: ["WatchwordModel", "WatchwordEnvelope", "WatchwordStore", "SecureMemory"]
         ),
 
+        // Shared vaults: the signed membership chain, fingerprint verification and pinned contacts, invitations, key
+        // grants, and rotation on removal or departure (§8; milestone 4). Portable: real cryptography through
+        // WatchwordCrypto, storage and the key directory through ports. Not yet wired into VaultSession or sync.
+        .target(
+            name: "WatchwordSharing",
+            dependencies: ["WatchwordEnvelope", "WatchwordCrypto", "SecureMemory", crypto]
+        ),
+
         // Breach checking, strength, reuse and the report behind them (§13; milestone 6). Portable: the network is the
         // `HTTPClient` port, time and randomness are passed in, and the only cryptography is SHA-1 for the Pwned
         // Passwords range API and HMAC for the in-memory reuse index. It knows nothing of the session or the store.
@@ -100,7 +109,8 @@ let package = Package(
             name: "WatchwordTestSupport",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordStore", "WatchwordSync", "WatchwordEnvelope",
-                "WatchwordAutoFill", "WatchwordMatching", "WatchwordHygiene", "SecureMemory",
+                "WatchwordAutoFill", "WatchwordMatching", "WatchwordHygiene", "SecureMemory", "WatchwordCrypto",
+                "WatchwordSharing",
             ]
         ),
 
@@ -151,6 +161,13 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "WatchwordSharingTests",
+            dependencies: [
+                "WatchwordSharing", "WatchwordCrypto", "WatchwordEnvelope", "SecureMemory", "WatchwordTestSupport",
+                crypto,
+            ]
+        ),
+        .testTarget(
             name: "WatchwordPlatformTests",
             dependencies: ["WatchwordPlatform", "WatchwordKit", "SecureMemory", "WatchwordTestSupport"]
         ),
@@ -160,8 +177,8 @@ let package = Package(
             name: "WatchwordAdversarialTests",
             dependencies: [
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
-                "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordKit", "WatchwordPlatform",
-                "WatchwordAutoFill", "WatchwordHygiene", "WatchwordTestSupport", crypto,
+                "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordSharing", "WatchwordKit",
+                "WatchwordPlatform", "WatchwordAutoFill", "WatchwordHygiene", "WatchwordTestSupport", crypto,
             ]
         ),
     ],

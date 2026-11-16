@@ -24,7 +24,7 @@ Apple SDK boundary described in `09-cloud-sessions.md` §1.
 | 1 — cryptographic core (done) | Yes since ADR 0006: every crypto suite runs, against swift-crypto's BoringSSL | The implementation that ships (CryptoKit, CommonCrypto), Security.framework |
 | 2 — local vault and unlock (done) | No | Keychain, LocalAuthentication, App Group container, PDF generation, the `Apps/` project, XCUITest, on-device QuickType |
 | 3 — sync (portable half and vault side done) | The change log, Lamport merge and multi-client simulation — done, with signing and encryption behind a port | done: the production keyring in `VaultSession`, SQLite sync state, the conflict UI and its XCUITest; open: `CloudKitTransport`/`CKSyncEngine`, the iCloud Drive container, the manual CloudKit workflow |
-| 4 — sharing | No | Ed25519 and HPKE under the membership chain, `CKShare`, `UICloudSharingController`/`NSSharingService` |
+| 4 — sharing (protocol core done) | The protocol core — membership chain, verified contacts, invitations, key grants, rotation plans — with real Ed25519 and HPKE through swift-crypto (ADR 0006), and its adversarial suite | the implementation that ships (CryptoKit); wiring into `VaultSession` and sync; `CKShare`, `UICloudSharingController`/`NSSharingService`, the folder-share flow; the sharing UI |
 | 5 — AutoFill (portable core done) | The request model, TOTP, the passkey authenticator and identity planning — done, behind a vault port with fakes | AuthenticationServices, app-extension targets, `VaultSession`'s conformance, simulator and device QA |
 | 6 — hygiene (portable core done) | HIBP clients, scheduling, strength estimator, reuse/age/2FA checks, the report and `HygieneEngine` — done | open: the `URLSession` adapter, the wiring into `VaultSession`, background-task glue, the Watchtower-style report UI and its snapshot tests |
 | 7 — interchange | Parsers, adversarial parser tests, and the fuzz targets — a better host for them | Credential Exchange on iOS 26/macOS 26, the encrypted Watchword archive |
@@ -186,7 +186,7 @@ half delivered** on a Mac; the transports are open.
   records of its own, so the never-pruned history (F1.4) no longer counts against an item's 1 MiB payload. The device
   registry (D9) must land before sync ships.
 
-## Milestone 4 — Sharing
+## Milestone 4 — Sharing (protocol core done; integration open)
 
 - `WatchwordSharing`: membership chain, invitations, fingerprints, rotation on removal/leave,
   read-only enforcement in the client; CloudKit `CKShare` and `UICloudSharingController`/
@@ -194,11 +194,56 @@ half delivered** on a Mac; the transports are open.
 - Exit: S3 and S4 pass end-to-end with two simulated users over `InMemorySyncTransport` and over
   CloudKit (manual workflow); adversarial tests for forged membership, stale-admin signatures,
   key substitution by the server, and post-revocation access.
-- Environment: **Mac.** Membership records are Ed25519-signed and wrap vault keys with HPKE, so even
-  the chain-walking logic cannot be tested on Linux; the adversarial tests named above — forged
-  membership, stale-admin signatures, key substitution, post-revocation access — are precisely the
-  ones that need real primitives rather than fakes. `CKShare` and the sharing controllers add the UI
-  half.
+- Environment: the protocol core was built and tested on **Linux**, which ADR 0006 made possible after this plan
+  was first written: Ed25519 and HPKE run there through swift-crypto, so the chain-walking logic and the adversarial
+  tests use real primitives, not fakes. Everything else is **Mac**: CryptoKit (the implementation that ships),
+  `CKShare`, the sharing controllers and the UI.
+
+**Delivered: the protocol core** (`02-architecture.md` §8), in `WatchwordSharing`, depending only on
+`WatchwordEnvelope`, `WatchwordCrypto` and `SecureMemory`:
+
+- the membership chain: `MembershipRecord` (canonical binary, bounded parser), `MembershipRules` (who may sign what),
+  `MembershipLedger` (verification from the pinned owner and the records already held; a grow-only tree of valid
+  records with the accepted chain a deterministic function of it, so concurrent administrators and any order of
+  arrival settle the same way everywhere; removals that lose a fork owed and carried out again; proposal status;
+  signed persistence), `writePermission` and `writeStanding` (F4.5): whether an account may write now, and which of
+  its writes count once it may not, by the **write cut** that the record ending its permission carries, the same on
+  every device;
+- fingerprint verification: the typed safety number and the scannable `FingerprintCode`, `VerifiedContacts` (signed
+  pins behind the `VerifiedContactStore` port), the `KeyBundleDirectory` port, and both sides of an invitation
+  (`OutgoingInvitation`, `IncomingInvitation`) as state machines that cannot wrap or accept a key before the
+  fingerprint is confirmed (F4.1, F4.2), and `MemberKeyCheck`, the comparison of a chain's member keys with the
+  pins that anything wrapping a key must present;
+- key grants: `KeyGrantCodec`, and `MembershipLedger.grantSender`/`openGrant`, which accept a grant only from the
+  account the chain entitles;
+- removal, leaving and rotation: `RotationPlanner`, `RotationPlan` (data, signed, resumable), `LeaveRequest`,
+  `PendingRotation` (F4.3, F4.4), and `recordsToReseal`; the per-item-keys question decided against (ADR 0007,
+  closing D10);
+- tests: unit suites for every encoding and transition, known answers from an independent Python implementation,
+  the two- and three-member simulation over a hostile store (`SharingScenarioTests`: S3 and S4 at the protocol
+  level), and the adversarial area "sharing and membership" (`04-test-plan.md` §6.4). Reviewed three times:
+  `06-adversarial-review.md` §I (S1 to S16 by the author, S17 to S27 from independent reviews, S28 from the final
+  verification and S29 to S31 from the work on it, each fixed with a regression test or recorded as accepted).
+
+Verified on Linux only (swift-crypto over BoringSSL). A macOS run against CryptoKit is still owed; the one place
+the two are known to differ, randomised Ed25519 signing, is why bundles are compared by key rather than by value.
+
+**Still open:**
+
+- Integration into `VaultSession`: a ledger, keys, at most one rotation plan and the pending proposals per shared
+  vault; the sync pass of `02-architecture.md` §8.8 during `sync()` (`SimulatedMember` is its reference);
+  `writeStanding(of:)` and the member's signing key from the ledger in `SyncKeyring.verify`; **the write cut over
+  sync's own objects** (`02-architecture.md` §8.8: bound to segments by digest, applied to each value's own author
+  through its `GroupStamp` and the device registry, and taken out of what was already merged; until this exists,
+  review finding S28 is closed in the module and open in the product); re-sealing through `ItemMerge.written`;
+  SQLite adapters for
+  `VerifiedContactStore`, the saved ledger, the saved plan and the pending proposals. It depends on the session holding more than one vault
+  and on the device registry (D9), which is why this milestone stopped at the protocol.
+- The transports' own sharing: `CKShare` with `UICloudSharingController`/`NSSharingService`, the folder-share flow
+  for the file transport, and the key directory's adapter (the account record).
+- The sharing UI: invitation and fingerprint screens (safety number, QR display and scan), the member list with
+  unverified members shown as such (D17), "pending rotation" (F4.3), and the wording F4.3 and F4.5 require.
+- Scenarios S3 and S4 end to end through `VaultSession` over `InMemorySyncTransport`, and the manual CloudKit run.
 
 ## Milestone 5 — AutoFill
 

@@ -9,9 +9,10 @@ synced through the user's own iCloud (or any file-based cloud). The repository i
 phase**: `docs/` is the primary deliverable, and `Sources/` holds the milestone-0 pure modules, the
 milestone-1 cryptographic core, milestone 2's local vault (`WatchwordStore`, `WatchwordKit`,
 `WatchwordPlatform`), milestone 3's sync (`WatchwordSync`, and the production keyring in `VaultSession`) short of
-its CloudKit and iCloud Drive transports, milestone 5's portable AutoFill core (`WatchwordAutoFill`) short of the
-extension adapter, and milestone 6's portable hygiene core (`WatchwordHygiene`) short of its network adapter,
-session wiring and UI. `Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
+its CloudKit and iCloud Drive transports, milestone 4's sharing protocol core (`WatchwordSharing`), which nothing
+calls yet, milestone 5's portable AutoFill core (`WatchwordAutoFill`) short of the extension adapter, and
+milestone 6's portable hygiene core (`WatchwordHygiene`) short of its network adapter, session wiring and UI.
+`Apps/project.yml` is the XcodeGen spec for the iOS and macOS apps, their
 AutoFill extension shells and the UI tests; the generated `.xcodeproj`, Info.plists and entitlements
 are not committed.
 
@@ -123,7 +124,7 @@ simulator and the Xcode MCP server.
 `Foundation`, `Testing` and `XCTest`, which is the sole reason they are testable on Linux. Treat that portability as a
 property to keep: `WatchwordSync` reaches keys only through its `SyncKeyring` and `RecordMerger` ports, and the day it
 imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMemoryRecordStore` and `WatchwordKit`'s
-policies and ports are portable too, and so are `WatchwordCrypto`, `VaultSession` and `WatchwordAutoFill` through
+policies and ports are portable too, and so are `WatchwordCrypto`, `WatchwordSharing`, `VaultSession` and `WatchwordAutoFill` through
 swift-crypto (ADR 0006);
 `SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and all of
 `WatchwordPlatform` are not. `WatchwordHygiene` is wholly portable: it imports `Foundation`, `Crypto`, `SecureMemory`
@@ -136,7 +137,7 @@ Read `docs/02-architecture.md` before changing anything security-relevant; its s
 cited throughout the code. `docs/01-prd.md` requirement IDs (`F6.6`, `SEC6`, …) are the other half of
 that vocabulary and appear in doc comments.
 
-Twelve shipped modules, dependency-ordered, plus test support:
+Thirteen shipped modules, dependency-ordered, plus test support:
 
 - **`WatchwordModel`** — pure data types (`Item`, `Field`, `ServiceScope`). No dependencies.
 - **`WatchwordMatching`** — the AutoFill security boundary. Depends on `WatchwordModel`.
@@ -157,6 +158,15 @@ Twelve shipped modules, dependency-ordered, plus test support:
   line-level `NoteText`, `ItemRecordMerger` (the one item merger, over an `ItemSealer`), `SyncEngine`,
   `DeletionRecordingStore`, and `SQLiteSyncStateStore` (`sync.sqlite`, beside the record store). Depends on
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
+- **`WatchwordSharing`** — milestone 4's protocol core for shared vaults: the signed membership chain
+  (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `writePermission`, `writeStanding` and the
+  `WriteCut`, `status(of:)`), fingerprint
+  verification (`FingerprintCode`, `VerifiedContacts` and its `VerifiedContact` token, `MemberKeyCheck`), both sides
+  of an invitation, key grants (`KeyGrantCodec`, `grantSender`/`openGrant`), `LeaveRequest`, and rotation as data
+  (`RotationPlanner`, `RotationPlan`, `PendingRotation`, `recordsToReseal`). Ports: `KeyBundleDirectory`,
+  `VerifiedContactStore`. Depends on `WatchwordEnvelope`, `WatchwordCrypto` and `SecureMemory`; not on
+  `WatchwordSync` or `WatchwordKit`, and nothing depends on it yet (`docs/02-architecture.md` §8.8 is what the
+  integration will call).
 - **`WatchwordHygiene`** — milestone 6's portable core: `PwnedPasswordsClient` (the k-anonymity range API) and
   `BreachedAccountClient` over the `HTTPClient` port, the `PwnedRangeCache` port, `ScanSchedule`/`ScanLedger` (when to
   check, as a value), `StrengthEstimator` (zxcvbn-class, with embedded word lists), `ReuseIndex`, `ItemAnalyzer`,
@@ -180,12 +190,14 @@ Twelve shipped modules, dependency-ordered, plus test support:
   checksum that is not cryptography, `FakeItemMerger`, `SyncTestClient`, `SimulatedServer`; for AutoFill
   `FakeCredentialVault`, `FakeCredentialIdentityPublisher`, `AutoFillHarness` and the S1 to S4 items in
   `AutoFillFixtures`; for hygiene `FakeHTTPClient`, which records every request, `RecordingPwnedRangeCache`,
-  `SimulatedPwnedPasswords`). Test targets only; not a product, and no production target may depend on it.
+  `SimulatedPwnedPasswords`; for sharing, with real keys, `HostileSharingStore`, `SimulatedMember` (the reference
+  for the integration's sync pass, §8.8), `SharingHousehold` and `ForgedRecord`, an encoder of its own for records
+  the module would never sign). Test targets only; not a product, and no production target may depend on it.
 
-`docs/02-architecture.md` §15 lists the modules still to come (`WatchwordSharing`,
-`WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
+`docs/02-architecture.md` §15 lists the module still to come (`WatchwordInterchange`) and which milestone each belongs to; §7.5 describes sync as built, and
 §7.6 the vault side (keyring, saves, state, conflict UI); `docs/03-implementation-plan.md` milestone 3 lists what is
-still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds). §13 describes hygiene as
+still open (CloudKit and iCloud Drive transports, enrolment, sync in production builds). §8 describes sharing as
+built, and milestone 4 what is open there (wiring into `VaultSession` and sync, `CKShare`, the UI). §13 describes hygiene as
 built, and milestone 6 what is still open (the `URLSession` adapter, session wiring, background glue, the report UI).
 
 ### `WatchwordHygiene` invariants
@@ -275,6 +287,66 @@ built, and milestone 6 what is still open (the `URLSession` adapter, session wir
   Keychain's `accountSigningKey` copy, and with no trusted key every object is refused (`trustedKeyUnavailable`).
 - Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
   `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
+
+### `WatchwordSharing` invariants
+
+- **The owner is fixed** (never removed, never re-roled), and **the administrator set changes only in records the
+  owner signed**: adding, removing or re-roling an administrator and deleting the vault are owner-only
+  (`MembershipRules.authorise`). The fork rule and "nobody can be locked out" both rest on these two; do not add an
+  operation that breaks either (ownership transfer needs a new design, not a new case).
+- A record is verified against the state *before* it, and the signer's key comes from that state, never from the
+  record. Cheap checks first, then the signature, and only then anything the record brought with it (a new member's
+  bundle, a leave request). The member list in a record must equal the previous list with the operation applied.
+- A removal or departure always names a vault key ID the chain has never used; nothing but those and `rotateKey`
+  changes the key (principle 5; ADR 0007: rotation re-encrypts, there are no per-item keys).
+- **The ledger is a grow-only set of valid records, and the accepted chain is a pure function of it**
+  (`MembershipLedger.resolve`): records that lose a fork are kept (`branches`, bounded, persisted), `ingest` only
+  ever adds, never throws for count and never depends on order or batching. A change that makes the result depend on
+  the order of arrival breaks convergence; `LongRunningMembershipForkTests` is the property test.
+- **Fork rule**: most owner-signed records on the path, then most records, then the lower hash where two such
+  paths part. Owner-signed first, because a hash-only or length-only rule lets a former administrator rewrite history
+  from before their removal (S1); length before hash, so a record signed on a stale head and released late displaces
+  nothing built since (S18, S19).
+- **Removal wins**: a removal on a losing branch whose signer may still remove that member is owed
+  (`owedRemovals`): the member's writes count only as far as that record's cut, `recordsToReseal` is empty, and
+  any device that may sign it
+  plans it again. Everything else that loses is proposed again by its author (`status(of:)`); a device ingests
+  before it proposes and never publishes a record that is not `awaitingPublication`.
+- A record's hash covers its signed content, not its signature; candidates sharing a hash are each examined until
+  one verifies (S3, S4). Every object *name* ends in a digest of the whole object, signature included, so nobody can
+  take a predictable record's name (S20).
+- Cheap checks, then the signature, then anything that costs work: unsigned junk costs one signature check, and no
+  examination is bounded by a count that junk can fill (ledger candidates, grants, leave requests).
+- Nothing is wrapped to, and no chain is anchored on, a bundle that is not a `VerifiedContact`; only
+  `VerifiedContacts` makes one. Keep that typing, as with `NormalizedHost`. Wrapping to the bundles a chain lists
+  (a rotation, `makeGrant`) takes a `MemberKeyCheck` made on the current head, which only
+  `MembershipLedger.checkMemberKeys` makes: a member whose listed keys differ from the pin is refused.
+  (`MemberKeyCheck.unchecked` is for `WatchwordTestSupport`; no production target calls it.)
+- Bundles are compared with `hasSameKeys`, never `==`: Ed25519 signing is randomised on CryptoKit, so the same keyset
+  gives a different self-signature each time. A Linux pass cannot show a mistake here.
+- A grant's vault, key ID and recipient come from its storage location, and its sender must be the one account
+  `grantSender` names: the signer of the record that entitled the recipient to that key. Not "any administrator".
+- Read-only and "former member" are client rules, not cryptography (F4.5). `writePermission(for:)` is for a
+  device's own writes; for anyone else's, `writeStanding(of:)`: everything an account signed while it may write
+  *now*, and once it may not, exactly what is inside the `WriteCut` of the record that ended it. That record (a
+  removal or departure of a member who could write, a change to read-only) and no other carries a cut, signed, so
+  every device applies the same one **whenever it heard of the record**: a write outside it is taken out again by a
+  device that had merged it, held aside, and never published on (S28). "Judged when merged, merged for good" is the
+  rule this replaced; do not bring it back, and do not judge a version only by who signed its envelope (it may
+  carry another account's work). The cut's bytes are the integrator's (§8.8 says what they must bind).
+- While a removal is owed, the displaced record's cut is believed only if that record and the one holding the cut
+  were signed by accounts that could sign them on the accepted head; a former administrator's dead branch decides
+  nothing about a member's writes (S29).
+- An invitation to a vault the device ever held continues that ledger (`accept(…, continuing:)`); it is never
+  rebuilt from the store (S26).
+- Local state is signed by the account's own key and re-verified on load (pins, the saved ledger, a rotation plan);
+  a plan's object names and the account it removes are derived again from its signed contents. One that does not
+  verify is ignored or refused.
+- Every signature here uses `SignatureDomain.membership`, and every signed message starts with its own magic
+  (`WWMR`, `WWLR`, `WWCP`, `WWML`, `WWRP`). A new signed message needs a new magic.
+- Every parser is bounded and exact (size before copying, counts before allocating, one canonical encoding); the
+  module imports no `WatchwordSync` or `WatchwordKit`, and its transport names live under `sharing/`, outside what
+  the sync engine lists.
 
 ### `VaultSession` invariants
 
@@ -455,7 +527,7 @@ directions are tested; keep both when adjusting constants.
   (`"envelope and KDF"`, `"AutoFill service matching"`, `"password generator"`,
   `"AutoFill request model"`, `"phishing resistance"`, `"crypto core"`, `"unlock and quick unlock"`,
   `"local vault store"`, `"Keychain item protection"`, `"sync log"`, `"sync with real keys"`,
-  `"hygiene and breach checks"`), so **renaming a suite breaks CI deliberately** — update
+  `"hygiene and breach checks"`, `"sharing and membership"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks.
 - Any PR touching crypto, envelope, sharing, `SecureMemory`, or a Keychain/LocalAuthentication
@@ -467,7 +539,8 @@ directions are tested; keep both when adjusting constants.
 - `WATCHWORD_LONG_TESTS=1` and `WATCHWORD_TEST_SEED` are the nightly workflow's knobs for extended
   randomised runs; new long-running tests should honour them via `TestEnvironment`. `test:long` runs the
   adversarial target plus any test whose identifier contains `LongRunning` (the sync simulation is
-  `LongRunningSyncSimulationTests`), so name a new randomised suite that way to have the nightly widen it.
+  `LongRunningSyncSimulationTests`, the membership ledger's convergence property `LongRunningMembershipForkTests`),
+  so name a new randomised suite that way to have the nightly widen it.
 - Known-answer vectors come from the RFC that defines the primitive, or from an independent
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 

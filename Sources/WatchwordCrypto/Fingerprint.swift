@@ -12,7 +12,9 @@ public struct Fingerprint: Sendable, Equatable {
     public static let groupCount = 12
     static let domain = Array("WW-fingerprint-v1".utf8)
 
-    let digest: [UInt8]
+    /// The 60 digest bytes. `package` so `WatchwordSharing` can put them in a scannable code (`FingerprintCode`); not
+    /// public, so nothing outside the package compares fingerprints except through `==`.
+    package let digest: [UInt8]
 
     init(accountID: UUID, agreementKey: [UInt8], signingKey: [UInt8]) {
         var hasher = SHA512()
