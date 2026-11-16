@@ -40,7 +40,7 @@ final class ScreenshotTourTests: XCTestCase {
 
         // The Emergency Kit. The tap on the key does nothing; it waits for the keyboard to have gone.
         let secretKey = app.staticTexts["kit.secretKey"]
-        XCTAssertTrue(secretKey.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(secretKey.waitForExistence(timeout: 15), app.debugDescription)
         secretKey.click()
         Screens.capture(
             "emergency-kit", in: app, showing: "The Emergency Kit: the test account's Secret Key, before confirming")
@@ -116,11 +116,11 @@ final class ScreenshotTourTests: XCTestCase {
         unlock.click()
         Screens.capture("locked", in: app, showing: "The locked app")
         unlock.typeText("not the password\n")
-        XCTAssertTrue(app.staticTexts["error"].waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["error"].waitForExistence(timeout: 15), app.debugDescription)
         Screens.capture("unlock-failed", in: app, showing: "The locked app after a wrong password")
         unlock.click()
         unlock.typeText(password + "\n")
-        XCTAssertTrue(app.itemRow("Library").waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.itemRow("Library").waitForExistence(timeout: 15), app.debugDescription)
 
         // Settings. A --uitest launch adds the section that drives the other device; a release build has none.
         app.openSettings()
@@ -129,7 +129,7 @@ final class ScreenshotTourTests: XCTestCase {
         // The item is published, renamed on the other device, and renamed here before this device has seen that.
         app.syncNow()
         app.buttons["debug.peerRename"].click()
-        XCTAssertTrue(app.staticTexts["debug.peerStatus"].waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["debug.peerStatus"].waitForExistence(timeout: 15), app.debugDescription)
         app.closeSettings()
         app.itemRow("Library").firstMatch.click()
         let edit = app.buttons["detail.edit"].firstMatch
@@ -190,7 +190,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.tap(AccessibilityID.Vault.invite)
         app.tap(AccessibilityID.Invite.uiTestFill)
         app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).waitForExistence(timeout: 30))
+        XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).waitForExistence(timeout: 15))
         app.element(AccessibilityID.Invite.safetyNumber).click()
         Screens.capture(
             "invite-fingerprint", in: app, showing: "Inviting: the other person's safety number, to compare first")
@@ -198,7 +198,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
         app.tap(AccessibilityID.Invite.confirm)
         app.tap(AccessibilityID.Invite.send)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.code).waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.code).waitForExistence(timeout: 15), app.debugDescription)
         app.element(AccessibilityID.Invite.code).click()
         Screens.capture("invite-code", in: app, showing: "The invitation to send, once the numbers were compared")
         // Done closes the whole screen from here; the invitation screen's own Done only goes back a step.
@@ -212,7 +212,7 @@ final class ScreenshotTourTests: XCTestCase {
             NSPredicate(
                 format: "identifier BEGINSWITH %@ AND NOT identifier ENDSWITH %@", "vault.member.Member ", ".role")
         ).firstMatch
-        XCTAssertTrue(member.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(member.waitForExistence(timeout: 15), app.debugDescription)
         Screens.capture(
             "vault-members", in: app, showing: "The shared vault's members: the owner and the person invited")
         app.closeScreen()
@@ -239,11 +239,11 @@ final class ScreenshotTourTests: XCTestCase {
         app.syncNow(expecting: "held for review")
         app.openScreen(AccessibilityID.Settings.quarantine)
         XCTAssertTrue(
-            app.element(AccessibilityID.Quarantine.row(0)).waitForExistence(timeout: 30), app.debugDescription)
+            app.element(AccessibilityID.Quarantine.row(0)).waitForExistence(timeout: 15), app.debugDescription)
         Screens.capture("quarantine", in: app, showing: "A change held aside, with its item, vault and device")
         app.tap(AccessibilityID.Quarantine.discard(0))
         app.confirm("Discard")
-        XCTAssertTrue(app.element(AccessibilityID.Quarantine.empty).waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.element(AccessibilityID.Quarantine.empty).waitForExistence(timeout: 15), app.debugDescription)
         app.closeScreen()
     }
 
@@ -256,7 +256,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.addLogin(title: "Shop", host: "shop.example", username: "pat", password: "password")
         app.openScreen(AccessibilityID.Settings.hygiene)
         app.tap(AccessibilityID.Hygiene.checkNow)
-        app.waitForText("checked", in: AccessibilityID.Hygiene.status, timeout: 60)
+        app.waitForText("checked", in: AccessibilityID.Hygiene.status, timeout: 20)
         XCTAssertTrue(app.element(AccessibilityID.Hygiene.section("breached")).waitForExistence(timeout: 10))
         Screens.capture(
             "security-report", in: app, showing: "The security report: a breached password, reused by two items")
@@ -270,13 +270,13 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.element(AccessibilityID.Import.vault).waitForExistence(timeout: 10))
         Screens.capture("import", in: app, showing: "Importing: the vault and the other app's format")
         app.tap(AccessibilityID.Import.uiTestSample)
-        XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).waitForExistence(timeout: 30))
+        XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).waitForExistence(timeout: 15))
         app.element(AccessibilityID.Import.duplicate("Library")).click()
         Screens.capture("import-review", in: app, showing: "The import's review: a duplicate waiting for a choice")
         app.tap(AccessibilityID.Import.choice("Library") + ".merge")
         app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
         let host = app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch
-        XCTAssertTrue(host.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(host.waitForExistence(timeout: 15), app.debugDescription)
         Screens.capture(
             "import-merge", in: app,
             showing: "A merge naming the website and sign-in details it would add, none accepted, the password hidden")
@@ -308,7 +308,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.enter("garden shed padlock", into: AccessibilityID.Import.passphrase)
         app.tap(AccessibilityID.Import.uiTestArchive)
         XCTAssertTrue(
-            app.element(AccessibilityID.Import.archiveDate).waitForExistence(timeout: 60), app.debugDescription)
+            app.element(AccessibilityID.Import.archiveDate).waitForExistence(timeout: 20), app.debugDescription)
         app.element(AccessibilityID.Import.archiveDate).click()
         Screens.capture("restore-review", in: app, showing: "Restoring a backup: the date it was made, first")
         app.closeScreen()
@@ -330,19 +330,19 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(unlock.waitForExistence(timeout: 10), app.debugDescription)
         unlock.click()
         unlock.typeText(password + "\n")
-        XCTAssertTrue(app.element(AccessibilityID.Unlock.passwordChanged).waitForExistence(timeout: 30))
+        XCTAssertTrue(app.element(AccessibilityID.Unlock.passwordChanged).waitForExistence(timeout: 15))
         unlock.click()
         Screens.capture(
             "unlock-password-changed", in: app, showing: "The old password refused, and the way out if that was not you"
         )
         unlock.typeText(password)
         app.tapWhenEnabled(AccessibilityID.Unlock.ignoreChange)
-        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 15), app.debugDescription)
 
         app.openScreen(AccessibilityID.Settings.devices)
         let other = UITestNames.otherDevice
         XCTAssertTrue(
-            app.element(AccessibilityID.Devices.row(other)).waitForExistence(timeout: 30), app.debugDescription)
+            app.element(AccessibilityID.Devices.row(other)).waitForExistence(timeout: 15), app.debugDescription)
         Screens.capture("devices", in: app, showing: "The account's devices, with the other one's password change")
         app.tap(AccessibilityID.Devices.revoke(other))
         app.enter(password, into: AccessibilityID.Devices.current)

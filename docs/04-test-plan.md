@@ -103,9 +103,9 @@ with password re-entry, import of 1PUX/CSV fixtures.
 - The account screens (vaults and sharing, devices, the quarantine, the security report, import, export and
   restore) add, on both platforms: `VaultSharingTests` (a vault created, renamed and shared; the other person's
   safety number shown and confirmed before a role is offered; the invitation issued, accepted by `UITestPeer`'s
-  second account and the member listed with the role given), `DeviceRevocationTests` (the other device listed and
-  removed with a new password, which then unlocks; a password changed on the other device announced after a sync,
-  the old one refused with the way out shown, the new one accepted), `QuarantineTests` (a version jumping past the
+  second account and the member listed with the role given), `DeviceRevocationTests` (a password changed on the other device announced after a sync, the
+  old one refused with the way out shown and taken, then that device removed with a new password, which then
+  unlocks), `QuarantineTests` (a version jumping past the
   launch's ceiling held aside, listed by item and discarded only through the confirmation) and `ImportExportTests`
   (an import whose duplicate must be decided first, a merge naming the `www` host it would add, off until accepted,
   with the password hidden; a CSV export's report and the standing warning; a backup restored with its date shown;
@@ -121,8 +121,10 @@ with password re-entry, import of 1PUX/CSV fixtures.
   uses it. The steps they share (`AccountScreenSteps.swift`) are platform-aware: on iOS a form is scrolled by
   swiping; on macOS by a scroll-wheel event on the scroll view that holds the target, or else the frontmost sheet's,
   never one a sheet covers (the first macOS run failed with "unable to find hit point" scrolling the main window under
-  Settings). Opening and closing a screen retry a click that did not take, and every such failure attaches the whole
-  element tree (`attachTree`), kept whether or not the test passes. Sheets the account screens open close by clearing
+  Settings). Opening and closing a screen retry a click that did not take, Sync Now and the UI-test hooks work from any
+  screen (an open account screen is closed and Settings opened first), waits are bounded (a missing element fails in
+  seconds), and every such failure attaches the whole element tree (`attachTree`), kept whether or not the test
+  passes. To keep the iOS job short, `DeviceRevocationTests` and `ImportExportTests` are one launch each. Sheets the account screens open close by clearing
   their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS.
 - Their logic is tested on Linux without a simulator: every account screen's state and decisions are a model in
   `WatchwordPresentation` (`02-architecture.md` §15), and `WatchwordPresentationTests` drives those models over real

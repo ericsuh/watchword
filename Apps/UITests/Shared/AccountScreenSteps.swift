@@ -8,19 +8,36 @@ extension XCUIApplication {
         descendants(matching: .any)[identifier].firstMatch
     }
 
-    /// The element with `identifier`, scrolled to if it is not on screen yet: a form's rows below the fold are not in
-    /// the hierarchy until they have been shown, and on macOS a row that is in the hierarchy may still be clipped.
+    /// Where a form's target is likely to be, so that `reveal` scrolls that way first.
+    enum FormPosition {
+        /// Near the top (Settings' Sync Now and UI-test section): scroll back up only.
+        case top
+        /// Below the fold (Settings' account rows, a review's last buttons): scroll down only.
+        case below
+        /// Either: down a little first, then up.
+        case anywhere
+    }
+
+    /// The element with `identifier`, scrolled to if it is not on screen yet: a form's rows out of view are not in the
+    /// hierarchy until they have been shown, and on macOS a row that is in the hierarchy may still be clipped. Bounded:
+    /// a few short waits and at most eight scrolls, so a missing element fails in seconds, with the tree attached.
     @discardableResult
-    func reveal(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+    func reveal(
+        _ identifier: String, at position: FormPosition = .anywhere, file: StaticString = #filePath, line: UInt = #line
+    ) -> XCUIElement {
         let target = element(identifier)
-        if !target.waitForExistence(timeout: 3) || !target.isHittable {
-            // Down the form first, then back up past where it started.
-            for towardsEnd in [true, true, true, true, false, false, false, false, false, false, false, false]
-            where !(target.exists && target.isHittable) {
+        if !(target.waitForExistence(timeout: 2) && target.isHittable) {
+            let steps: [Bool]
+            switch position {
+            case .top: steps = Array(repeating: false, count: 6)
+            case .below: steps = Array(repeating: true, count: 6)
+            case .anywhere: steps = [true, true, true, false, false, false, false, false]
+            }
+            for towardsEnd in steps where !(target.exists && target.isHittable) {
                 scroll(towardsEnd: towardsEnd, to: identifier)
             }
         }
-        if !target.waitForExistence(timeout: 10) {
+        if !target.waitForExistence(timeout: 2) {
             attachTree("reveal \(identifier)")
             XCTFail("\(identifier) was not found", file: file, line: line)
         }
@@ -62,16 +79,26 @@ extension XCUIApplication {
         return XCTWaiter().wait(for: [hittable], timeout: timeout) == .completed
     }
 
+    /// Settings, from wherever the test is: an account screen's sheet is closed first, and Settings opened if it is
+    /// not open.
+    func showSettings(file: StaticString = #filePath, line: UInt = #line) {
+        if buttons[AccessibilityID.screenDone].firstMatch.exists { closeScreen(file: file, line: line) }
+        if !buttons["settings.done"].exists {
+            backToList()
+            openSettings()
+        }
+    }
+
     /// Opens Settings and, from it, the account screen whose row has `identifier`, which opens in a sheet of its own.
     /// A click that did not open it (one made while Settings was still settling) is made once more.
     func openScreen(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
-        if !buttons["settings.done"].exists { openSettings() }
+        showSettings(file: file, line: line)
         let done = buttons[AccessibilityID.screenDone].firstMatch
         for _ in 0..<2 {
-            let row = reveal(identifier, file: file, line: line)
-            waitUntilHittable(row)
+            let row = reveal(identifier, at: .below, file: file, line: line)
+            waitUntilHittable(row, timeout: 3)
             row.click()
-            if done.waitForExistence(timeout: 10) { return }
+            if done.waitForExistence(timeout: 5) { return }
         }
         attachTree("open \(identifier)")
         XCTFail("\(identifier) did not open its screen", file: file, line: line)
@@ -81,15 +108,15 @@ extension XCUIApplication {
     /// (a sheet of its own closing) to have gone first, and clicks again if the first click did not take.
     func closeScreen(file: StaticString = #filePath, line: UInt = #line) {
         let done = buttons[AccessibilityID.screenDone].firstMatch
-        guard done.waitForExistence(timeout: 10) else {
+        guard done.waitForExistence(timeout: 5) else {
             attachTree("close the screen")
             XCTFail("no screen is open", file: file, line: line)
             return
         }
-        for _ in 0..<3 {
-            waitUntilHittable(done)
+        for _ in 0..<2 {
+            waitUntilHittable(done, timeout: 3)
             done.click()
-            if done.waitForNonExistence(timeout: 10) { return }
+            if done.waitForNonExistence(timeout: 5) { return }
         }
         attachTree("close the screen")
         XCTFail("the screen is still open", file: file, line: line)
@@ -104,7 +131,7 @@ extension XCUIApplication {
     func tapWhenEnabled(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
         let target = reveal(identifier, file: file, line: line)
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: target)
-        XCTAssertEqual(XCTWaiter().wait(for: [enabled], timeout: 30), .completed, "\(identifier) stayed disabled")
+        XCTAssertEqual(XCTWaiter().wait(for: [enabled], timeout: 15), .completed, "\(identifier) stayed disabled")
         target.click()
     }
 
@@ -125,7 +152,7 @@ extension XCUIApplication {
 
     /// Waits for the text with `identifier` to contain `text`.
     func waitForText(
-        _ text: String, in identifier: String, timeout: TimeInterval = 30, file: StaticString = #filePath,
+        _ text: String, in identifier: String, timeout: TimeInterval = 15, file: StaticString = #filePath,
         line: UInt = #line
     ) {
         let match = descendants(matching: .any).matching(identifier: identifier).matching(
@@ -137,9 +164,9 @@ extension XCUIApplication {
     /// Runs one of the Settings section's UI-test hooks (`UITestPeer`) and waits for its own report, which names what
     /// it did (`AppModel`'s hooks), so an earlier hook's line is not taken for this one's.
     func runPeerHook(_ identifier: String, expecting text: String, file: StaticString = #filePath, line: UInt = #line) {
-        if !buttons["settings.done"].exists { openSettings() }
-        tap(identifier, file: file, line: line)
-        waitForText(text, in: "debug.peerStatus", timeout: 60, file: file, line: line)
+        showSettings(file: file, line: line)
+        reveal(identifier, at: .top, file: file, line: line).click()
+        waitForText(text, in: "debug.peerStatus", timeout: 20, file: file, line: line)
     }
 
     /// An item with a website, a user name and a password typed in (or generated when `password` is nil).
@@ -176,7 +203,7 @@ extension XCUIApplication {
         XCTAssertTrue(unlock.waitForExistence(timeout: 10), debugDescription)
         unlock.click()
         unlock.typeText(password + "\n")
-        XCTAssertTrue(buttons["items.add"].waitForExistence(timeout: 30), debugDescription)
+        XCTAssertTrue(buttons["items.add"].waitForExistence(timeout: 15), debugDescription)
     }
 
     /// Launches a `--uitest` app for the account-screen tests and creates the account.

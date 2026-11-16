@@ -104,13 +104,18 @@ extension XCUIApplication {
     }
 
     /// Taps Sync Now and waits for a status that mentions `expecting`.
-    func syncNow(expecting: String = "sent") {
-        // Settings may be scrolled down from an account screen's row, and its top rows are then out of the hierarchy.
-        reveal("settings.syncNow").click()
+    /// From anywhere: an account screen is closed and Settings opened first, and Settings scrolled back to the top if
+    /// an account row had scrolled it down (its top rows are then out of the hierarchy).
+    func syncNow(expecting: String = "sent", file: StaticString = #filePath, line: UInt = #line) {
+        showSettings(file: file, line: line)
+        reveal("settings.syncNow", at: .top, file: file, line: line).click()
         let status = staticTexts.matching(identifier: "settings.syncStatus").matching(
             NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", expecting, expecting)
         ).firstMatch
-        XCTAssertTrue(status.waitForExistence(timeout: 30), debugDescription)
+        if !status.waitForExistence(timeout: 20) {
+            attachTree("sync expecting \(expecting)")
+            XCTFail("no sync status containing \(expecting)", file: file, line: line)
+        }
     }
 
     /// On iPhone the list and the detail are one navigation stack, and Settings lives on the list. On iPad and the

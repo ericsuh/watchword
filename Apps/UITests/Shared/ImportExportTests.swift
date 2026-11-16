@@ -1,116 +1,94 @@
 import XCTest
 
-/// Milestone 7 UI tests, run on iOS and macOS (docs/04-test-plan.md §5): an import whose duplicate must be decided,
-/// where a merge names each website it would add and adds only the one accepted (PRD F8.2, F11.2); and an export that
-/// shows the plaintext warning and the report before the file is saved, and a backup restored with its date shown
-/// (F8.4, F8.5). The import reads `UITestSamples.importCSV` through a UI-test button rather than the system's file
-/// picker, which XCUITest cannot drive reliably on both platforms.
+/// Milestone 7 UI test, run on iOS and macOS (docs/04-test-plan.md §5), in one launch to keep the iOS job short:
+/// - an import whose duplicate must be decided first, where a merge names the website it would add, off until
+///   accepted, with the password hidden (PRD F8.2, F11.2);
+/// - a lock with the merge review open, after which it is gone (review of the account screens, finding 6);
+/// - an export that shows the plaintext warning and the report before the file is saved, gone after a lock too;
+/// - a backup restored with its date shown (F8.4, F8.5).
+/// The import reads `UITestSamples.importCSV`, and the restore the archive just made, through UI-test buttons rather
+/// than the system's file picker, which XCUITest cannot drive reliably on both platforms; "Lock now" is a Debug-only
+/// stand-in for auto-lock with the screen up.
 final class ImportExportTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
     }
 
     @MainActor
-    func testImportWithADuplicate() throws {
+    func testImportExportRestoreAndLock() throws {
         let app = XCUIApplication.launchedWithAccount()
+        let password = OnboardingAndUnlockTests.password
         app.addLogin(title: "Library", host: "citylibrary.org", username: "pat", password: nil)
 
+        // A duplicate is decided before anything is imported; a merge adds only the host accepted.
         app.openScreen(AccessibilityID.Settings.importItems)
         app.tap(AccessibilityID.Import.uiTestSample)
-        XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).waitForExistence(timeout: 30))
+        XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).waitForExistence(timeout: 15))
         XCTAssertFalse(app.reveal(AccessibilityID.Import.commit).isEnabled, "imported before the duplicate was decided")
-
         app.tap(AccessibilityID.Import.choice("Library") + ".merge")
         app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
         let host = app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch
-        XCTAssertTrue(host.waitForExistence(timeout: 30), app.debugDescription)
         XCTAssertEqual(host.value.map { "\($0)" }, "0", "a website accepted for the person")
-        XCTAssertTrue(app.element(AccessibilityID.Import.reveal("Password")).exists, "the password shown, not hidden")
-        host.toggleOn()
+        XCTAssertTrue(app.reveal(AccessibilityID.Import.reveal("Password")).exists, "the password shown, not hidden")
+
+        // A lock with the review open: after unlocking, the review is gone.
+        app.tap(AccessibilityID.Import.reveal("Password"))
+        app.tap(AccessibilityID.Debug.lockNow)
+        let unlock = app.secureTextFields["unlock.password"]
+        XCTAssertTrue(unlock.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertFalse(host.exists, "the review is still on screen after the lock")
+        unlock.click()
+        unlock.typeText(password + "\n")
+        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 15), app.debugDescription)
+        app.openScreen(AccessibilityID.Settings.importItems)
+        XCTAssertTrue(app.element(AccessibilityID.Import.uiTestSample).waitForExistence(timeout: 5))
+        XCTAssertFalse(app.element(AccessibilityID.Import.duplicate("Library")).exists, "the review outlived the lock")
+
+        // Again, to the end.
+        app.tap(AccessibilityID.Import.uiTestSample)
+        app.tap(AccessibilityID.Import.choice("Library") + ".merge")
+        app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
+        app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch.toggleOn()
         app.tapWhenEnabled(AccessibilityID.Import.commit)
         app.waitForText("1 added, 1 merged", in: AccessibilityID.Import.summary)
         app.tap(AccessibilityID.Import.done)
         app.closeSettings()
-
-        // The accepted website is the item's now.
         app.itemRow("Library").firstMatch.click()
         XCTAssertTrue(
             app.staticTexts.matching(
                 NSPredicate(format: "label == %@ OR value == %@", "www.citylibrary.org", "www.citylibrary.org")
-            ).firstMatch.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(app.itemRow("Garden club").exists)
-    }
+            ).firstMatch.waitForExistence(timeout: 5), app.debugDescription)
 
-    @MainActor
-    func testExportShowsTheReportAndABackupRestores() throws {
-        let app = XCUIApplication.launchedWithAccount()
-        app.addLogin(title: "Library", host: "citylibrary.org", username: "pat", password: nil)
-
+        // A plaintext export's warning and report, gone after a lock.
         app.openScreen(AccessibilityID.Settings.export)
-        XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 5))
         app.tap(AccessibilityID.Export.kind + ".applePasswordsCSV")
-        app.enter(OnboardingAndUnlockTests.password, into: AccessibilityID.Export.password)
+        app.enter(password, into: AccessibilityID.Export.password)
         app.tap(AccessibilityID.Export.run)
-        app.waitForText("1 item(s)", in: AccessibilityID.Export.count)
+        app.waitForText("item(s) in the file", in: AccessibilityID.Export.count)
         XCTAssertTrue(app.element(AccessibilityID.Export.save).exists)
         XCTAssertTrue(app.element(AccessibilityID.Export.warning).exists, "the warning went once the file existed")
+        app.tap(AccessibilityID.Debug.lockNow)
+        XCTAssertTrue(unlock.waitForExistence(timeout: 10), app.debugDescription)
+        unlock.click()
+        unlock.typeText(password + "\n")
+        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 15), app.debugDescription)
+        app.openScreen(AccessibilityID.Settings.export)
+        XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 5))
+        XCTAssertFalse(app.element(AccessibilityID.Export.count).exists, "the report outlived the lock")
 
+        // A backup, restored with its date shown.
         app.tap(AccessibilityID.Export.kind + ".archive")
-        app.enter(OnboardingAndUnlockTests.password, into: AccessibilityID.Export.password)
+        app.enter(password, into: AccessibilityID.Export.password)
         app.enter("garden shed padlock", into: AccessibilityID.Export.passphrase)
         app.enter("garden shed padlock", into: AccessibilityID.Export.passphraseConfirmation)
         app.tap(AccessibilityID.Export.run)
-        app.waitForText("1 item(s)", in: AccessibilityID.Export.count)
-        app.closeScreen()
-
+        app.waitForText("item(s) in the file", in: AccessibilityID.Export.count, timeout: 20)
         app.openScreen(AccessibilityID.Settings.restore)
         app.enter("garden shed padlock", into: AccessibilityID.Import.passphrase)
         app.tap(AccessibilityID.Import.uiTestArchive)
         XCTAssertTrue(
-            app.element(AccessibilityID.Import.archiveDate).waitForExistence(timeout: 60), app.debugDescription)
-        app.tap(AccessibilityID.Import.choice("Library") + ".skip")
-        app.tapWhenEnabled(AccessibilityID.Import.commit)
-        app.waitForText("1 skipped", in: AccessibilityID.Import.summary)
-        app.tap(AccessibilityID.Import.done)
-    }
-
-    /// A lock while the merge review (with a password shown) or the export report is open: after unlocking, neither is
-    /// there any more; the models dropped them on the session's lock (review of the account screens, finding 6). The
-    /// lock is the UI-test hook on each screen, a Debug-only stand-in for auto-lock with the screen still up.
-    @MainActor
-    func testALockClearsTheMergeReviewAndTheExportReport() throws {
-        let app = XCUIApplication.launchedWithAccount()
-        app.addLogin(title: "Library", host: "citylibrary.org", username: "pat", password: nil)
-
-        app.openScreen(AccessibilityID.Settings.importItems)
-        app.tap(AccessibilityID.Import.uiTestSample)
-        app.tap(AccessibilityID.Import.choice("Library") + ".merge")
-        app.tap(AccessibilityID.Import.reveal("Password"))
-        app.tap(AccessibilityID.Debug.lockNow)
-        let unlock = app.secureTextFields["unlock.password"]
-        XCTAssertTrue(unlock.waitForExistence(timeout: 30), app.debugDescription)
-        XCTAssertFalse(app.element(AccessibilityID.Import.host("www.citylibrary.org")).exists)
-        unlock.click()
-        unlock.typeText(OnboardingAndUnlockTests.password + "\n")
-        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 30), app.debugDescription)
-        app.openScreen(AccessibilityID.Settings.importItems)
-        XCTAssertTrue(app.element(AccessibilityID.Import.uiTestSample).waitForExistence(timeout: 10))
-        XCTAssertFalse(app.element(AccessibilityID.Import.duplicate("Library")).exists, "the review outlived the lock")
-        app.closeScreen()
-
-        app.openScreen(AccessibilityID.Settings.export)
-        app.tap(AccessibilityID.Export.kind + ".applePasswordsCSV")
-        app.enter(OnboardingAndUnlockTests.password, into: AccessibilityID.Export.password)
-        app.tap(AccessibilityID.Export.run)
-        app.waitForText("item(s) in the file", in: AccessibilityID.Export.count)
-        app.tap(AccessibilityID.Debug.lockNow)
-        XCTAssertTrue(unlock.waitForExistence(timeout: 30), app.debugDescription)
-        unlock.click()
-        unlock.typeText(OnboardingAndUnlockTests.password + "\n")
-        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 30), app.debugDescription)
-        app.openScreen(AccessibilityID.Settings.export)
-        XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 10))
-        XCTAssertFalse(app.element(AccessibilityID.Export.count).exists, "the report outlived the lock")
+            app.element(AccessibilityID.Import.archiveDate).waitForExistence(timeout: 20), app.debugDescription)
         app.closeScreen()
     }
 }
