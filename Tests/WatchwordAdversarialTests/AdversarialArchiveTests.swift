@@ -232,7 +232,11 @@ struct AdversarialArchiveTests {
 /// Adversaries: **A7**, the author of an import file or archive the person is talked into importing (including an
 /// archive made with an account of their own, handed over with its Emergency Kit), who controls every byte of it;
 /// **A3**, someone holding the device while the app is unlocked, who does not know the account password.
-@Suite("Adversarial: interchange through the session", .tags(.adversarial))
+///
+/// Serialised: each lock test holds a cooperative-pool thread in a blocking wait (that is what proves the work is off
+/// the actor), and run side by side on a three-core runner they took every thread of the pool, so `lock()` itself
+/// could not be scheduled until their 60-second bounds ran out. One at a time, they hold one thread at most.
+@Suite("Adversarial: interchange through the session", .serialized, .tags(.adversarial))
 struct AdversarialSessionInterchangeTests {
     static let passphrase = "the archive's own passphrase"
 
