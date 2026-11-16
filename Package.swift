@@ -94,10 +94,14 @@ let package = Package(
             ]
         ),
 
-        // Apple-framework adapters for the WatchwordKit ports: Keychain, LocalAuthentication, the App Group container
-        // and the Emergency Kit PDF. In the package rather than Apps/ so the strict-memory-safety job, the unsafe
-        // tripwire, lint and `swift test` all cover them.
-        .target(name: "WatchwordPlatform", dependencies: ["WatchwordKit", "WatchwordStore", "SecureMemory"]),
+        // Apple-framework adapters for the ports: Keychain, LocalAuthentication, the App Group container and the
+        // Emergency Kit PDF (WatchwordKit); the device-local file store (§13.8); the URLSession client of hygiene's
+        // HTTPClient port; the coordinated iCloud Drive and CloudKit sync transports (§7.2, §7.3). In the package
+        // rather than Apps/ so the strict-memory-safety job, the unsafe tripwire, lint and `swift test` all cover them.
+        .target(
+            name: "WatchwordPlatform",
+            dependencies: ["WatchwordKit", "WatchwordStore", "WatchwordSync", "WatchwordHygiene", "SecureMemory"]
+        ),
 
         // The portable core of the credential provider extension: every decision and every byte it returns, behind a
         // vault port, so the extension itself is an adapter (§9.1; milestone 5). No AuthenticationServices, and not
@@ -179,7 +183,10 @@ let package = Package(
         ),
         .testTarget(
             name: "WatchwordPlatformTests",
-            dependencies: ["WatchwordPlatform", "WatchwordKit", "SecureMemory", "WatchwordTestSupport"]
+            dependencies: [
+                "WatchwordPlatform", "WatchwordKit", "WatchwordSync", "WatchwordHygiene", "SecureMemory",
+                "WatchwordTestSupport",
+            ]
         ),
 
         .testTarget(
