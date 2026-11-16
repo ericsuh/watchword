@@ -1,5 +1,6 @@
 #if canImport(Darwin)
     import Foundation
+    import Security
     import Testing
     import WatchwordPlatform
 
