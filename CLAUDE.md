@@ -183,7 +183,8 @@ Fourteen shipped modules, dependency-ordered, plus test support:
   `VaultSession+Account.swift`), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `VaultMetadataCodec`, `ItemSearch`,
   `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`, `DeviceKeyStore` with the software
   `KeychainDeviceKeyStore`), and `VaultSyncAdapter`, the production `SyncKeyring` and `ItemSealer`
-  (`VaultSession+Sync.swift`).
+  (`VaultSession+Sync.swift`); and the session's conformance to `WatchwordAutoFill`'s `CredentialVault`
+  (`VaultSession+AutoFill.swift`). Depends on `WatchwordAutoFill`, never the reverse.
 - **`WatchwordAutoFill`** — the credential provider extension's portable core (milestone 5): `CredentialProviderModel`
   (one method per request the OS makes: credential list, passwords, one-time codes, text to insert, passkey
   registration and assertion, save and generate password, credential-update reports), `ReleaseGate`, `TOTP`,

@@ -7,78 +7,9 @@ import WatchwordMatching
 import WatchwordModel
 import WatchwordTestSupport
 
-/// `CredentialVault` over a real `VaultSession`, written against the session's public API only.
-///
-/// A stand-in for the session's own conformance, which belongs in `WatchwordKit` and is milestone 5's open
-/// integration step (docs/03-implementation-plan.md). It exists so that the scenarios below run through real
-/// encryption, versioning and history today, and to show the port asks nothing of the session it does not already
-/// do. The one thing it cannot do from outside the actor is make `saveCredentialItem` atomic: it reads the stored
-/// version and then saves, which is enough for a single-threaded test and is exactly what the real conformance must
-/// do inside the session's `write`. `confirmUnlocked()` asks the session for its state, which is the lock check the
-/// real conformance makes on the actor.
-struct SessionCredentialVault: CredentialVault {
-    let session: VaultSession
-    var backedUp = false
-
-    func credentialItems() async throws -> [Item] {
-        try await translating { try await session.items().items }
-    }
-
-    func confirmUnlocked() async throws {
-        try await translating {
-            guard try await session.state() == .unlocked else { throw VaultError.locked }
-        }
-    }
-
-    func defaultVaultID() async throws -> UUID {
-        try await translating {
-            guard try await session.state() == .unlocked else { throw VaultError.locked }
-            guard let id = await session.personalVaultID else { throw VaultError.noAccount }
-            return id
-        }
-    }
-
-    func isBackedUp() async throws -> Bool {
-        try await translating {
-            guard try await session.state() == .unlocked else { throw VaultError.locked }
-            return backedUp
-        }
-    }
-
-    func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
-        try await translating {
-            var existing: Item?
-            do {
-                existing = try await session.item(id: item.id)
-            } catch VaultError.itemNotFound {
-                existing = nil
-            }
-            guard existing?.version == replacingVersion else { throw CredentialVaultError.versionConflict(item.id) }
-            return try await session.save(item)
-        }
-    }
-
-    private func translating<Value>(_ body: () async throws -> Value) async throws -> Value {
-        do {
-            return try await body()
-        } catch let error as CredentialVaultError {
-            throw error
-        } catch VaultError.locked {
-            throw CredentialVaultError.locked
-        } catch VaultError.noAccount {
-            throw CredentialVaultError.noAccount
-        } catch VaultError.itemNotFound(let id) {
-            throw CredentialVaultError.itemNotFound(id)
-        } catch VaultError.scopeRejected(let reason) {
-            throw CredentialVaultError.scopeRejected(reason)
-        } catch {
-            throw CredentialVaultError.failed(String(describing: type(of: error)))
-        }
-    }
-}
-
-/// Scenarios S1 and S2 once more, with the request model over a real `VaultSession`: AES-GCM records, the vault's
-/// own versions and history, and its lock (docs/04-test-plan.md §4, "written once against `VaultSession`").
+/// Scenarios S1 and S2 once more, with the request model over a real `VaultSession` as its `CredentialVault`: AES-GCM
+/// records, the vault's own versions and history, its compare-and-swap and its lock (docs/04-test-plan.md §4,
+/// "written once against `VaultSession`").
 @Suite("Request model over a real vault session")
 struct VaultSessionBridgeTests {
     typealias Fixtures = AutoFillFixtures
@@ -88,7 +19,7 @@ struct VaultSessionBridgeTests {
         try await vault.createAccount()
         let vaultID = try #require(await vault.session.personalVaultID)
         let model = CredentialProviderModel(
-            vault: SessionCredentialVault(session: vault.session), clock: vault.clock,
+            vault: vault.session, clock: vault.clock,
             random: SeededGenerator(seed: TestEnvironment.seed(fallback: 21)))
         return (vault, model, vaultID)
     }
@@ -192,7 +123,7 @@ struct VaultSessionBridgeTests {
         let relaunched = vault.relaunched()
         try await relaunched.session.unlock(password: TestVault.password)
         let extensionModel = CredentialProviderModel(
-            vault: SessionCredentialVault(session: relaunched.session), clock: vault.clock)
+            vault: relaunched.session, clock: vault.clock)
         let prfInput = PRFInputValues(first: Data("vault key".utf8))
         let request = PasskeyAssertionRequest(
             relyingPartyID: "google.com", clientDataHash: Fixtures.clientDataHash(8),
@@ -218,9 +149,9 @@ struct VaultSessionBridgeTests {
         #expect(after.history.count == 2)
 
         // A write prepared against a version that has since moved is refused, not merged over.
-        let stale = SessionCredentialVault(session: relaunched.session)
         await #expect(throws: CredentialVaultError.versionConflict(google.id)) {
-            try await stale.saveCredentialItem(stored, replacingVersion: stored.version)
+            try await relaunched.session.saveCredentialItem(stored, replacingVersion: stored.version)
         }
+        #expect(try await relaunched.session.item(id: google.id) == after)
     }
 }

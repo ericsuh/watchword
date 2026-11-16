@@ -47,5 +47,6 @@ struct CanonicalReadTests {
             "no stamp above the row's version")
         #expect(try await vault.session.items().items.first { $0.id == saved.id } == read)
         #expect(try await vault.session.search("someone@example.com").first { $0.id == saved.id } == read)
+        #expect(try await vault.session.credentialItems().first { $0.id == saved.id } == read)
     }
 }

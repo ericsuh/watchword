@@ -1502,11 +1502,25 @@ Also in the module: `TOTP` (RFC 6238 over an injected instant), `PasswordRules` 
 for the page's `passwordrules` and its mapping to `RandomPasswordPolicy`; the generated password
 is checked against the parsed rules before it is returned), and `CredentialIdentityPublishing`.
 
-Still open for milestone 5, all on a Mac: the extension targets' adapter over this model,
-`VaultSession`'s conformance to `CredentialVault`, the encrypted index record that lets the
-extension list without decrypting every item, and on-device QA (first, what the system hands back
-for a QuickType tap and on which hosts it offers an identity, §9.1; then what it passes as `prf`
-salts, and how it treats UP = 0 on a conditional registration).
+**`VaultSession` is the `CredentialVault`** (`VaultSession+AutoFill.swift`; `WatchwordKit` depends on
+`WatchwordAutoFill`, never the reverse). `credentialItems()` is every vault's items as `items()`
+presents them (read through their rows, canonical, what a vault's deletion left shown trashed). The
+store keeps one row per item ID whatever its vault and sync refuses a record naming an ID another
+vault holds, so an ID occurs once; a move is a copy under a derived ID and the original trashed in
+one commit, so the original is never fillable beside its copy. `saveCredentialItem` is a
+compare-and-swap inside the session's own `write`: the expectation (absent, or the version read) is
+checked against the row the write read, and the commit is conditional on that row, so a save or a
+merge landing in between is refused with `versionConflict`; the session stamps the edit
+(`ItemMerge.stamped`) and runs every scope through `ScopePolicy`, as `save` does. `isBackedUp()` is
+whether the session syncs. `confirmUnlocked()` is the actor's own check that keys are resident.
+The extension process builds a session over the App Group store and the shared Keychain and
+unlocks it with `quickUnlock(prompt:)` (the Local Unlock Key the Keychain releases after biometric
+authentication, then the AUK, then the keyset) or the password; nothing else is exposed for it.
+
+Still open for milestone 5, all on a Mac: the extension targets' adapter over this model, the
+encrypted index record that lets the extension list without decrypting every item, and on-device
+QA (first, what the system hands back for a QuickType tap and on which hosts it offers an identity,
+§9.1; then what it passes as `prf` salts, and how it treats UP = 0 on a conditional registration).
 
 ## 10. Unlock state machine
 

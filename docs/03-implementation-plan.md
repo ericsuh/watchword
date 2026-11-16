@@ -313,12 +313,13 @@ the two are known to differ, randomised Ed25519 signing, is why bundles are comp
     the model's value types, shows what the outcome describes, and returns what it carries, plus the
     `ASCredentialIdentityStore` adapter for `CredentialIdentityPublisher`. No security decision belongs in
     it;
-  - `VaultSession`'s conformance to `CredentialVault` (`saveCredentialItem` as a compare-and-swap inside the
-    actor's `write`, `isBackedUp` from whether sync is configured, `confirmUnlocked` as the actor's own lock
-    check), and unlocking from the extension. When shared vaults arrive, an item ID present in two vaults is
-    treated by the model as naming neither item, so a move between vaults must not leave both copies readable.
-    `SessionCredentialVault` in `WatchwordAutoFillTests` is a stand-in over the session's public API that the
-    S1 and S2 tests already run through; it shows the shape and is not atomic;
+  - `VaultSession`'s conformance to `CredentialVault` is **done** (Linux; `02-architecture.md` §9.2): the
+    compare-and-swap inside the actor's `write`, `isBackedUp` from whether sync is configured, `confirmUnlocked`
+    as the actor's own lock check, one ID per item across vaults, and the extension unlocking through quick
+    unlock or the password. S1 and S2 run through it ("Request model over a real vault session"), with the CAS,
+    a lock between read and release, moves between vaults and the extension's unlock in "Vault session as the
+    AutoFill vault". What remains is the extension process itself: building the session over the App Group
+    store and the shared Keychain access group;
   - the encrypted index record, so the extension lists without decrypting every item;
   - on-device QA for S1 and S2, including three things only a device can answer. First, what the system
     hands back for a QuickType tap and on which hosts it offers a stored identity: the core assumes the
