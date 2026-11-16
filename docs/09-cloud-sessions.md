@@ -280,8 +280,10 @@ wrote. It is how a session without a Mac checks a screen it added to the tour, a
 3. Read the end of the job log. A passing run lists every screen with its pixel size, file size and average
    brightness (`07-item-detail  1206x2622  412 KB, brightness 0.93`), then a coarse text rendering of each picture
    (the gate passes `--previews`): enough to see that a sheet, a dialog or the keyboard is where it should be, and
-   that a dark set is dark, without the image. A failing run ends with the failure summary; the tour's own failure
-   is an `XCTAssert` line naming the element that never appeared, and `app:diagnose` output precedes it. A tour that
+   that a dark set is dark, without the image. The contact sheet's size and its own rendering come last
+   (`contact sheet  2556x3084  487 KB`), which shows every tile is there over its name. A failing run ends with
+   the failure summary; the tour's own failure is an `XCTAssert` line naming the element that never appeared, and
+   `app:diagnose` output precedes it. A tour that
    stopped part way leaves no set: the screens it captured before that, and XCUITest's own screenshots of the
    failure, are in `Screenshots/<set>-incomplete/` in the artifact, and the log has a text rendering of the last
    screen it reached and of each failure screenshot, which is usually enough to see what was on screen instead of

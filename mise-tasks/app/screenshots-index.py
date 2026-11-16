@@ -327,6 +327,7 @@ def write_contact_sheet(path, screens):
         return False
     with open(path, "wb") as handle:
         handle.write(png_bytes(*sheet))
+    print(f"contact sheet  {sheet[0]}x{len(sheet[1])}  {os.path.getsize(path) // 1024} KB  {path}")
     return True
 
 
@@ -532,6 +533,13 @@ def main():
         screens = [(entry["name"], entry["source"], entry["size"]) for entry in entries]
         if not write_contact_sheet(arguments.standalone, screens):
             print("::warning::no one-picture contact sheet was written (sips is unavailable, or it would be too large)")
+        elif arguments.previews:
+            # The sheet as it would look from across the room: enough to see every tile is there, over its name.
+            grid = luminance_grid(arguments.standalone, png_size(arguments.standalone))
+            if grid is not None:
+                print("::group::contact sheet (text preview)")
+                print("\n".join(preview(grid)))
+                print("::endgroup::")
     if arguments.names:
         with open(arguments.names, "w", encoding="utf-8") as handle:
             handle.write(",".join(entry["name"] for entry in entries) + "\n")

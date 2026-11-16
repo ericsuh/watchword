@@ -63,7 +63,10 @@ class ScreenshotsIndexTests(support.ScriptTestCase):
 
     def test_contact_sheet_is_one_png_holding_every_screen_under_its_name(self):
         export = self.export("export", self.pictures(THREE) + [support.index_attachment(*THREE)])
-        self.assertEqual(self.index(export).returncode, 0)
+        result = self.index(export, "--previews")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(f"contact sheet  {24 + 3 * 84}x{24 + 120 + 28 + 24}  ", result.stdout)
+        self.assertIn("::group::contact sheet (text preview)", result.stdout)
         with open(self.path("Screenshots", "watchword-screens-ios.png"), "rb") as handle:
             width, height, rows = support.decode_png(handle.read())
         # Three 60-pixel tiles and four 24-pixel gaps; one band of tile, name and gap under the top margin.
