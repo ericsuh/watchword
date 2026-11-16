@@ -392,7 +392,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `.ifServerRecordUnchanged`; the iCloud Drive transport creates under file coordination, counts a not-downloaded
   placeholder as existing, and refuses (never resolves) `NSFileVersion` conflicts. An error with `stopsSync` stops a
   sync where it stands like `unavailable` (catch `let error as SyncTransportError where error.stopsSync`, never
-  `.unavailable` alone), and the report carries it (`transportFailure`).
+  `.unavailable` alone), and the report carries it (`transportFailure`); `syncAll` then hands it to the remaining
+  vaults (`transportStopped`), so one sync asks a stopped transport once. A failure of one object is never
+  `unavailable`: it is `objectUnreadable` (or another per-object case), refused alone, so one broken record cannot stop
+  this device publishing. A CloudKit zone this device has seen (`SyncStoreMarker`) and then finds missing is
+  `storeReset`, never recreated: the person may have deleted it. Adapter listings and waits are bounded
+  (`listingTooLarge`, coordination deadlines).
 - Download needs no keys and checks signatures before staging; merge re-verifies staged objects and checks kind,
   context, AEAD, then payload, in that order. A stream is merged strictly in sequence: never skip a gap.
 - A segment carries only its author's versions, and each record envelope's own context must match its entry

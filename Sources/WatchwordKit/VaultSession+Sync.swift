@@ -86,12 +86,16 @@ extension VaultSession {
         // other devices without the copy (PRD F7.6, F7.7; docs/02-architecture.md §7.7).
         var deferred: [UUID] = []
         var restPublished = true
+        // The first failure that stops a sync stops this one: the vaults after it merge what they hold and do not ask
+        // the transport again (a throttled store asked once per vault would only throttle longer).
+        var stopped = report.transportFailure ?? sharingReports.values.lazy.compactMap(\.transportFailure).first
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
             let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 vaultReport = try await engine(vaultID).sync(
-                    reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing)
+                    reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
+                    transportStopped: stopped)
                 sharedEngineDidRun(vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
@@ -103,9 +107,10 @@ extension VaultSession {
                     restPublished = false
                 }
             } else {
-                vaultReport = try await engine(vaultID).download()
+                vaultReport = try await engine(vaultID).download(transportStopped: stopped)
                 vaultReport.deferredUntilUnlock = true
             }
+            if stopped == nil, let failure = vaultReport.transportFailure, failure.stopsSync { stopped = failure }
             vaultReport.deviceRevoked = standing == .revoked
             vaultReport.deviceNotRegistered = standing == .unknown
             vaultReport.awaitingNewPassword = report.awaitingNewPassword
@@ -117,7 +122,7 @@ extension VaultSession {
                 report.vaults[vaultID] = Self.report(first, followedBy: try await engine(vaultID).sync())
             }
         }
-        if mayWrite {
+        if mayWrite, stopped == nil {
             for vaultID in sharedVaultsNeedingReplay() {
                 guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
                 await prepareSharedReplay(vaultID)

@@ -351,10 +351,17 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   `CKAsset` (`payloadAsset`) above 512 KiB, since a record's own fields are capped near 1 MB. The `kind`, `lamport`
   and `deviceID` fields above are not written: the name carries them and nothing queries them. A record is saved only
   new, with `.ifServerRecordUnchanged`, so an existing one fails with `serverRecordChanged` (`objectExists`); nothing
-  fetched is saved back. A listing queries `name BEGINSWITH` the prefix, fetching the name only, follows the cursor
-  and is capped; a record counts only if its ID and `name` agree, and a read takes exactly one payload within the
-  reader's limit, never a plain field. The zone is created by the first create, never by a read; `userDeletedZone`
-  and a reset encryption key are `SyncTransportError.storeReset`, never silently recreated. Errors map to the
+  fetched is saved back. A listing queries `name BEGINSWITH` the prefix, fetching the name only, and follows the cursor
+  for at most `maximumPages` pages, twice `maximumListedObjects` raw results and `maximumListedObjects` names, past
+  which it is `listingTooLarge` and the sync stops (a store answering without end must not keep one running); a record
+  counts only if its ID and `name` agree, and a read takes exactly one payload within the reader's limit, never a plain
+  field. A missing or unavailable asset is `objectUnreadable`: that object alone is refused and its stream waits at it,
+  so one record broken by A1 cannot keep this device from publishing. **The zone and the person's deletion:** the first
+  create makes the zone, never a read, and listing or creating it marks it seen in a `SyncStoreMarker` on this device.
+  A zone that is missing once seen was deleted (the person's "delete data" in iCloud settings purges it, and CloudKit
+  then says only `zoneNotFound`), so it is `SyncTransportError.storeReset` for every operation, as are
+  `userDeletedZone` and a reset encryption key; it is never recreated or read as empty, and only the person's choice to
+  start again (not built) may forget the marker. Errors map to the
   transport's typed errors (`CloudKitErrors`): throttling with CloudKit's `retryAfterSeconds` (`rateLimited`, which
   `AutoSyncPolicy` honours within its bounds, §7.9), `quotaExceeded`, `notAuthenticated`, the network
   (`unavailable`); each stops a sync as being offline does, and the report says which (`transportFailure`). The
@@ -386,10 +393,16 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   `Documents`. A file iCloud has not downloaded — a legacy `.<name>.icloud` placeholder, or a dataless or evicted file
   (`ubiquitousItemDownloadingStatus` `notDownloaded`) — is listed, fetched as absent after
   `startDownloadingUbiquitousItem`, and counts as existing for a create; absence is safe, as a stream waits at its gap.
-  `SyncFolderPresenter` (`NSFilePresenter` on the root) turns changes into remote-change hints. An object with
-  unresolved `NSFileVersion` conflicts is refused (`conflictingVersions`) rather than resolved: keeping "the copy that
-  verifies", as above, needs the engine's signature check, and is not built. Not built either: other providers with a
-  security-scoped bookmark, and their polling.
+  The download status is checked before the coordinated read, so a file known to be absent is not waited for, and
+  again inside it, so one evicted in between is still read as absent. Each access gives up at a deadline (30 s) or on
+  cancellation and cancels its coordinator: a fetch so given up is `objectUnreadable` (that object waits, the sync goes
+  on), a listing, create or delete `unavailable`. `SyncFolderPresenter` (`NSFilePresenter` on the root) turns changes
+  into remote-change hints. An object with unresolved `NSFileVersion` conflicts is refused (`conflictingVersions`)
+  rather than resolved, which leaves its stream waiting at it for good; and iCloud may rename a second create of one
+  name to `N 2.wwe`, which the layout ignores, so that copy is never read. Both need a device to have reused a sequence
+  number; keeping "the copy that verifies", as above, needs the engine's signature check and is **an owner decision**
+  (`03-implementation-plan.md`, milestone 3). Not built either: other providers with a security-scoped bookmark, and
+  their polling.
 
 ### 7.4 Sync while locked
 
@@ -892,6 +905,10 @@ a `.wait(until:)` names. The rules (defaults in `AutoSyncSettings`):
 
 `WatchwordPlatform.AutoSyncDriver` is the timer: it records the app's events, asks the policy, starts the sync it
 calls for, records the outcome (`AutoSyncOutcome`, from the report or the error), and arms one task for the next date.
+The outcome is read from every part of the account's report — its own objects, each vault's log, each shared vault's
+pass — so a throttled vault is a throttled sync, with the longest wait asked. Within one sync, the first failure that
+stops it stops the rest: `syncAll` hands it to every later vault's engine (`transportStopped`), which merges what it
+had downloaded and asks the transport nothing, and the sharing pass stops at its first.
 It adds no rule, and takes its clock and its sleep as parameters. Remote-change hints come from `SyncFolderPresenter`
 and, once the app registers for them, CloudKit pushes. The app does not create one yet.
 
@@ -2289,14 +2306,23 @@ which builds its session without `HygieneSettings`):
   nor accepted, the system's TLS validation with TLS 1.2 at least; every redirect refused by the session's and the
   task's delegate, so the 3xx is the answer, and a response from any URL but the one asked refused; the decoded body
   counted as it arrives and cut one byte past `maximumResponseBytes`; an idle timeout, a resource timeout and an
-  overall deadline of its own; nothing logged, and errors carry no URL.
+  overall deadline of its own, each held to 1 ms to 600 s whatever is configured; exactly the request's headers, with
+  `User-Agent: Watchword` if none is named and a fixed `Accept-Language: *` in place of the device's languages
+  (URLSession still adds `Accept` and `Accept-Encoding`); nothing logged, and errors carry no URL. A proxy the system or
+  a device-management profile sets is used like any app's: it sees the host, and one the device trusts to intercept
+  TLS also sees the five-character prefix (and, for the opt-in breached-account lookup, the address). The limit on the
+  decoded body is untested against a compressed response: the tests' URL-loading stub bypasses URLSession's decoding.
 - **`FileDeviceLocalStore`**: one file per record in `DeviceLocal/` beside the database (`AppContainer.
   deviceLocalStoreURL`), owner-only, excluded from backup (the directory and every file),
-  `completeUntilFirstUserAuthentication` on iOS (macOS has no per-file class for this; FileVault protects it), atomic
-  writes. Reads fail closed against A8: only a regular file, never through a link (a link planted under a record's
-  name is removed before a write), never past the size limit, checked before reading; a store directory replaced by a
-  link is refused, and `deleteAll` removes the link without touching its target. Portable apart from the backup flag
-  and protection class, so it is tested on Linux too.
+  `completeUntilFirstUserAuthentication` on iOS (macOS has no per-file class for this; FileVault protects it). The
+  store is a path of `components` below a trusted ancestor, the App Group container (`AppContainer.deviceLocalStore`),
+  and every component is checked at every operation, so a link anywhere below the container is refused. Writes go to an
+  exclusively created temporary file (`withoutOverwriting`) moved into place after whatever was under the name is
+  removed, so no write follows a link; a crash in between leaves no record, which reads as none. 0700 and the
+  directory's backup exclusion are set again before every write. Reads fail closed against A8: only a regular file,
+  never through a link, never past the size limit, checked before reading; `deleteAll` removes a link in the
+  directory's place without touching its target. Portable apart from the backup flag and protection class, so it is
+  tested on Linux too.
 
 Still to come:
 

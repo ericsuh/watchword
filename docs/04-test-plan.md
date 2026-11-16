@@ -881,24 +881,35 @@ other does, and reported as not required on Linux, where they cannot compile.
 - **"Adversarial: device-local store files"** (`AdversarialDeviceLocalStoreTests`, portable, listed). A8 with write
   access to the App Group container: a link planted under a record's name is neither read nor written through (the
   write replaces the link, the target is untouched); a store directory replaced by a link is refused, and erasing the
-  account removes only the link; a sparse 8 GiB file is refused from its size before any byte is read; a planted
+  account removes only the link; a link anywhere on the path below the container is refused; a record has one file
+  name, and a case variant of it is a stray only on a case-sensitive volume (AD10); a sparse 8 GiB file is refused from its size before any byte is read; a planted
   directory is not a record; stray and look-alike names are never records and are erased; a truncated record reads
   back as exactly its bytes, for the session to refuse.
 - **"Adversarial: Apple adapters: HTTP client"** (`AdversarialURLSessionHTTPClientTests`, Mac). A1 at the Pwned
   Passwords endpoint, through a real `URLSession` with a URL-loading stub in front of the network: bodies one byte and
   16 MiB over the limit refused; a server that never answers, and one that sends headers and a few bytes, given up
-  on within the limits; redirects to another host and to plain HTTP never followed; a body that reaches the limit
-  and keeps coming refused. Not covered: a compressed body (a stub bypasses URLSession's decoding).
+  on at the deadline (injected, already passed, so no test waits on a clock); redirects to another host and to plain
+  HTTP never followed; a body that reaches the limit and keeps coming refused; time limits of infinity, NaN or less
+  than nothing held to their range. Not covered: a compressed body (a stub bypasses URLSession's decoding).
 - **"Adversarial: Apple adapters: iCloud Drive transport"** (`AdversarialCoordinatedFileSyncTransportTests`, Mac). A1
   writing the sync folder: a stream directory replaced by a link is neither listed, read nor written through under
   coordination; planted placeholders outside the layout are not objects, and one beside a present object changes
-  nothing; an oversized object is refused. Not covered: `NSFileVersion` conflicts and downloads by iCloud itself, which
-  need a ubiquity container.
+  nothing; an oversized object is refused. "Coordinated iCloud Drive transport" adds a read held past its deadline by
+  another writer, given up as that object's failure alone. Not covered: `NSFileVersion` conflicts and downloads by
+  iCloud itself, which need a ubiquity container.
 - **"Adversarial: Apple adapters: CloudKit transport"** (`AdversarialCloudKitTransportTests`, Mac, over the fake
   database). A1 as the CloudKit store: records whose `name` disagrees with their ID, or whose names are outside the
   layout, are not listed and are refused when fetched; a payload in a plain field is never read, two payloads are
-  refused, an oversized one is refused; a listing over the cap is refused; a stated wait of years is held to the
-  policy's maximum backoff; a refused create is `objectExists`, and no save ever uses an overwriting policy.
+  refused, an oversized one is refused; a listing over the cap, or one of endless cursors of duplicate or invalid
+  records, ends in `listingTooLarge`; one record with a missing asset is refused alone and the device still publishes
+  (AD4); a stated wait of years is held to the policy's maximum backoff; a refused create is `objectExists`, and no save
+  ever uses an overwriting policy. "CloudKit transport" adds the person's deletion of the zone (a reset, never
+  recreated) and an unreadable marker (counts as seen). The fake reads the query rather than evaluating it (AD9).
+- **"Adversarial: sync log"** gains, portably, one unreadable object (`objectUnreadable`) in another device's stream:
+  refused alone, the stream waits, and the device publishes (AD4).
+- **Not adversarial, Linux:** "Automatic sync outcome" (a vault throttled is a throttled sync, and one sync asks the
+  transport once; the longest wait wins; sharing failures count), "Sync transport failures" (`transportStopped`), "Sync
+  store marker".
 
 ## 7. CI implementation
 
