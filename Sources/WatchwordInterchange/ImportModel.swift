@@ -113,8 +113,15 @@ public enum ImportWarning: Equatable, Sendable {
     /// as `count` concealed fields labelled "(unresolved value)": an import starts the item afresh, with no sync
     /// history to hold them as alternatives.
     case unresolvedValuesKept(count: Int)
-    /// `count` unresolved values of something other than a field's text (a title, a scope, a passkey) were left out.
+    /// `count` unresolved values that have no text form were left out: a passkey, or, from an encrypted Watchword
+    /// archive (which keeps other titles, hosts and tags as fields), a flag such as the archived mark, which settles to
+    /// the value shown.
     case unresolvedValuesOmitted(count: Int)
+    /// The encrypted Watchword archive had the item in the trash because sync left it there, not because a person
+    /// moved it (kept after a permanent deletion that had not seen it, trashed without seeing every edit, or over a
+    /// concurrent restore: `Item.isTrashedByPerson` is false). It is imported as a live item, not skipped as the
+    /// source's trash and not trashed again, where the 30-day purge would remove it as the person's (PRD F1.5, F7.7).
+    case restoredFromSyncTrash
 }
 
 /// Why an entry was not imported.

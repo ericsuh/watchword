@@ -132,6 +132,69 @@ struct ArchivedItemsTests {
         #expect(withTrash.entries.first?.item.trashedAt == nil)
     }
 
+    static func stamp(_ version: UInt64) -> GroupStamp {
+        GroupStamp(revision: Revision(version: version, device: UUID()), seen: VersionVector())
+    }
+
+    /// Review finding X4: sync leaves items in the trash that nobody chose to discard. Restored as the source's
+    /// trash, the 30-day purge would remove them as the person's; skipped, the report would call them the person's.
+    /// They come back live, whatever `includesTrashed` says, and the report says why.
+    @Test("an item sync left in the trash comes back live, not as the person's trash")
+    func syncTrash() throws {
+        var kept = Self.archivedItem()
+        kept.archived = false
+        kept.trashedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        kept.keptAfterDeletion = true
+        var overRestore = Self.archivedItem()
+        overRestore.id = UUID()
+        overRestore.archived = false
+        overRestore.trashedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        overRestore.conflicts = [.trashedAt: [ConflictingValue(stamp: Self.stamp(3), value: .trashedAt(nil))]]
+        #expect(kept.isTrashed && !kept.isTrashedByPerson && !overRestore.isTrashedByPerson)
+        for options in [ImportOptions(), ImportOptions(includesTrashed: true)] {
+            let result = try Self.importing(
+                [ArchivedEntry(.item(kept)), ArchivedEntry(.item(overRestore))], options: options)
+            #expect(result.report.skipped.isEmpty)
+            #expect(result.entries.map(\.state) == [.active, .active])
+            #expect(result.entries.allSatisfy { $0.item.trashedAt == nil && !$0.item.keptAfterDeletion })
+            #expect(result.report.warnings.filter { $0.warning == .restoredFromSyncTrash }.count == 2)
+        }
+    }
+
+    /// Review finding X5: the archive is the backup that keeps everything, so what sync was holding beside a title,
+    /// a set of scopes and the tags comes back as values the person can see, not as a count. A host comes back as
+    /// text, never as a scope.
+    @Test("another title, other hosts and other tags survive a restore as visible values")
+    func unresolvedAttributes() throws {
+        var archived = Self.archivedItem()
+        archived.retainedValues = []
+        archived.conflicts = [
+            .title: [ConflictingValue(stamp: Self.stamp(5), value: .title("Bank – joint"))],
+            .scopes: [
+                ConflictingValue(
+                    stamp: Self.stamp(6),
+                    value: .scopes([ServiceScope(host: "bank.example"), ServiceScope(host: "joint.bank.example")]))
+            ],
+            .tags: [ConflictingValue(stamp: Self.stamp(7), value: .tags(["money", "shared", "joint"]))],
+            .archived: [ConflictingValue(stamp: Self.stamp(8), value: .archived(false))],
+        ]
+        let result = try Self.importing([ArchivedEntry(.item(archived))])
+        let item = try #require(result.entries.first?.item)
+        let kept = item.fields.filter { $0.label.hasSuffix("(unresolved value)") }
+        #expect(
+            Set(kept.map { "\($0.kind.rawValue) \($0.label): \($0.value)" }) == [
+                "custom Title (unresolved value): Bank – joint",
+                "url Website (unresolved value): joint.bank.example",
+                "custom Tags (unresolved value): joint, shared",
+            ])
+        #expect(kept.allSatisfy { $0.meta[InterchangeMeta.sourceType] == nil })
+        #expect(item.title == "Bank" && item.scopes.map(\.host) == ["bank.example", "login.example.org"])
+        let warnings = result.report.warnings.map(\.warning)
+        #expect(warnings.contains(.unresolvedValuesKept(count: 3)))
+        // Only the flag has no text form.
+        #expect(warnings.contains(.unresolvedValuesOmitted(count: 1)))
+    }
+
     @Test("timestamps no person could mean are dropped and reported")
     func implausibleDates() throws {
         var archived = Self.archivedItem()

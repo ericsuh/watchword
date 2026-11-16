@@ -74,14 +74,18 @@ extension ImportAssembler {
             skip(reference, .duplicateIdentifier(identifier))
             return
         }
+        // Only the person's own trash is trash here. Sync also leaves items in the trash that nobody chose to discard
+        // (kept after a deletion that had not seen them, trashed without seeing every edit, or over a concurrent
+        // restore); restored as trash, the 30-day purge would remove them as the person's (PRD F1.5, F7.7), and
+        // skipped, the report would call them the person's. They come back live, and the report says why.
+        let trashedBySync = archived.isTrashed && !archived.isTrashedByPerson
         let state: ImportedState =
-            archived.trashedAt != nil || archived.keptAfterDeletion
-            ? .trashed : archived.archived ? .archived : .active
+            archived.isTrashedByPerson ? .trashed : archived.archived ? .archived : .active
         if state == .trashed, !options.includesTrashed {
             skip(reference, .trashedAtSource)
             return
         }
-        let unresolved = ExportSupport.unresolvedValues(of: archived)
+        let unresolved = ImportAssembler.unresolvedAlternatives(of: archived)
         let exclusions = archived.scopes.reduce(0) { $0 + $1.excludedHosts.count }
         let parts =
             archived.fields.count + archived.scopes.count + exclusions + archived.tags.count
@@ -95,7 +99,7 @@ extension ImportAssembler {
         let kept = parts + historyFields
         guard kept <= limits.maximumTotalFields - totalFields else { throw limits.exceeded(.totalFields) }
 
-        var warnings: [ImportWarning] = []
+        var warnings: [ImportWarning] = trashedBySync ? [.restoredFromSyncTrash] : []
         var scopes: [ServiceScope] = []
         var fields: [Field] = []
         var hosts = Set<String>()
@@ -153,7 +157,7 @@ extension ImportAssembler {
         }
         for value in unresolved.fields {
             fields.append(
-                Field(id: RandomUUID.make(using: &generator), kind: .custom, label: value.label, value: value.value))
+                Field(id: RandomUUID.make(using: &generator), kind: value.kind, label: value.label, value: value.value))
         }
         if !unresolved.fields.isEmpty { warnings.append(.unresolvedValuesKept(count: unresolved.fields.count)) }
         if unresolved.omitted > 0 { warnings.append(.unresolvedValuesOmitted(count: unresolved.omitted)) }
@@ -213,6 +217,55 @@ extension ImportAssembler {
             }
             report.warnings.append(ImportWarningRecord(entry: reference, warning: warning))
         }
+    }
+
+    /// What sync was holding beside the values `item` shows, as fields the person can see and choose from: a field's
+    /// other text (`ExportSupport.unresolvedValues`), another title, the hosts of another set of scopes, and other
+    /// tags. A restore starts the item afresh, with no sync metadata to hold them as alternatives, and the archive is
+    /// the backup whose purpose is to keep everything (PRD F7.7). A host becomes a `url` field with no
+    /// `InterchangeMeta.websiteType`, so it is text the person reads and never a scope or an exported website: an
+    /// alternative widens nothing. Only flags (the archived mark, the trash, the exclusion from suggestions, the field
+    /// order) and passkeys are left out, counted in `omitted`: a flag settles to the value shown and the person can
+    /// set it again, and a passkey has no text form.
+    static func unresolvedAlternatives(of item: Item) -> (
+        fields: [(kind: FieldKind, label: String, value: String)], omitted: Int
+    ) {
+        let text = ExportSupport.unresolvedValues(of: item)
+        var fields = text.fields.map { (kind: FieldKind.custom, label: $0.label, value: $0.value) }
+        // `ExportSupport` counts every kept value that is not a field's text as omitted; those kept here are taken
+        // back out of that count.
+        var omitted = text.omitted
+        var listed = Set<[UInt8]>()
+        func add(_ kind: FieldKind, _ label: String, _ value: String) {
+            guard listed.insert(Array(label.utf8) + [0] + Array(value.utf8)).inserted else { return }
+            fields.append((kind, label, value))
+        }
+        let shownHosts = Set(item.scopes.map(\.host))
+        let conflicting = item.conflicts.keys.sorted().flatMap { item.conflicts[$0] ?? [] }
+        for kept in conflicting + item.retainedValues {
+            switch kept.value {
+            case .title(let title):
+                omitted -= 1
+                let title = UTF8Text.trimmed(title)
+                if !title.isEmpty, title != UTF8Text.trimmed(item.title) {
+                    add(.custom, "Title (unresolved value)", title)
+                }
+            case .scopes(let scopes):
+                omitted -= 1
+                for host in scopes.map(\.host) where !host.isEmpty && !shownHosts.contains(host) {
+                    add(.url, "Website (unresolved value)", host)
+                }
+            case .tags(let tags):
+                omitted -= 1
+                let other = tags.map { UTF8Text.trimmed($0) }.filter { !$0.isEmpty && !item.tags.contains($0) }
+                if !other.isEmpty {
+                    add(.custom, "Tags (unresolved value)", Set(other).sorted().joined(separator: ", "))
+                }
+            default:
+                continue
+            }
+        }
+        return (fields, omitted)
     }
 
     /// A refused or unconsidered scope, kept as the website it named. No scope comes from it.

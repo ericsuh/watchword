@@ -2172,9 +2172,16 @@ scope checked again (`ScopeDerivation.validated`: the normaliser must give back 
 rule and `ScopePolicy`; subdomains stay included only where the derived scope includes them, exclusions are kept,
 and a refused scope is kept as a website field and reported), one-time passwords through `OTPParameters`,
 passkeys through `PasskeyCredential`, the import's budgets (history fields count) and the stored-size bound, and no
-sync metadata: values sync was holding for the person to choose between become concealed fields labelled
-"(unresolved value)" and are reported (`unresolvedValuesKept`). An entry that is neither a vault nor an item that
-decodes is listed as skipped. Everything else a Watchword item holds is kept: every field's kind, label and
+sync metadata. Values sync was holding for the person to choose between come back as fields labelled
+"(unresolved value)" and are reported (`unresolvedValuesKept`): a field's other text, another title, another set of
+scopes' hosts (as `url` fields without `InterchangeMeta.websiteType`, so text and never a scope or an exported
+website) and other tags; only flags (archived, trash, exclusion, field order), which settle to the value shown, and
+passkeys are counted as omitted (`unresolvedValuesOmitted`). Only the person's own trash is trash on restore
+(`Item.isTrashedByPerson`): an item sync left in the trash (kept after a deletion that had not seen it, trashed
+without seeing every edit, or over a concurrent restore) comes back live, with `restoredFromSyncTrash`, because
+restored as trash `trash(id:)` would make it the person's and the 30-day purge would remove it, and skipped as
+`trashedAtSource` the report would call it the person's (PRD F1.5, F7.7). An entry that is neither a vault nor an
+item that decodes is listed as skipped. Everything else a Watchword item holds is kept: every field's kind, label and
 metadata, the whole history, the times, the archived mark and the exclusion from suggestions. What an archive does
 not restore is the vaults themselves: the items of every archived vault go into the one vault the person chooses,
 each listing the vault it came from (`ImportEntryReference.container`).
