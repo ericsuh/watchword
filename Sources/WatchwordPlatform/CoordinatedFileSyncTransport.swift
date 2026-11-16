@@ -1,6 +1,7 @@
 #if canImport(Darwin)
     import Foundation
     import WatchwordSync
+    import os
 
     /// The iCloud Drive transport (docs/02-architecture.md §7.3): `FileSyncTransport` with every access under file
     /// coordination, and iCloud's not-yet-downloaded files handled.
@@ -29,15 +30,26 @@
     ///   absence safely: a stream waits at the gap (it never skips one) and the next sync fetches it; the folder's
     ///   `SyncFolderPresenter` reports the download's arrival as a remote-change hint. Nothing waits for the network
     ///   inside a coordinated read.
-    /// - Coordination itself failing (the provider unavailable, the request cancelled) is `unavailable`.
+    /// - **Bounded waits.** An access not granted coordination before its deadline (thirty seconds), or whose task is
+    ///   cancelled, is given up and its coordinator cancelled. For a fetch that is `objectUnreadable`, that object's
+    ///   failure alone (its stream waits, the sync and this device's publishing go on); for a listing, a create or a
+    ///   delete it is `unavailable`. Download status is checked once before the read, so a file known not to be here
+    ///   is not waited for, and again inside it, so a file evicted in between is still read as absent.
     ///
     /// Nothing here decides what to trust: everything it returns is checked by the engine like anything else from a
     /// transport. Not built: other file providers with a security-scoped bookmark, and polling them.
     public struct CoordinatedFileSyncTransport: SyncTransport {
-        public let base: FileSyncTransport
+        /// Returns when an access that has not been granted coordination yet should be given up. The default waits
+        /// thirty seconds; tests pass one that returns at once.
+        public typealias Deadline = @Sendable () async -> Void
 
-        public init(root: URL) {
+        public let base: FileSyncTransport
+        let deadline: Deadline
+
+        public init(root: URL, coordinationDeadline: @escaping Deadline = { try? await Task.sleep(for: .seconds(30)) })
+        {
             base = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+            deadline = coordinationDeadline
         }
 
         /// `<ubiquity container>/Watchword/<accountID>`: outside the container's `Documents`, so the Files app does
@@ -52,56 +64,74 @@
         public func list(prefix: String) async throws -> [String] {
             let directory = try base.listingDirectory(for: prefix)
             let base = base
-            return try await Self.coordinate(
-                .readingIntent(with: directory, options: [.immediatelyAvailableMetadataOnly])
-            ) {
-                try base.listNow(prefix: prefix)
+            do {
+                return try await coordinated(.read([.immediatelyAvailableMetadataOnly]), at: directory) {
+                    try base.listNow(prefix: prefix)
+                }
+            } catch is CoordinationFailure {
+                throw SyncTransportError.unavailable  // The folder as a whole.
             }
         }
 
         public func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
             let url = try base.fileURL(for: name)
+            // A first look, outside coordination, so that a file known not to be here is not waited for: a coordinated
+            // read of it would download it first.
             switch try Self.availability(of: url) {
-            case .absent:
-                return nil
-            case .notDownloaded:
-                // Asked for, not waited for: absence makes the stream wait, and the presenter says when it arrives.
-                try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-                return nil
-            case .local:
-                break
+            case .absent: return nil
+            case .notDownloaded: return Self.requestDownload(url)
+            case .local: break
             }
             let base = base
-            return try await Self.coordinate(.readingIntent(with: url, options: [.withoutChanges])) {
-                if let conflicts = NSFileVersion.unresolvedConflictVersionsOfItem(at: url), !conflicts.isEmpty {
-                    throw SyncTransportError.conflictingVersions(name)
+            do {
+                return try await coordinated(.read([.withoutChanges]), at: url) {
+                    // Again, inside the read: the file may have been evicted since the first look.
+                    switch try Self.availability(of: url) {
+                    case .absent: return nil
+                    case .notDownloaded: return Self.requestDownload(url)
+                    case .local: break
+                    }
+                    if let conflicts = NSFileVersion.unresolvedConflictVersionsOfItem(at: url), !conflicts.isEmpty {
+                        throw SyncTransportError.conflictingVersions(name)
+                    }
+                    return try base.fetchNow(name, maximumLength: maximumLength)
                 }
-                return try base.fetchNow(name, maximumLength: maximumLength)
+            } catch is CoordinationFailure {
+                // One file whose read was not granted in time: that object alone waits, the sync goes on.
+                throw SyncTransportError.objectUnreadable(name)
             }
         }
 
         public func create(_ name: String, contents: [UInt8]) async throws {
             let url = try base.fileURL(for: name)
             let base = base
-            try await Self.coordinate(.writingIntent(with: url, options: [])) {
-                // Known to iCloud but not downloaded here: it exists.
-                if try FileSyncTransport.kind(of: FileSyncTransport.placeholderURL(for: url)) != .missing {
-                    throw SyncTransportError.objectExists(name)
+            do {
+                try await coordinated(.write([]), at: url) {
+                    // Known to iCloud but not downloaded here: it exists.
+                    if try FileSyncTransport.kind(of: FileSyncTransport.placeholderURL(for: url)) != .missing {
+                        throw SyncTransportError.objectExists(name)
+                    }
+                    try base.createNow(name, contents: contents)
                 }
-                try base.createNow(name, contents: contents)
+            } catch is CoordinationFailure {
+                throw SyncTransportError.unavailable
             }
         }
 
         public func delete(_ name: String) async throws {
             let url = try base.fileURL(for: name)
             let base = base
-            try await Self.coordinate(.writingIntent(with: url, options: [.forDeleting])) {
-                try base.deleteNow(name)
-                // An object deleted while only its placeholder is here: the placeholder stands for it.
-                let placeholder = FileSyncTransport.placeholderURL(for: url)
-                if try FileSyncTransport.kind(of: placeholder) == .file {
-                    try FileManager.default.removeItem(at: placeholder)
+            do {
+                try await coordinated(.write([.forDeleting]), at: url) {
+                    try base.deleteNow(name)
+                    // An object deleted while only its placeholder is here: the placeholder stands for it.
+                    let placeholder = FileSyncTransport.placeholderURL(for: url)
+                    if try FileSyncTransport.kind(of: placeholder) == .file {
+                        try FileManager.default.removeItem(at: placeholder)
+                    }
                 }
+            } catch is CoordinationFailure {
+                throw SyncTransportError.unavailable
             }
         }
 
@@ -109,6 +139,13 @@
 
         enum Availability: Equatable {
             case absent, notDownloaded, local
+        }
+
+        /// Asks iCloud for the file and reads it as absent for now: absence makes the stream wait, and the presenter
+        /// says when it arrives.
+        static func requestDownload(_ url: URL) -> [UInt8]? {
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+            return nil
         }
 
         /// Whether the object is here to read. Only a regular file's download status is asked; anything else is left
@@ -133,22 +170,91 @@
 
         // MARK: - Coordination
 
-        /// Runs `body` while holding coordination for `intent`, on a queue of its own, and returns what it returns.
-        static func coordinate<T: Sendable>(
-            _ intent: NSFileAccessIntent, _ body: @escaping @Sendable () throws -> T
+        /// Runs `body` while holding coordination for `access` to `url`. Gives up, cancelling the coordinator, when the
+        /// deadline passes or the task is cancelled before coordination is granted; once `body` has started it runs to
+        /// its end (it is local file work, bounded by `FileSyncTransport`'s limits).
+        func coordinated<T: Sendable>(
+            _ access: CoordinatedAccess, at url: URL, _ body: @escaping @Sendable () throws -> T
         ) async throws -> T {
-            let coordinator = NSFileCoordinator(filePresenter: nil)
-            let queue = OperationQueue()
-            queue.maxConcurrentOperationCount = 1
-            return try await withCheckedThrowingContinuation { continuation in
-                coordinator.coordinate(with: [intent], queue: queue) { error in
-                    if error != nil {
-                        continuation.resume(throwing: SyncTransportError.unavailable)
-                        return
+            try await CoordinationAttempt<T>().run(access, at: url, deadline: deadline, body)
+        }
+    }
+
+    /// What a coordinated access is for.
+    enum CoordinatedAccess: Sendable {
+        case read(NSFileCoordinator.ReadingOptions)
+        case write(NSFileCoordinator.WritingOptions)
+    }
+
+    /// Coordination was refused, cancelled, or not granted before the deadline.
+    struct CoordinationFailure: Error {}
+
+    /// One coordinated access, which the deadline or a cancellation can give up while it waits. The coordinator is the
+    /// actor's own, so `cancel()` reaches it without sharing it across threads; the accessor and the deadline settle
+    /// who goes first through `phase`.
+    actor CoordinationAttempt<T: Sendable> {
+        enum Phase: Sendable {
+            case waiting, running, abandoned
+        }
+
+        private let coordinator = NSFileCoordinator(filePresenter: nil)
+        private let phase = OSAllocatedUnfairLock(initialState: Phase.waiting)
+        private var continuation: CheckedContinuation<T, any Error>?
+        private var timer: Task<Void, Never>?
+
+        func run(
+            _ access: CoordinatedAccess, at url: URL, deadline: @escaping CoordinatedFileSyncTransport.Deadline,
+            _ body: @escaping @Sendable () throws -> T
+        ) async throws -> T {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    self.continuation = continuation
+                    let intent: NSFileAccessIntent
+                    switch access {
+                    case .read(let options): intent = .readingIntent(with: url, options: options)
+                    case .write(let options): intent = .writingIntent(with: url, options: options)
                     }
-                    continuation.resume(with: Result(catching: body))
+                    let queue = OperationQueue()
+                    queue.maxConcurrentOperationCount = 1
+                    let phase = phase
+                    coordinator.coordinate(with: [intent], queue: queue) { error in
+                        let started = phase.withLock { state -> Bool in
+                            guard state == .waiting else { return false }
+                            state = .running
+                            return true
+                        }
+                        guard started else { return }
+                        let result: Result<T, any Error> =
+                            error == nil ? Result(catching: body) : .failure(CoordinationFailure())
+                        Task { await self.finish(result) }
+                    }
+                    timer = Task {
+                        await deadline()
+                        await self.giveUp()
+                    }
                 }
+            } onCancel: {
+                Task { await self.giveUp() }
             }
+        }
+
+        private func finish(_ result: Result<T, any Error>) {
+            timer?.cancel()
+            continuation?.resume(with: result)
+            continuation = nil
+        }
+
+        /// Gives up an access still waiting for coordination; one already running is left to finish.
+        private func giveUp() {
+            let abandoned = phase.withLock { state -> Bool in
+                guard state == .waiting else { return false }
+                state = .abandoned
+                return true
+            }
+            guard abandoned else { return }
+            coordinator.cancel()
+            continuation?.resume(throwing: CoordinationFailure())
+            continuation = nil
         }
     }
 

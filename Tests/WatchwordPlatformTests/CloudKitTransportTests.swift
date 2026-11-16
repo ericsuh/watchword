@@ -16,7 +16,7 @@
         @Test("keeps the sync transport contract over the fake database")
         func contract() async throws {
             let violations = try await SyncTransportContract.violations {
-                FakeCloudKitTransport(database: FakeCloudKitDatabase())
+                FakeCloudKitTransport(database: FakeCloudKitDatabase(), marker: InMemorySyncStoreMarker())
             }
             #expect(violations == [])
         }
@@ -24,7 +24,7 @@
         @Test("every save is of a new record with ifServerRecordUnchanged: created once, never modified")
         func createOnly() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = FakeCloudKitTransport(database: database)
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
             let name = SyncTransportContract.name
             try await transport.create(name, contents: [1])
             await #expect(throws: SyncTransportError.objectExists(name)) {
@@ -41,7 +41,7 @@
         @Test("a record holds the name in plain and the bytes encrypted; the record name is the name with dots")
         func layout() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = FakeCloudKitTransport(database: database)
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
             let name = SyncTransportContract.name
             try await transport.create(name, contents: [9, 8, 7])
             let id = CKRecord.ID(
@@ -71,7 +71,7 @@
         @Test("a listing follows every page and asks for the name field only")
         func paging() async throws {
             let database = FakeCloudKitDatabase(pageLimit: 2)
-            let transport = FakeCloudKitTransport(database: database)
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
             let names = (1...7).map {
                 SyncObjectLocation.segment(
                     vaultID: SyncTransportContract.vault, author: SyncTransportContract.deviceA, sequence: UInt64($0)
@@ -86,7 +86,7 @@
         @Test("an object over the inline limit is an asset, and round-trips within the reader's limit")
         func asset() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = FakeCloudKitTransport(database: database)
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
             let name = SyncTransportContract.name
             let contents = (0..<(FakeCloudKitTransport.inlineLimit + 1)).map { UInt8(truncatingIfNeeded: $0) }
             try await transport.create(name, contents: contents)
@@ -102,13 +102,80 @@
         @Test("reads in a zone never created are empty and create nothing; the first create makes the zone")
         func zone() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = FakeCloudKitTransport(database: database)
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
             #expect(try await transport.list(prefix: "vault/").isEmpty)
             #expect(try await transport.fetch(SyncTransportContract.name, maximumLength: 10) == nil)
             try await transport.delete(SyncTransportContract.name)
             #expect(database.zoneNames.isEmpty)
             try await transport.create(SyncTransportContract.name, contents: [1])
             #expect(database.zoneNames == ["Watchword"])
+        }
+
+        /// A marker that cannot be read, as on a damaged or locked file system.
+        actor BrokenMarker: SyncStoreMarker {
+            struct Broken: Error {}
+            func hasSeen(_ store: String) throws -> Bool { throw Broken() }
+            func markSeen(_ store: String) throws { throw Broken() }
+            func forget(_ store: String) throws { throw Broken() }
+        }
+
+        /// The person deletes the app's iCloud data in Settings, which purges the zone; CloudKit then answers
+        /// `zoneNotFound` without the reset flag (review of the adapters, finding 2). A device that created the zone, or
+        /// saw it while listing, must read that as a reset: never recreate it and never list it as empty.
+        @Test("a zone this device has seen and then finds missing is a reset; it is never recreated")
+        func deletedByThePerson() async throws {
+            let database = FakeCloudKitDatabase()
+            let creator = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            let reader = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            let name = SyncTransportContract.name
+            try await creator.create(name, contents: [1])
+            #expect(try await reader.list(prefix: "vault/") == [name])
+            database.purgeZone("Watchword")
+
+            for transport in [creator, reader] {
+                await #expect(throws: SyncTransportError.storeReset) { try await transport.list(prefix: "vault/") }
+                await #expect(throws: SyncTransportError.storeReset) {
+                    try await transport.fetch(name, maximumLength: 10)
+                }
+                await #expect(throws: SyncTransportError.storeReset) { try await transport.delete(name) }
+                await #expect(throws: SyncTransportError.storeReset) {
+                    try await transport.create(name + "0", contents: [2])
+                }
+            }
+            #expect(database.zoneNames.isEmpty)
+
+            // Only the person's choice to start again forgets it.
+            let fresh = InMemorySyncStoreMarker()
+            let restarted = FakeCloudKitTransport(database: database, marker: fresh)
+            try await restarted.create(name, contents: [3])
+            #expect(database.zoneNames == ["Watchword"])
+            #expect(await fresh.hasSeen(restarted.markerName))
+        }
+
+        @Test("a marker that cannot be read counts as seen: a missing zone is a reset, and nothing is created")
+        func unreadableMarker() async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: BrokenMarker())
+            await #expect(throws: SyncTransportError.storeReset) { try await transport.list(prefix: "vault/") }
+            await #expect(throws: SyncTransportError.storeReset) {
+                try await transport.create(SyncTransportContract.name, contents: [1])
+            }
+            #expect(database.zoneNames.isEmpty)
+        }
+
+        @Test("an asset that is missing is that object's failure alone")
+        func missingAsset() async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            let name = SyncTransportContract.name
+            try await transport.create(
+                name, contents: Array(repeating: 1, count: FakeCloudKitTransport.inlineLimit + 1))
+            let record = try #require(database.storedRecord(try transport.recordIDForTests(name)))
+            let asset = try #require(record["payloadAsset"] as? CKAsset)
+            try FileManager.default.removeItem(at: try #require(asset.fileURL))
+            await #expect(throws: SyncTransportError.objectUnreadable(name)) {
+                try await transport.fetch(name, maximumLength: 1 << 20)
+            }
         }
 
         /// Pairs of an error and its meaning. A loop rather than test arguments: `CKError` is not declared `Sendable`.
@@ -128,6 +195,8 @@
                 (CKError(.permissionFailure), .forbidden("n")),
                 (CKError(.limitExceeded), .objectTooLarge("n")),
                 (CKError(.badContainer), .forbidden("n")),
+                (CKError(.assetFileNotFound), .objectUnreadable("n")),
+                (CKError(.assetNotAvailable), .objectUnreadable("n")),
                 (
                     CKError(
                         .partialFailure,
@@ -150,7 +219,7 @@
         @Test("throttling and a missing account stop the sync; the engine reports why")
         func failuresReachTheReport() async throws {
             let database = FakeCloudKitDatabase()
-            let transport = FakeCloudKitTransport(database: database)
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
             let keys = FakeAccountKeys(seed: 13)
             let vault = SyncTransportContract.vault
             await keys.addVaultKey(vaultID: vault)
@@ -183,7 +252,9 @@
                 containerIdentifier: try #require(Self.cloudKitContainer))
             var zones: [CKRecordZone.ID] = []
             let violations = try await SyncTransportContract.violations {
-                let transport = CloudKitTransport(database: database, zoneName: "WatchwordTests-\(UUID().uuidString)")
+                let transport = CloudKitTransport(
+                    database: database, marker: InMemorySyncStoreMarker(),
+                    zoneName: "WatchwordTests-\(UUID().uuidString)")
                 zones.append(transport.zoneID)
                 return transport
             }
