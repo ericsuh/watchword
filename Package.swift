@@ -172,7 +172,7 @@ let package = Package(
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordMatching", "WatchwordStore", "WatchwordCrypto",
                 "WatchwordEnvelope", "WatchwordSync", "WatchwordSharing", "SecureMemory", "WatchwordTestSupport",
-                "WatchwordAutoFill", "WatchwordHygiene", "WatchwordInterchange",
+                "WatchwordAutoFill", "WatchwordHygiene", "WatchwordInterchange", "WatchwordPresentation",
             ]
         ),
         .testTarget(
