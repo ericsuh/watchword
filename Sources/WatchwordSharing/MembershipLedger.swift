@@ -124,6 +124,14 @@ public struct MembershipLedger: Sendable {
         chain[chain.count - 1].state
     }
 
+    /// Whether the accepted chain has never listed anyone but the vault's owner: the vault has been made shareable
+    /// and nobody has been let in. Only the owner's account can then sign anything that verifies in the vault, as in
+    /// a vault that is not shared at all, and an integration has nobody's writes to judge against anybody's standing
+    /// (review finding Z56). A function of the accepted chain alone, so it changes only when the head does.
+    public var isOwnersAlone: Bool {
+        chain.allSatisfy { $0.state.members.count == 1 }
+    }
+
     public func state(atEpoch epoch: UInt64) -> MembershipState? {
         epoch < UInt64(chain.count) ? chain[Int(epoch)].state : nil
     }

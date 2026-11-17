@@ -1722,6 +1722,20 @@ where the stamp names one of its devices, or the sharing device writing every re
 owner account vouching for its other devices' values. Either widens S36's "a value is its device's work only where
 that device's own stream carried it" for the owner's account, and wants the same review that rule had.
 
+The check at `shareVault` is made before any other device of the account can have seen the marker, and one that has
+not seen it still runs the vault as a private one and may compact its log afterwards (review finding Z56). Three
+things bound that. The marker is put on the transport, and must be, before the chain's first record is published
+and before a key is wrapped to anyone (`publishSharedMarker`). A chain that has **never listed anyone but its owner**
+(`MembershipLedger.isOwnersAlone`) is not judged at all: only the owner's account can sign what verifies in it, as in
+a vault that is not shared, so the judge admits every segment, version and tombstone and nothing of the owner's is
+held aside, whatever became of the log. It is a function of the accepted chain, so the first record that lists
+someone else changes the head, and everything is taken out and judged then as at any change of head. And `invite`
+makes the whole-log check again before that first record exists: a vault whose log was compacted in between cannot
+take its first member (`historyCompacted`) and goes on as its owner's. What is left is a compaction that lands after
+the invitation's check, by a device whose sync had read the account's directory before the marker was there and is
+still running, or a store that hides the snapshot from the inviting device: the outcome is Z42's, items held aside,
+nothing lost.
+
 **The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
 own safety number), `contactCandidate` and `verifyContact` (fingerprint by typed number, scanned code or comparison;
 a different pinned bundle is `keySubstituted` unless the person replaces the pin), `shareVault` (the genesis

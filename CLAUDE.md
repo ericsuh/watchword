@@ -702,6 +702,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - A vault is shared with `indexRebuilding` set, so its index is built from the log before any row it already holds is
   judged, and one whose log was compacted (a snapshot listed, or merged) is not shared at all (`historyCompacted`,
   Z42): a value that survives only in a snapshot has no attribution. Do not lift that without a rule for such values.
+  The marker is on the transport before the chain's first record and before the first grant (`publishSharedMarker`),
+  and `invite` asks `requireWholeLog` again while the chain is its owner's alone (Z56).
+- A chain that has never listed anyone but its owner is not judged (`MembershipLedger.isOwnersAlone`, Z56): the
+  judge admits everything, as for a vault that is not shared, because only the owner's account can sign what
+  verifies there. It must stay a function of the accepted chain alone, so that it changes only with the head, which
+  is what takes out and replays; never widen it to a chain that listed someone once.
 - A chain stopped at a later format (`continuesInLaterFormat`, §8.9) makes the vault read-only in the session and is
   reported (`SharedVaultStatus.requiresNewerVersion`): no proposal published, no plan resumed or made, nothing sealed
   again, no leave request. A later-format object is offered again until the ledger holds it; never add it to

@@ -210,4 +210,25 @@ extension AdversarialSharingTests {
         late.ingest([departure.record.contents, addition.encoded()])
         #expect(late.exposedKeyHolders == [outsider] && late.branches == device.branches)
     }
+
+    /// Threat: a member, current or former (A4, A5), in a vault whose integration judges nothing while the chain is
+    /// its owner's alone (review finding Z56). That must be true only of a chain that has never listed anyone else:
+    /// one whose members have all been removed still holds their work, their cuts and their late writes, and is
+    /// judged like any other.
+    @Test("a chain is its owner's alone only while it has never listed anyone else")
+    func ownersAloneOnlyBeforeAnyoneIsListed() async throws {
+        let base = try await SharingHousehold.make()
+        var device = try Self.freshDevice(base, [base.ledger.chain[0].encoded])
+        #expect(device.isOwnersAlone)
+        device.ingest(base.ledger.chain.dropFirst().map(\.encoded))
+        #expect(device.state == base.state && !device.isOwnersAlone)
+        for member in base.state.members where member.accountID != base.owner.accountID {
+            device.ingest([
+                try RotationPlanner.plan(.removal(member.accountID), ledger: device, signedBy: base.owner.keyset)
+                    .record.contents
+            ])
+        }
+        #expect(device.state.members.map(\.accountID) == [base.owner.accountID])
+        #expect(!device.isOwnersAlone, "a vault everyone was removed from was taken for one nobody had joined")
+    }
 }

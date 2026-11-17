@@ -598,7 +598,10 @@ and their completion, and the saved form. A key a dead branch says was handed ou
 that removes and re-adds, and what is kept (`AdversarialSharingUndoneAdditionTests.swift`, Z53). The deletion gate
 (`AdversarialSharedVaultDeletionGateTests.swift`): an entry planted under this device's name that must not stop its
 deletions (Z54), and a second replay in one sync that must not publish the deletion a move's held-aside copy is
-waiting on (Z55).
+waiting on (Z55). A log the account's other device compacted after the vault was shared, which holds nothing of the
+owner's aside and stops the first invitation, and the marker published before the chain
+(`AdversarialSharedVaultLateCompactionTests.swift`, Z56), with the ledger's "its owner's alone" in "sharing and
+membership".
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

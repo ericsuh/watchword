@@ -186,6 +186,24 @@ extension VaultSession {
         }
     }
 
+    /// Puts this device's marker for `vaultID` on the transport, and throws if that cannot be done (review finding
+    /// Z56). `markShared` publishes when it can and leaves the rest to the next sync, which is enough for a vault
+    /// joined; before the chain's first record is published, and before a key is wrapped to anyone, the account's
+    /// other devices must be able to learn that the vault is shared, or one of them goes on compacting its log.
+    func publishSharedMarker(_ vaultID: UUID, owner: UUID, account: AccountRecord, epoch: UInt64) async throws {
+        guard let transport = syncSettings?.transport else { return }
+        let location = AccountObjectLocation.vaultShared(
+            accountID: account.accountID, vaultID: vaultID, author: account.deviceID)
+        guard try await !transport.list(prefix: location.name).contains(location.name) else { return }
+        let body = Self.sharedMarkerBody(vaultID: vaultID, owner: owner)
+        let signature = try await dualSignature(
+            Self.directoryMessage(name: location.name, body: body), domain: .vaultDirectory,
+            keys: try requireKeys(since: epoch), account: account)
+        _ = try requireKeys(since: epoch)
+        _ = try await create(
+            location.name, contents: SignedObject(signature: signature, envelope: body).serialized(), on: transport)
+    }
+
     /// Whether `vaultID` is governed by a membership chain, as far as anything this device holds says so. With the
     /// markers not read yet the answer for any vault but the Personal one is yes: nothing is run as a private vault
     /// on a fact that has not been looked up.

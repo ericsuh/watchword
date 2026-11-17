@@ -683,6 +683,7 @@ extension VaultSession {
             // owner's genesis record put where the others look for it (Z50).
             try await saveSharedVault(vaultID)
             if shared.ledger.owner.accountID == account.accountID {
+                try await publishSharedMarker(vaultID, owner: account.accountID, account: account, epoch: epoch)
                 try await publishSharingObject(SharingObject(shared.ledger.chain[0].record))
             }
             return
@@ -727,6 +728,9 @@ extension VaultSession {
         vault.indexRebuilding = true
         sharing.vaults[vaultID] = vault
         try await saveSharedVault(vaultID)
+        // On the transport before the chain is: the account's other devices stop compacting the vault's log when
+        // they see it (Z56). A failure here leaves a share that `shareVault` finishes (Z50).
+        try await publishSharedMarker(vaultID, owner: account.accountID, account: account, epoch: epoch)
         try await publishSharingObject(SharingObject(ledger.chain[0].record))
     }
 
@@ -762,7 +766,19 @@ extension VaultSession {
         guard let vaultKey = currentVaultKey(vaultID, keys: keys, account: account) else {
             throw SharedVaultError.awaitingKey(ledger.state.vaultKeyID)
         }
-        let package = try invitation.issue(ledger: ledger, vaultKey: vaultKey, signedBy: keys.keyset)
+        if ledger.isOwnersAlone {
+            // The first person let in. The check `shareVault` made is made again here, because it was made before
+            // any other device of the account could have seen the marker: one that had not went on running the
+            // vault as its own and may have compacted the log since (Z56). The marker is on the transport first, so
+            // that from here on none does.
+            if ledger.owner.accountID == account.accountID {
+                try await publishSharedMarker(vaultID, owner: account.accountID, account: account, epoch: epoch)
+            }
+            try await requireWholeLog(vaultID)
+        }
+        // A lock during those requests wins: nothing is wrapped with keys that have been wiped.
+        let current = try requireKeys(since: epoch)
+        let package = try invitation.issue(ledger: ledger, vaultKey: vaultKey, signedBy: current.keyset)
         try await publishSharingObject(package.grant)
         try await propose(package.proposal, in: vaultID)
         return package.invitation

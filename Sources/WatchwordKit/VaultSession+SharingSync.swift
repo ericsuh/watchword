@@ -727,9 +727,12 @@ extension VaultSession {
         }
         let ownView = try? await registry(account)
         guard let current = sharing.vaults[location.vaultID],
-            let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account),
-            Self.streamAdmits(signer, at: location, in: current, account: account)
+            let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account)
         else { return .holdAside }
+        // Nobody but the owner has ever been listed: every object that verifies is the owner's account's, and the
+        // vault is judged as that account's other vaults are, which is not at all (Z56).
+        if current.ledger.isOwnersAlone { return .apply }
+        guard Self.streamAdmits(signer, at: location, in: current, account: account) else { return .holdAside }
         switch current.ledger.writeStanding(of: signer) {
         case .mayWrite:
             return .apply
@@ -771,6 +774,10 @@ extension VaultSession {
         let local = try await store.record(record.key)
         guard let keys else { throw SyncKeyringError.locked }
         guard let vault = sharing.vaults[record.vaultID] else { return true }
+        // A chain that has never listed anyone but its owner has one account's devices for writers, and nothing
+        // they wrote is held against anything (Z56): what follows weighs one account's work against another's
+        // standing. The first record that lists someone else changes the head, and everything is judged then.
+        if vault.ledger.isOwnersAlone { return true }
         let listing = { (device: UUID) in
             self.accountsListing(device, in: record.vaultID, ownView: ownView, account: account)
         }
@@ -881,6 +888,7 @@ extension VaultSession {
         guard let account = try await loadAccount() else { return false }
         let ownView = try? await registry(account)
         guard let vault = sharing.vaults[location.vaultID] else { return true }
+        if vault.ledger.isOwnersAlone { return true }
         let listing = { (device: UUID) in
             self.accountsListing(device, in: location.vaultID, ownView: ownView, account: account)
         }
