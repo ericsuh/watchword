@@ -319,3 +319,64 @@ actor SleepRecorder {
         durations.append(duration)
     }
 }
+
+/// Counts how often the main actor gets to run while it is otherwise waiting: a step whose heavy work blocked it (a
+/// key derivation on the main thread) would leave the count at zero until the step was done.
+@MainActor
+final class MainActorTicker {
+    private(set) var ticks = 0
+    private var running = true
+    private var task: Task<Void, Never>?
+
+    func start() {
+        task = Task { @MainActor in
+            while self.running {
+                self.ticks += 1
+                await Task.yield()
+            }
+        }
+    }
+
+    func stop() async {
+        running = false
+        await task?.value
+    }
+}
+
+@Suite("Screen models: the main actor during the long interchange steps")
+@MainActor
+struct InterchangeMainActorTests {
+    /// The archive's key derivation (ADR 0008) and its decryption are the longest steps the screens start; on an
+    /// iPhone they take seconds. They run off the session's actor, and the models only await them, so the main actor,
+    /// which draws the screen and answers the accessibility queries UI tests make, keeps running throughout.
+    @Test("exporting and restoring an archive leave the main actor free while the keys are derived")
+    func archiveStepsLeaveTheMainActorFree() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let export = ExportModel(context: ScreenContext(session: vault.session))
+        await export.load()
+        export.kind = .archive
+        export.password = TestVault.password
+        export.passphrase = "garden shed padlock"
+        export.passphraseConfirmation = "garden shed padlock"
+
+        let duringExport = MainActorTicker()
+        duringExport.start()
+        await export.export()
+        let exportTicks = duringExport.ticks
+        await duringExport.stop()
+        let archive = try #require(export.archiveBytes, "\(export.errorMessage ?? "")")
+        #expect(exportTicks > 10, "the main actor ran \(exportTicks) times during the export")
+
+        let restore = ImportModel(context: ScreenContext(session: vault.session))
+        await restore.load()
+        restore.archivePassphrase = "garden shed padlock"
+        let duringRestore = MainActorTicker()
+        duringRestore.start()
+        await restore.readArchive(archive)
+        let restoreTicks = duringRestore.ticks
+        await duringRestore.stop()
+        #expect(restore.stage == .review, "\(restore.errorMessage ?? "")")
+        #expect(restoreTicks > 10, "the main actor ran \(restoreTicks) times during the restore")
+    }
+}

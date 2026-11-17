@@ -125,7 +125,9 @@ with password re-entry, import of 1PUX/CSV fixtures.
   Settings). Opening and closing a screen retry a click that did not take, Sync Now and the UI-test hooks work from any
   screen (an open account screen is closed and Settings opened first), waits are bounded (a missing element fails in
   seconds), and every such failure attaches the whole element tree (`attachTree`), kept whether or not the test
-  passes. To keep the iOS job short, `DeviceRevocationTests` and `ImportExportTests` are one launch each. Sheets the account screens open close by clearing
+  passes. To keep the iOS job short, `DeviceRevocationTests` is one launch; `ImportExportTests` is two (import with a lock
+  during the review; export, a lock during the report, and a restore), each within its allowance, and prints a
+  timestamped `STEP` line before each step. Sheets the account screens open close by clearing
   their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS. The macOS window
   (820×600) and every sheet fit a 1024×768 screen with the menu bar, as the CI runners have: content scrolls, and
   Done, Cancel and confirm buttons are toolbar items, always in view (a 780-point window put Settings' Done below the
