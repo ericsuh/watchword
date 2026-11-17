@@ -45,7 +45,7 @@ build() { # build <scheme> <destination> <derived data> <build settings...>
   shift 3
   rm -rf "$data" # an earlier product must not be what is inspected
   xcodebuild build -project Apps/Watchword.xcodeproj -scheme "$scheme" -destination "$destination" \
-    -configuration Release -derivedDataPath "$data" "$@"
+    -configuration Release -derivedDataPath "$data" "${package_arguments[@]}" "$@"
 }
 
 inspect() { # inspect <platform's name> <derived data>: 0 if the Release app holds no marker

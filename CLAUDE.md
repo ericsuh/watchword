@@ -60,9 +60,13 @@ mise run clean                                         # .build, generated proje
 mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs (app:screenshots too)
 ```
 
-Every app task has Xcode resolve the package's dependencies first and refuses to build unless the `Package.resolved`
-Xcode writes inside the generated project pins the commits `assert-no-dependencies.sh` names (`packages.sh`): the root
-`Package.resolved` does not govern an Xcode build. A new task that runs `xcodebuild` sources `packages.sh` too.
+The root `Package.resolved` does not govern an Xcode build, and Xcode writes none of its own for this project. So every
+`xcodebuild` call in an app task is given `"${package_arguments[@]}"` (`mise-tasks/app/packages.sh`: one
+`-clonedSourcePackagesDirPath`, `.build/app-source-packages`), and each task has Xcode resolve first and refuses to
+build unless the git checkouts under that directory are exactly the packages and commits `assert-no-dependencies.sh`
+names, unchanged (`--checkouts`). A new task that runs `xcodebuild` sources `packages.sh`, calls `resolve_packages` and
+`check_resolved_packages`, and passes the arguments on every call; `test:scripts` fails one that does not. Unproven
+until a Mac run passes: a failure prints what Xcode left there.
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and syncs
 over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only Settings

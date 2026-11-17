@@ -12,7 +12,7 @@
 # WATCHWORD_REQUIRE_KEYCHAIN (xcodebuild hands TEST_RUNNER_-prefixed variables to the test process) turns a missing
 # entitlement into a failure here, so a signing mistake cannot pass by skipping the round trip.
 #
-# The package commits Xcode resolves are checked before and after, as in `app:build` (packages.sh).
+# The package sources Xcode checks out are read before and after, as in `app:build` (packages.sh).
 set -euo pipefail
 # shellcheck source=packages.sh
 source "$(dirname "${BASH_SOURCE[0]}")/packages.sh"
@@ -31,6 +31,6 @@ if [ -n "${usage_results:-}" ]; then
 fi
 
 resolve_packages
-TEST_RUNNER_WATCHWORD_REQUIRE_KEYCHAIN=1 xcodebuild test "${args[@]}" -allowProvisioningUpdates \
-  CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$team"
+TEST_RUNNER_WATCHWORD_REQUIRE_KEYCHAIN=1 xcodebuild test "${args[@]}" "${package_arguments[@]}" \
+  -allowProvisioningUpdates CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$team"
 check_resolved_packages "After testing"

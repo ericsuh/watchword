@@ -4,29 +4,35 @@
 # the commits it names. That covers `swift build` and `swift test`, where this package is the root. An app is built by
 # xcodebuild from the generated project, which refers to the package by path, and Xcode resolves a local package's
 # dependencies for itself: by the version in Package.swift (a tag, which can be moved) and, for swift-asn1, by whatever
-# is newest in swift-crypto's range. It records the result in a Package.resolved of its own inside the project, which is
-# generated and never committed. So the pin says nothing about an app unless that file is read.
+# is newest in swift-crypto's range. So the pin says nothing about an app unless what Xcode fetched is read.
 #
-# These two functions read it. `resolve_packages` has Xcode resolve before anything is compiled and fails unless the
-# commits are the allowed ones, so a moved tag stops the task before its sources are built into an app; and
-# `check_resolved_packages` is called again after the build or test, in case xcodebuild resolved a second time. The
-# commits are the ones `.github/scripts/assert-no-dependencies.sh` names, and it does the comparing, so a bump is still
-# one edit. A missing file fails: no record is not a pass.
+# The first version of this read the Package.resolved Xcode was expected to write inside the generated project. The
+# first Mac run (Xcode 27) showed that it writes none there for this project, a local package whose dependencies are
+# remote: the resolution succeeded and the file did not exist. So the evidence is now the sources themselves. Every
+# xcodebuild call in every app task is given the same `-clonedSourcePackagesDirPath` (`package_arguments` below), which
+# puts each dependency's git working copy at `<directory>/checkouts/<package>`: a place this repository chose, not one
+# Xcode did. `resolve_packages` has Xcode resolve before anything is compiled, and `check_resolved_packages` then
+# requires those working copies to be exactly the allowed packages, each at its allowed commit with no file changed;
+# it is called again after the build or test, in case xcodebuild resolved a second time. The commits are the ones
+# `.github/scripts/assert-no-dependencies.sh` names, and it does the comparing (`--checkouts`), so a bump is still one
+# edit. No checkouts is not a pass. A call without `package_arguments` would compile from Xcode's own DerivedData,
+# which nothing reads: Tests/ScriptTests fails a task that makes one.
 #
-# Not run on a Mac yet (docs/06-adversarial-review.md Z102): where Xcode writes the file, and that
-# `-resolvePackageDependencies` needs no scheme, are from Xcode's documented behaviour.
-# shellcheck shell=bash
-resolved_packages="Apps/Watchword.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+# Unproven until a Mac run passes (docs/06-adversarial-review.md Z102): that Xcode puts the checkouts there and leaves
+# them as clean working copies is its documented behaviour, not something seen. A failure prints what it found.
+# shellcheck shell=bash disable=SC2034
+source_packages="$PWD/.build/app-source-packages"
+package_arguments=(-clonedSourcePackagesDirPath "$source_packages")
 dependency_tripwire="$(dirname "${BASH_SOURCE[0]}")/../../.github/scripts/assert-no-dependencies.sh"
 
 check_resolved_packages() { # check_resolved_packages <when, for the message>
-  if ! "$dependency_tripwire" --resolved-file "$resolved_packages"; then
-    echo "::error::$1, Xcode's own Package.resolved does not pin the allowed swift-crypto commits: this app build is not the reviewed dependency (ADR 0006). If the pins were bumped, \`mise run clean\` removes a stale project."
+  if ! "$dependency_tripwire" --checkouts "$source_packages"; then
+    echo "::error::$1, the package sources xcodebuild checked out are not the allowed swift-crypto commits: this app build is not the reviewed dependency (ADR 0006). If the pins were bumped, \`mise run clean\` removes the old checkouts."
     return 1
   fi
 }
 
 resolve_packages() {
-  xcodebuild -resolvePackageDependencies -project Apps/Watchword.xcodeproj
+  xcodebuild -resolvePackageDependencies -project Apps/Watchword.xcodeproj "${package_arguments[@]}"
   check_resolved_packages "Before building"
 }

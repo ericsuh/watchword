@@ -3,74 +3,68 @@
 Two things these tasks decide that no Swift test can reach (docs/06-adversarial-review.md Z102, Z105):
 
 - Which swift-crypto an app is built from. The pin in the root Package.resolved covers `swift build`; xcodebuild
-  resolves the generated project's local package for itself and writes a Package.resolved of its own inside the
-  project. The tasks have Xcode resolve first and refuse to build unless that file pins the allowed commits.
+  resolves the generated project's local package for itself, and writes no Package.resolved of its own for it (the
+  first Mac run looked). So the tasks give every xcodebuild call one `-clonedSourcePackagesDirPath`, have Xcode
+  resolve first, and refuse to build unless the git working copies it left there are the allowed packages at the
+  allowed commits, unchanged. The stand-in checks packages out with real git, so the real `git` calls are what is
+  tested.
 - That a Release build holds none of the Debug-only UI-test switch. Every scheme and CI leg built Debug, so nothing
   ever compiled Release, let alone looked inside it.
 
-None of this has run on a Mac. What is tested here is what the tasks do with what xcodebuild leaves; where Xcode
-leaves it is from its documented behaviour."""
+None of this has passed on a Mac. What is tested here is what the tasks do with what xcodebuild leaves; that Xcode
+leaves clean working copies in that directory is from its documented behaviour.
+
+The tasks run from a scratch copy of `mise-tasks/app` and `.github/scripts`, identical but for the one line of
+assert-no-dependencies.sh that names the allowed commits: a made-up repository cannot be given swift-crypto's real
+commit ID, so that line names the stand-in repositories' (support.pinned_tripwire)."""
 
 import json
 import os
 import re
 import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import support  # noqa: E402
 
 TASKS = os.path.join(support.ROOT, "mise-tasks", "app")
-RESOLVED = os.path.join("Apps", "Watchword.xcodeproj", "project.xcworkspace", "xcshareddata", "swiftpm", "Package.resolved")
+PICK_SIMULATOR = os.path.join(support.ROOT, ".github", "scripts", "pick-simulator.sh")
+DIRECTORY_ARGUMENT = '"${package_arguments[@]}"'
 
-# xcodebuild: appends its arguments to $STUB_LOG. `-resolvePackageDependencies` writes $STUB_RESOLVED (if set) where
-# Xcode keeps the project's Package.resolved; any other invocation writes $STUB_REWRITTEN there (if set), as a build
-# that resolved again would, and, for a build with `-derivedDataPath`, lays down the products $STUB_PRODUCTS describes
-# ({"relative path under Build/Products": "contents"}). Exits as $STUB_EXIT says for anything but the resolution.
-FAKE_XCODEBUILD = r'''#!/usr/bin/env python3
-import json, os, shutil, sys
-arguments = sys.argv[1:]
-with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as log:
-    log.write(json.dumps(arguments) + "\n")
-resolved = os.path.join("Apps", "Watchword.xcodeproj", "project.xcworkspace", "xcshareddata", "swiftpm", "Package.resolved")
-resolving = "-resolvePackageDependencies" in arguments
-source = os.environ.get("STUB_RESOLVED" if resolving else "STUB_REWRITTEN", "")
-if source:
-    os.makedirs(os.path.dirname(resolved), exist_ok=True)
-    shutil.copy(source, resolved)
-if resolving:
-    sys.exit(int(os.environ.get("STUB_RESOLVE_EXIT", "0")))
-if "-derivedDataPath" in arguments and os.environ.get("STUB_PRODUCTS"):
-    root = os.path.join(arguments[arguments.index("-derivedDataPath") + 1], "Build", "Products")
-    platform = "ios" if "Watchword-iOS" in arguments else "macos"
-    for relative, contents in json.loads(os.environ["STUB_PRODUCTS"])[platform].items():
-        target = os.path.join(root, relative)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "wb") as handle:
-            handle.write(contents.encode("latin-1"))
-sys.exit(int(os.environ.get("STUB_EXIT", "0")))
-'''
+
+def xcodebuild_commands(text):
+    """The xcodebuild command lines in a shell script, each with its continuation lines joined: a line that is the
+    command itself (after `if`, a `!` or an environment assignment), not one that mentions it."""
+    joined = re.sub(r"\s*\\\n\s*", " ", text)
+    return [line.strip() for line in joined.splitlines() if re.match(r"\s*(if\s+)?(!\s+)?([A-Z_]+=\S+\s+)*xcodebuild\s", line)]
 
 
 class AppTaskTestCase(support.ScriptTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.upstream = tempfile.mkdtemp(prefix="watchword-script-test-packages-")
+        cls.addClassCleanup(shutil.rmtree, cls.upstream, ignore_errors=True)
+        cls.sources = support.PackageSources(cls.upstream)
+
     def setUp(self):
         super().setUp()
-        self.install("xcodebuild", FAKE_XCODEBUILD)
+        self.install("xcodebuild", support.FAKE_XCODEBUILD)
+        self.install("xcrun", "#!/bin/sh\nexit 0\n")
         self.write("stub.log", "")
         os.makedirs(self.path("Apps", "Watchword.xcodeproj"))
-
-    def pins(self, edit=None):
-        """A Package.resolved as Xcode would write it: the committed pins, with edit applied."""
-        with open(os.path.join(support.ROOT, "Package.resolved"), encoding="utf-8") as handle:
-            document = json.load(handle)
-        if edit:
-            edit(document)
-        return self.write(f"pins-{len(os.listdir(self.scratch))}.json", json.dumps(document))
+        shutil.copytree(TASKS, self.path("mise-tasks", "app"))
+        os.makedirs(self.path(".github", "scripts"))
+        shutil.copy(PICK_SIMULATOR, self.path(".github", "scripts", "pick-simulator.sh"))
+        self.tripwire = support.pinned_tripwire(self, self.sources)
+        # Where the tasks tell xcodebuild to put packages. bash works out $PWD for itself, links resolved.
+        self.packages = os.path.join(os.path.realpath(self.scratch), ".build", "app-source-packages")
 
     def task(self, name, **environment):
-        environment.setdefault("STUB_RESOLVED", self.pins())
-        return self.run_process(["bash", os.path.join(TASKS, name)], STUB_LOG=self.path("stub.log"), **environment)
+        environment.setdefault("STUB_CHECKOUTS", self.sources.plan())
+        command = ["bash", self.path("mise-tasks", "app", name)]
+        return self.run_process(command, STUB_LOG=self.path("stub.log"), **environment)
 
     def calls(self):
         return [json.loads(line) for line in self.read("stub.log").splitlines()]
@@ -79,55 +73,111 @@ class AppTaskTestCase(support.ScriptTestCase):
         """What each xcodebuild call was for: its first argument."""
         return [call[0] for call in self.calls()]
 
-
-def moved_tag(document):
-    """The 4.5.2 tag points somewhere else: same package, another commit."""
-    next(pin for pin in document["pins"] if pin["identity"] == "swift-crypto")["state"]["revision"] = "f" * 40
-
-
-def newer_asn1(document):
-    """A new swift-asn1 release inside swift-crypto's range, which an unpinned resolution takes."""
-    state = next(pin for pin in document["pins"] if pin["identity"] == "swift-asn1")["state"]
-    state["revision"], state["version"] = "a" * 40, "1.9.0"
-
-
-def another_package(document):
-    document["pins"].append({"identity": "swift-extra", "kind": "remoteSourceControl", "state": {"revision": "b" * 40}})
+    def assert_every_call_was_given_the_directory(self):
+        calls = self.calls()
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertIn("-clonedSourcePackagesDirPath", call, call)
+            self.assertEqual(call[call.index("-clonedSourcePackagesDirPath") + 1], self.packages, call)
 
 
 class ResolvedPackagesTests(AppTaskTestCase):
     def build(self, **environment):
         return self.task("build", usage_platform="macos", usage_configuration="Debug", **environment)
 
+    def assert_stopped_before_building(self, result, expected):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
+        self.assertIn(expected, result.stdout)
+        self.assertIn("::error::Before building, the package sources xcodebuild checked out are not", result.stdout)
+
     def test_the_pinned_commits_build(self):
         result = self.build()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies", "build"])
-        self.assertEqual(self.calls()[0], ["-resolvePackageDependencies", "-project", "Apps/Watchword.xcodeproj"])
-        self.assertEqual(result.stdout.count("pins the allowed swift-crypto commits and nothing else"), 2)
+        self.assertEqual(self.calls()[0][:3], ["-resolvePackageDependencies", "-project", "Apps/Watchword.xcodeproj"])
+        self.assert_every_call_was_given_the_directory()
+        # One line a package, with its commit, before the build and again after it.
+        for name in ("swift-crypto", "swift-asn1"):
+            self.assertEqual(result.stdout.count(f"{name} {self.sources.commits[name][0]} (clean checkout"), 2)
+        self.assertNotIn("::error", result.stdout)
 
     def test_both_apps_are_built_after_one_resolution(self):
         result = self.task("build", usage_platform="all", usage_configuration="Debug")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies", "build", "build"])
+        self.assert_every_call_was_given_the_directory()
 
-    def test_nothing_is_built_from_any_other_resolution(self):
+    def test_nothing_is_built_from_any_other_commit(self):
         """Finding: a re-pointed 4.5.2 tag, or a new swift-asn1, left every package gate green and was compiled into
         the app by the next `app:build` or `app:test`."""
-        for edit in (moved_tag, newer_asn1, another_package):
-            with self.subTest(case=edit.__name__):
+        sources = self.sources
+        cases = {
+            "a moved tag": (sources.plan(swift_crypto=sources.at("swift-crypto", 1)), "swift-crypto: checked out at"),
+            "a newer swift-asn1": (sources.plan(swift_asn1=sources.at("swift-asn1", 1)), "swift-asn1: checked out at"),
+            "another package": (sources.plan(swift_extra=sources.at("swift-extra")), "swift-extra: a package that is not"),
+            "a package missing": (sources.plan(swift_asn1=None), "swift-asn1: not checked out"),
+            "no packages": ("{}", "swift-crypto: not checked out"),
+        }
+        for name, (plan, expected) in cases.items():
+            with self.subTest(case=name):
                 self.write("stub.log", "")
-                result = self.build(STUB_RESOLVED=self.pins(edit))
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
-                self.assertIn("expected exactly", result.stdout)
-                self.assertIn("::error::Before building, Xcode's own Package.resolved does not pin", result.stdout)
+                self.assert_stopped_before_building(self.build(STUB_CHECKOUTS=plan), expected)
 
-    def test_no_record_of_the_resolution_is_a_failure(self):
-        result = self.build(STUB_RESOLVED="")
+    def test_a_stray_file_beside_the_checkouts_is_not_a_package(self):
+        os.makedirs(os.path.join(self.packages, "checkouts"))
+        with open(os.path.join(self.packages, "checkouts", ".DS_Store"), "w", encoding="utf-8") as handle:
+            handle.write("left by a file browser")
+        result = self.build()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_no_checkouts_at_all_is_a_failure(self):
+        """What the first Mac run would have looked like had it been this check: nothing where the task looked."""
+        result = self.build(STUB_CHECKOUTS="")
+        self.assert_stopped_before_building(result, "checkouts is not a directory")
+
+    def test_a_checkout_that_was_changed_is_refused(self):
+        sources = self.sources
+        cases = {
+            "a tracked file edited": sources.at("swift-crypto", edit="let backdoor = true\n"),
+            "a file added": sources.at("swift-crypto", add="Extra.swift"),
+        }
+        for name, how in cases.items():
+            with self.subTest(case=name):
+                self.write("stub.log", "")
+                result = self.build(STUB_CHECKOUTS=sources.plan(swift_crypto=how))
+                self.assert_stopped_before_building(result, "swift-crypto: the checkout differs from commit")
+
+    def test_a_directory_that_is_no_working_copy_is_refused(self):
+        """Sources dropped where a checkout belongs. The task's directory is inside this repository on a runner, so
+        git must not be let to find *that* repository and answer for it: here the scratch directory is one too."""
+        support.git(self.scratch, "init", "-q")
+        support.git(self.scratch, "commit", "-q", "--allow-empty", "-m", "the repository the tasks run in")
+        elsewhere = self.path("elsewhere")
+        support.git(self.scratch, "clone", "-q", self.sources.repositories["swift-crypto"], elsewhere)
+        support.git(elsewhere, "checkout", "-q", "--detach", self.sources.commits["swift-crypto"][0])
+        for name, how in (("a plain directory", {"plain": True}), ("a symbolic link", {"link": elsewhere})):
+            with self.subTest(case=name):
+                self.write("stub.log", "")
+                result = self.build(STUB_CHECKOUTS=self.sources.plan(swift_crypto=how))
+                self.assert_stopped_before_building(result, "is not a git working copy of its own")
+
+    def test_a_failure_says_what_was_there(self):
+        """Nothing in a cloud session can run Xcode, so one failed CI run has to show what Xcode left."""
+        moved = self.sources.commits["swift-crypto"][1]
+        result = self.build(STUB_CHECKOUTS=self.sources.plan(swift_crypto=self.sources.at("swift-crypto", 1)))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
-        self.assertIn("is missing", result.stdout)
+        output = result.stdout
+        self.assertIn(f"::error::swift-crypto: checked out at {moved}, expected {self.sources.commits['swift-crypto'][0]}", output)
+        self.assertIn("::group::What xcodebuild left in the source packages directory", output)
+        self.assertIn(f"$ ls -la {self.packages}\n", output)
+        self.assertIn(f"$ ls -la {os.path.join(self.packages, 'checkouts')}\n", output)
+        self.assertIn("workspace-state.json", output)
+        self.assertIn(f"swift-crypto: git rev-parse HEAD: {moved}; changed files: 0", output)
+        self.assertIn(f"swift-asn1: git rev-parse HEAD: {self.sources.commits['swift-asn1'][0]}; changed files: 0", output)
+        self.assertIn(f'workspace-state.json: swift-crypto remoteSourceControl', output)
+        self.assertIn(f'"revision": "{moved}"', output)
+        self.assertIn("::endgroup::", output)
 
     def test_a_failed_resolution_stops_the_task(self):
         result = self.build(STUB_RESOLVE_EXIT="74")
@@ -135,22 +185,88 @@ class ResolvedPackagesTests(AppTaskTestCase):
         self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
 
     def test_a_build_that_resolved_again_is_caught_afterwards(self):
-        result = self.build(STUB_REWRITTEN=self.pins(moved_tag))
+        moved = self.sources.plan(swift_crypto=self.sources.at("swift-crypto", 1))
+        result = self.build(STUB_REBUILT=moved)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies", "build"])
-        self.assertIn("::error::After building, Xcode's own Package.resolved does not pin", result.stdout)
+        self.assertIn("::error::After building, the package sources xcodebuild checked out are not", result.stdout)
 
-    def test_the_tests_do_not_run_on_another_resolution(self):
-        result = self.task("test", usage_platform="macos", STUB_RESOLVED=self.pins(moved_tag))
+    def test_a_resolution_that_was_not_given_the_directory_proves_nothing(self):
+        """Without the argument Xcode checks packages out under its own DerivedData, which nothing reads. The pinned
+        commits being there is no evidence, and the task must not take it for any."""
+        packages = self.path("mise-tasks", "app", "packages.sh")
+        with open(packages, encoding="utf-8") as handle:
+            text = handle.read()
+        resolve = f"-project Apps/Watchword.xcodeproj {DIRECTORY_ARGUMENT}\n"
+        self.assertEqual(text.count(resolve), 1)
+        self.write(os.path.join("mise-tasks", "app", "packages.sh"), text.replace(resolve, "-project Apps/Watchword.xcodeproj\n"))
+        result = self.build()
+        self.assert_stopped_before_building(result, "checkouts is not a directory")
+        derived = self.path("Library", "Developer", "Xcode", "DerivedData", "Watchword-stand-in", "SourcePackages")
+        self.assertTrue(os.path.isdir(os.path.join(derived, "checkouts", "swift-crypto", ".git")))
+
+    def test_every_xcodebuild_call_of_every_task_is_given_the_directory(self):
+        """A call without it compiles from Xcode's own checkouts, whatever the ones that were read say."""
+        runs = {
+            "build": {"usage_platform": "all", "usage_configuration": "Debug"},
+            "test": {"usage_platform": "all"},
+            "test (with results)": {"usage_platform": "macos", "usage_results": "TestResults"},
+            "test (a chosen simulator)": {"usage_platform": "ios", "usage_simulator": "0000-UDID"},
+            "test-keychain": {"usage_team": "ABCDE12345"},
+            "release": {"usage_platform": "all", "usage_derived_data": "derived"},
+        }
+        shutil.copytree(os.path.join(support.ROOT, "Apps", "Shared"), self.path("Apps", "Shared"))
+        seen = set()
+        for name, environment in runs.items():
+            with self.subTest(run=name):
+                self.write("stub.log", "")
+                self.task(name.split(" ")[0], **environment)
+                self.assert_every_call_was_given_the_directory()
+                seen.update(self.actions())
+        self.assertEqual(
+            seen,
+            {"-resolvePackageDependencies", "-showdestinations", "build", "build-for-testing", "test", "test-without-building"},
+        )
+
+    def test_no_xcodebuild_command_in_the_repository_s_scripts_lacks_the_directory(self):
+        """The same, read from the scripts: a call on a path the runs above do not take cannot slip through."""
+        scripts = [os.path.join(TASKS, name) for name in sorted(os.listdir(TASKS)) if not name.endswith(".py")]
+        scripts.append(PICK_SIMULATOR)
+        found = {}
+        for path in scripts:
+            with open(path, encoding="utf-8") as handle:
+                commands = xcodebuild_commands(handle.read())
+            for command in commands:
+                self.assertIn(DIRECTORY_ARGUMENT, command, f"{os.path.relpath(path, support.ROOT)}: {command}")
+            if commands:
+                found[os.path.basename(path)] = len(commands)
+        expected = {"build": 1, "packages.sh": 1, "pick-simulator.sh": 1, "release": 1, "test": 3, "test-keychain": 1}
+        self.assertEqual(found, expected)
+
+    def test_the_reading_of_the_scripts_sees_a_call_without_it(self):
+        """The check above is only as good as its eye for a command line."""
+        with open(os.path.join(TASKS, "test"), encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertEqual(len(xcodebuild_commands(text)), 3)
+        stripped = xcodebuild_commands(text.replace(DIRECTORY_ARGUMENT + " ", ""))
+        self.assertEqual(len(stripped), 3)
+        self.assertTrue(all(DIRECTORY_ARGUMENT not in command for command in stripped))
+        sample = 'if ! FOO=1 xcodebuild build \\\n    -scheme X; then\n  echo "xcodebuild failed"\nfi\n# xcodebuild test\n'
+        self.assertEqual(xcodebuild_commands(sample), ["if ! FOO=1 xcodebuild build -scheme X; then"])
+
+    def test_the_tests_do_not_run_on_another_commit(self):
+        moved = self.sources.plan(swift_crypto=self.sources.at("swift-crypto", 1))
+        result = self.task("test", usage_platform="macos", STUB_CHECKOUTS=moved)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
 
-    def test_passing_tests_do_not_excuse_another_resolution(self):
+    def test_passing_tests_do_not_excuse_another_commit(self):
         result = self.task("test", usage_platform="macos")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies", "test"])
         self.write("stub.log", "")
-        result = self.task("test", usage_platform="macos", STUB_REWRITTEN=self.pins(newer_asn1))
+        newer = self.sources.plan(swift_asn1=self.sources.at("swift-asn1", 1))
+        result = self.task("test", usage_platform="macos", STUB_REBUILT=newer)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies", "test"])
         self.assertIn("::error::App tests failed: packages(not the pinned commits)", result.stdout)
@@ -165,24 +281,32 @@ class ResolvedPackagesTests(AppTaskTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies", "test"])
         self.write("stub.log", "")
-        result = self.task("test-keychain", usage_team="ABCDE12345", STUB_RESOLVED=self.pins(moved_tag))
+        moved = self.sources.plan(swift_crypto=self.sources.at("swift-crypto", 1))
+        result = self.task("test-keychain", usage_team="ABCDE12345", STUB_CHECKOUTS=moved)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
 
-    def test_every_task_that_runs_xcodebuild_checks(self):
-        """A new app task that builds must source packages.sh too, or it builds whatever Xcode resolved."""
-        for name in sorted(os.listdir(TASKS)):
-            path = os.path.join(TASKS, name)
-            if not os.access(path, os.X_OK) or name.endswith(".py"):
-                continue
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
-            # A line that is the command itself, after `if` or an environment assignment, not one that mentions it.
-            if re.search(r"^\s*(if\s+)?([A-Z_]+=\S+\s+)*xcodebuild\s", text, re.MULTILINE):
-                with self.subTest(task=name):
-                    self.assertIn('source "$(dirname "${BASH_SOURCE[0]}")/packages.sh"', text)
-                    self.assertIn("resolve_packages\n", text)
-                    self.assertIn("check_resolved_packages ", text)
+    def test_the_directory_is_build_output(self):
+        """Ignored by git and removed by `mise run clean`, like the rest of `.build`."""
+        with open(os.path.join(TASKS, "packages.sh"), encoding="utf-8") as handle:
+            self.assertIn('\nsource_packages="$PWD/.build/app-source-packages"\n', handle.read())
+        with open(os.path.join(support.ROOT, "mise-tasks", "clean"), encoding="utf-8") as handle:
+            self.assertIn("\nrm -rf .build ", handle.read())
+        with open(os.path.join(support.ROOT, ".gitignore"), encoding="utf-8") as handle:
+            self.assertIn("\n.build/\n", handle.read())
+
+    def test_the_repository_s_own_script_holds_the_real_commits(self):
+        """The scratch copy differs from the repository's script in one line. The repository's, unchanged, refuses
+        these stand-ins, and names the commits `Package.resolved` pins as the ones it wants."""
+        with open(os.path.join(support.ROOT, "Package.resolved"), encoding="utf-8") as handle:
+            pins = {pin["identity"]: pin["state"]["revision"] for pin in json.load(handle)["pins"]}
+        self.build()
+        script = os.path.join(support.ROOT, ".github", "scripts", "assert-no-dependencies.sh")
+        result = self.run_process(["bash", script, "--checkouts", self.packages])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for name, commit in pins.items():
+            self.assertIn(f"::error::{name}: checked out at {self.sources.commits[name][0]}, expected {commit}", result.stdout)
+        self.assertEqual(sorted(pins), ["swift-asn1", "swift-crypto"])
 
 
 MARKERS = ["--uitest", "WATCHWORD_UITEST_PASSWORD", "UI test: another device", "Lock now (UI test)"]
@@ -298,7 +422,8 @@ class ReleaseBuildTests(AppTaskTestCase):
         self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
 
     def test_release_is_built_from_the_pinned_commits_only(self):
-        result = self.release(STUB_RESOLVED=self.pins(moved_tag))
+        moved = self.sources.plan(swift_crypto=self.sources.at("swift-crypto", 1))
+        result = self.release(STUB_CHECKOUTS=moved)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
 

@@ -47,18 +47,27 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
 - **[enforced; not yet run on a Mac]** The pin reaches the apps only through a second check. The
   committed `Package.resolved` governs `swift build` and `swift test`, where this package is the
   root. The apps are built by xcodebuild from a generated project that names the package by path,
-  and Xcode resolves a local package's dependencies for itself, into a `Package.resolved` of its
-  own inside the generated, uncommitted project: by the `4.5.2` tag, which can be moved, and for
-  swift-asn1 by the newest release in swift-crypto's range. So `app:build`, `app:test`,
-  `app:release` and `app:test-keychain` have Xcode resolve first
-  (`xcodebuild -resolvePackageDependencies`) and stop, before anything is compiled, unless that
-  file pins exactly the commits `assert-no-dependencies.sh` names; they check it again after the
-  build, and a missing file fails (`mise-tasks/app/packages.sh`, review finding Z102). Until this
-  existed, a re-pointed tag left every package gate green and was compiled into the next app
-  build, which is the artefact T1 is about. `Tests/ScriptTests/test_app_tasks.py` drives the tasks
-  with a stand-in `xcodebuild`; where Xcode writes the file, and that a build after an explicit
-  resolution does not resolve differently, are Xcode's documented behaviour and have not been
-  seen on a Mac. If the first Mac run shows the file elsewhere, the tasks fail closed.
+  and Xcode resolves a local package's dependencies for itself: by the `4.5.2` tag, which can be
+  moved, and for swift-asn1 by the newest release in swift-crypto's range. It records the result
+  in no file this repository can read: the first Mac run showed that Xcode writes no
+  `Package.resolved` inside the generated project for a local package whose dependencies are
+  remote, and the first version of this check, which read that file, failed closed on every app
+  job. So the evidence is the sources themselves. Every `xcodebuild` call in `app:build`,
+  `app:test`, `app:release` and `app:test-keychain` (and in `pick-simulator.sh`) is given one
+  `-clonedSourcePackagesDirPath`, `.build/app-source-packages`, which makes each dependency a git
+  working copy under `checkouts/` there. The tasks have Xcode resolve first
+  (`xcodebuild -resolvePackageDependencies`) and stop, before anything is compiled, unless
+  `assert-no-dependencies.sh --checkouts` finds exactly the allowed packages, each a working copy
+  of its own with `HEAD` at the commit the script names and no file changed; they check again
+  after the build, and no checkouts at all is a failure (`mise-tasks/app/packages.sh`, review
+  finding Z102). A failure prints what is in the directory, each checkout's `HEAD` and what Xcode
+  recorded in `workspace-state.json`, because nothing but a CI run can look. Until this existed,
+  a re-pointed tag left every package gate green and was compiled into the next app build, which
+  is the artefact T1 is about. `Tests/ScriptTests/test_app_tasks.py` drives the tasks with a
+  stand-in `xcodebuild` that checks packages out with real git, and fails if any call lacks the
+  argument: a call without it would compile from Xcode's own DerivedData, which nothing reads.
+  That Xcode puts clean working copies in that directory is its documented behaviour and has not
+  been seen: this version is unproven until a Mac run passes, and fails closed until then.
 - **[enforced]** `Apps/project.yml` can add everything the manifest is forbidden: a remote
   package, shell at generation or build time, prebuilt frameworks, native sources, settings that
   switch off what the compiler enforces. `assert-no-dependencies.sh` hands it to

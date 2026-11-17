@@ -10,10 +10,12 @@
 # only re-exports CryptoKit. `CryptoExtras` compiles BoringSSL into whatever links it, so it must stay behind a Linux
 # platform condition. Bumping either means editing these lines, like an action pin.
 #
-# `assert-no-dependencies.sh --resolved-file <path>` checks one Package.resolved against the same commits and nothing
-# else. The app tasks call it on the file Xcode writes inside the generated project: xcodebuild resolves a local
-# package's dependencies for itself, so the root Package.resolved says nothing about what an app is built from
-# (mise-tasks/app/packages.sh, docs/07-supply-chain.md §2).
+# `assert-no-dependencies.sh --checkouts <source packages directory>` checks what an Xcode build compiles against the
+# same commits and nothing else. xcodebuild resolves a local package's dependencies for itself, so the root
+# Package.resolved says nothing about what an app is built from, and Xcode writes no Package.resolved of its own for
+# this project (the first Mac run looked). What it does leave is the sources: with `-clonedSourcePackagesDirPath`,
+# each dependency is a git working copy under `<directory>/checkouts`. The app tasks pass that directory to every
+# xcodebuild call and hand it here (mise-tasks/app/packages.sh, docs/07-supply-chain.md §2).
 set -euo pipefail
 
 fail=0
@@ -51,16 +53,115 @@ if pins != expected:
 ' "$1" "$2"
 }
 
-if [ "${1:-}" = "--resolved-file" ]; then
+# The sources an Xcode build compiles must be exactly the allowed commits: under <directory>/checkouts, one git working
+# copy per allowed package and nothing else, each with HEAD at its allowed commit and no change to any file. A
+# directory that is missing, an entry that is not a working copy of its own (git is not allowed to find a repository
+# further up, which here would be this one), a package nobody allowed, another commit and an edited file all fail.
+# Nothing here can run Xcode, so a failure prints what is there: the listings, every checkout's HEAD, and what Xcode
+# recorded in workspace-state.json, which is read for the log only and never believed.
+check_checkouts() { # check_checkouts <source packages directory>
+  python3 -I -c '
+import json, os, subprocess, sys
+root = sys.argv[1]
+checkouts = os.path.join(root, "checkouts")
+expected = dict(pin.split("=") for pin in os.environ["ALLOWED_PINS"].split())
+# No GIT_DIR or GIT_WORK_TREE from outside, and no looking above the checkouts for a repository.
+environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+environment["GIT_CEILING_DIRECTORIES"] = os.path.realpath(checkouts)
+environment["GIT_OPTIONAL_LOCKS"] = "0"
+
+def git(path, *arguments):
+    try:
+        done = subprocess.run(["git", "-C", path, *arguments], capture_output=True, text=True, env=environment)
+    except OSError as problem:
+        return 127, "", str(problem)
+    return done.returncode, done.stdout.strip(), done.stderr.strip()
+
+def listing(path):
+    print(f"$ ls -la {path}")
+    sys.stdout.flush()
+    subprocess.run(["ls", "-la", path])
+
+problems, commits = [], {}
+# The packages are the directories there (a link counts, and is refused below); a stray file is not a package.
+try:
+    names = sorted(os.listdir(checkouts)) if os.path.isdir(checkouts) else None
+except OSError:
+    names = None
+if names is not None:
+    names = [name for name in names if os.path.isdir(os.path.join(checkouts, name)) or os.path.islink(os.path.join(checkouts, name))]
+if names is None:
+    problems.append(f"{checkouts} is not a directory: xcodebuild checked no packages out where it was told to")
+    names = []
+for name in names:
+    if name not in expected:
+        problems.append(f"{name}: a package that is not allowed was checked out (allowed: {sorted(expected)})")
+for name, commit in sorted(expected.items()):
+    path = os.path.join(checkouts, name)
+    if name not in names:
+        problems.append(f"{name}: not checked out")
+        continue
+    status, top, _ = git(path, "rev-parse", "--show-toplevel")
+    if os.path.islink(path) or status != 0 or os.path.realpath(top) != os.path.realpath(path):
+        problems.append(f"{name}: {path} is not a git working copy of its own")
+        continue
+    status, head, error = git(path, "rev-parse", "--verify", "HEAD")
+    if status != 0 or head != commit:
+        problems.append(f"{name}: checked out at {head or error}, expected {commit}")
+        continue
+    status, changes, error = git(path, "status", "--porcelain")
+    if status != 0 or changes:
+        shown = (changes or error).splitlines()[:10]
+        problems.append(f"{name}: the checkout differs from commit {commit}: {shown}")
+        continue
+    commits[name] = head
+if not problems:
+    for name, commit in sorted(commits.items()):
+        print(f"{name} {commit} (clean checkout in {checkouts})")
+    sys.exit(0)
+for problem in problems:
+    print(f"::error::{problem} (ADR 0006)")
+print("::group::What xcodebuild left in the source packages directory")
+for path in (root, checkouts):
+    if os.path.exists(path):
+        listing(path)
+    else:
+        print(f"{path} does not exist")
+for name in names:
+    path = os.path.join(checkouts, name)
+    _, head, error = git(path, "rev-parse", "HEAD")
+    _, changes, _ = git(path, "status", "--porcelain")
+    print(f"{path}: git rev-parse HEAD: {head or error}; changed files: {len(changes.splitlines())}")
+state = os.path.join(root, "workspace-state.json")
+if os.path.isfile(state):
+    try:
+        with open(state, encoding="utf-8") as handle:
+            recorded = json.load(handle)
+        for dependency in recorded.get("object", recorded).get("dependencies", []):
+            reference = dependency.get("packageRef", {})
+            print(
+                "workspace-state.json:", reference.get("identity"), reference.get("kind"), reference.get("location"),
+                json.dumps(dependency.get("state", {}), sort_keys=True), "subpath", dependency.get("subpath"),
+            )
+    except (OSError, ValueError, AttributeError, TypeError) as problem:
+        print(f"workspace-state.json could not be read: {type(problem).__name__}: {problem}")
+else:
+    print(f"{state} does not exist")
+print("::endgroup::")
+sys.exit(1)
+' "$1"
+}
+
+if [ "${1:-}" = "--checkouts" ]; then
   if [ "$#" -ne 2 ] || [ -z "$2" ]; then
-    echo "::error::usage: assert-no-dependencies.sh --resolved-file <Package.resolved>"
+    echo "::error::usage: assert-no-dependencies.sh --checkouts <source packages directory>"
     exit 2
   fi
-  check_pins "$2" "nothing shows which commits were resolved (ADR 0006)."
-  echo "$2 pins the allowed swift-crypto commits and nothing else."
+  check_checkouts "$2"
+  echo "The package sources in $2 are the allowed swift-crypto commits and nothing else."
   exit 0
 elif [ "$#" -ne 0 ]; then
-  echo "::error::usage: assert-no-dependencies.sh [--resolved-file <Package.resolved>]"
+  echo "::error::usage: assert-no-dependencies.sh [--checkouts <source packages directory>]"
   exit 2
 fi
 

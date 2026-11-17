@@ -352,57 +352,35 @@ class ManifestTests(TripwireTestCase):
         self.assert_refused("Native: target type binary is not permitted")
 
 
-class ResolvedFileTests(TripwireTestCase):
-    """`--resolved-file`: one Package.resolved against the allowed commits, for the file Xcode writes."""
+class CheckoutsOptionTests(TripwireTestCase):
+    """`--checkouts <directory>`: the sources an Xcode build compiles, against the allowed commits. What it accepts
+    and refuses is tested through the app tasks that call it, with real git checkouts (test_app_tasks.py); here, that
+    it is the script's one option and that the option it replaced is gone."""
 
-    def resolved(self, edit=None):
-        with open(os.path.join(support.ROOT, "Package.resolved"), encoding="utf-8") as handle:
-            document = json.load(handle)
-        if edit:
-            edit(document)
-        return self.write("Xcode.resolved", json.dumps(document))
-
-    def test_the_committed_pins_pass(self):
-        result = self.run_script("--resolved-file", self.resolved())
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("pins the allowed swift-crypto commits and nothing else", result.stdout)
-
-    def test_any_other_resolution_fails(self):
-        def moved_tag(document):
-            document["pins"][0]["state"]["revision"] = "0" * 40
-
-        def extra(document):
-            document["pins"].append({"identity": "swift-evil", "state": {"revision": "1" * 40}})
-
-        def fewer(document):
-            document["pins"].pop()
-
-        def twice(document):
-            document["pins"].append(dict(document["pins"][0], state={"revision": "2" * 40}))
-
-        def branch(document):
-            document["pins"][0]["state"] = {"branch": "main"}
-
-        for edit in (moved_tag, extra, fewer, twice, branch):
-            with self.subTest(case=edit.__name__):
-                result = self.run_script("--resolved-file", self.resolved(edit))
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("::error file=", result.stdout)
-
-    def test_a_missing_or_unreadable_file_fails(self):
-        result = self.run_script("--resolved-file", self.path("nowhere", "Package.resolved"))
+    def test_a_directory_with_no_checkouts_fails_and_says_what_is_there(self):
+        os.makedirs(self.path("packages"))
+        result = self.run_script("--checkouts", self.path("packages"))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("is missing", result.stdout)
-        for text in ("", "not json", "[]", '{"pins": 3}', '{"object": {"pins": []}}', '{"pins": [{"identity": "x"}]}'):
-            with self.subTest(text=text):
-                result = self.run_script("--resolved-file", self.write("Broken.resolved", text))
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("::error", result.stdout)
+        self.assertIn("checkouts is not a directory", result.stdout)
+        self.assertIn("::group::What xcodebuild left in the source packages directory", result.stdout)
+        self.assertIn("workspace-state.json does not exist", result.stdout)
+        result = self.run_script("--checkouts", self.path("nowhere"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("nowhere does not exist", result.stdout)
 
-    def test_the_option_needs_its_file(self):
-        self.assertEqual(self.run_script("--resolved-file").returncode, 2)
-        self.assertEqual(self.run_script("--resolved-file", "").returncode, 2)
+    def test_a_workspace_state_that_cannot_be_read_does_not_stop_the_report(self):
+        self.write(os.path.join("packages", "workspace-state.json"), "{ not json")
+        result = self.run_script("--checkouts", self.path("packages"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("workspace-state.json could not be read", result.stdout)
+        self.assertIn("::endgroup::", result.stdout)
+
+    def test_the_option_needs_its_directory_and_is_the_only_one(self):
+        self.assertEqual(self.run_script("--checkouts").returncode, 2)
+        self.assertEqual(self.run_script("--checkouts", "").returncode, 2)
         self.assertEqual(self.run_script("--something-else").returncode, 2)
+        # Xcode writes no Package.resolved for this project, so reading one was never evidence.
+        self.assertEqual(self.run_script("--resolved-file", self.path("Package.resolved")).returncode, 2)
 
 
 if __name__ == "__main__":

@@ -982,9 +982,9 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   as it is in a scratch directory: `audit:actions` over every spelling of `uses:` a grep did not read; the
   adversarial-suite check over logs in which a suite is missing, skipped, or named only inside another's name;
   `audit:mise-pins`; the dependency tripwire with a stand-in `swift` (the `Apps/project.yml` allowlist over each
-  planted bypass, a manifest that reads its environment or leaves Swift 6 mode, and a `Package.resolved` that pins
-  anything else); the app tasks with a stand-in `xcodebuild` (no build from a resolution other than the pinned
-  commits; a Release product holding a Debug-only marker); and `cloud-setup.sh` with stand-ins for `curl` and `gpg`
+  planted bypass, and a manifest that reads its environment or leaves Swift 6 mode); the app tasks with a stand-in
+  `xcodebuild` that checks packages out with real git (no build unless the checkouts are the pinned commits,
+  unchanged; every call given the source-packages directory; a Release product holding a Debug-only marker); and `cloud-setup.sh` with stand-ins for `curl` and `gpg`
   (a tarball that does not verify installs nothing and tries nothing else). The job then runs the two audits that
   need no build [`lint`, `test:scripts`, `audit:actions`, `audit:mise-pins`].
 - `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator on `xcode-27`: one leg for macOS, and the
