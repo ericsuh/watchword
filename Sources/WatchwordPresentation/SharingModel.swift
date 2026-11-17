@@ -14,6 +14,11 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         /// The chain lists keys for them that differ from the ones this device compared: a warning, never accepted
         /// silently (SEC3).
         case keysChanged
+        /// Their account's own devices disagree about which of them are the account's: its device registry holds a
+        /// second first entry, or a password change beside the one this device follows, made by someone who holds
+        /// their account key (review finding Z6). Nothing a device in question signs counts until the person has
+        /// verified with them again and typed the code their device shows.
+        case devicesDisagree
         /// No comparison of the chain with this device's pins has been made on the current head (the vault is
         /// locked, or the contacts could not be read). Never shown as verified (D17).
         case notChecked
@@ -35,6 +40,7 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         case .you, .verified: return nil
         case .unverified: return "Not verified by you"
         case .keysChanged: return "Keys changed: compare safety numbers again"
+        case .devicesDisagree: return "This person's devices disagree: verify with them again"
         case .notChecked: return "Not checked yet"
         }
     }
@@ -183,6 +189,18 @@ public final class SharedVaultModel {
         }
     }
 
+    /// The person has verified with a member whose devices disagree (`MemberRow.Trust.devicesDisagree`) and typed the
+    /// code that member's own device shows: this device follows the password change the code names (Z6).
+    public func verifyDevices(of member: MemberRow, code: String) async {
+        await perform {
+            try await context.session.verifyMemberDevices(of: member.id, code: code)
+            try await reload()
+            notice =
+                "\(member.name)'s devices are verified. Only the devices of the password change they showed "
+                + "you count here now."
+        }
+    }
+
     public func rotate() async {
         await perform {
             let status = try await context.session.rotateVaultKey(vaultID)
@@ -239,7 +257,8 @@ public final class SharedVaultModel {
     nonisolated static func rows(_ status: SharedVaultStatus, me: UUID?) -> [MemberRow] {
         rows(
             members: status.membership.members.map { ($0.accountID, $0.role) }, substituted: status.substitutedMembers,
-            unverified: status.unverifiedMembers, verified: status.verifiedMembers, me: me)
+            unverified: status.unverifiedMembers, verified: status.verifiedMembers,
+            devicesDisagree: status.membersWithDisagreeingDevices, me: me)
     }
 
     /// The member list: changed keys first of all, then unverified; verified only for a member the comparison on the
@@ -247,9 +266,10 @@ public final class SharedVaultModel {
     /// account that is in no list is never taken for verified.
     public nonisolated static func rows(
         members: [(accountID: UUID, role: MemberRole)], substituted: [UUID], unverified: [UUID], verified: [UUID]?,
-        me: UUID?
+        devicesDisagree: [UUID] = [], me: UUID?
     ) -> [MemberRow] {
         let substituted = Set(substituted)
+        let devicesDisagree = Set(devicesDisagree)
         let unverified = Set(unverified)
         let verified = Set(verified ?? [])
         return members.map { member in
@@ -258,6 +278,9 @@ public final class SharedVaultModel {
                 trust = .you
             } else if substituted.contains(member.accountID) {
                 trust = .keysChanged
+            } else if devicesDisagree.contains(member.accountID) {
+                // Above "verified": the keys compared are the right ones, and someone else holds them too.
+                trust = .devicesDisagree
             } else if unverified.contains(member.accountID) {
                 trust = .unverified
             } else if verified.contains(member.accountID) {

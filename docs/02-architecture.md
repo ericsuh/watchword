@@ -270,6 +270,17 @@ milestone 2 stores full item records only.
   registry entry is re-hashed and its signatures re-checked whenever the registry is evaluated, a candidate
   header and a vault deletion count only if the account key and a registered device signed them, and the
   Keychain anchor below says how far the registry had got (§7.7, §7.8).
+- Two columns of the `account` row need a check of their own, because nothing derived from them fails when
+  they are edited: `personal_vault_id` and `personal_vault_key_id` (review finding Z5). Which vault is the
+  Personal one decides where new items, AutoFill's saved logins and new passkeys go, and which vault is never
+  shared or deleted. The account header seals the Personal vault's ID under the Account Unlock Key (its
+  binding, §7.7), so at every unlock, by password or by quick unlock, once the keyset has opened and before a
+  key is installed, the stored header must be this account record's own and its binding must open to the
+  vault the row names; the key the row names must be a key of that vault, and never one that reached the
+  account by another member's grant (`personalVaultMismatch` otherwise, and the session stays locked). A
+  missing header row is refused wherever the Keychain holds a registry anchor. Only a store with neither (an
+  account from before the registry, or a backup restored onto other hardware with its header removed) is
+  taken at the row's word, and such a store publishes nothing until it has enrolled again.
 - The file is untrusted input (A8 can edit it while the app is locked; a restored backup is anyone's).
   The connection is opened with `SQLITE_OPEN_NOFOLLOW` (the database path is resolved first, since
   `/var` is itself a link), `trusted_schema = OFF`, `cell_size_check = ON` and `secure_delete = ON`;
@@ -780,7 +791,10 @@ account password and the Secret Key (typed, or the Emergency Kit's setup code, w
 
 1. List the account's headers and take the newest first. A header that does not parse, whose name disagrees with
    its contents, or whose KDF parameters are outside the two-sided bounds is skipped before any derivation
-   (SEC5, SEC9); at most three that parse are tried, because each costs a derivation.
+   (SEC5, SEC9); at most three that parse are tried, because each costs a derivation, and at most one per
+   authoring device (its newest), so a device that publishes a chain of headers spends one of the three (Z1).
+   Nothing can be checked against the registry yet: a store that plants well-formed headers under device IDs of
+   its own invention still uses up the three, as it can delete the real header (W5, Y7).
 2. Derive the AUK, open the keyset (bound to the account ID), open the binding. Any failure is the one error a
    wrong password and a wrong Secret Key share. The binding is what authenticates the header to a device that
    holds no key yet: nobody without the password and Secret Key can make one, and it fixes the two things a new
@@ -811,14 +825,31 @@ has the account is not affected at all: it follows only newer credentials, and r
 
 **A password change is the account's, not the device's.** `changePassword` re-verifies the current password,
 writes a credential entry to the registry (§7.8) and a new header, and deletes the header it replaces from the
-transport. Every other device, at its next sync, keeps the new header as a *candidate* — only if the registry
-holds its credential entry and the account key and the writing device signed it — and from then on refuses the old
-password (`passwordChangedOnAnotherDevice`), refuses quick unlock (and destroys the Local Unlock Key), and neither
-merges nor publishes until the person enters the new password there, which adopts the header. The keyset does not
-change: a password change does not take the keys away from someone who opened them with the old password (§7.8
-says what does). If the change was not the person's, they unlock a device they still hold with the password it
-has (`unlock(password:ignoringPasswordChange:)`), revoke the device that made it and set a password of their own;
-every other device then follows whichever password the person gives it.
+transport. Every other device, from the sync that brings it the credential entry, refuses the old password
+(`passwordChangedOnAnotherDevice`), refuses quick unlock (and destroys the Local Unlock Key), and neither merges nor
+publishes until the person enters the new password there, which adopts the change's header. That refusal is keyed
+on the registry's entry and remembered in the Keychain's anchor, not on the header having arrived or on any row of
+the local file (Z3, §7.8). The header is kept as a *candidate* only if the registry lists its credential entry and
+the account key and the writing device signed it, one per authoring device. The keyset does not change: a
+password change does not take the keys away from someone who opened them with the old password (§7.8 says what
+does).
+
+**Which header a typed password is tried against** (`openAccount`; review findings Z1, Z8). The device's own
+header first: it is the one thing in reach that no adversary wrote, and no derivation under parameters someone
+else chose runs ahead of it. If the password opens it while a change is pending, it is the retired password and is
+refused; it is never taken as confirming a "change" that happens to use the same password, which a revoked device
+that knew it can publish. If it does not open it, each device that published a *pending* change (one that follows
+the credentials this device has) gets one attempt, on its newest header, up to three; a change whose own history
+revokes this device is refused (`passwordChangeRevokesThisDevice`), and if more devices have published one than
+were tried, the unlock says that (`tooManyPasswordChangesPending`) rather than "wrong password". A change that
+branches off *before* the credentials this device follows (two devices changed the password at once, or someone
+used a password since retired) is not tried from the lock screen at all, or a retired password would open a
+device that has moved on. If the change was not the person's, they unlock a device they still hold with the
+password it has (`unlock(password:ignoringPasswordChange:)`, which reads no candidate), revoke the device that made
+it and set a password of their own. From an unlocked session `pendingPasswordChanges` lists the changes this
+device does not follow, with the device that made each and the devices each would revoke, and
+`followPasswordChange(by:password:)` follows the one the person names: that is how a fork is followed, and how the
+genuine change is reached when a revoked device has published more than an unlock tries.
 
 ### 7.8 The device registry (as built; review findings D9, Y5, Y6)
 
@@ -885,20 +916,35 @@ fill no device's registry, stop no fetch of the entries that matter, and keep ne
 spreading nor a new device from enrolling (review of the device registry, "flood"), in its own name or in a
 puppet's. A registered device in the wrong hands, or a revoked one before a password change, can still sign
 entries that might count (and so can puppets it registers before the change); the limit then
-refuses the registry rather than evaluate it without bound, as before. A candidate password
-change is judged *as if it were followed* (the registry replayed with it as the last checkpoint), never by where
-it falls among unsealed entries: otherwise a revoked device could hide the change from a device that has not been
-given the new password yet, by back-dating a revocation of the device that made it (found by the adversarial
-suite).
+refuses the registry rather than evaluate it without bound, as before.
 
-**What each device trusts.** The genesis entry and the credential entry it follows, and the newest entries it
-has applied, are pinned in the Keychain (`deviceRegistryAnchor`). The genesis entry comes from the account header
-the person's password opened; the credential entry moves forward only when this device changes the password or
-the person unlocks it with a newer one. So the store cannot forge the registry (no account key), cannot roll a
-device back (the local file must still hold everything the anchor names, or nothing verifies until a sync
-restores it), and cannot fork it in any way that survives the entries reaching a device (union is the merge). It
-can withhold entries, as it can withhold anything (Y7): a device then acts on an older registry until they
-arrive. A header older than the pinned credentials is refused at unlock (`accountHeaderRolledBack`).
+**Password changes this device does not follow** are *listed* and *followed* by different rules, because a device
+that has not been given a new password must at least see that there is one, whatever else is planted. A change is
+listed (`pendingCredentials` if it follows the entry this device follows, `forkedCredentials` if it leaves the
+chain earlier) from its own signatures and its links back to the chain alone: its author's signature under a key
+an ancestor registers, the enrolment key of the generation it replaces, consecutive generations, a predecessor
+that is followed or itself listed, and not an entry that can never count on this chain. That is one verification
+per entry and no replay, so nothing bounds the list and nothing can crowd the genuine change out of it (Z2: a
+budget of sixteen replays, spent in entry-ID order and charged before the replay, let sixteen planted entries hide
+it). A change is *followed* only by evaluating with it as the credential, which replays the registry with it as
+the last checkpoint and never judges it by where it falls among unsealed entries: otherwise a revoked device
+could void the change by back-dating a revocation of the device that made it (W1). The list can therefore name a
+change that would not replay; making one takes the account key, a device key and the replaced generation's
+enrolment key, and whoever holds those can make one that does.
+
+**What each device trusts.** The genesis entry and the credential entry it follows, the newest entries it
+has applied, and the password changes it has seen and not been given are pinned in the Keychain
+(`deviceRegistryAnchor`). The genesis entry comes from the account header the person's password opened; the
+credential entry moves forward only when this device changes the password or the person unlocks it with a newer
+one. So the store cannot forge the registry (no account key), cannot roll a device back (the local file must
+still hold everything the anchor names, or nothing verifies until a sync restores it), and cannot fork it in any
+way that survives the entries reaching a device (union is the merge). It can withhold entries, as it can withhold
+anything (Y7): a device then acts on an older registry until they arrive. A header older than the pinned
+credentials is refused at unlock (`accountHeaderRolledBack`). A pending change is the one part of the registry
+whose rows can be deleted without the pinned heads noticing (it is no entry on the followed chain), so the anchor
+names the pending credential entries seen while the device follows a given entry and keeps them until it follows
+another: the retired password and quick unlock are refused on the anchor's word, whatever the file holds by then
+and whether or not the registry can still be evaluated (Z3).
 
 **Adding a device.** By enrolment with the password and Secret Key (§7.7), or by a registered, unlocked device
 vouching for a device's ID and key before it has them (`prepareDeviceIdentity`, `approveDevice`).
@@ -933,9 +979,17 @@ choice explicit (`RevocationPasswordChoice`).
   confirm. The revocation is then behind a checkpoint that only someone knowing the *new* password can have
   made: on every device that has been given it, nothing the revoked device signs afterwards counts — not a
   registration under any ID or key, not an enrolment with the old password, not a back-dated revocation of the
-  others — and a device that has not been given it yet neither merges nor publishes. What still holds: the
-  reading, above; and whatever the revoked device wrote before a given device learned of the revocation, which
-  that device merged in good faith and hands on (§7.5).
+  others — and a device that has not been given it yet neither merges nor publishes, and refuses the retired
+  password. What still holds: the reading, above; and whatever the revoked device wrote before a given device
+  learned of the revocation, which that device merged in good faith and hands on (§7.5).
+- *A competing change.* The revoked device still holds the enrolment key of the generation before its
+  revocation, so on a device that has not been given the new password it can publish a password change of its
+  own from there, with every signature the genuine one has. Such a device cannot tell the two apart and does not
+  try: it adopts neither on the retired password, tries each author's newest once on a new one, refuses a change
+  that revokes itself, and otherwise leaves the choice to the person (§7.7, Z1). What the revoked device can
+  still do there is delay: plant changes under devices it registered before it was revoked, so that the person
+  has to name the device they changed the password on. A device it registered before the revocation is still a
+  registered device after it; the person revokes those too.
 - *A stolen local header.* A thief with the device's Keychain (the Secret Key) and database can try passwords
   against the header as it was, offline. A password change elsewhere does not change that copy, and the keyset
   it opens is still the account's: again only the re-key ends it. The KDF floor and the Keychain's protection
@@ -1642,9 +1696,9 @@ accepts to set up a vault its account already takes part in), `leaveSharedVault`
 **One sync** (`syncAll`) runs §8.8's pass around the logs. Before any vault's log: membership ingested (names first,
 refused names remembered), member keys compared with the pins, proposals settled, the current key fetched if the
 chain entitles this account to it, and the device registry of every account the chains list or listed fetched from
-`account/<id>/registry/` and evaluated from the one genesis entry signed by the key the chain gives for that account,
-following its newest password change. A registry is evaluated once per signing key the chains give an account, and
-each vault uses the one its own chain anchors (S39). Then each shared vault's log runs with the judge, publishing only if this
+`account/<id>/registry/` and evaluated from the genesis entry this device anchored for the key the chain gives that
+account, forward from the password change it follows (below). A registry is evaluated once per signing key the
+chains give an account, and each vault uses the one its own chain anchors (S39). Then each shared vault's log runs with the judge, publishing only if this
 account may write (a read-only or former member merges and publishes nothing, `sync(publishing:)`), and with
 `maintainsLog` off: a shared vault writes no snapshots and collects no segments, because a cut is judged against the
 departing account's own segments (§8.8, "a departed account's log"). After the logs: a saved plan continued, owed
@@ -1660,7 +1714,30 @@ A snapshot needs the owner's account: a shared vault writes none, so an honest o
 shared, when the owner's devices were its only writers, and it is read for one thing, the gap in a stream whose first
 segments were collected then (refusing it would stop that stream at a new member and at every replay). A member's
 snapshot would have its coverage vector believed unjudged, and is refused (Z21). Devices revoked from a member's
-account, as the vault's chain anchors it, are not read.
+account, as the vault's chain anchors it and as this device follows that account's registry, are not read.
+
+**Another member's registry** (`evaluateMemberRegistry`; review finding Z6). An account's own devices know which
+password change is theirs, because the person typed its password. Another member's device knows nothing of the
+kind: two changes made from the same generation each carry the account key's signature, a registered device's and
+the previous generation's enrolment key's, and a device that was revoked with a password change still holds all
+three for the generation before its revocation. So no rule picks between two branches, and following the highest
+generation followed whoever published most. Instead, what this device took once is an anchor (the genesis entry and
+the credential entry followed; signed by this account under `WWMD` and saved with each vault that lists the member,
+refused whole if it does not verify) that moves **only forward**: one credential entry at a time, and only where
+exactly one change follows that replays as a chain. A change that leaves the chain at or before the anchored entry
+is never followed, whatever its generation. Where two or more follow it, neither is taken, and a device counts only
+if it is registered at the anchored entry *and in every competing branch*: each side's revocations are honoured,
+so neither the device a branch revokes nor the one it keeps signs anything that counts here, while a device nobody
+contests carries on (a contested device stays listed as a revoked one is, so what it wrote before is still its
+account's work). A second genesis entry neither replaces nor removes the one anchored; with none anchored, two
+anchor neither. Each such sight is reported in the vault's status (`membersWithDisagreeingDevices`: "this person's
+devices disagree: verify with them again") until the person settles it, and the one step that moves an anchor
+anywhere but forward is theirs: `verifyMemberDevices(of:code:)`, with the twelve-digit code the member reads off
+their own device (`memberDevicesCode`, a digest of the account and the credential entry that device follows).
+What this does not stop: the holder of the member's account key can keep that member's contested devices in
+question, and make the notice return, for as long as they like; and a device that anchors while only the forged
+branch is visible follows it until the person verifies. Both end with the account re-key (F10.1, not built), which
+gives the member a signing key the old device never held.
 
 **A stream is one account's** (review finding Z46). An object's name carries a device ID and no account, device IDs
 are chosen by devices, and a member can list another member's device ID in their own registry (S33) and sign segments
@@ -2103,8 +2180,16 @@ As built in milestone 2 (`WatchwordKit.VaultSession`):
   later bug cannot revive an expired enrolment; a biometric re-enrolment also forgets the state.
   After `maximumFailedAttempts` prompts that did not end in the key — cancels included, because the
   system prompt retries internally and a run of failures usually ends in Cancel — the LUK is deleted
-  and no further prompt is shown. Bytes from the Keychain that fail to open the wrapped AUK, or an
-  AUK that fails to open the keyset, destroy the enrolment; a bad vault-key row does not.
+  and no further prompt is shown. The attempt is counted *before* the prompt is shown, written to the
+  Keychain, and taken back only once the released key has opened the wrapped AUK and the keyset: a
+  count made after the Keychain read returned was never made if the app was killed while the prompt
+  was up (Z7). The price is that a crash, a kill or an unrelated Keychain error during the prompt
+  counts as a failed attempt, and three send the person back to the password. Bytes from the Keychain
+  that fail to open the wrapped AUK, or an AUK that fails to open the keyset, destroy the enrolment;
+  a bad vault-key row does not.
+- **The row is not believed about the Personal vault.** Both ways of unlocking check, before a key
+  is installed, that the Personal vault the account row names is the one the header seals under the
+  AUK (§6, Z5), and that no password change is pending that this device has not been given (§7.7).
 - **Enrolment needs the password.** `enableQuickUnlock(password:)` re-verifies the password against
   the stored header, because enrolment starts the 14-day interval: a quick-unlocked session must not
   be able to restart it.
@@ -2115,7 +2200,9 @@ As built in milestone 2 (`WatchwordKit.VaultSession`):
 - **Lock wins.** `VaultSession` is an actor and actors are re-entrant across `await`. A lock epoch
   is checked after every suspension, so a `lock()` that lands during an unlock discards the derived
   keys (`lockedDuringUnlock`) and one that lands during a save fails it (`locked`) instead of sealing
-  with a zeroised key.
+  with a zeroised key. What an unlock does after installing its keys (re-enrolling quick unlock,
+  copying the signing key to the Keychain, reconciling the account's objects) checks again before
+  each read of them, since reading a zeroised key traps (W22, Z4).
 - **Auto-lock** (`AutoLockPolicy`, F5.5) is likewise pure: idle timeout, background grace (default
   zero: backgrounding locks at once), screen lock/sleep, and a clock that moved backwards locks.
 

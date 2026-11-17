@@ -82,4 +82,20 @@ public enum VaultError: Error, Equatable, Sendable {
     /// The password opened an account header, but the device registry shows the password has been changed since:
     /// the store presented an old header (A1), or the person typed an old password. Use the current one.
     case passwordSuperseded
+    /// The password opened a password change made on another device, and that change's own history removes this
+    /// device from the account. It is not followed here: this device keeps the credentials it has, and the change
+    /// stays pending (review finding Z1). If the person did remove this device, it is to be erased and enrolled
+    /// again; if they did not, the device that made the change is the one to remove.
+    case passwordChangeRevokesThisDevice
+    /// More devices have published a password change than one unlock tries (`maximumHeaderAttempts`; each costs a
+    /// key derivation whose parameters its author chose), and none of those tried opened. The password may be right
+    /// for one that was not tried: unlock with the password this device still has (`ignoringPasswordChange`) and
+    /// name the device that made the change (`followPasswordChange(by:password:)`).
+    case tooManyPasswordChangesPending
+    /// `followPasswordChange` named a device that has published no password change this device could follow.
+    case noPasswordChangeToFollow(UUID)
+    /// The Personal vault the local account row names is not the one the account header seals under the Account
+    /// Unlock Key, or that binding cannot be checked: the row was edited (A8), or its key is one that reached this
+    /// account by another member's grant. Refused at every unlock, before a key is installed (review finding Z5).
+    case personalVaultMismatch
 }

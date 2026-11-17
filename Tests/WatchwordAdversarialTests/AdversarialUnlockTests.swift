@@ -106,6 +106,40 @@ struct AdversarialUnlockTests {
     /// coerced or sleeping owner) quick-unlocks just before the 14-day interval ends and re-enables quick unlock to
     /// restart it, forever (review finding U1). Enabling needs the password, re-verified against the stored header,
     /// so the interval still ends 14 days after the password was last entered.
+    /// Threat: the adversary of U3 (holds the unlocked device and knows its passcode, so can clear the OS biometric
+    /// lockout, but cannot pass the enrolled biometric), killing the app while the system prompt is up instead of
+    /// letting it end. The Keychain read then never returns, so a count made after it returns is never made, and the
+    /// three-attempt limit of F5.4 never trips (review finding Z7). The attempt is counted before the prompt is
+    /// shown.
+    @Test("an app killed while the biometric prompt is up has still used an attempt")
+    func killedDuringThePrompt() async throws {
+        let (vault, kit) = try await Self.enrolled()
+        for attempt in 1...3 {
+            let launch = vault.relaunched()
+            #expect(try await launch.session.status().quickUnlock == .allowed)
+            await vault.keychain.script(.neverReturns)
+            let prompt = Task { try await launch.session.quickUnlock() }
+            await vault.keychain.waitUntilPromptsHeld(attempt)
+            // The process is gone: nothing after the read runs.
+            prompt.cancel()
+            _ = await prompt.result
+        }
+        let next = vault.relaunched()
+        #expect(try await next.session.status().quickUnlock == .requirePassword(.tooManyFailedAttempts))
+        await #expect(throws: VaultError.quickUnlockRefused(.tooManyFailedAttempts)) {
+            try await next.session.quickUnlock()
+        }
+        #expect(!(await vault.keychain.contains(.quickUnlockKey(accountID: kit.accountID))))
+        #expect(await vault.keychain.biometricPrompts == 3, "no prompt is shown once the limit is reached")
+        // The password brings quick unlock back, and a prompt that ends in the key takes its attempt back.
+        try await next.session.unlock(password: TestVault.password)
+        await next.session.lock()
+        try await next.session.quickUnlock()
+        await next.session.lock()
+        #expect(try await next.session.status().quickUnlock == .allowed)
+        try await next.session.quickUnlock()
+    }
+
     @Test("a quick-unlocked session cannot restart the password interval")
     func cannotExtendInterval() async throws {
         let (vault, _) = try await Self.enrolled()

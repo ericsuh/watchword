@@ -592,7 +592,17 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 
 - Nothing unlocks on a boolean. `BiometricGate` reports enrolment only; quick unlock needs the Keychain to release
   the Local Unlock Key, that key to open the wrapped AUK, and the AUK to open the keyset. Keep it that way.
-- A refused quick unlock *deletes* the Local Unlock Key; it is not merely ignored.
+- A refused quick unlock *deletes* the Local Unlock Key; it is not merely ignored. An attempt is counted in the
+  Keychain **before** the prompt is shown and taken back only when the released key has opened the keyset (Z7):
+  never move the count behind the read, which does not return if the app is killed.
+- **Which vault is Personal is the header's to say, not the row's** (Z5): both unlock paths call
+  `requirePersonalVaultBinding` before a key is installed, and the Personal vault's key is never one that
+  `arrivedByGrant`. A new unlock path does the same.
+- **The device's own header first** (Z1, `openAccount`). A typed password is tried against the header this device
+  has before anything else, and never against a candidate when it opens that or when `ignoringPasswordChange` is
+  set. Candidates are pending changes only, one attempt per authoring device; a fork is followed only from an
+  unlocked session (`followPasswordChange`, Z8). Never try a candidate ahead of the trusted header, and never
+  adopt one whose branch revokes this device.
 - The actor is re-entrant across `await`: after every suspension, re-check the lock epoch (`requireKeys(since:)`)
   before touching key material, so `lock()` always wins.
 - Read contexts come from the store row, and a decrypted item's `id`/`vaultID`/`version` must equal the row's.
@@ -686,6 +696,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `refusedNames` before then.
 - Member registries are anchored per vault (`memberRegistries`, S39), and a vault key whose ID this device holds for
   another vault is refused (`keyIDInUse`, S38).
+- **Another member's registry moves only forward** (Z6, `evaluateMemberRegistry`): from the genesis and credential
+  entry this device anchored (`MemberRegistryPin`, saved signed as `WWMD`), one credential entry at a time, and only
+  where exactly one change follows. Two changes from one generation are symmetric to an outsider, so no rule picks
+  one: where two follow, only devices every branch keeps count, and the fork is reported
+  (`membersWithDisagreeingDevices`). Never follow the highest generation, never drop the anchor for a second
+  genesis, and move an anchor sideways only in `verifyMemberDevices`.
 - **A stream is one account's** (Z46): this device's own stream takes only this account's signature, and any other
   belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`). Another
   account's segment in it is recorded for the cut's chain, filed nowhere, and held aside. Never attribute through a
@@ -710,16 +726,24 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   deterministic function of the entries, the pinned genesis entry and the pinned credential entry. Keep it that
   way: no clock, no arrival order, no local state.
 - Password changes are checkpoints: what a credential entry had seen is replayed before what it had not. A
-  candidate change is judged by replaying with it as the last checkpoint, never by its place among unsealed
-  entries (a revoked device can back-date entries in front of it; review finding W1).
+  candidate change is **followed** only by replaying with it as the last checkpoint (`evaluate(credential:)`),
+  never by its place among unsealed entries (a revoked device can back-date entries in front of it; review
+  finding W1). It is **listed** (`pendingCredentials`, `forkedCredentials`) from its own signatures and its links
+  back to the chain alone, one verification each and no replay, so that no number of planted entries hides the
+  genuine change (Z2). Never put a budget on the list, and never treat "listed" as "can be followed".
 - Every entry needs the account key's signature and its author's (a registered device, or the current enrolment
   key); a credential entry also the previous generation's enrolment key. A revoked ID or key never returns.
 - What a device trusts is in the Keychain (`deviceRegistryAnchor`, `accountSigningKey`), never in the database.
   The local store must still hold everything the anchor names, or the registry is unavailable and nothing verifies.
+  The anchor also names the pending password changes seen (`RegistryAnchor.pending`, Z3), kept until the device
+  follows another credential entry: ask `passwordChangePending`, never whether a candidate header row exists.
 - Everything fetched before a key is held is hostile: headers are bounded and KDF-validated before any derivation,
   authenticated by the binding under the derived AUK, and the genesis entry comes from that binding only.
 - A device with a password change it has not been given neither merges nor publishes, refuses the old password
-  once it holds the new header, and adopts the change only when the person's password opens it.
+  from the moment the registry lists the change (header or no header), and adopts the change only when the
+  person's password opens it and does not open the device's own header. To such a device a change by a revoked
+  device that knew the old password is indistinguishable from the genuine one: the person chooses
+  (`pendingPasswordChanges`, `followPasswordChange`), the code never does.
 - Revocation stops writing, not reading: do not describe it as more (§7.8 states the limits; the re-key is open).
 
 ### `CredentialProviderModel` invariants

@@ -29,6 +29,10 @@ public enum SharingStateKey: String, Sendable, CaseIterable {
     /// Which segment of which device's stream first carried each record version, and the head the vault was last
     /// judged at (`SharedStreamIndex`), signed.
     case streamIndex
+    /// What this device has anchored of the other members' device registries (`MemberRegistryPins`), signed: for each
+    /// account and signing key the vault's chain lists, the genesis entry and the credential entry it follows
+    /// (review finding Z6).
+    case memberDevices
 }
 
 public actor InMemorySharingStateStore: SharingStateStore {
@@ -113,4 +117,7 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// `removeLocalCopies` was asked for a vault this account is still a member of: a member leaves first, and the
     /// copies can go once the chain says they are out.
     case stillAMember(UUID)
+    /// `verifyMemberDevices` was given a code that no entry of that account's device registry, or more than one,
+    /// answers to. Nothing was anchored: read the code again from the member's own device.
+    case memberDevicesCodeUnknown(UUID)
 }

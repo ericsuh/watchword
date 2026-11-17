@@ -189,7 +189,8 @@ extension VaultSession {
     /// one the record that ended their permission listed). Their devices are what a value's `GroupStamp` names, and
     /// their keys what a segment's device signature is checked against (§8.8, D9). Anchored per vault (review finding
     /// S39): an administrator of one vault who lists another account's ID with keys of their own makes a registry
-    /// that vault judges by, and no other.
+    /// that vault judges by, and no other. And anchored on this device (Z6, `evaluateMemberRegistry`): what was
+    /// taken once moves only forward.
     func refreshMemberRegistries(account: AccountRecord) async {
         guard let transport = syncSettings?.transport else { return }
         var anchors: [UUID: Set<[UInt8]>] = [:]
@@ -199,28 +200,48 @@ extension VaultSession {
             }
         }
         var registries: [MemberRegistryAnchor: DeviceRegistryState] = [:]
+        var disagreements: Set<MemberRegistryAnchor> = []
         for (accountID, signingKeys) in anchors.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
             let anchorsOfAccount = signingKeys.map { MemberRegistryAnchor(accountID: accountID, signingKey: $0) }
-            guard
-                let names = try? await transport.list(prefix: AccountObjectLocation.registryPrefix(accountID))
-            else {
-                for anchor in anchorsOfAccount { registries[anchor] = sharing.registries[anchor] }
+            guard let raw = await fetchMemberRegistry(accountID, transport: transport) else {
+                for anchor in anchorsOfAccount {
+                    registries[anchor] = sharing.registries[anchor]
+                    if sharing.registryDisagreements.contains(anchor) { disagreements.insert(anchor) }
+                }
                 continue
             }
-            var raw: [[UInt8]] = []
-            for name in Set(names).sorted() {
-                guard case .registryEntry(let owner, _)? = AccountObjectLocation(name: name), owner == accountID,
-                    let bytes = try? await transport.fetch(name, maximumLength: RegistryEntry.maximumLength)
-                else { continue }
-                raw.append(bytes)
-            }
             for anchor in anchorsOfAccount {
-                registries[anchor] =
-                    Self.evaluateMemberRegistry(raw, accountID: accountID, signingKey: anchor.signingKey)
-                    ?? sharing.registries[anchor]
+                let evaluated = Self.evaluateMemberRegistry(
+                    raw, accountID: accountID, signingKey: anchor.signingKey, pin: sharing.registryPins[anchor])
+                guard evaluated.complete else {
+                    // What was anchored is not all there now (withheld, or lost): nothing new is believed, and
+                    // nothing held is forgotten.
+                    registries[anchor] = sharing.registries[anchor]
+                    if sharing.registryDisagreements.contains(anchor) { disagreements.insert(anchor) }
+                    continue
+                }
+                registries[anchor] = evaluated.state
+                if let pin = evaluated.pin { sharing.registryPins[anchor] = pin }
+                if evaluated.unsettled { disagreements.insert(anchor) }
             }
         }
         sharing.registries = registries
+        sharing.registryDisagreements = disagreements
+    }
+
+    /// Every entry under an account's registry prefix on the transport, or `nil` if it cannot be listed.
+    func fetchMemberRegistry(_ accountID: UUID, transport: any SyncTransport) async -> [[UInt8]]? {
+        guard let names = try? await transport.list(prefix: AccountObjectLocation.registryPrefix(accountID)) else {
+            return nil
+        }
+        var raw: [[UInt8]] = []
+        for name in Set(names).sorted() {
+            guard case .registryEntry(let owner, _)? = AccountObjectLocation(name: name), owner == accountID,
+                let bytes = try? await transport.fetch(name, maximumLength: RegistryEntry.maximumLength)
+            else { continue }
+            raw.append(bytes)
+        }
+        return raw
     }
 
     /// The signing key `ledger`'s chain gives each account it lists or listed, other than `me`: the current member's,
@@ -254,31 +275,246 @@ extension VaultSession {
             }
     }
 
-    /// Another account's registry, anchored on the signing key the membership chain lists for it: the one genesis
-    /// entry that key signed, following that account's newest password change (a registry is the account's own
-    /// business, and every entry needs its account key's signature). `nil` if there is not exactly one genesis.
-    static func evaluateMemberRegistry(_ raw: [[UInt8]], accountID: UUID, signingKey: [UInt8])
-        -> DeviceRegistryState?
-    {
+    /// Password changes replayed side by side when another account's registry forks at the one followed; more than
+    /// this many competing changes are not replayed at all, and every device of the account is held in question.
+    static let maximumMemberBranches = 8
+
+    /// What `evaluateMemberRegistry` made of another account's registry.
+    struct MemberRegistryEvaluation {
+        /// Whose signatures count now: `nil` if nothing is anchored.
+        var state: DeviceRegistryState?
+        /// What this device anchors from now on; `nil` while it anchors nothing.
+        var pin: MemberRegistryPin?
+        /// The entries that disagree about whose devices the account's are: genesis entries other than the one
+        /// anchored (all of them, with none anchored), competing password changes at the one followed, and password
+        /// changes that leave the chain at or before it.
+        var disagreement: Set<ObjectDigest> = []
+        /// Whether `disagreement` holds anything the person has not settled.
+        var unsettled = false
+        /// `false` when the anchored entries were not all among those given: the caller keeps what it had.
+        var complete = true
+    }
+
+    /// Another account's registry, as this device follows it (review finding Z6; docs/02-architecture.md §8.10).
+    ///
+    /// An account's own devices know which password change is theirs: the person typed its password. Another
+    /// member's device knows nothing of the kind, and to it two password changes made from the same generation are
+    /// symmetric: each carries the account key's signature, a registered device's, and the previous generation's
+    /// enrolment key's. A device that was revoked *with* a password change still holds all three for the generation
+    /// before its revocation, so it can publish a competing change there, sealing a back-dated revocation of the
+    /// device that revoked it, and extend it to any generation. Following the highest generation therefore followed
+    /// whoever published most, and un-revoked that device in every other member's eyes.
+    ///
+    /// So no rule here picks between two branches. What this device took once (`pin`: the genesis entry and the
+    /// credential entry it follows) moves **only forward**, one credential entry at a time, and only where exactly
+    /// one change follows that replays as a chain. A change that leaves the chain at or before the anchored entry
+    /// is never followed, whatever its generation. Where two or more follow the anchored entry, neither is taken:
+    /// the registry stays at the entry before them, and a device counts only if it is registered there **and in
+    /// every one of the competing branches** — each side's revocations are honoured, so neither the device a branch
+    /// revokes nor the one it keeps signs anything that counts here, while a device nobody contests carries on.
+    /// With nothing anchored, more than one genesis entry anchors none.
+    ///
+    /// Every such sight is returned as a disagreement, for the screens to say that this person's devices disagree
+    /// and to verify with them again; `verifyMemberDevices` is that step, and the only thing that moves the anchor
+    /// to a branch of the person's choosing. What this does not stop: the key holder can keep the member's
+    /// contested devices in question for as long as they like, and a device that anchors while only the forged
+    /// branch is visible follows it until the person verifies. The cure for both is the account re-key (F10.1).
+    static func evaluateMemberRegistry(
+        _ raw: [[UInt8]], accountID: UUID, signingKey: [UInt8], pin: MemberRegistryPin?
+    ) -> MemberRegistryEvaluation {
         let entries = DeviceRegistry.admit(raw, accountID: accountID, accountSigningKey: signingKey)
+        func evaluate(_ genesis: ObjectDigest, _ credential: ObjectDigest) -> DeviceRegistryState? {
+            try? DeviceRegistry.evaluate(
+                entries, accountID: accountID, accountSigningKey: signingKey, genesis: genesis,
+                credential: credential)
+        }
         let geneses = entries.filter {
             if case .genesis = $0.value.body { return true }
             return false
+        }.keys.sorted()
+        var result = MemberRegistryEvaluation()
+        let genesis: ObjectDigest
+        if let pin {
+            genesis = pin.genesis
+            result.disagreement.formUnion(geneses.filter { $0 != genesis })
+        } else {
+            guard geneses.count == 1 else {
+                // None to anchor, or more than one: nothing is anchored on a choice this device cannot make.
+                result.disagreement = Set(geneses)
+                result.unsettled = !geneses.isEmpty
+                return result
+            }
+            genesis = geneses[0]
         }
-        guard geneses.count == 1, let genesis = geneses.first?.key else { return nil }
-        var credential = genesis
-        var state: DeviceRegistryState?
-        for _ in 0..<8 {
-            guard
-                let evaluated = try? DeviceRegistry.evaluate(
-                    entries, accountID: accountID, accountSigningKey: signingKey, genesis: genesis,
-                    credential: credential)
-            else { return state }
-            state = evaluated
-            guard let next = evaluated.pendingCredentials.last else { return evaluated }
-            credential = next.id
+        guard var state = evaluate(genesis, pin?.credential ?? genesis) else {
+            result.pin = pin
+            result.complete = false
+            return result
         }
-        return state
+
+        // Forward, while exactly one change follows the one followed and replays as a chain.
+        var branches: [DeviceRegistryState] = []
+        var everyDeviceInQuestion = false
+        for _ in 0..<DeviceRegistry.maximumEntries {
+            let next = state.pendingCredentials.filter { $0.previous == state.credential.id }
+            guard !next.isEmpty else { break }
+            guard next.count <= maximumMemberBranches else {
+                everyDeviceInQuestion = true
+                result.disagreement.formUnion(next.map(\.id))
+                break
+            }
+            let followable = next.compactMap { evaluate(genesis, $0.id) }
+            if followable.count == 1 {
+                state = followable[0]
+                continue
+            }
+            if followable.count > 1 {
+                branches = followable
+                result.disagreement.formUnion(followable.map(\.credential.id))
+            }
+            break
+        }
+
+        // Changes that leave the chain at or before the entry followed: listed ones, and ones that can never count
+        // on this chain (their author revoked behind one of its checkpoints) yet were made with the password of the
+        // generation they replace. Never followed; seen, and said.
+        result.disagreement.formUnion(state.forkedCredentials.map(\.id))
+        let followed = Set(state.credentialChain.map(\.id))
+        let ahead = Set(state.pendingCredentials.map(\.id))
+        for (id, entry) in entries where !followed.contains(id) && !ahead.contains(id) {
+            guard case .credential(_, _, let previous) = entry.body, state.connectedEntries.contains(id) else {
+                continue
+            }
+            let replaced: [UInt8]?
+            switch entries[previous]?.body {
+            case .genesis(_, _, let key)?, .credential(_, let key, _)?: replaced = key
+            default: replaced = nil
+            }
+            guard let replaced,
+                (try? Signatures.verify(
+                    entry.previousCredentialSignature, for: entry.previousCredentialMessage, domain: .deviceRegistry,
+                    signingKey: replaced)) != nil
+            else { continue }
+            result.disagreement.insert(id)
+        }
+
+        // Competing changes at the one followed: only what every branch agrees is a device of the account counts.
+        if everyDeviceInQuestion || !branches.isEmpty {
+            for (id, device) in state.devices
+            where everyDeviceInQuestion || !branches.allSatisfy({ $0.devices[id]?.key == device.key }) {
+                state.devices[id] = nil
+                // Still listed, as a revoked device is: what it wrote before stays its account's work, and its
+                // stream is not read from here on.
+                state.revoked[id] = device
+            }
+        }
+        result.state = state
+        result.pin = MemberRegistryPin(genesis: genesis, credential: state.credential.id, settled: pin?.settled)
+        result.unsettled =
+            !result.disagreement.isEmpty && pin?.settled != Self.disagreementDigest(result.disagreement)
+        return result
+    }
+
+    static func disagreementDigest(_ entries: Set<ObjectDigest>) -> ObjectDigest {
+        ObjectDigest(hashing: Array("WW-devices-settled-v1".utf8) + entries.sorted().flatMap(\.bytes))
+    }
+
+    /// The code that names a credential entry of an account's registry: twelve digits from SHA-256 of a label, the
+    /// account and the entry's ID. A member reads theirs off their own device (`memberDevicesCode`); whoever shares a
+    /// vault with them types it to say which of that account's password changes is the member's own.
+    static func devicesCode(accountID: UUID, credential: ObjectDigest) -> String {
+        let digest = ObjectDigest(
+            hashing: Array("WW-devices-code-v1".utf8) + SharedBytes.bytes(accountID) + credential.bytes
+        ).bytes
+        let value = digest.prefix(5).reduce(UInt64(0)) { $0 << 8 | UInt64($1) } % 1_000_000_000_000
+        let digits = String(repeating: "0", count: 12 - String(value).count) + String(value)
+        return stride(from: 0, to: 12, by: 4).map { offset in
+            String(digits.dropFirst(offset).prefix(4))
+        }.joined(separator: " ")
+    }
+
+    /// This account's own code: the password change this device follows, for another member to type on theirs when
+    /// their device reports that this account's devices disagree. Read it to them in person or over a call you
+    /// trust, as with a safety number.
+    public func memberDevicesCode() async throws -> String {
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        let view = try await registry(account)
+        return Self.devicesCode(accountID: account.accountID, credential: view.state.credential.id)
+    }
+
+    /// The person has verified with a member again, and typed the code that member's own device shows
+    /// (`memberDevicesCode`): this device anchors that member's registry on the credential entry the code names,
+    /// whichever branch it is on, and takes what it has seen disagree as settled. The one step that moves an anchor
+    /// anywhere but forward, and it is the person's.
+    ///
+    /// The code must name exactly one credential (or genesis) entry of the account's registry that replays as a
+    /// chain; otherwise nothing changes (`memberDevicesCodeUnknown`).
+    public func verifyMemberDevices(of member: UUID, code: String) async throws {
+        _ = try sharingSettings()
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        await loadSharedVaultsIfNeeded()
+        let transport = try sharingTransport()
+        var signingKeys: Set<[UInt8]> = []
+        for vault in sharing.vaults.values {
+            if let key = Self.memberAnchors(of: vault.ledger, excluding: account.accountID)[member] {
+                signingKeys.insert(key)
+            }
+        }
+        guard !signingKeys.isEmpty, let raw = await fetchMemberRegistry(member, transport: transport) else {
+            throw SharedVaultError.memberDevicesCodeUnknown(member)
+        }
+        _ = try requireKeys(since: epoch)
+        let wanted = code.filter(\.isNumber)
+        var settled: [MemberRegistryAnchor: MemberRegistryEvaluation] = [:]
+        for signingKey in signingKeys {
+            let anchor = MemberRegistryAnchor(accountID: member, signingKey: signingKey)
+            let entries = DeviceRegistry.admit(raw, accountID: member, accountSigningKey: signingKey)
+            let named = entries.filter { id, entry in
+                switch entry.body {
+                case .genesis, .credential:
+                    return Self.devicesCode(accountID: member, credential: id).filter(\.isNumber) == wanted
+                default:
+                    return false
+                }
+            }.keys.sorted()
+            let geneses = entries.filter {
+                if case .genesis = $0.value.body { return true }
+                return false
+            }.keys.sorted()
+            guard named.count == 1 else { continue }
+            // The genesis entry the named one descends from: the anchored one, or the one it replays from.
+            let candidates =
+                sharing.registryPins[anchor].map { [$0.genesis] } ?? Array(geneses.prefix(Self.maximumMemberBranches))
+            let genesis = candidates.first { candidate in
+                (try? DeviceRegistry.evaluate(
+                    entries, accountID: member, accountSigningKey: signingKey, genesis: candidate,
+                    credential: named[0])) != nil
+            }
+            guard let genesis else { continue }
+            var evaluated = Self.evaluateMemberRegistry(
+                raw, accountID: member, signingKey: signingKey,
+                pin: MemberRegistryPin(genesis: genesis, credential: named[0], settled: nil))
+            guard evaluated.complete, var pin = evaluated.pin else { continue }
+            pin.settled = evaluated.disagreement.isEmpty ? nil : Self.disagreementDigest(evaluated.disagreement)
+            evaluated.pin = pin
+            evaluated.unsettled = false
+            settled[anchor] = evaluated
+        }
+        guard !settled.isEmpty else { throw SharedVaultError.memberDevicesCodeUnknown(member) }
+        for (anchor, evaluated) in settled {
+            sharing.registries[anchor] = evaluated.state
+            sharing.registryPins[anchor] = evaluated.pin
+            sharing.registryDisagreements.remove(anchor)
+        }
+        // Whose devices count has changed: the vaults that list the member are judged again, and the pins saved.
+        for (vaultID, vault) in sharing.vaults
+        where Self.memberAnchors(of: vault.ledger, excluding: account.accountID)[member] != nil {
+            requestReplay(vaultID)
+            _ = try requireKeys(since: epoch)
+            try await saveSharedVault(vaultID)
+        }
     }
 
     /// The accounts whose registries, as `vaultID`'s chain anchors them, list `device`, this account's own first;

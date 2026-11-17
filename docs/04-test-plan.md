@@ -356,6 +356,12 @@ specification, plus vectors from independent Python implementations for HPKE wit
   timeout locks; a committed password change reports success even if the vault locks; a planted
   vault-key row does not block unlock; a planted trigger, view, table or index makes the store refuse
   to open; erasing leaves no ciphertext in the write-ahead log; SQLite refuses oversized values.
+- Added by the audit of 2026-11-17 (§Z): an app killed while the biometric prompt is up has still
+  used an attempt (`killedDuringThePrompt`, Z7: three prompts that never return, each from a new
+  launch, then no prompt and the password; a prompt that ends in the key takes its attempt back).
+  Suite "Vault session: a lock during the account's objects" gains three cases (Z4): a lock while a
+  password unlock waits on the Keychain, while a quick unlock writes its state, and while a granted
+  vault key is being stored. Each trapped before.
 
 ### 6.3 AutoFill matching (milestone 2/5)
 - Service identifiers with user-info (`https://amazon.com@evil.example/`), ports, trailing dots,
@@ -973,6 +979,34 @@ an insider device in hands that do not know the password.
   the local file (A8): one moved under another vault, one deleted, another account's planted with a directory row
   to list it — none opens, no vault is listed or written under a key that is not its own, the items are reported
   unreadable, and the next sync restores the genuine wraps from the transport.
+
+Added by the audit of 2026-11-17 (`AdversarialAccountForkTests.swift`, the same suite; `06-adversarial-review.md` §Z,
+Z1 to Z8), the adversary being a device revoked with a password change, a registered device in hands that know a
+retired password, and A8:
+
+- Password changes that are not the person's (Z1, Z8): a change made with the retired password under a new salt,
+  sealing a back-dated revocation of the revoker, is refused when the retired password is typed, followed by
+  nothing under `ignoringPasswordChange`, and described to the person (who made it, what it revokes); a chain of
+  four changes under one device's name leaves the genuine one reachable by unlock and by enrolment; a change whose
+  own history revokes the device is refused there; with four devices claiming a change, the unlock reports that
+  and the genuine one is followed by naming its device from an unlocked session; a fork made with a retired
+  password does not open a device that follows the new one, and is followed only from an unlocked session.
+- The list of pending changes (Z2): 96 planted credential entries, half without a valid signature of the previous
+  generation's enrolment key, cannot keep the genuine change off it, over four seeds, asserting that sixteen sort
+  first.
+- A pending change outlives the file (Z3): with the candidate header's row deleted, that and the credential
+  entry, a registry row the anchor names, or the header withheld on the transport, the retired password and quick
+  unlock are refused; a sync restores what was taken and the new password is followed.
+- Which vault is the Personal one (Z5): the account row redirected to another vault with the real one kept in view
+  by a planted directory row, the same with the header row removed, and with the header row replaced by another
+  account's, are each refused at a password unlock and at a quick unlock; a key that arrived by grant is never
+  the Personal vault's key, on a store with neither header nor anchor.
+- Another member's registry (Z6), as a function over `RegistryFixture`: the member's own change followed when it
+  is all there is; a forged branch two generations long ignored and reported once the genuine one is anchored;
+  both arriving together followed by neither, with only the uncontested device counting; the forged branch alone
+  followed and then held to, the genuine one reported, and the member's code naming it; a settled disagreement not
+  reported again and a new entry reported; a second genesis entry neither replacing nor removing the anchored one,
+  and two anchoring neither; the saved anchors refused whole on any edit, another vault's ID or another key.
 
 Registry rules themselves, including the back-dating case the suite found, are in `WatchwordCryptoTests`
 "Device registry" (among them `puppets`: entries relying on a registration that can never count — forged, by the

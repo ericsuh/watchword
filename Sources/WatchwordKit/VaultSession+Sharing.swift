@@ -34,6 +34,84 @@ struct MemberRegistryAnchor: Hashable, Sendable {
     var signingKey: [UInt8]
 }
 
+/// What this device has anchored of another account's device registry (review finding Z6): the one genesis entry it
+/// took, and the credential entry (password change) it follows. From there the registry moves only forward, along
+/// credential entries that descend from `credential` one after another; it never crosses to a branch that leaves the
+/// chain at or before it, whatever generation that branch reaches.
+struct MemberRegistryPin: Hashable, Sendable {
+    var genesis: ObjectDigest
+    var credential: ObjectDigest
+    /// A digest of the disagreeing entries the person last settled (`verifyMemberDevices`): they are not reported
+    /// again, and anything new is.
+    var settled: ObjectDigest?
+}
+
+/// One vault's saved pins. `"WWMD" ‖ version u8 = 1 ‖ own account 16 ‖ vault 16 ‖ count u16 ‖ { account 16 ‖
+/// signing key 32 ‖ genesis 32 ‖ credential 32 ‖ settled flag u8 ‖ settled 32? } ‖ signature 64`, in the order of
+/// account then signing key. Local state like the saved ledger and the stream index: signed by this account's own key
+/// under `SignatureDomain.membership` with its own magic, and refused whole if it does not verify, so a file edited on
+/// the device (A8) can make this device anchor again from what the transport shows, and never choose its anchor.
+enum MemberRegistryPins {
+    static let magic: [UInt8] = Array("WWMD".utf8)
+    static let formatVersion: UInt8 = 1
+    static let maximumPins = 4096
+
+    static func signed(
+        _ pins: [MemberRegistryAnchor: MemberRegistryPin], account: UUID, vaultID: UUID, keyset: Keyset
+    ) throws -> [UInt8] {
+        let ordered = pins.filter { $0.key.signingKey.count == 32 }.sorted {
+            ($0.key.accountID.uuidString, $0.key.signingKey.map { String($0, radix: 16) }.joined())
+                < ($1.key.accountID.uuidString, $1.key.signingKey.map { String($0, radix: 16) }.joined())
+        }.prefix(maximumPins)
+        var out = magic + [formatVersion] + SharedBytes.bytes(account) + SharedBytes.bytes(vaultID)
+        out += SharedBytes.littleEndian16(UInt16(ordered.count))
+        for (anchor, pin) in ordered {
+            out += SharedBytes.bytes(anchor.accountID) + anchor.signingKey + pin.genesis.bytes + pin.credential.bytes
+            if let settled = pin.settled {
+                out += [1] + settled.bytes
+            } else {
+                out += [0]
+            }
+        }
+        return out + (try keyset.sign(out, domain: .membership))
+    }
+
+    static func parse(_ bytes: [UInt8], account: PublicKeyBundle, vaultID: UUID)
+        -> [MemberRegistryAnchor: MemberRegistryPin]?
+    {
+        guard bytes.count > 64 else { return nil }
+        let body = Array(bytes[..<(bytes.count - 64)])
+        guard
+            (try? Signatures.verify(
+                Array(bytes[(bytes.count - 64)...]), for: body, domain: .membership, signingKey: account.signingKey))
+                != nil
+        else { return nil }
+        var reader = SharedReader(body)
+        guard reader.read(4) == magic, reader.read(1) == [formatVersion], reader.uuid() == account.accountID,
+            reader.uuid() == vaultID, let count = reader.uint16(), Int(count) <= maximumPins
+        else { return nil }
+        var pins: [MemberRegistryAnchor: MemberRegistryPin] = [:]
+        for _ in 0..<count {
+            guard let member = reader.uuid(), let signingKey = reader.read(32),
+                let genesis = reader.read(32).flatMap(ObjectDigest.init(bytes:)),
+                let credential = reader.read(32).flatMap(ObjectDigest.init(bytes:)), let flag = reader.read(1)
+            else { return nil }
+            var settled: ObjectDigest?
+            switch flag {
+            case [0]: break
+            case [1]:
+                guard let digest = reader.read(32).flatMap(ObjectDigest.init(bytes:)) else { return nil }
+                settled = digest
+            default: return nil
+            }
+            pins[MemberRegistryAnchor(accountID: member, signingKey: signingKey)] = MemberRegistryPin(
+                genesis: genesis, credential: credential, settled: settled)
+        }
+        guard reader.remaining == 0 else { return nil }
+        return pins
+    }
+}
+
 /// The session's sharing state: the settings, the shared vaults once loaded, and the other members' device
 /// registries as last fetched (public data, kept across a lock).
 struct SharingRuntime: Sendable {
@@ -42,6 +120,11 @@ struct SharingRuntime: Sendable {
     var loaded = false
     /// Other accounts' registries, evaluated from the transport, by the anchor a vault's chain gives them.
     var registries: [MemberRegistryAnchor: DeviceRegistryState] = [:]
+    /// What this device has anchored of each of them (Z6); saved with every vault whose chain lists the anchor.
+    var registryPins: [MemberRegistryAnchor: MemberRegistryPin] = [:]
+    /// The anchors whose registry holds entries that disagree about whose devices the account's are, and that the
+    /// person has not settled: a second genesis entry, or a password change beside the ones followed.
+    var registryDisagreements: Set<MemberRegistryAnchor> = []
     /// The vaults the account's own markers say are shared, each with its chain's owner (the record store's
     /// account-signed rows, VaultSession+SharedMarker.swift), and whether they have been read this session.
     var markers: [UUID: UUID] = [:]
@@ -78,6 +161,11 @@ public struct SharedVaultStatus: Sendable, Hashable {
     public let pendingRotation: [PendingRotation]
     /// Writes held aside because they do not count (docs/02-architecture.md §8.7), for the person to look at.
     public let heldAside: Int
+    /// Members whose own devices disagree about which of them are the account's (review finding Z6): the member's
+    /// device registry holds a second first entry, or a password change beside the one this device follows. Whoever
+    /// made it holds that member's account key. Nothing a contested device signs counts here meanwhile, and nothing
+    /// is followed until the person has verified with the member again (`verifyMemberDevices`).
+    public let membersWithDisagreeingDevices: [UUID]
     /// The vault has gone on in a format this version cannot read (`MembershipLedger.continuesInLaterFormat`,
     /// docs/02-architecture.md §8.9): it is read-only on this device, which proposes, plans, publishes and seals
     /// nothing there, and the person is told to update the app.
@@ -173,6 +261,7 @@ extension VaultSession {
         let epoch = lockEpoch
         guard let ids = try? await settings.state.sharedVaultIDs() else { return }
         var loaded: [UUID: SharedVault] = [:]
+        var pins: [MemberRegistryAnchor: MemberRegistryPin] = [:]
         var unloadable: Set<UUID> = []
         var complete = true
         for vaultID in ids {
@@ -241,8 +330,16 @@ extension VaultSession {
             // sync keyring (S39).
             vault.keyCheck = try? await ledger.checkMemberKeys(against: contacts)
             loaded[vaultID] = vault
+            // What this device anchored of the other members' device registries (Z6). A blob that does not verify
+            // is as good as none: the device anchors again from what the transport shows.
+            if let bytes = try? await settings.state.value(.memberDevices, vaultID: vaultID),
+                let saved = MemberRegistryPins.parse(bytes, account: bundle, vaultID: vaultID)
+            {
+                for (anchor, pin) in saved where pins[anchor] == nil { pins[anchor] = pin }
+            }
         }
         guard epoch == lockEpoch, !sharing.loaded else { return }
+        for (anchor, pin) in pins where sharing.registryPins[anchor] == nil { sharing.registryPins[anchor] = pin }
         for (vaultID, vault) in loaded where sharing.vaults[vaultID] == nil {
             sharing.vaults[vaultID] = vault
         }
@@ -259,6 +356,15 @@ extension VaultSession {
         guard let vault = sharing.vaults[vaultID] else { return }
         let ledger = try vault.ledger.persisted(signedBy: keys.keyset)
         let index = try vault.index.signed(account: account.accountID, vaultID: vaultID, keyset: keys.keyset)
+        // The pins of the accounts this vault's chain lists (Z6). Signed here, with the rest, before anything
+        // suspends: a lock during the writes below must not leave the keyset read after it was zeroised.
+        var pins: [MemberRegistryAnchor: MemberRegistryPin] = [:]
+        for (member, signingKey) in Self.memberAnchors(of: vault.ledger, excluding: account.accountID) {
+            let anchor = MemberRegistryAnchor(accountID: member, signingKey: signingKey)
+            pins[anchor] = sharing.registryPins[anchor]
+        }
+        let memberDevices = try MemberRegistryPins.signed(
+            pins, account: account.accountID, vaultID: vaultID, keyset: keys.keyset)
         try await settings.state.setValue(
             SharedBytes.bytes(vault.ledger.owner.accountID), for: .owner, vaultID: vaultID)
         try await settings.state.setValue(ledger, for: .ledger, vaultID: vaultID)
@@ -266,6 +372,7 @@ extension VaultSession {
             SharedBytes.encodeRecords(vault.proposals), for: .proposals, vaultID: vaultID)
         try await settings.state.setValue(vault.plan, for: .plan, vaultID: vaultID)
         try await settings.state.setValue(index, for: .streamIndex, vaultID: vaultID)
+        try await settings.state.setValue(memberDevices, for: .memberDevices, vaultID: vaultID)
         sharing.vaults[vaultID]?.indexChanged = false
     }
 
@@ -490,9 +597,22 @@ extension VaultSession {
             vaultKey.zeroise()
             throw error
         }
-        let keys = try requireKeys(since: epoch)
+        // Both reads first, then the keys: the wrap reads the keyset, which a `lock()` during either read would
+        // have zeroised, and reading a zeroised key traps (review finding Z4). Nothing suspends between
+        // `requireKeys(since:)` and the wrap.
+        let wrapHeld: Bool
+        let directoryHeld: Bool
+        let keys: UnlockedKeys
+        do {
+            wrapHeld = try await store.record(RecordKey(recordID: vaultKey.key.keyID, kind: .vaultKeyWrap)) != nil
+            directoryHeld = try await store.record(RecordKey(recordID: vaultID, kind: .vaultDirectory)) != nil
+            keys = try requireKeys(since: epoch)
+        } catch {
+            vaultKey.zeroise()
+            throw error
+        }
         var change = StoreChange()
-        if try await store.record(RecordKey(recordID: vaultKey.key.keyID, kind: .vaultKeyWrap)) == nil {
+        if !wrapHeld {
             let wrap = StoredRecord(
                 recordID: vaultKey.key.keyID, kind: .vaultKeyWrap, vaultID: vaultID,
                 keyID: keys.keyset.symmetricKey.keyID, version: 1, deviceID: account.deviceID,
@@ -500,7 +620,7 @@ extension VaultSession {
             change.upserts.append(wrap)
             change.expectations[wrap.key] = .absent
         }
-        if try await store.record(RecordKey(recordID: vaultID, kind: .vaultDirectory)) == nil {
+        if !directoryHeld {
             let row = Self.directoryRow(vaultID: vaultID, accountID: account.accountID, deviceID: account.deviceID)
             change.upserts.append(row)
             change.expectations[row.key] = .absent
@@ -952,6 +1072,11 @@ extension VaultSession {
                 }
             },
             pendingRotation: pending, heldAside: heldAside,
+            membersWithDisagreeingDevices: Self.memberAnchors(of: vault.ledger, excluding: account.accountID)
+                .filter {
+                    sharing.registryDisagreements.contains(
+                        MemberRegistryAnchor(accountID: $0.key, signingKey: $0.value))
+                }.keys.sorted { $0.uuidString < $1.uuidString },
             requiresNewerVersion: vault.ledger.continuesInLaterFormat)
     }
 

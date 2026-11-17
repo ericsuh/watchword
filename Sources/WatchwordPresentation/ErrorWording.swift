@@ -66,6 +66,19 @@ public enum ErrorWording {
             return "Your account password was changed on another device. Enter the new password."
         case .passwordSuperseded:
             return "That password has been changed since. Enter the current one."
+        case .passwordChangeRevokesThisDevice:
+            return "That password belongs to a change that removed this device from your account, so it is not "
+                + "used here. If you did not remove this device, unlock with the password it still has and remove "
+                + "the device that made the change."
+        case .tooManyPasswordChangesPending:
+            return "Several devices say they changed your account password, more than can be checked from here. "
+                + "Unlock with the password this device still has, then choose the device you changed it on under "
+                + "Devices."
+        case .noPasswordChangeToFollow:
+            return "That device has not changed the account password."
+        case .personalVaultMismatch:
+            return "This device's copy of your account does not match your account password's record of "
+                + "it, so it was not opened. Erase this device and set it up again from your Emergency Kit."
         case .deviceRevoked:
             return "This device has been removed from your account. It can no longer sync."
         case .cannotRevokeThisDevice:
@@ -115,6 +128,9 @@ public enum ErrorWording {
             return "This device has not received the vault's current key yet. Sync, then try again."
         case .keyIDInUse:
             return "That invitation conflicts with a vault already on this device, and was refused."
+        case .memberDevicesCodeUnknown:
+            return "That code does not match any of this person's devices. Ask them to read it again from Devices "
+                + "on their own device."
         case .stillAMember:
             return "You are still a member of this vault. Leave it first; its items can be removed from this device "
                 + "once you are no longer a member."

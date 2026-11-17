@@ -411,6 +411,9 @@ public actor VaultSession: SharesExecutor {
             // device already follows means the file was rolled back to a password the person retired.
             do {
                 try await refuseRolledBackHeader(record)
+                // And which vault is the Personal one is what the header seals under this key, not what the row
+                // says (Z5).
+                try await requirePersonalVaultBinding(record, unlockKey: unlockKey)
             } catch {
                 opened.keyset.zeroise()
                 throw error
@@ -436,10 +439,14 @@ public actor VaultSession: SharesExecutor {
         do {
             try await reconcileAccountObjects(account: record, keys: newKeys)
         } catch VaultError.accountHeaderRolledBack {
-            // The one failure that is not best effort: the file holds a header from before a password change this
+            // A failure that is not best effort: the file holds a header from before a password change this
             // device had already followed (A8). The password that opened it is not the account's any more.
             lock()
             throw VaultError.accountHeaderRolledBack
+        } catch VaultError.personalVaultMismatch {
+            // Nor is this one: the row's Personal vault stopped being the one the header seals (Z5).
+            lock()
+            throw VaultError.personalVaultMismatch
         } catch {
             // Sync says why (`deviceRegistryUnavailable`); the person keeps access to their vault.
         }
@@ -449,19 +456,20 @@ public actor VaultSession: SharesExecutor {
         try? await purgeExpiredTrash()
     }
 
-    /// Derives the AUK and opens the keyset: under an account header for a password changed on another device, if
-    /// the password opens one (which adopts it), otherwise under the header this device has.
+    /// Derives the AUK and opens the keyset: under the header this device has, and only if the password does not
+    /// open that, under an account header for a password changed on another device (which adopts it).
+    ///
+    /// The order is the point (review finding Z1). This device's own header is the one thing here that an
+    /// adversary did not write, so the password is tried against it first, and no derivation under parameters
+    /// someone else chose runs ahead of it. If it opens while a change made elsewhere is pending, the password is
+    /// the one that was retired: refused (`passwordChangedOnAnotherDevice`), never adopted as a "change" that
+    /// happens to use the same password (a revoked device that knew it can publish exactly that). With
+    /// `ignoringPasswordChange` it unlocks and no candidate is so much as read. Otherwise each device that published
+    /// a pending change gets one attempt, on its newest header; a change that branches off *before* the credentials
+    /// this device follows is not tried from the lock screen at all (`followPasswordChange`).
     private func openAccount(
         password: String, secretKey: SecretKey, account record: AccountRecord, ignoringPasswordChange: Bool
     ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord) {
-        let candidates = await candidateHeaders(record)
-        var attempts = 0
-        for candidate in candidates.pending where attempts < Self.maximumHeaderAttempts {
-            attempts += 1
-            if let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record) {
-                return adopted
-            }
-        }
         do {
             let unlockKey = try deriveUnlockKey(password: password, secretKey: secretKey, account: record)
             let keyset: Keyset
@@ -471,27 +479,41 @@ public actor VaultSession: SharesExecutor {
                 unlockKey.zeroise()
                 throw error
             }
-            guard candidates.pending.isEmpty || ignoringPasswordChange else {
+            do {
+                // A header from before a change this device already followed is refused as that, whatever else.
+                try await refuseRolledBackHeader(record)
+                if !ignoringPasswordChange, await passwordChangePending(record) {
+                    throw VaultError.passwordChangedOnAnotherDevice
+                }
+            } catch {
                 unlockKey.zeroise()
                 keyset.zeroise()
-                throw VaultError.passwordChangedOnAnotherDevice
+                throw error
             }
             return (unlockKey, keyset, record)
         } catch CryptoError.authenticationFailed {
-            // Not this device's password. One of a branch the person may have chosen elsewhere?
-            for candidate in candidates.forked where attempts < Self.maximumHeaderAttempts {
-                attempts += 1
+            // Not this device's password. The person who did not make the change never follows one by accident.
+            guard !ignoringPasswordChange else { throw CryptoError.authenticationFailed }
+            let pending = await candidateHeaders(record).pending
+            for candidate in pending.prefix(Self.maximumHeaderAttempts) {
                 if let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record) {
                     return adopted
                 }
             }
+            // More devices have published a change than were tried: the password may open one of the others.
+            if pending.count > Self.maximumHeaderAttempts { throw VaultError.tooManyPasswordChangesPending }
             throw CryptoError.authenticationFailed
         }
     }
 
     /// Tries `password` against a candidate header. If it opens the keyset — the same keyset, for the same personal
     /// vault — the person has confirmed that password change on this device: the header becomes this device's, and
-    /// the registry is followed along its credential entry from now on. Returns `nil` if it does not open.
+    /// the registry is followed along its credential entry from now on. Returns `nil` if it does not open, or if
+    /// the registry does not replay along it.
+    ///
+    /// A change whose own history revokes this device is refused with `passwordChangeRevokesThisDevice` (Z1):
+    /// following it would have this device hold itself revoked and its revoker's entries as final, on the word of
+    /// whoever wrote the branch.
     private func adopt(
         _ candidate: AccountHeaderObject, password: String, secretKey: SecretKey, account record: AccountRecord
     ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord)? {
@@ -518,6 +540,11 @@ public actor VaultSession: SharesExecutor {
             unlockKey.zeroise()
             keyset.zeroise()
             return nil
+        }
+        guard followed.state.standing(of: record.deviceID) != .revoked else {
+            unlockKey.zeroise()
+            keyset.zeroise()
+            throw VaultError.passwordChangeRevokesThisDevice
         }
         var updated = record
         updated.kdf = candidate.kdf
@@ -548,6 +575,68 @@ public actor VaultSession: SharesExecutor {
         return (unlockKey, keyset, updated)
     }
 
+    /// Follows a password change made on `device`, from an unlocked session: the way to follow a change the lock
+    /// screen does not try (review findings Z1, Z8).
+    ///
+    /// That is a change that branches off *before* the credentials this device follows: two devices changed the
+    /// password at once and the person is bringing this one over to the other, or it was made with a password since
+    /// retired. From the lock screen such a change would let anyone who knows a retired password, and holds a
+    /// registered device to publish the fork from, open this device with it; here they must first have unlocked it
+    /// with the password it follows now. It is also how a pending change is reached when more devices have
+    /// published one than an unlock tries (`tooManyPasswordChangesPending`): unlock with `ignoringPasswordChange`,
+    /// then name the device. The header is fetched from the transport if a sync has not kept it.
+    ///
+    /// `password` is the one that change set. On success this device follows it: the old password is wrong from
+    /// now on, and quick unlock is enrolled again under the new credentials if it was enrolled.
+    public func followPasswordChange(by device: UUID, password: String) async throws {
+        let epoch = lockEpoch
+        let current = try requireKeys()
+        guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        let secretKey = try await storedSecretKey(accountID: record.accountID)
+        defer { secretKey.zeroise() }
+        let view = try await registry(record)
+        _ = try requireKeys(since: epoch)
+
+        let held = await candidateHeaders(record)
+        var candidates = (held.pending + held.forked).filter { $0.author == device }
+        if candidates.isEmpty, let transport = syncSettings?.transport {
+            let changes =
+                Self.changesByAuthor(view.state.pendingCredentials + view.state.forkedCredentials)
+                .first { $0.author == device }?.changes ?? []
+            for change in changes.prefix(Self.maximumHeaderAttempts) {
+                if let header = await fetchCandidateHeader(
+                    for: change, account: record, view: view, transport: transport)
+                {
+                    candidates.append(header)
+                    break
+                }
+            }
+        }
+        guard !candidates.isEmpty else { throw VaultError.noPasswordChangeToFollow(device) }
+        // At most one change of that device's that follows this device's credentials and one that forks from them.
+        for candidate in candidates.prefix(Self.maximumHeaderAttempts) {
+            _ = try requireKeys(since: epoch)
+            guard
+                let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record)
+            else { continue }
+            // The same keyset under a new Account Unlock Key: the copy just opened is not needed.
+            adopted.keyset.zeroise()
+            // Committed: this device follows the change whatever became of the session meanwhile.
+            guard epoch == lockEpoch, let now = keys, now === current else {
+                adopted.unlockKey.zeroise()
+                return
+            }
+            keys = UnlockedKeys(
+                accountUnlockKey: adopted.unlockKey, keyset: now.keyset, vaultKeys: now.vaultKeys)
+            current.accountUnlockKey.zeroise()
+            try? await refreshQuickUnlock(after: await clock.now(), account: adopted.account)
+            guard epoch == lockEpoch, let installed = keys else { return }
+            try? await reconcileAccountObjects(account: adopted.account, keys: installed)
+            return
+        }
+        throw CryptoError.authenticationFailed
+    }
+
     /// Quick unlock (PRD F5.3, F5.4): the policy must allow it, then the Keychain must release the Local Unlock Key
     /// after biometric authentication, that key must open the wrapped AUK, and the AUK must open the keyset. No
     /// step is a boolean; each is a key that only the previous step can produce.
@@ -560,8 +649,9 @@ public actor VaultSession: SharesExecutor {
             throw VaultError.quickUnlockRefused(.notEnabled)
         }
         // The password was changed on another device: the key this device would release opens credentials that are
-        // no longer the account's. Destroyed, like any refused enrolment; the new password re-enrols.
-        if !(await candidateHeaders(record)).pending.isEmpty {
+        // no longer the account's. Destroyed, like any refused enrolment; the new password re-enrols. Asked of the
+        // Keychain's anchor and the registry's entries, not of whether the change's header is in the file (Z3).
+        if await passwordChangePending(record) {
             try await suspendQuickUnlock(accountID: accountID, forget: false)
             throw VaultError.quickUnlockRefused(.credentialsChanged)
         }
@@ -586,12 +676,19 @@ public actor VaultSession: SharesExecutor {
         // passcode fallback, the system prompt retries a face or finger internally and a run of failures usually
         // ends in Cancel (`errSecUserCanceled`), not in `errSecAuthFailed`; counting only the latter would let
         // someone who can clear the OS lockout with the device passcode keep trying indefinitely (F5.4).
+        //
+        // And it counts **before the prompt is shown** (review finding Z7): the attempt is written to the Keychain
+        // first and taken back only once the key the prompt released has opened the keyset. A count made after the
+        // read returned was never made if the app was killed while the prompt was up, so that same person could
+        // present a face until the prompt was about to give up, kill the app, and start again without limit. The
+        // price is that a crash or a kill during the prompt counts as a failed attempt, and three send the person
+        // back to the password.
+        state.failedAttempts += 1
+        try await saveQuickUnlockState(state, accountID: accountID)
         let releasedKey: SecureBytes?
         do {
             releasedKey = try await keychain.read(.quickUnlockKey(accountID: accountID), prompt: prompt)
         } catch let error as KeychainError where error == .authenticationFailed || error == .userCancelled {
-            state.failedAttempts += 1
-            try await saveQuickUnlockState(state, accountID: accountID)
             if state.failedAttempts >= configuration.quickUnlock.maximumFailedAttempts {
                 try await suspendQuickUnlock(accountID: accountID, forget: false)
             }
@@ -633,10 +730,15 @@ public actor VaultSession: SharesExecutor {
             try? await suspendQuickUnlock(accountID: accountID, forget: true)
             throw error
         }
+        // The chain opened: the attempt counted before the prompt is taken back. If that cannot be written it stays
+        // counted, which is the direction to fail in.
+        state.failedAttempts = 0
+        try? await saveQuickUnlockState(state, accountID: accountID)
         let newKeys: UnlockedKeys
         do {
             do {
                 try await refuseRolledBackHeader(record)
+                try await requirePersonalVaultBinding(record, unlockKey: unlockKey)
             } catch {
                 keyset.zeroise()
                 throw error
@@ -651,14 +753,15 @@ public actor VaultSession: SharesExecutor {
             throw VaultError.lockedDuringUnlock
         }
         install(newKeys, at: now)
-        state.failedAttempts = 0
-        try? await saveQuickUnlockState(state, accountID: accountID)
         try? await refreshSigningKey(account: record, keys: newKeys)
         do {
             try await reconcileAccountObjects(account: record, keys: newKeys)
         } catch VaultError.accountHeaderRolledBack {
             lock()
             throw VaultError.accountHeaderRolledBack
+        } catch VaultError.personalVaultMismatch {
+            lock()
+            throw VaultError.personalVaultMismatch
         } catch {
             // As after a password unlock: sync reports a registry it cannot use.
         }
@@ -683,6 +786,32 @@ public actor VaultSession: SharesExecutor {
         try Keyset.unwrap(
             account.wrappedKeyset, accountID: account.accountID, with: unlockKey,
             recordVersion: account.keysetVersion)
+    }
+
+    /// Requires the Personal vault the account row names to be the one the account header seals under `unlockKey`
+    /// (review finding Z5). Call once the keyset has opened under that key and before any key is installed.
+    ///
+    /// `personal_vault_id` and `personal_vault_key_id` are plain columns of a file that is A8's. Nothing sealed held
+    /// them at unlock, so one edit made a shared vault the "Personal" one: the default for new items, for AutoFill's
+    /// saved logins and for new passkeys, never shared and never deleted in the session's eyes, with every later
+    /// save sealed under a key that vault's other members hold. The header's binding has named the Personal vault
+    /// under the AUK all along (enrolment and adoption read it); this is the same check at every unlock.
+    ///
+    /// The header must be this account record's own (the unlock key ID the row names) and its binding must open.
+    /// With no header row at all the check has nothing to stand on: that is refused wherever the Keychain holds a
+    /// registry anchor, which every account that has a header has, and let through only for an account that has
+    /// neither (made before the registry existed, or a store restored onto other hardware with its header row
+    /// removed). Such an account has no registry here and so publishes nothing until it has enrolled again.
+    func requirePersonalVaultBinding(_ account: AccountRecord, unlockKey: EncryptionKey) async throws {
+        guard let row = try await store.record(Self.headerKey(account.accountID)) else {
+            if await readAnchor(account.accountID) == nil { return }
+            throw VaultError.personalVaultMismatch
+        }
+        guard !unlockKey.isZeroised else { throw VaultError.lockedDuringUnlock }
+        guard let header = try? AccountHeaderObject.parse(row.envelope), header.accountID == account.accountID,
+            header.unlockKeyID == account.unlockKeyID,
+            (try? header.openBinding(with: unlockKey)) == account.personalVaultID
+        else { throw VaultError.personalVaultMismatch }
     }
 
     /// Unwraps the key of every vault in the directory. Identities come from the storage location (each row), never
@@ -711,9 +840,15 @@ public actor VaultSession: SharesExecutor {
                     continue
                 }
             }
-            guard vaultKeys[account.personalVaultKeyID] != nil else {
+            guard let personalKey = vaultKeys[account.personalVaultKeyID] else {
                 for key in vaultKeys.values { key.zeroise() }
                 throw VaultError.vaultKeyMissing(vaultID: account.personalVaultID)
+            }
+            // The key the row names must be a key of the Personal vault, and one of the account's own making: a key
+            // that reached the account by another member's grant is a shared vault's, whatever the row says (Z5).
+            guard personalKey.vaultID == account.personalVaultID, !personalKey.arrivedByGrant else {
+                for key in vaultKeys.values { key.zeroise() }
+                throw VaultError.personalVaultMismatch
             }
             return UnlockedKeys(accountUnlockKey: unlockKey, keyset: keyset, vaultKeys: vaultKeys)
         } catch {

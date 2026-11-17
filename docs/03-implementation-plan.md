@@ -274,7 +274,9 @@ half delivered** on a Mac; the transports are open.
   against an item's 1 MiB payload.
 - **Still open (design):** an account re-key — new keyset and Secret Key, vault keys rotated — which is what ends a
   revoked device's reading if it held the keyset (architecture §7.8, §16); it belongs with vault-key rotation in
-  milestone 4. Collecting a deleted vault's objects from the transport.
+  milestone 4. It is also the only cure for what a revoked device that kept the account key can still do to the
+  other members of a shared vault: keep that member's devices in question (review finding Z6, architecture §8.10).
+  Collecting a deleted vault's objects from the transport.
 - **Still open, from the audit of 2026-11-17 (`06-adversarial-review.md` §Z, Z20 to Z29):** a Mac run of
   `SQLiteSyncStateStore` at schema version 3 (the indexed quarantine and its migration, Z27) and of the signed state
   row over real files (Z20); keying the record store by (vault, record, kind), with its migration, so that a record
@@ -282,6 +284,12 @@ half delivered** on a Mac; the transports are open.
   the author signs and readers honour, for an unsigned object squatting at a device's next sequence number (Z24);
   refusing at download a segment that an ended account's cut cannot admit (Z27); an intent row in the record store's
   own transaction, for a crash between a deletion and its tombstone (Z28).
+- **Still open (screens, after the audit of 2026-11-17):** choosing between pending password changes
+  (`pendingPasswordChanges`, `followPasswordChange`; the lock screen reports `tooManyPasswordChangesPending` and
+  `passwordChangeRevokesThisDevice` in words, and nothing calls the two functions yet, Z1 and Z8); showing a
+  member their devices code and taking another member's (`memberDevicesCode`, `verifyMemberDevices`,
+  `SharedVaultModel.verifyDevices`; the member list words the warning, Z6). Whether that code should instead be
+  part of the safety number is ADR 0010's question.
 
 ## Milestone 4 — Sharing (protocol core and session integration done; transports and UI open)
 

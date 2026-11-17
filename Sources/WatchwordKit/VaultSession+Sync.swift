@@ -62,7 +62,9 @@ extension VaultSession {
         let view = try? await registry(record)
         let standing = view?.state.standing(of: record.deviceID)
         report.deviceStanding = standing
-        report.awaitingNewPassword = !(view?.state.pendingCredentials.isEmpty ?? true)
+        // The registry's pending entries, and what the Keychain remembers of one whose rows the file has lost (Z3).
+        let changePending = await passwordChangePending(record)
+        report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
         let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
 
@@ -559,7 +561,12 @@ extension VaultSession {
     }
 
     /// Copies the account's public signing key to the Keychain, for checking downloads while locked.
+    ///
+    /// Called after an unlock has installed `keys` and then waited on the Keychain, so a `lock()` may have zeroised
+    /// them by now, and reading a zeroised key traps (review finding Z4, as W22): checked here, before the keyset is
+    /// read, with no suspension between the check and the read.
     func refreshSigningKey(account: AccountRecord, keys: UnlockedKeys) async throws {
+        guard !keys.keyset.isZeroised else { throw VaultError.locked }
         var signingKey = try keys.keyset.publicKeyBundle().signingKey
         try await keychain.store(
             SecureBytes(wiping: &signingKey), for: .accountSigningKey(accountID: account.accountID))
