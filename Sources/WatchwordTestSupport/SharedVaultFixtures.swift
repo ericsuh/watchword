@@ -130,6 +130,7 @@ public struct SharedVaultHousehold: Sendable {
 public actor WithholdingTransport: SyncTransport {
     public let base: InMemorySyncTransport
     private var frozen: [String: Set<String>] = [:]
+    private var hidden: Set<String> = []
 
     public init(base: InMemorySyncTransport) {
         self.base = base
@@ -140,12 +141,18 @@ public actor WithholdingTransport: SyncTransport {
         frozen[prefix] = Set(await base.list(prefix: prefix))
     }
 
+    /// From now on exactly these objects are withheld from this view, whatever else is created.
+    public func withhold(_ names: Set<String>) {
+        hidden.formUnion(names)
+    }
+
     public func reveal() {
         frozen = [:]
+        hidden = []
     }
 
     private func isWithheld(_ name: String) -> Bool {
-        frozen.contains { prefix, shown in name.hasPrefix(prefix) && !shown.contains(name) }
+        hidden.contains(name) || frozen.contains { prefix, shown in name.hasPrefix(prefix) && !shown.contains(name) }
     }
 
     public func list(prefix: String) async throws -> [String] {

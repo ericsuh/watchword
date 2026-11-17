@@ -340,3 +340,54 @@ extension SharingScreenTests {
         #expect(shared.isShared && !shared.needsSetUp && shared.members.count == 2)
     }
 }
+
+extension SharingScreenTests {
+    /// What the screens say of leaving, removal and read-only is what the code does (review finding Z45): leaving does
+    /// not take the items off the device, a removed member keeps what they hold, and read-only is not encryption
+    /// (PRD F4.3, F4.5).
+    @Test("the leave, removal and role texts promise nothing the code does not do")
+    func sharingStatementsAreTrue() {
+        #expect(SharedVaultModel.leaveExplanation.contains("stays on it until you remove it"))
+        #expect(!SharedVaultModel.leaveExplanation.contains("go from your devices"))
+        #expect(SharedVaultModel.removalExplanation.contains("cannot be taken back"))
+        #expect(InvitationModel.roleExplanation.contains("not encryption"))
+        #expect(InvitationModel.roleExplanation.contains("holds the vault's key"))
+        #expect(ErrorWording.readOnly(.notAMember).contains("no longer a member"))
+    }
+
+    @Test("a vault this account left is labelled as one it is no longer in, and its items are removed on request")
+    func leftVaultOnScreen() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 580)
+        let member = home.members[0]
+        var item = AutoFillFixtures.bank
+        item.id = UUID()
+        item.vaultID = home.vaultID
+        _ = try await home.owner.session.save(item)
+        try await home.owner.session.sync()
+        try await member.session.sync()
+
+        let shared = SharedVaultModel(vaultID: home.vaultID, context: ContextProbe().context(member.session))
+        await shared.load()
+        #expect(!shared.membershipEnded)
+        await shared.leave()
+        #expect(shared.notice?.contains("stays on it until you remove it") == true)
+        for _ in 0..<3 {
+            try await home.owner.session.sync()
+            try await member.session.sync()
+        }
+        await shared.load()
+        #expect(shared.membershipEnded && !shared.mayLeave)
+
+        let vaults = VaultsModel(context: ContextProbe().context(member.session))
+        await vaults.load()
+        let row = try #require(vaults.row(home.vaultID), "the vault dropped out of the list with its items still here")
+        #expect(row.badge == VaultSharing.endedBadge && row.detail == VaultSharing.endedDetail && row.isReadOnly)
+
+        await shared.removeFromThisDevice()
+        #expect(shared.errorMessage == nil, "\(shared.errorMessage ?? "")")
+        #expect(shared.notice?.contains("1 item(s)") == true)
+        await vaults.load()
+        #expect(vaults.row(home.vaultID) == nil)
+    }
+}

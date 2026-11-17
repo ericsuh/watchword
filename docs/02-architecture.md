@@ -1101,6 +1101,22 @@ cut, were each signed by an account that could sign the same on the accepted hea
 on counting until the departure is carried out again with a cut by an account that may: a former administrator cannot
 turn a pending leave request into "set this member's work aside" (S29).
 
+**An addition undone on the branch that lost** (review finding Z43). An administrator's device that has not been shown
+an owner-signed record can add someone and remove them again on its stale head; the owner's record then displaces the
+addition, the removal and the removal's rotation together. That member is in no accepted state, so no removal is owed
+by the rule above. Two things follow all the same. The addition is **not replayed**: of a superseded addition the
+ledger says whether a record held on its branch went on to remove that member (`wasUndoneOnItsBranch`), and the device
+that signed it then lets it go, where it used to sign the member in again and wrap the current key to them with
+nobody asking. And the key that was current on the losing path while they were a member was wrapped to them; where
+that is the accepted head's key (the rotation lost too) the ledger lists them in `exposedKeyHolders`: someone outside
+the vault holds its key. Until a rotation is adopted, `recordsToReseal` is empty, as while a removal is owed,
+`pendingRotation` reports `keyHeldOutsideTheVault`, and any device whose account administers the vault plans a
+routine rotation at its next sync. Like `owedRemovals` this is a function of the records held, the records that show
+it are the last let go when branches are trimmed, and a branch that went on to add the member again exposes nobody:
+what it last meant is that they are a member, and that addition is its author's to replay. Not covered, and tracked:
+an addition that loses alone and is never replayed (its author's device gone, or no longer an administrator) leaves
+its grant standing in the same way with nothing reported.
+
 **Everything else that loses is proposed again by its author.** `MembershipLedger.status(of:)` says whether a record
 this device proposed is `awaitingPublication`, `adopted` or `superseded`. A device keeps what it proposed until it is
 adopted, asks after every ingest, and proposes a superseded change again on the new head (the proposing functions
@@ -1258,8 +1274,10 @@ the chain are not the ones this device's person verified.
 requested and not yet carried out, a removal that is owed (§8.3), a plan of this device's not yet in the chain, the
 current key not yet held, and records still to be sealed again.
 
-**Leaving.** The member's device publishes a signed `LeaveRequest` and leaves the transport share; it cannot write
-the record itself, which names a key it must not hold. The next unlocked device of an administrator (the owner, if
+**Leaving.** The member's device publishes a signed `LeaveRequest`; it cannot write
+the record itself, which names a key it must not hold. It does not take itself off the transport's share
+(`ShareAccessControl` has only an administrator's `revokeAccess`): the administrator's device that carries the
+departure out does that as the rotation's first step, and until then the leaver is a member like any other. The next unlocked device of an administrator (the owner, if
 the leaver is an administrator) turns the request into a rotation whose record carries the request's signature, so
 "left" in the chain always means the member said so. A request is bound to the vault and to one stint of membership
 (the epoch the member was added), so replaying it after the member has been invited back, or into another vault,
@@ -1391,10 +1409,18 @@ Not solved here, and to be decided with integration:
   devices to refuse to sign while they disagree, which is device-registry work. A displaced *demotion* is not owed;
   the owner's device proposes it again (step 3).
 - **Forks cost work.** Whatever lost a fork is done again: removals by any device that may, everything else by its
-  author's device when it next syncs. Until then an invitee waits, a role change is not in effect, and a removed
+  author's device when it next syncs, except an addition that its own branch went on to undo, which is let go and
+  whose key is rotated instead (§8.3, Z43). Until then an invitee waits, a role change is not in effect, and a removed
   member is listed (with their writes counted only as far as the displaced record's cut). A displaced *demotion* is
   not owed, so until its author proposes it again the member's writes count in full, the later ones included; the
-  new record's cut then decides.
+  new record's cut then decides. What a device sealed under the key of a rotation that lost is passed over by the
+  devices that never held that key and reaches them sealed again (§8.10, Z47); a **deletion** it published under
+  that key does not, and stays this device's alone until the item is touched again.
+- **A move across a vault this device may not publish to.** A move is a copy in one vault and a deletion in
+  another, and deletions go out only once everything else has. A vault that is not published to (this account was made
+  read-only there before the device synced) or whose copy was taken out and held aside as a write after the cut holds
+  an item that exists nowhere else; while any vault does, no vault's deletions are published (Z44,
+  `holdsUnpublishedWork`). What releases them is the copy going out, or the person discarding the held-aside copy.
 - **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
   departed account's segments must not be collected while a device may still need them to judge a cut, or the cut
   must carry what is needed to judge without them.
@@ -1498,9 +1524,14 @@ by grant (§7.7), with a directory row when the vault is new on the device and t
 owner; a key whose ID the device already holds for another vault is
 refused (`keyIDInUse`, S38), as is one whose ID it holds for this vault with other bytes, because key IDs are public
 and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
-chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission` (in
-`writableVaultKey`, so every write path asks: save, move, copy, rename, conflict resolution). Deleting a shared vault
-is the owner's and also proposes `deleteVault`; a member leaves instead.
+chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission`: in
+`writableVaultKey` for save, copy, rename, conflict resolution and both sides of a move (the vault an item is moved
+out of is written to as well: the original is trashed, then deleted), and through `checkSharedWrite` for a permanent
+deletion and the 30-day purge, which skips a vault this account may not write to (review finding Z44: those three
+once asked nothing, so a read-only member's device deleted locally and queued signed tombstones that went out the day
+the member was allowed to write). The same check covers a removal that is owed, a chain stopped at a later format, and
+a vault with no ledger here. Deleting a shared vault is the owner's and also proposes `deleteVault`; a member leaves
+instead.
 
 **"Shared" is a fact a device cannot lose** (review finding Z41). Whether a vault is governed by a chain was once
 answered by the ledger a device had loaded. The ledger is per-device state, so two kinds of device ran a shared vault
@@ -1526,6 +1557,18 @@ that holds only the first key and has not yet been shown the marker (the store w
 from the file and no sync has run since) still takes the vault for its own until the next sync that delivers it; the
 key it seals under is then the right one, and what it wrote is not published once the marker is there. And the ledger
 itself is still not synced between an account's devices (S35): each accepts the invitation.
+
+**A vault this account is no longer in** (review finding Z45). Leaving and removal change the chain and the key;
+nothing takes the vault's records off the leaver's devices, and the screens no longer say that anything does. Once the
+accepted chain no longer lists this account, the vault's items are not given to AutoFill (`credentialItems` leaves out
+every vault for which `vaultsWithheldFromAutoFill` answers: one this account is no longer a member of, and one that is
+shared with no ledger here, where membership cannot be told), the vault stays in the list while the device holds items
+of it, labelled as one this account is no longer in, and the person removes what the device holds with
+`removeLocalCopies(ofSharedVault:)`: the rows, their synced scan results and what was held aside, taken out of the
+store directly, so nothing is recorded to publish and nobody else's copy is touched. It is refused while the account is
+still a member. The key wraps and the ledger stay (S26). What the leaver's device already copied elsewhere, and what a
+removed member's device holds, cannot be taken back, which the removal dialog says (F4.3); "read-only" is worded as a
+rule the apps keep, not encryption (F4.5).
 
 **Sharing a vault that already holds work** (review finding Z42). A vault can be shared after months of use from
 several devices. At the genesis record its stream index is empty, and the judge attributes a value through the segment
@@ -1574,6 +1617,25 @@ whose permission ended, the key in the record that ended it), and that account's
 A snapshot needs an account that may write now. Devices revoked from a member's account, as the vault's chain anchors
 it, are not read.
 
+**A stream is one account's** (review finding Z46). An object's name carries a device ID and no account, device IDs
+are chosen by devices, and a member can list another member's device ID in their own registry (S33) and sign segments
+into the stream named after it; `validate` then makes every entry in such a segment name that device, so to every rule
+keyed by device ID they were the victim's device's versions, merged "like any other" on the victim's own device too. A
+claim to have seen that device's unpublished edits was not asked of the device (S46's check exempts a version's own
+writer), and the victim's unpublished value was superseded with no conflict. Two rules now. A device knows what it
+wrote: a segment in its own stream that its own account's keys did not sign is held aside and not recorded (a snapshot
+named as its own is refused). And for every other device, a stream belongs to the account that signed its
+lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`; a shared vault keeps its whole log, so devices that
+hold the same segments agree): a segment in it that another account signed is recorded, since a cut's chain runs over
+every object of the stream, but nothing is filed or attributed through it, `segmentCounts` is false for it, and the
+judge holds it aside, so the stream carries on past it instead of waiting. A cut covers the streams that are the
+departing account's. And a version is exempt from the question about its own writer's edits only where it is known
+to be that device's work: its own stream carried it, or it is this device's own; one that merely names a device, in a
+snapshot say, is held to that device's stream like anyone's claim. What is left is denial of service by an insider, as
+S33 and S11: a member who writes into a stream **before** its device's first segment in that vault takes the stream,
+and that device's later segments are then held aside by everyone else (visibly), its own device excepted. A device
+that cannot open a stream's first segments (it joined after a rotation) names the owner from the first one it can.
+
 **The write cut over sync's objects** (S28). The cut a removal, departure or demotion carries is, for each device
 whose segments the departing account's keys signed, the furthest sequence through which the signing device holds every
 segment of that stream and the chain `H_n = SHA-256("WW-cut-v1" ‖ H_{n-1} ‖ n ‖ digest_n)` through it
@@ -1612,7 +1674,11 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   segments that carried older values: for them a version sealed under a key introduced at or after the latest record
   that ended anyone's permission to write vouches for such values (its sealer held that record and every earlier
   segment, and judged them), provided the device is listed by an account whose work can count. Segments sealed under a
-  key this account was never entitled to are passed over for that reason (`WriteJudge.passesOverSegment`). A tombstone's
+  key this account was never entitled to are passed over for that reason (`WriteJudge.passesOverSegment`), and so are
+  segments sealed under a key that only a record on a losing branch introduced (a rotation signed on a stale head):
+  the accepted chain never names that key, no grant of it is fetched, and the stream of whoever sealed under it would
+  otherwise wait there for good with everything written after (Z47). What they carried arrives sealed again under the
+  vault's key; if that branch comes to win, receiving its key replays the log. A tombstone's
   segment carries what applying it writes (`ItemMerge.attributedSettlement`), so a version kept after a deletion is
   judged like any other.
 - *Taken out.* When the head changes, every local version of the vault that no longer counts is held aside and taken
@@ -1645,6 +1711,7 @@ chain once that record is here. Tests: "Vault session: a shared vault in a later
 
 - A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
   through vouching count only while every listing account's work can count (S33, insider denial of service like S11).
+  Segments are no longer attributed by signature alone: a stream is one account's (Z46, above).
 - Vouching is for a member who joined after a rotation, and only under a key introduced at or after the latest record
   that ended a permission: a member invited after a demotion, with no rotation since, holds aside versions carrying
   values from before the last rotation until the next one seals them again, and a store withholding one device's

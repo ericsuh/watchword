@@ -15,8 +15,16 @@ extension VaultSession: CredentialVault {
     /// trash). The store keeps one row per item ID whatever its vault, and sync refuses a record that names an ID held
     /// in another vault (`recordInAnotherVault`), so an ID occurs once; a move is a copy under a derived ID plus the
     /// original trashed in one commit, so the original is never readable beside the copy as a fillable item.
+    ///
+    /// Not the items of a shared vault this account is no longer a member of, or of one with no ledger on this device
+    /// (`vaultsWithheldFromAutoFill`, review finding Z45): they stay on the device until the person removes them, and
+    /// they are not offered to a page.
     public func credentialItems() async throws -> [Item] {
-        try await translatingForAutoFill { try await items().items }
+        try await translatingForAutoFill {
+            let listing = try await items().items
+            let withheld = try await vaultsWithheldFromAutoFill()
+            return withheld.isEmpty ? listing : listing.filter { !withheld.contains($0.vaultID) }
+        }
     }
 
     /// The actor's own lock check: the model calls it as its last suspension before it hands a secret back, so a

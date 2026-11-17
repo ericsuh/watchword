@@ -83,6 +83,14 @@ public struct MembershipLedger: Sendable {
     /// Removals carried out on a branch that lost, by a signer who may still remove that member: one per member, in
     /// account order. Plan each again (`RotationPlanner.plan` with `reason`) on a device whose account may.
     public private(set) var owedRemovals: [OwedRemoval]
+    /// Accounts that hold the vault's current key and are not members of it, in account order: each was added on a
+    /// branch that lost a fork, which wrapped the key that was current there to them, and removed again on that
+    /// branch by a record that lost with it, rotation and all, so that the key they were given is the accepted
+    /// head's (review finding Z43). Nothing is owed in the sense of `owedRemovals`, since they are not in the
+    /// accepted state; what is owed is a rotation. Until one is adopted `recordsToReseal` is empty,
+    /// `pendingRotation` reports each of them, and a device whose account administers the vault plans a routine
+    /// rotation. A function of the records held, like everything else here.
+    public private(set) var exposedKeyHolders: [UUID]
     /// Records of a format this version cannot read, each signed by the owner as of the record it follows, which
     /// extend a record this ledger holds (docs/02-architecture.md §8.9). Held, and saved with the ledger, so that a
     /// later call that is not offered them again still stops where this one did. At most
@@ -99,7 +107,7 @@ public struct MembershipLedger: Sendable {
 
     init(
         vaultID: UUID, owner: PublicKeyBundle, chain: [Link], branches: [Link], owedRemovals: [OwedRemoval],
-        laterFormatRecords: [[UInt8]] = []
+        exposedKeyHolders: [UUID] = [], laterFormatRecords: [[UInt8]] = []
     ) {
         precondition(!chain.isEmpty)
         self.vaultID = vaultID
@@ -107,6 +115,7 @@ public struct MembershipLedger: Sendable {
         self.chain = chain
         self.branches = branches
         self.owedRemovals = owedRemovals
+        self.exposedKeyHolders = exposedKeyHolders
         self.laterFormatRecords = laterFormatRecords
     }
 
@@ -227,7 +236,8 @@ public struct MembershipLedger: Sendable {
         return (
             MembershipLedger(
                 vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
-                owedRemovals: resolution.owed, laterFormatRecords: resolution.later),
+                owedRemovals: resolution.owed, exposedKeyHolders: resolution.exposed,
+                laterFormatRecords: resolution.later),
             resolution.report
         )
     }
@@ -293,6 +303,7 @@ public struct MembershipLedger: Sendable {
         chain = resolution.chain
         branches = resolution.branches
         owedRemovals = resolution.owed
+        exposedKeyHolders = resolution.exposed
         laterFormatRecords = resolution.later
         return resolution.report
     }
@@ -335,6 +346,7 @@ public struct MembershipLedger: Sendable {
         var chain: [Link]
         var branches: [Link]
         var owed: [OwedRemoval]
+        var exposed: [UUID] = []
         var later: [[UInt8]] = []
         var report: IngestReport
     }
@@ -560,9 +572,47 @@ public struct MembershipLedger: Sendable {
             }
             if !takenBack { carriers[index] = owed }
         }
+
+        // An addition and the removal that undid it can lose a fork together (review finding Z43): an administrator
+        // on a stale head invites someone and removes them again, and one owner-signed record displaces both. That
+        // member is in no accepted state, so nothing above is owed. But the key that was current on the losing path
+        // while they were a member was wrapped to them, and if it is the accepted head's key (the rotation that
+        // removed them lost too), someone outside the vault holds its key. Not if the branch went on to add them
+        // again: what it last meant is that they are a member, and that addition is its author's to replay.
+        var exposers: [Int: UUID] = [:]
+        for index in nodes.indices where !nodes[index].isOnChain && !head.isDeleted {
+            guard let parent = nodes[index].parent else { continue }
+            let accountID: UUID
+            switch nodes[index].link.record.operation {
+            case .removeMember(let removed): accountID = removed
+            case .memberLeft(let left, _): accountID = left
+            case .createVault, .addMember, .changeRole, .rotateKey, .deleteVault: continue
+            }
+            guard head.member(accountID) == nil, let then = nodes[parent].link.state.member(accountID) else {
+                continue
+            }
+            // Every state of this path in which they were a member, back to the record that added them.
+            var heldHeadKey = false
+            var cursor: Int? = parent
+            while let at = cursor, nodes[at].link.state.epoch >= then.since, !heldHeadKey {
+                heldHeadKey = nodes[at].link.state.vaultKeyID == head.vaultKeyID
+                cursor = nodes[at].parent
+            }
+            guard heldHeadKey else { continue }
+            var takenBack = false
+            var below = nodes[index].children.min(by: preferred)
+            while let next = below, !takenBack {
+                if case .addMember(let added, _) = nodes[next].link.record.operation, added == accountID {
+                    takenBack = true
+                }
+                below = nodes[next].children.min(by: preferred)
+            }
+            if !takenBack { exposers[index] = accountID }
+        }
         for index in nodes.indices.reversed() {
             nodes[index].isProtected =
-                carriers[index] != nil || nodes[index].children.contains { nodes[$0].isProtected }
+                carriers[index] != nil || exposers[index] != nil
+                || nodes[index].children.contains { nodes[$0].isProtected }
         }
 
         // Keep the losing branches, best-ranked first when there are too many. The order puts every record after
@@ -649,7 +699,11 @@ public struct MembershipLedger: Sendable {
         report.superseded = accepted[shared...].map(\.record)
         report.outranked = nodes.filter { $0.isNew && !$0.isOnChain }.map(\.link.record)
             .sorted { ($0.epoch, $0.hash) < ($1.epoch, $1.hash) }
-        return Resolution(chain: chain, branches: branches, owed: owed, later: laterKept, report: report)
+        // Only from records that are kept: what was forgotten for the cap exposes nobody a restore would not.
+        let kept = Set(side)
+        let exposed = Set(exposers.filter { kept.contains($0.key) }.values).sorted { $0.sharingPrecedes($1) }
+        return Resolution(
+            chain: chain, branches: branches, owed: owed, exposed: exposed, later: laterKept, report: report)
     }
 
     /// Whether `node`, a record on a losing branch, is a removal that still has to happen in `head`: it removes a
@@ -776,6 +830,7 @@ public struct MembershipLedger: Sendable {
         }
         return MembershipLedger(
             vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
-            owedRemovals: resolution.owed, laterFormatRecords: resolution.later)
+            owedRemovals: resolution.owed, exposedKeyHolders: resolution.exposed,
+            laterFormatRecords: resolution.later)
     }
 }

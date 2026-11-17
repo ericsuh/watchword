@@ -90,6 +90,25 @@ public final class SharedVaultModel {
     public var requiresNewerVersion: Bool { sharing?.requiresNewerVersion ?? false }
     public var mayInvite: Bool { ownRole?.isAdministrator == true && !isReadOnly }
     public var mayLeave: Bool { ownRole != nil && ownRole != .owner && !requiresNewerVersion }
+    /// This account is no longer a member (it left, or was removed), and this device still holds the vault: the
+    /// screen says so and offers to remove what it holds (`removeFromThisDevice`).
+    public var membershipEnded: Bool { isShared && ownRole == nil }
+
+    /// What leaving does and does not do, for the confirmation and the notice after it (PRD F4.4; review finding
+    /// Z45). Leaving is a request: an administrator's device carries it out. And nothing takes the vault's items off
+    /// this device; it stops receiving changes, AutoFill stops offering them, and the person removes them.
+    public static let leaveExplanation =
+        "You stay a member until an administrator's device has replaced the vault's key. After that this device "
+        + "no longer receives the vault's changes and AutoFill stops offering its items. What this device already "
+        + "holds stays on it until you remove it from the vault's screen, and the other members keep their copies."
+
+    /// What removing a member does and does not do (PRD F4.3: the app must say that copies may have been kept).
+    public static let removalExplanation =
+        "They lose access to new changes. The vault's key is replaced and every item sealed again, but what they "
+        + "already copied cannot be taken back, and their own devices keep what they hold until they remove it."
+
+    public static let removeCopiesExplanation =
+        "This removes the vault's items from this device only. The vault's members keep theirs."
     public var mayRotate: Bool { ownRole?.isAdministrator == true && !isReadOnly }
 
     /// The roles `member` can be given by this account: the owner gives any role but owner to anyone else, an
@@ -150,9 +169,17 @@ public final class SharedVaultModel {
         await perform {
             try await context.session.leaveSharedVault(vaultID)
             try await reload()
-            notice =
-                "You asked to leave. The vault goes from your devices once an administrator's device has "
-                + "rotated its key."
+            notice = "You asked to leave. " + Self.leaveExplanation
+        }
+    }
+
+    /// Removes from this device what it holds of a vault this account is no longer a member of (review finding Z45):
+    /// the only thing that does.
+    public func removeFromThisDevice() async {
+        await perform {
+            let removed = try await context.session.removeLocalCopies(ofSharedVault: vaultID)
+            try await reload()
+            notice = "\(removed) item(s) of this vault were removed from this device."
         }
     }
 
@@ -250,6 +277,10 @@ public final class SharedVaultModel {
                 + "sealed under a key they hold."
         case .removalOwed(let id):
             return "Removing member \(shortIdentifier(id)) has to be done again: a change made at the same time won."
+        case .keyHeldOutsideTheVault(let id):
+            return "The account \(shortIdentifier(id)) was invited and removed again while another change was being "
+                + "made, and still holds this vault's key. Until an administrator's device rotates the key, new items "
+                + "are sealed under a key it holds."
         case .awaitingPublication:
             return "A key rotation from this device goes out at the next sync."
         case .resealing(let remaining):
@@ -300,6 +331,12 @@ public final class InvitationModel {
 
     /// The roles an invitation can carry: never owner.
     public static let roles: [MemberRole] = [.readWrite, .readOnly, .administrator]
+
+    /// What the roles mean, under the role picker. Read-only is a rule the apps keep, not encryption, and the screen
+    /// must say so (PRD F4.5): a read-only member holds the vault's key like any other.
+    public static let roleExplanation =
+        "Administrators can invite and remove others. Read-only is a rule Watchword keeps, not encryption: a "
+        + "read-only member holds the vault's key like everyone else, and their copy of the app does not change items."
 
     /// Whether the person named the account with a fingerprint code. It only says which account: the comparison is
     /// still theirs to make.

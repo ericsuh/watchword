@@ -110,4 +110,7 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// those: shared as it is, the vault's older items would be held aside on every device (review finding Z42).
     /// Refused until there is a rule for them; a new vault can be shared and the items moved into it.
     case historyCompacted(UUID)
+    /// `removeLocalCopies` was asked for a vault this account is still a member of: a member leaves first, and the
+    /// copies can go once the chain says they are out.
+    case stillAMember(UUID)
 }

@@ -322,6 +322,10 @@ extension VaultSession {
         for vaultID in directory.keys {
             rows[vaultID] = try await store.record(RecordKey(recordID: vaultID, kind: .vaultMetadata))
         }
+        var leftovers: Set<UUID> = []
+        for vaultID in directory.keys where membershipEnded(vaultID, account: account) {
+            if !(try await store.records(in: vaultID, kind: .item)).isEmpty { leftovers.insert(vaultID) }
+        }
         let keys = try requireKeys(since: epoch)
         var result: [VaultInfo] = []
         for (vaultID, entry) in directory where includingDeleted || !entry.isDeleted {
@@ -331,7 +335,13 @@ extension VaultSession {
             let unavailable =
                 isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID)
                 && keys.vaultKeys.values.contains { $0.vaultID == vaultID }
-            guard unavailable || currentVaultKey(vaultID, keys: keys, account: account) != nil else { continue }
+            // A shared vault this account is no longer a member of has no current key here once the key was
+            // rotated. It is still listed while this device holds items of it, so that they are shown as what they
+            // are (`SharedVaultStatus.role` is `nil`) and can be removed (Z45).
+            let ended = membershipEnded(vaultID, account: account) && leftovers.contains(vaultID)
+            guard unavailable || ended || currentVaultKey(vaultID, keys: keys, account: account) != nil else {
+                continue
+            }
             let isPersonal = vaultID == account.personalVaultID
             let metadata = rows[vaultID].flatMap { try? openMetadata($0, keys: keys) }
             result.append(
@@ -551,6 +561,13 @@ extension VaultSession {
         let original = try openItem(originalRow, keys: keys)
         if removingOriginal, original.vaultID == destination { return original }
         let destinationKey = try await writableVaultKey(destination, keys: keys, account: account)
+        // A move writes in the vault it takes the item out of too: the original is trashed, then deleted. That needs
+        // this account's permission to write there as any write does (Z44), before anything is written anywhere. A
+        // deleted vault's leftovers can still be moved out: that is how they are restored. A copy writes nothing in
+        // the vault it reads from.
+        let originalKey =
+            removingOriginal
+            ? try await writableVaultKey(original.vaultID, keys: keys, account: account, allowingDeleted: true) : nil
         _ = try requireKeys(since: epoch)
         for scope in original.scopes {
             do {
@@ -583,10 +600,7 @@ extension VaultSession {
         var change = StoreChange(upserts: [createdRow], expectations: [createdRow.key: .absent])
 
         var trashedRow: StoredRecord?
-        if removingOriginal {
-            guard let originalKey = currentVaultKey(original.vaultID, keys: keys, account: account) else {
-                throw VaultError.unknownVault(original.vaultID)
-            }
+        if let originalKey {
             var trashed = original
             if trashed.trashedAt == nil || trashed.keptAfterDeletion { trashed.trashedAt = now }
             trashed.keptAfterDeletion = false

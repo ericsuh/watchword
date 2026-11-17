@@ -154,6 +154,14 @@ extension VaultSession {
                     guard (try? await planRotation(owed.reason, in: vaultID)) != nil else { continue }
                     report.rotation = try await resumeRotation(in: vaultID)
                 }
+                // Someone outside the vault holds its current key (an addition and its removal lost a fork
+                // together, Z43): a routine rotation, by any device whose account administers the vault.
+                if !(try sharedVault(vaultID).ledger.exposedKeyHolders.isEmpty), try sharedVault(vaultID).plan == nil,
+                    ledger.state.member(account.accountID)?.role.isAdministrator == true,
+                    (try? await planRotation(.routine, in: vaultID)) != nil
+                {
+                    report.rotation = try await resumeRotation(in: vaultID)
+                }
                 if ledger.state.member(account.accountID)?.role.isAdministrator == true {
                     let objects = try await listSharingObjects(
                         prefix: SharingObjectLocation.leavePrefix(vaultID), maximumLength: LeaveRequest.encodedLength)
@@ -333,6 +341,12 @@ extension VaultSession {
         guard
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account)
         else { throw SyncKeyringError.authenticationFailed }
+        // A snapshot named as this device's that this account's keys did not sign is nobody's this device knows: it
+        // knows what it wrote (Z46). A segment in that position is taken in and held aside by the judge instead
+        // (`judgeAdmitsSegment`), so that the stream is not left waiting at it.
+        if location.kind == .snapshot, location.author == account.deviceID, signer != account.accountID {
+            throw SyncKeyringError.untrustedAuthor(location.author)
+        }
         // Keys in the chain that differ from this device's pin: the person has been warned, and nothing they sign
         // counts here until that is settled (S39).
         if vault.keyCheck?.substituted.contains(signer) == true {
@@ -346,6 +360,22 @@ extension VaultSession {
         case .nothingCounts:
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
+    }
+
+    /// Whether a segment at `location` signed by `signer`'s keys is that stream's own (review finding Z46). A stream is
+    /// named by its device alone, and a member can list another member's device ID in their own registry and sign
+    /// objects into "its" stream; every device, the victim's included, used to merge those as that device's versions,
+    /// which no rule keyed by device ID survives (a claim to have seen the device's unpublished edits is not asked
+    /// of the device itself, S46). So: this device's own stream is this account's and no other's, since a device
+    /// knows what it wrote; and any other stream is the account's that signed its lowest-numbered segment
+    /// (`SharedStreamIndex.account(ofStream:)`). A segment that is not the stream's own is held aside, never merged,
+    /// and the stream carries on past it.
+    static func streamAdmits(
+        _ signer: UUID, at location: SyncObjectLocation, in vault: SharedVault, account: AccountRecord
+    ) -> Bool {
+        if location.author == account.deviceID { return signer == account.accountID }
+        if let owner = vault.index.account(ofStream: location.author) { return owner == signer }
+        return true
     }
 
     /// The devices whose streams a shared vault no longer reads: revoked from their own account.
@@ -368,7 +398,13 @@ extension VaultSession {
         guard let keys,
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account),
             var vault = sharing.vaults[location.vaultID],
-            vault.index.segment(device: location.author, sequence: location.number) == nil
+            vault.index.segment(device: location.author, sequence: location.number) == nil,
+            // Another account's object in this device's own stream is no part of what it wrote. It is recorded,
+            // unfiled, for the cut's chain that runs over it, as in anyone's stream, but only behind a segment of this
+            // device's own: the stream's lowest segment names its account, and here that is never anyone else's (Z46).
+            location.author != account.deviceID || signer == account.accountID
+                || (vault.index.account(ofStream: location.author) == account.accountID
+                    && (vault.index.firstSequence(ofStream: location.author) ?? .max) < location.number)
         else { return }
         // The values this segment carried that its stream had not carried before, for the work of the device their
         // stamp names: what a value is checked against, rather than the stamp it chose (S36). Only this stream's own
@@ -440,7 +476,8 @@ extension VaultSession {
         }
         let ownView = try? await registry(account)
         guard let current = sharing.vaults[location.vaultID],
-            let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account)
+            let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account),
+            Self.streamAdmits(signer, at: location, in: current, account: account)
         else { return .holdAside }
         switch current.ledger.writeStanding(of: signer) {
         case .mayWrite:
@@ -519,11 +556,16 @@ extension VaultSession {
             admitted = false
         }
         if admitted, record.kind == .item, let item = try? openItem(record, keys: keys) {
+            // A version's writer is not asked about its own edits only where the version is known to be that
+            // device's: its own stream carried it (a stream is one account's, Z46), or it is this device's own. One
+            // that merely names a device, in a snapshot say, is held to that device's stream like anyone's claim.
+            let writersOwn =
+                record.deviceID == account.deviceID || vault.index.firstCarrier[record.deviceID]?[originKey] != nil
             admitted = Self.knowledgeCounts(
                 ItemMerge.effectiveClock(item, origin: Self.origin(record)),
                 of: VersionKey(recordID: record.recordID, kind: record.kind.rawValue, version: record.version),
-                author: record.deviceID, judgedBy: account.deviceID, in: vault, vouched: vouched, listing: listing,
-                awaited: &awaited)
+                author: writersOwn ? record.deviceID : nil, judgedBy: account.deviceID, in: vault, vouched: vouched,
+                listing: listing, awaited: &awaited)
         }
         if let known = sharing.vaults[record.vaultID]?.index.awaiting, !awaited.isSubset(of: known) {
             sharing.vaults[record.vaultID]?.index.awaiting.formUnion(awaited)
@@ -547,8 +589,11 @@ extension VaultSession {
     /// account was never given) cannot be checked, and a current member's edits there are believed as before; a
     /// version that vouches (S42) vouches for these as for its values. A device no account lists names nobody's work
     /// and is passed over.
+    ///
+    /// `author` is the device whose own edits are not asked about: the version's writer, where the version is known
+    /// to be its work (`judgeAdmits`), or the device whose stream carried a tombstone. `nil` exempts nobody.
     static func knowledgeCounts(
-        _ clock: VersionVector, of record: VersionKey, author: UUID, judgedBy me: UUID, in vault: SharedVault,
+        _ clock: VersionVector, of record: VersionKey, author: UUID?, judgedBy me: UUID, in vault: SharedVault,
         vouched: Bool, listing: (UUID) -> [UUID], awaited: inout Set<UUID>
     ) -> Bool {
         for (device, count) in clock.entries where device != author {
@@ -661,7 +706,10 @@ extension VaultSession {
     /// Whether the segment of `device`'s stream at `sequence` counts: its signer may write, or it is inside the cut
     /// of the record that ended the signer's permission.
     static func segmentCounts(_ device: UUID, sequence: UInt64, in vault: SharedVault) -> Bool {
-        guard let segment = vault.index.segment(device: device, sequence: sequence) else { return false }
+        // Only a segment of the account the stream belongs to: another account's object there counts for nothing.
+        guard let segment = vault.index.segment(device: device, sequence: sequence),
+            vault.index.isOwnersSegment(device: device, sequence: sequence)
+        else { return false }
         switch vault.ledger.writeStanding(of: segment.account) {
         case .mayWrite:
             return true
@@ -726,10 +774,18 @@ extension VaultSession {
     }
 
     /// A key the chain introduced and never entitled this account to: segments sealed under it never open here.
+    ///
+    /// So is a key that only a branch which lost a fork introduced (a rotation signed on a stale head, Z43): the
+    /// accepted chain never names it, so no grant of it is ever fetched here, and the stream of whoever sealed under
+    /// it while they saw that branch would wait at that segment for good, their later writes with it. What the segment
+    /// carried reaches this device sealed again under the vault's key, as after any rotation; and if that branch
+    /// comes to win after all, receiving its key replays the log (`fetchCurrentKey`), the segment included. A key no
+    /// record held here introduced is not passed over: its record may yet arrive.
     func judgePassesOver(keyID: UUID, vaultID: UUID) async -> Bool {
-        guard let vault = sharing.vaults[vaultID], let account = try? await loadAccount(),
-            vault.ledger.keyEpoch(of: keyID) != nil
-        else { return false }
+        guard let vault = sharing.vaults[vaultID], let account = try? await loadAccount() else { return false }
+        guard vault.ledger.keyEpoch(of: keyID) != nil else {
+            return vault.ledger.branches.contains { $0.state.vaultKeyID == keyID }
+        }
         if case SharingError.notEntitledToKey? = Self.error(of: {
             try vault.ledger.grantSender(forKey: keyID, to: account.accountID)
         }) {

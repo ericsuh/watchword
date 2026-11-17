@@ -51,6 +51,9 @@ struct SharedStreamIndex: Sendable, Hashable {
 
     /// By device, then sequence number.
     private(set) var streams: [UUID: [UInt64: Segment]] = [:]
+    /// The lowest sequence recorded of each stream, kept beside `streams`: the segment that names the stream's
+    /// account (`account(ofStream:)`), asked for with every value judged.
+    private var lowest: [UUID: UInt64] = [:]
     /// The membership head the vault's items were last judged against (`MembershipHash.bytes`), so that a change of
     /// head is noticed after a restart too.
     var judgedHead: [UInt8]?
@@ -66,12 +69,55 @@ struct SharedStreamIndex: Sendable, Hashable {
 
     init() {}
 
+    /// The account a device's stream belongs to: the one whose keys signed its lowest-numbered segment recorded here
+    /// (review finding Z46). A stream is named by a device ID alone, device IDs are chosen by devices, and nothing
+    /// stops a member listing another member's device ID in their own registry and signing objects into "its"
+    /// stream. So the name does not say whose a stream is; its first segment does, and a shared vault keeps its whole
+    /// log, so devices that hold the same segments agree. `nil` for a stream nothing was recorded of.
+    func account(ofStream device: UUID) -> UUID? {
+        firstSequence(ofStream: device).flatMap { streams[device]?[$0]?.account }
+    }
+
+    /// The lowest sequence number recorded of a device's stream.
+    func firstSequence(ofStream device: UUID) -> UInt64? {
+        lowest[device]
+    }
+
+    /// Whether the segment at `sequence` of `device`'s stream is there and signed by the account the stream belongs
+    /// to. Another account's object in that position is kept, since a write cut's chain runs over every object of
+    /// the stream, but nothing is attributed through it.
+    func isOwnersSegment(device: UUID, sequence: UInt64) -> Bool {
+        guard let segment = streams[device]?[sequence] else { return false }
+        return segment.account == account(ofStream: device)
+    }
+
     /// Remembers a segment. The first copy seen of a name is kept: objects are written once, so a second, different
     /// object under the same name is a store showing devices different streams (`forkedStream`), and the cut's chain
-    /// is what tells which one its signer held.
+    /// is what tells which one its signer held. What a segment carried is filed only if the account the stream
+    /// belongs to signed it (Z46); if a lower-numbered segment arrives later and is another account's, the stream is
+    /// that account's after all and what was filed through it is filed again.
     mutating func record(device: UUID, sequence: UInt64, segment: Segment) {
         guard streams[device]?[sequence] == nil else { return }
+        let before = account(ofStream: device)
         streams[device, default: [:]][sequence] = segment
+        lowest[device] = min(lowest[device] ?? .max, sequence)
+        let owner = account(ofStream: device)
+        if let before, before != owner {
+            firstCarrier[device] = nil
+            for value in valueCarriers.keys {
+                valueCarriers[value]?[device] = nil
+                if valueCarriers[value]?.isEmpty == true { valueCarriers[value] = nil }
+            }
+            for (number, held) in (streams[device] ?? [:]).sorted(by: { $0.key < $1.key })
+            where held.account == owner {
+                file(held, device: device, sequence: number)
+            }
+        } else if segment.account == owner {
+            file(segment, device: device, sequence: sequence)
+        }
+    }
+
+    private mutating func file(_ segment: Segment, device: UUID, sequence: UInt64) {
         for entry in segment.entries where (firstCarrier[device]?[entry] ?? .max) > sequence {
             firstCarrier[device, default: [:]][entry] = sequence
         }
@@ -109,9 +155,9 @@ struct SharedStreamIndex: Sendable, Hashable {
         return sequence
     }
 
-    /// The devices whose segments this account's keys signed.
+    /// The devices whose streams are this account's (`account(ofStream:)`): what a write cut for it covers.
     func devices(signedBy account: UUID) -> [UUID] {
-        streams.filter { $0.value.values.contains { $0.account == account } }.keys.sorted { $0.precedes($1) }
+        streams.keys.filter { self.account(ofStream: $0) == account }.sorted { $0.precedes($1) }
     }
 
     static func link(_ previous: [UInt8], sequence: UInt64, digest: [UInt8]) -> [UInt8] {

@@ -373,6 +373,10 @@ extension VaultSession {
                 remaining.append(record)
                 published = true
             case .superseded:
+                // An addition its own branch went on to undo is not replayed: the pair lost together, and what it
+                // meant is that the member is out (Z43). The key they were given is the ledger's to report
+                // (`exposedKeyHolders`) and an administrator's device's to rotate.
+                if ledger.wasUndoneOnItsBranch(record) { continue }
                 guard let again = try await proposeAgain(record.operation, ledger: ledger, in: vaultID) else {
                     continue
                 }
@@ -507,7 +511,10 @@ extension VaultSession {
             throw VaultError.locked
         }
         // A key already resident is kept: it is the same key (checked above), with the nonces sealed under it so far.
-        if current.vaultKeys[vaultKey.key.keyID] == nil {
+        // A second copy of its bytes, opened from a grant, is not left behind.
+        if let resident = current.vaultKeys[vaultKey.key.keyID] {
+            if resident.key.material !== vaultKey.key.material { vaultKey.zeroise() }
+        } else {
             var vaultKeys = current.vaultKeys
             vaultKeys[vaultKey.key.keyID] = vaultKey
             self.keys = UnlockedKeys(
@@ -946,6 +953,65 @@ extension VaultSession {
             },
             pendingRotation: pending, heldAside: heldAside,
             requiresNewerVersion: vault.ledger.continuesInLaterFormat)
+    }
+
+    // MARK: - A vault this account is no longer in (PRD F4.3, F4.4; review finding Z45)
+
+    /// Whether this account's membership of a shared vault has ended in the chain this device accepts: it left, or
+    /// was removed. Nothing takes the vault's records off the device when that happens: they stay, readable under
+    /// the keys it held, until the person removes them (`removeLocalCopies`). `false` without a loaded ledger.
+    func membershipEnded(_ vaultID: UUID, account: AccountRecord) -> Bool {
+        guard let vault = sharing.vaults[vaultID] else { return false }
+        return vault.ledger.state.member(account.accountID) == nil
+    }
+
+    /// The vaults whose items AutoFill is not given: a shared vault this account is no longer a member of, and one
+    /// that is shared with no verified ledger on this device, where membership cannot be told (a device that left a
+    /// vault and then lost its sharing state must not start offering it again).
+    func vaultsWithheldFromAutoFill() async throws -> Set<UUID> {
+        await loadSharedVaultsIfNeeded()
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        var withheld: Set<UUID> = []
+        for vaultID in try await vaultDirectory(account).keys where vaultID != account.personalVaultID {
+            if membershipEnded(vaultID, account: account)
+                || isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID)
+            {
+                withheld.insert(vaultID)
+            }
+        }
+        return withheld
+    }
+
+    /// Removes from this device what it holds of a shared vault this account is no longer a member of: every item,
+    /// its synced scan results, and the versions held aside from it. The person's choice, made on the vault's
+    /// screen; nothing does it for them, and until they do the copies stay (which the screens say). Not a deletion:
+    /// nothing is recorded to publish, no other member's copy is touched, and the ledger is kept (S26). Refused while
+    /// this account is still a member (it leaves first) and for a vault with no ledger here. Returns how many items
+    /// went.
+    @discardableResult
+    public func removeLocalCopies(ofSharedVault vaultID: UUID) async throws -> Int {
+        _ = try sharingSettings()
+        _ = try requireKeys()
+        await loadSharedVaultsIfNeeded()
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        guard sharing.vaults[vaultID] != nil else {
+            throw isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID)
+                ? SharedVaultError.ledgerUnavailable(vaultID) : SharedVaultError.notShared(vaultID)
+        }
+        guard membershipEnded(vaultID, account: account) else { throw SharedVaultError.stillAMember(vaultID) }
+        let items = try await store.records(in: vaultID, kind: .item)
+        let scans = try await store.records(in: vaultID, kind: .scanStatus)
+        _ = try requireKeys()
+        // The engine's store, not the session's writer: these are not deletions to publish.
+        try await store.commit(
+            StoreChange(
+                deletions: scans.map(\.key),
+                conditionalDeletions: Dictionary(uniqueKeysWithValues: items.map { ($0.key, $0.version) })))
+        if let state = syncSettings?.state {
+            try await state.discardQuarantined(try await state.quarantined(vaultID: vaultID), vaultID: vaultID)
+        }
+        try? await reconcileHygiene()
+        return items.count
     }
 
     // MARK: - Hooks the rest of the session calls

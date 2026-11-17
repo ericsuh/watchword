@@ -537,7 +537,23 @@ state that cannot be read at unlock; and an invitation naming another owner refu
 core", that the class of a vault key's wrap is authenticated (`grantedKeyWrapClass`). "Screen models: sharing" has the
 vault's label and the accept screen setting it up. Sharing a vault that already holds work
 (`AdversarialSharedVaultExistingVaultTests.swift`, Z42): one that two devices of the owner wrote to, where nothing is
-held aside on the owner's device or an invitee's; and one whose log was compacted, which is refused.
+held aside on the owner's device or an invitee's; and one whose log was compacted, which is refused. An addition and
+the removal that undid it losing a fork together (Z43): through the session
+(`AdversarialSharedVaultUndoneAdditionTests.swift`: the addition not replayed, no second grant, nothing sealed again
+towards the key the outsider holds, the key reported and then rotated by the administrator's own next syncs, and what
+the administrator wrote under the losing branch's key reaching the others, Z47), and in the ledger
+(`AdversarialSharingUndoneAdditionTests.swift`, "sharing and membership": order and restart, a routine rotation ending
+it, an addition that lost alone, a branch that added the member again); `LongRunningMembershipForkTests` compares
+`exposedKeyHolders` across orders and batches with the rest. The deletion paths
+(`AdversarialSharedVaultDeletionPathTests.swift`, Z44): a read-only member's permanent deletion, purge and move out,
+each refused with nothing queued, then allowed once the member may write; and a move whose copy was written after a
+demotion, whose deletion waits until the person discards the held-aside copy. A vault the account left
+(`AdversarialSharedVaultFormerMemberTests.swift`, Z45): still a member and still on the share until the rotation, then
+listed for what it is, not given to AutoFill, unwritable, and removed from the device by the person without anything
+published; and a vault with no ledger not given to AutoFill. A stream's owner
+(`AdversarialSharedVaultStreamOwnerTests.swift`, Z46): a member's device enrolled under the owner's device ID writing
+into the owner's stream over an unpublished edit, held aside on the owner's device and everyone's, the stream carrying
+on. "Screen models: sharing" has the texts (`sharingStatementsAreTrue`) and the left vault on screen.
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

@@ -32,6 +32,16 @@ public struct VaultSharing: Hashable, Sendable {
     public var roleName: String {
         role.map(MemberRow.name(of:)) ?? "Not a member"
     }
+
+    /// This account left the vault or was removed from it. What this device already held of it is still here.
+    public var membershipEnded: Bool { role == nil }
+
+    /// What a vault this account is no longer in says of itself, wherever it is listed (PRD F4.3, F4.4; review
+    /// finding Z45). Nothing removes its items from the device; the person does, on the vault's screen.
+    public static let endedBadge = "No longer shared with you"
+    public static let endedDetail =
+        "You are no longer a member of this vault. What this device already holds of it stays on this device until "
+        + "you remove it; it is no longer updated, and AutoFill does not offer it."
 }
 
 /// One vault in the vault list (PRD F2.1).
@@ -68,6 +78,7 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
         if isPersonal { return "Your own vault" }
         if isSharedUnavailable { return Self.notSetUpBadge }
         guard let sharing else { return "Only you" }
+        if sharing.membershipEnded { return VaultSharing.endedBadge }
         if sharing.role == .owner { return "Shared by you" }
         return "Shared with you · " + sharing.roleName
     }
@@ -83,6 +94,7 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
         if isPersonal { return "Your own vault. It is never shared." }
         if isSharedUnavailable { return Self.notSetUpReason }
         guard let sharing else { return "Only you" }
+        if sharing.membershipEnded { return VaultSharing.endedDetail }
         if sharing.requiresNewerVersion { return "Read-only: update Watchword" }
         let members = sharing.memberCount == 1 ? "1 member" : "\(sharing.memberCount) members"
         return "Shared, \(members). You: \(sharing.roleName)"

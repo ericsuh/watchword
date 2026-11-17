@@ -525,7 +525,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (`owedRemovals`): the member's writes count only as far as that record's cut, `recordsToReseal` is empty, and
   any device that may sign it
   plans it again. Everything else that loses is proposed again by its author (`status(of:)`); a device ingests
-  before it proposes and never publishes a record that is not `awaitingPublication`.
+  before it proposes and never publishes a record that is not `awaitingPublication`. **Except an addition its own
+  branch went on to undo** (`wasUndoneOnItsBranch`, Z43): that is let go, never replayed alone, and if the key that
+  branch wrapped to the member is the accepted head's they are in `exposedKeyHolders`: `recordsToReseal` is empty,
+  `pendingRotation` says so, and an administrator's device rotates. Both are functions of the records held.
 - A record's hash covers its signed content, not its signature; candidates sharing a hash are each examined until
   one verifies (S3, S4). Every object *name* ends in a digest of the whole object, signature included, so nobody can
   take a predictable record's name (S20).
@@ -616,7 +619,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   *shown* trashed and kept after a deletion (`VaultSession.presented`), never written that way: an automatic write
   per device is an edit the next deletion elsewhere has not seen.
 - A move is a copy (derived ID) plus the original trashed in **one commit**, then the original deleted like any
-  permanent deletion. Never move by changing a row's vault, and never move an item with unresolved values.
+  permanent deletion. Never move by changing a row's vault, and never move an item with unresolved values. It writes
+  in both vaults, so both keys come from `writableVaultKey`; and every deletion the session makes (`deletePermanently`,
+  the purge, a vault's deletion) asks `checkSharedWrite` or `checkSharedDeletion` first (Z44). A new path that
+  commits through `writer(for:)` asks too.
+- A sync publishes no vault's deletions while any vault holds an item that exists nowhere else
+  (`holdsUnpublishedWork`): the copy half of a move that was not published, or was held aside (Z44, PRD F7.6).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
 
@@ -659,6 +667,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `refusedNames` before then.
 - Member registries are anchored per vault (`memberRegistries`, S39), and a vault key whose ID this device holds for
   another vault is refused (`keyIDInUse`, S38).
+- **A stream is one account's** (Z46): this device's own stream takes only this account's signature, and any other
+  belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`). Another
+  account's segment in it is recorded for the cut's chain, filed nowhere, and held aside. Never attribute through a
+  segment without `isOwnersSegment`, and never exempt a version's writer from `knowledgeCounts` unless its own stream
+  carried the version or this device wrote it.
+- A segment sealed under a key that only a losing branch introduced is passed over, not waited for (Z47).
+- Once the chain no longer lists this account, the vault's items are withheld from `credentialItems()`
+  (`vaultsWithheldFromAutoFill`, which also withholds a vault with no ledger), the vault stays listed while items of
+  it are here, and only `removeLocalCopies` takes them off the device, without publishing anything (Z45). Leaving does
+  not remove them, and no screen may say it does; read-only is worded as a client rule, never as encryption (F4.5).
 - A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
   `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
   judge a cut.

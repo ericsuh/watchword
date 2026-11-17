@@ -110,6 +110,13 @@ extension VaultSession {
                 vaultReport = try await engine(vaultID).download(transportStopped: stopped)
                 vaultReport.deferredUntilUnlock = true
             }
+            // A vault may hold the copy half of a move that this sync did not publish: it is not published to (this
+            // account may not write there now, or it is shared with no ledger here), or the copy was taken out and
+            // held aside before it went out. While any vault holds an item that exists nowhere else, no vault's
+            // deletions go out (Z44).
+            if restPublished, mayWrite, await holdsUnpublishedWork(in: vaultID, account: record) {
+                restPublished = false
+            }
             if stopped == nil, let failure = vaultReport.transportFailure, failure.stopsSync { stopped = failure }
             vaultReport.deviceRevoked = standing == .revoked
             vaultReport.deviceNotRegistered = standing == .unknown
@@ -137,6 +144,25 @@ extension VaultSession {
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
         try? await reconcileHygiene()
         return report
+    }
+
+    /// Whether `vaultID` holds an item that exists nowhere but on this device: one it created, of which the sync layer
+    /// has neither published nor merged any version, in the vault or held aside from it (a copy made before this
+    /// device was shown the record that ended its account's permission to write is taken out and kept there). The
+    /// other half of such an item may be a deletion in another vault. Not every row this device sealed: the result of
+    /// a merge is its row too, in a vault it only reads, and holds nothing the others lack.
+    func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
+        guard let base = syncSettings?.state else { return false }
+        let known = (try? await base.loadState(vaultID: vaultID))?.known ?? [:]
+        for row in (try? await store.records(in: vaultID, kind: .item)) ?? []
+        where row.deviceID == account.deviceID && known[row.key] == nil {
+            return true
+        }
+        for entry in (try? await base.quarantined(vaultID: vaultID)) ?? []
+        where entry.kind == .item && !entry.isDeletion && entry.device == account.deviceID && known[entry.key] == nil {
+            return true
+        }
+        return false
     }
 
     /// One vault's report for two engine runs in one sync: counts added up, state as the second left it.

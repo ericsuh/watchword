@@ -362,13 +362,19 @@ public enum RotationPlanner {
 
 /// One reason a vault's rotation is not finished, for the UI to show (PRD F4.3: "pending rotation").
 public enum PendingRotation: Sendable, Hashable {
-    /// A member asked to leave and no administrator's device has rotated the key yet. They are already off the
-    /// transport share; until the rotation, new items are still sealed under a key they hold.
+    /// A member asked to leave and no administrator's device has rotated the key yet. Until it does they are still a
+    /// member, still on the transport's share (the administrator's device takes them off it as the first step of the
+    /// rotation), and new items are still sealed under a key they hold.
     case departureRequested(UUID)
     /// A record that removed this member lost a fork, and the removal has not been planned again yet
     /// (`MembershipLedger.owedRemovals`). Until it is, the member is listed again and holds the current key; their
     /// writes count only as far as that record's cut, and nothing is re-sealed.
     case removalOwed(UUID)
+    /// This account is not a member and holds the vault's current key: it was added on a branch that lost a fork,
+    /// which wrapped that key to it, and removed again on that branch by a rotation that lost with it
+    /// (`MembershipLedger.exposedKeyHolders`, review finding Z43). Until an administrator's device rotates the key,
+    /// new items are sealed under a key someone outside the vault holds, and nothing is re-sealed.
+    case keyHeldOutsideTheVault(UUID)
     /// This device planned a rotation whose record is not yet in the chain it sees.
     case awaitingPublication(RotationReason)
     /// This many records are still sealed under an earlier key and wait to be sealed again by a member who may
@@ -415,10 +421,13 @@ extension MembershipLedger {
     ///
     /// Empty while a removal is owed (`owedRemovals`): the current key is then one that the member to be removed
     /// holds, the removal is about to rotate it, and sealing anything again towards it would hand that member what
-    /// was written under the newer key (review finding S19). Empty for a deleted vault.
+    /// was written under the newer key (review finding S19). Empty, for the same reason, while someone outside the
+    /// vault holds its current key (`exposedKeyHolders`, Z43): a removal that lost a fork with the addition it undid
+    /// leaves the member out of the accepted state, so nothing is owed, yet the current key is one they were given.
+    /// Empty for a deleted vault.
     public func recordsToReseal(in inventory: [SealedRecordReference]) -> [SealedRecordReference] {
         let state = self.state
-        guard !state.isDeleted, owedRemovals.isEmpty else { return [] }
+        guard !state.isDeleted, owedRemovals.isEmpty, exposedKeyHolders.isEmpty else { return [] }
         return inventory.filter { $0.keyID != state.vaultKeyID }.sorted {
             $0.recordID == $1.recordID
                 ? $0.kind.rawValue < $1.kind.rawValue : $0.recordID.sharingPrecedes($1.recordID)
@@ -453,6 +462,7 @@ extension MembershipLedger {
         var pending =
             inAccountOrder(departing).map(PendingRotation.departureRequested)
             + inAccountOrder(removing).map(PendingRotation.removalOwed)
+            + exposedKeyHolders.map(PendingRotation.keyHeldOutsideTheVault)
         if let plan, plan.status(in: self, inventory: inventory) == .awaitingPublication {
             pending.append(.awaitingPublication(plan.reason))
         }

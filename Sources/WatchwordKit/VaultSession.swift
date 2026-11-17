@@ -1182,11 +1182,17 @@ public actor VaultSession: SharesExecutor {
     }
 
     /// Permanently deletes a trashed item. Items not in the trash are refused, so one call cannot destroy data.
+    ///
+    /// A deletion is a write: in a shared vault it needs `writePermission` like any other (F4.5), and in one with no
+    /// ledger on this device it is refused (review findings Z41, Z44). A deletion made while this account may not
+    /// write would take effect here, and wait, signed, to be published the day it may.
     public func deletePermanently(id: UUID) async throws {
         let item = try await item(id: id)
         guard item.isTrashed else { throw VaultError.itemNotTrashed(id) }
         _ = try requireKeys()
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        try await checkSharedWrite(item.vaultID, account: record)
+        _ = try requireKeys()
         // Conditional on the version just read, so a restore that lands in between is not silently undone. The item's
         // synced scan results go with it (§13.9).
         try await writer(for: record).commit(
@@ -1206,11 +1212,21 @@ public actor VaultSession: SharesExecutor {
             return now.timeIntervalSince(trashedAt) >= VaultConfiguration.trashRetention
         }
         guard !expired.isEmpty, let record = try await loadAccount() else { return }
+        // Not in a shared vault this account may not write to now (read-only, a removal owed, a later format, no
+        // ledger on this device): the purge is a deletion like any other (Z44), and there the trash is other
+        // members' to empty.
+        var writable: [UUID: Bool] = [:]
+        for vaultID in Set(expired.map(\.vaultID)) {
+            writable[vaultID] = (try? await checkSharedWrite(vaultID, account: record)) != nil
+        }
+        let purged = expired.filter { writable[$0.vaultID] == true }
+        guard !purged.isEmpty else { return }
+        _ = try requireKeys()
         try await writer(for: record).commit(
             StoreChange(
-                deletions: try await scanStatusKeys(of: expired.map(\.id)),
+                deletions: try await scanStatusKeys(of: purged.map(\.id)),
                 conditionalDeletions: Dictionary(
-                    uniqueKeysWithValues: expired.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
+                    uniqueKeysWithValues: purged.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
     }
 
     /// Read-modify-write of one item: the version moves forward and the record is sealed under the vault's current
