@@ -39,6 +39,9 @@ public struct QuarantineRow: Hashable, Sendable, Identifiable {
         case .unmerged:
             return "Held back because it could not be combined with the version on this device. Nothing in it was "
                 + "applied."
+        case .recordInAnotherVault:
+            return "Held back because another vault on this device already holds a record with the same identifier. "
+                + "Nothing in it was applied, and the other vault's record was not changed."
         }
     }
 }

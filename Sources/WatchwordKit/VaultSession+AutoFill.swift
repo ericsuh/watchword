@@ -12,8 +12,8 @@ import WatchwordStore
 extension VaultSession: CredentialVault {
     /// Every item of every vault the session holds, trashed and archived ones included, each read through the
     /// row it was stored in (`openItem`) and presented as the person sees it (what a vault's deletion left is in the
-    /// trash). The store keeps one row per item ID whatever its vault, and sync refuses a record that names an ID held
-    /// in another vault (`recordInAnotherVault`), so an ID occurs once; a move is a copy under a derived ID plus the
+    /// trash). The store keeps one row per item ID whatever its vault, and sync keeps aside a record that names an ID
+    /// held in another vault (`SyncReport.collided`), so an ID occurs once; a move is a copy under a derived ID plus the
     /// original trashed in one commit, so the original is never readable beside the copy as a fillable item.
     ///
     /// Not the items of a shared vault this account is no longer a member of, or of one with no ledger on this device

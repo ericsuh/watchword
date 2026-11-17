@@ -177,6 +177,7 @@ extension VaultSession {
         total.rejected = first.rejected + second.rejected
         total.quarantined = first.quarantined + second.quarantined
         total.heldAside = first.heldAside + second.heldAside
+        total.collided = first.collided + second.collided
         total.staleSnapshots += first.staleSnapshots
         total.ignoredNames = max(first.ignoredNames, second.ignoredNames)
         total.retiredObjects = max(first.retiredObjects, second.retiredObjects)
@@ -272,8 +273,12 @@ extension VaultSession {
                 sharedIDs.contains(vaultID) || sharing.vaults[vaultID] != nil || sharing.markers[vaultID] != nil
             for entry in entries {
                 let implausible = entry.version > configuration.maximumVersion || (!overflow && entry.version > ceiling)
-                let reason: QuarantineReason =
+                var reason: QuarantineReason =
                     implausible ? .implausibleVersion : shared ? .heldAside : .unmerged
+                // Told from the store as it is now, like the others: the ID is another vault's record's (Z22).
+                if let holder = try await store.record(entry.key), holder.vaultID != vaultID {
+                    reason = .recordInAnotherVault
+                }
                 versions.append(QuarantinedVersion(vaultID: vaultID, entry: entry, reason: reason))
             }
         }
@@ -714,6 +719,8 @@ public enum QuarantineReason: Sendable, Hashable {
     /// Its merge with the local version could not be sealed (Y37), or it is no longer implausible as the vault has
     /// caught up with it.
     case unmerged
+    /// A record of another vault holds its record ID on this device (the store keys records across vaults, Z22).
+    case recordInAnotherVault
 }
 
 /// What one sync of the account did: the account's own objects, and each vault's log.
@@ -759,6 +766,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.rejected += report.rejected
             total.quarantined += report.quarantined
             total.heldAside += report.heldAside
+            total.collided += report.collided
             total.waiting.merge(report.waiting, uniquingKeysWith: min)
             total.staleSnapshots += report.staleSnapshots
             total.ignoredNames += report.ignoredNames

@@ -86,7 +86,7 @@ public struct SyncSummary: Hashable, Sendable {
             }
             notices.append(.snapshotWithheld(by: named.sorted()))
         }
-        let kept = combined.quarantined.count + combined.heldAside.count
+        let kept = combined.quarantined.count + combined.heldAside.count + combined.collided.count
         if kept > 0 { notices.append(.keptAside(kept)) }
         self.notices = notices
     }

@@ -63,4 +63,69 @@ extension AdversarialSyncTests {
         #expect(await f.transport.allObjects.isEmpty)
         #expect(await f.writer.state()?.published[RecordKey(recordID: item.id, kind: .item)] == nil)
     }
+
+    // MARK: - One key space for every vault
+
+    /// Threat: A4, a writer in one shared vault who knows (or can compute, for a moved item) a record ID that will
+    /// arrive in another of the victim's vaults, publishes a record under that ID in the vault where they may write.
+    /// The local store keys records by (record ID, kind) across all vaults, so whichever vault gets an ID into a
+    /// device's store first decides which vault's honest record collides. The collision used to reject the whole
+    /// segment, and a stream is merged strictly in sequence: the honest author's stream then stopped at that segment
+    /// at every sync, and nothing they wrote afterwards arrived (Z22). It costs the colliding entry alone: kept aside
+    /// for the person, with the rest of the segment and the stream merged.
+    @Test("a record ID held by another vault costs one entry, not its author's stream")
+    func collisionCostsOneEntry() async throws {
+        let f = try await Self.fixture()
+        let first = try await f.writer.save(Self.login("First", password: "1"))
+        try await f.writer.sync()
+        let colliding = try await f.writer.save(Self.login("Colliding", password: "2"))
+        let beside = try await f.writer.save(Self.login("Beside it", password: "3"))
+        try await f.writer.sync()
+        let later = try await f.writer.save(Self.login("Later", password: "4"))
+        try await f.writer.sync()
+
+        let reader = await f.reader()
+        // The plant: the same ID, stored under another vault before this vault's record arrives.
+        let planted = StoredRecord(
+            recordID: colliding.id, kind: .item, vaultID: Self.otherVault, keyID: UUID(), version: 1,
+            deviceID: Self.b, envelope: [9, 9, 9])
+        await reader.store.tamper(planted)
+        let report = try await reader.sync()
+        #expect(report.waiting.isEmpty && report.rejected.isEmpty)
+        #expect(report.collided == [planted.key])
+        #expect(Set(try await reader.items().keys) == [first.id, beside.id, later.id])
+        #expect(await reader.store.record(planted.key) == planted, "the other vault's row is untouched")
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).map(\.recordID) == [colliding.id])
+        #expect(await reader.state()?.merged[Self.a] == 3)
+        // Kept once, however often it is offered again.
+        try await reader.sync(reconcile: true)
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).count == 1)
+    }
+
+    /// Threat: the same plant against a device that bootstraps the vault from a snapshot. The snapshot used to be
+    /// refused whole at the colliding entry, at every sync: the entries sorted after it never arrived, and the streams
+    /// it covered stayed where they were.
+    @Test("a snapshot is not refused whole for one colliding record")
+    func collisionInSnapshot() async throws {
+        let f = try await Self.fixture()
+        var ids: [UUID] = []
+        for index in 0..<6 { ids.append(try await f.writer.save(Self.login("Item \(index)", password: "p")).id) }
+        let rows = await f.writer.store.records(in: Self.vault, kind: .item)
+        let snapshot = SyncPayload(
+            kind: .snapshot, vaultID: Self.vault, author: Self.a, number: 6, vector: [:],
+            entries: rows.map(SyncEntry.init).sorted(by: SyncPayload.entryOrder))
+        try await f.plant(snapshot, signedBy: f.writer.keyring)
+        let victim = try #require(snapshot.entries.first)
+
+        let reader = await f.reader()
+        let planted = StoredRecord(
+            recordID: victim.recordID, kind: .item, vaultID: Self.otherVault, keyID: UUID(), version: 1,
+            deviceID: Self.b, envelope: [9, 9, 9])
+        await reader.store.tamper(planted)
+        let report = try await reader.sync()
+        #expect(report.rejected.isEmpty)
+        #expect(report.collided == [planted.key])
+        #expect(Set(try await reader.items().keys) == Set(ids).subtracting([victim.recordID]))
+        #expect(await reader.state()?.snapshots[snapshot.location] != nil)
+    }
 }

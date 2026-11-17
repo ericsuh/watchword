@@ -65,8 +65,6 @@ public enum SyncRejectionReason: Sendable, Equatable {
     /// A record's envelope claims another record, vault, kind, key or version than the entry carrying it: a record
     /// swap or relabel inside a validly signed segment.
     case recordContextMismatch(UUID)
-    /// The record ID belongs to a record of another vault on this device.
-    case recordInAnotherVault(UUID)
     /// The merger could not merge the remote version (it does not open, or opens to another item).
     case mergeFailed(UUID)
     /// The merger returned a result the engine must not store.
@@ -107,6 +105,10 @@ public struct SyncReport: Sendable, Equatable {
     /// Remote versions held aside because they carry work that does not count in a shared vault (a write outside
     /// its author's write cut, docs/02-architecture.md §8.7). Kept in the quarantine like the others.
     public var heldAside: [RecordKey] = []
+    /// Remote versions whose record ID a record of *another vault* holds on this device (the local store keys
+    /// records by ID and kind across vaults). Not merged, and the other vault's row is not touched: kept in the
+    /// quarantine like the others, while the rest of the object and its stream are merged (review finding Z22).
+    public var collided: [RecordKey] = []
     /// Streams stopped at a missing or rejected segment: the next sequence number each is waiting for. Later segments
     /// are never applied over a gap.
     public var waiting: [UUID: UInt64] = [:]
@@ -931,6 +933,13 @@ public actor SyncEngine {
                 report.quarantined.append(entry.key)
                 try await syncState.quarantine(entry, vaultID: vaultID)
                 return
+            } catch is RecordElsewhere {
+                // Another vault's record holds this ID on this device (review finding Z22). Whoever got the ID into
+                // the store first must not decide which vault's stream stops: this entry alone is kept for the
+                // person, the other vault's row stays as it is, and the object and the stream go on.
+                report.collided.append(entry.key)
+                try await syncState.quarantine(entry, vaultID: vaultID)
+                return
             } catch is HeldAside {
                 // Carries work that does not count in this shared vault (docs/02-architecture.md §8.7): kept for the
                 // person, never merged, never published on.
@@ -954,7 +963,7 @@ public actor SyncEngine {
     private func applyOnce(_ entry: SyncEntry, erasure: Erasure?) async throws -> Bool {
         let key = entry.key
         let local = try await store.record(key)
-        if let local, local.vaultID != vaultID { throw Rejection(reason: .recordInAnotherVault(entry.recordID)) }
+        if let local, local.vaultID != vaultID { throw RecordElsewhere() }
 
         if let remote = entry.record(in: vaultID), let judge, !(try await judge.admits(remote)) {
             throw HeldAside()
@@ -1382,6 +1391,9 @@ public actor SyncEngine {
 
     /// A version the judge did not admit.
     struct HeldAside: Error {}
+
+    /// An entry whose record ID a record of another vault holds on this device.
+    struct RecordElsewhere: Error {}
 
     /// Errors that stop the sync rather than reject one object: the vault locked, the transport went away, or the
     /// local store failed.
