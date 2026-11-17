@@ -515,7 +515,7 @@ member's late title, whose knowledge an unaware member's rename on top of it car
 member's rename on top of it carried (S46), and a permanent deletion of a copy that held a late write (S45); and
 (`AdversarialSharedVaultTakeOutHygieneTests.swift`) the hygiene report of an item a take-out rebuilt (S47). Each is merged by a
 device the store had not shown the record, written on top of, and counts on no device once it is shown, the two
-devices holding the same item. For F4.7 and the review of its rule (`06-adversarial-review.md` §R,
+devices holding the same item. For F4.7 and the review of its rule (`06-adversarial-review.md` §T,
 `AdversarialSharedVaultRenameTests.swift`), each failing without its fix: a read-write member's rename, plain, above
 the owner's later one and labelled as the owner's revision, held aside everywhere with the name unchanged and the
 member's items counting (S53); a demoted administrator's late rename taken out again on the device that merged it and
@@ -970,8 +970,25 @@ other does, and reported as not required on Linux, where they cannot compile.
   writing the sync folder: a stream directory replaced by a link is neither listed, read nor written through under
   coordination; planted placeholders outside the layout are not objects, and one beside a present object changes
   nothing; an oversized object is refused. "Coordinated iCloud Drive transport" adds a read held past its deadline by
-  another writer, given up as that object's failure alone. Not covered: `NSFileVersion` conflicts and downloads by
-  iCloud itself, which need a ubiquity container.
+  another writer, given up as that object's failure alone. Renamed copies (`N 2.wwe`) planted beside an object are
+  handed over as bytes, with a link, a directory and an oversized file among them counted and never read or deleted
+  through; "Coordinated iCloud Drive transport" runs the copies contract and an engine reading the genuine object
+  from behind a junk file under coordination. Not covered: `NSFileVersion` conflict versions and downloads by iCloud
+  itself, which need a ubiquity container.
+- **Conflict copies** (architecture §7.5; portable, Linux). *Transports* ("Conflict copies: transports"):
+  `SyncTransportContract.singleCopies` on every transport and `heldCopies` on the in-memory, directory and simulated
+  ones; only an exact `<name> <n>` (2 to 64) is a copy; a copy whose object is gone is still listed; a link or
+  directory under a copy's name is counted and never followed. *State* ("… what is staged and remembered"): staged
+  copies round-trip and a hostile row is no object; the state's new fields survive encoding and an older row.
+  *Engine* ("… the engine"): junk beside an object; the object behind a junk current file; no copy verifying refused
+  alone; two verifying copies merged, in either order to the same items; a late copy; the forked author's hand-on;
+  acknowledgements by minimum; snapshot copies; both bounds; a judge refusing a fork, at download and from an edited
+  staging row; a copy that verifies and does not open stopping the position whole. *Adversarial*: "sync log"
+  (`AdversarialSyncConflictCopyTests`: planted junk of five kinds, the genuine object hidden, two verifying forks
+  reaching devices past the position, a flood, a shared vault's fork, a copy planted in the staging area) and "sync
+  with real keys" (planted copies while locked and after unlock; a really signed fork merged by every device and
+  handed on). `LongRunningSyncSimulationTests` plants junk copies and forked copies of a device's newest segment and
+  still converges, loses nothing, and leaves no hand-on owed.
 - **"Adversarial: Apple adapters: CloudKit transport"** (`AdversarialCloudKitTransportTests`, Mac, over the fake
   database). A1 as the CloudKit store: records whose `name` disagrees with their ID, or whose names are outside the
   layout, are not listed and are refused when fetched; a payload in a plain field is never read, two payloads are

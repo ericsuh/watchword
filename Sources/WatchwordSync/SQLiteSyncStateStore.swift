@@ -168,7 +168,7 @@
                 "INSERT OR REPLACE INTO staged (vault_id, name, object) VALUES (?, ?, ?)",
                 [
                     SQLiteRecordStore.value(object.location.vaultID), .text(object.location.name),
-                    .blob(object.object.serialized()),
+                    .blob(object.storageBytes),
                 ])
         }
 
@@ -177,10 +177,9 @@
                 "SELECT name, object FROM staged WHERE vault_id = ? ORDER BY name", [SQLiteRecordStore.value(vaultID)])
             return rows.compactMap { row in
                 guard row.count == 2, case .text(let name) = row[0], case .blob(let bytes) = row[1],
-                    let location = SyncObjectLocation(name: name), location.vaultID == vaultID,
-                    let object = try? SignedObject.parse(bytes)
+                    let location = SyncObjectLocation(name: name), location.vaultID == vaultID
                 else { return nil }
-                return StagedObject(location: location, object: object)
+                return StagedObject(location: location, storageBytes: bytes)
             }
         }
 

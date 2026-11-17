@@ -39,6 +39,9 @@ struct EncodedState: Codable {
     /// Absent in a row written before ADR 0009.
     var stashUnsaved: Bool?
     var stashGeneration: UInt64?
+    /// Absent in a row written before conflict copies were examined (§7.5).
+    var examinedCopies: [String: Int]?
+    var handOnOwed: Bool?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -63,6 +66,8 @@ struct EncodedState: Codable {
         snapshotCoverage = Self.strings(state.snapshotCoverage)
         stashUnsaved = state.stashUnsaved
         stashGeneration = state.stashGeneration
+        examinedCopies = Dictionary(uniqueKeysWithValues: state.examinedCopies.map { ($0.key.name, $0.value) })
+        handOnOwed = state.handOnOwed
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -100,6 +105,11 @@ struct EncodedState: Codable {
         }
         state.stashUnsaved = stashUnsaved ?? false
         state.stashGeneration = stashGeneration ?? 0
+        for (name, count) in examinedCopies ?? [:] {
+            guard let location = SyncObjectLocation(name: name), count >= 0 else { return nil }
+            state.examinedCopies[location] = count
+        }
+        state.handOnOwed = handOnOwed ?? false
         return state
     }
 

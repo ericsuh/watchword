@@ -364,6 +364,11 @@ failed each time.
   Two different writes under one revision are then both kept (they are distinct register elements; reused line IDs
   keep both texts), so nothing is lost; but a third device's write that had seen the first is taken to have seen the
   second too. The remedy is for the vault to persist the highest version it has assigned outside the rolled-back file.
+  A rolled-back device can also reuse a *sequence number* where the provider keeps both objects (iCloud Drive's
+  conflict copies). The engine then merges every copy that verifies (`02-architecture.md` §7.5, "Conflict copies"),
+  which adds nothing to the above: each copy's entries go through the same join, so the copies in any order give one
+  item, and the two writes under one revision are the case just described. Merging them is what keeps both; choosing
+  one copy would lose the other's edits outright.
 - **The engine did not tell the merger the tombstone's version** (Y28, fixed when the sync-core work merged). The
   engine now passes the joined erasure's stamp, and `ItemRecordMerger` believes no summary naming a row above it.
   Within that bound an insider can still name a *lower* row, or another device, in its summary; the write that

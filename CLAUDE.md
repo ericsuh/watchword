@@ -389,7 +389,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `SyncTransport`. Transports stay thin (§7.2, §7.3): they map names to storage and the provider's failures to
   `SyncTransportError`, and decide nothing about trust. CloudKit saves only new records with
   `.ifServerRecordUnchanged`; the iCloud Drive transport creates under file coordination, counts a not-downloaded
-  placeholder as existing, and refuses (never resolves) `NSFileVersion` conflicts. An error with `stopsSync` stops a
+  placeholder as existing, and hands over (never resolves) `NSFileVersion` conflicts and renamed copies. An error with `stopsSync` stops a
   sync where it stands like `unavailable` (catch `let error as SyncTransportError where error.stopsSync`, never
   `.unavailable` alone), and the report carries it (`transportFailure`); `syncAll` then hands it to the remaining
   vaults (`transportStopped`), so one sync asks a stopped transport once. A failure of one object is never
@@ -397,6 +397,19 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   this device publishing. A CloudKit zone this device has seen (`SyncStoreMarker`) and then finds missing is
   `storeReset`, never recreated: the person may have deleted it. Adapter listings and waits are bounded
   (`listingTooLarge`, coordination deadlines).
+- **Conflict copies** (§7.5; owner decision 2026-11-17). A provider can hold several copies under one name
+  (`listWithCopies`, `fetchCopies`; `FileSyncTransport` attributes `N 2.wwe` to `N 64.wwe` to `N`). The transport
+  chooses none and resolves none; never add a "pick the winner" or a conflict resolution to a transport, and never let
+  a device remove another device's copies (they go only when the author collects the object: `delete`). The engine
+  checks each copy alone (container, kind and context, signatures; identical bytes are one copy), stages every copy
+  that verifies together (`StagedObject.alternates`), and re-checks each at merge: none verifying refuses the name
+  alone; one is used; several are *all* merged in a vault of one account — a position's copies are opened all or none,
+  acknowledgements take the pointwise minimum, snapshot coverage the maximum — and **refused in a vault with a judge**
+  (`conflictingVersions`: a write cut binds one digest per position; do not merge there without a rule for the cut).
+  A copy found under a position already merged is applied late, like a stale snapshot's entries, never by moving
+  `merged`. A device whose own stream forked owes a snapshot (`SyncState.handOnOwed`) and collects nothing before it
+  is written. What was examined is remembered by count (`SyncState.examinedCopies`), and a name is examined whole or
+  not at all (`maximumCopiesPerObject`, `maximumCopiesPerSync`): check the sync's bound before a name, never inside.
 - Download needs no keys and checks signatures before staging; merge re-verifies staged objects and checks kind,
   context, AEAD, then payload, in that order. A stream is merged strictly in sequence: never skip a gap.
 - A segment carries only its author's versions, and each record envelope's own context must match its entry
@@ -640,7 +653,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
   (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
-- **A vault's description counts only as an administrator's work** (§8.7, §8.10; `06-adversarial-review.md` §R).
+- **A vault's description counts only as an administrator's work** (§8.7, §8.10; `06-adversarial-review.md` §T).
   `renameVault` refuses a shared vault's member who holds neither role (`SharedVaultError.renameRefused`,
   `checkSharedRename`, after `writableVaultKey`), but the rule is the judge's: the segment that carried the
   description must count as a write *and* as an administrator's (`administratorSegmentCounts`: the role now, or inside

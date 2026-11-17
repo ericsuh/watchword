@@ -1424,7 +1424,7 @@ A fourth, the cut where a record already carried one and the current role for a 
 change to the verifier, and was rejected for what a person would see: the names of an administrator who was removed
 would stand while those of one merely demoted lapsed. "By current role alone" keeps the same adversaries out and
 admits less, and what it changes is visible to a person, so the choice of the cut over it is recorded for the owner
-(`06-adversarial-review.md` §R, K10); going from the cut to the role alone later only narrows what counts.
+(`06-adversarial-review.md` §T, K10); going from the cut to the role alone later only narrows what counts.
 
 The record's layout is unchanged: the field was always there, and what changed is which records the verifier lets
 carry a cut, and what an empty one on a demotion to read-write means (none of that account's names count). Nothing
@@ -1778,7 +1778,7 @@ the ledger holds it in `laterFormatRecords` (§8.8 step 1): one that arrives bef
 chain once that record is here. Tests: "Vault session: a shared vault in a later format", and
 `laterFormatBeforeItsParent` and `laterFormatImpostorsThroughTheSession` in "shared vaults through the session".
 
-**Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46, and §R, S57 and S58):
+**Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46, and §T, S57 and S58):
 
 - A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
   through vouching count only while every listing account's work can count (S33, insider denial of service like S11).

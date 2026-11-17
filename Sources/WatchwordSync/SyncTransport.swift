@@ -25,8 +25,10 @@ public enum SyncTransportError: Error, Equatable, Sendable {
     /// key that protected it (`userDidResetEncryptedDataKey`). A transport never recreates such a store by itself
     /// (docs/02-architecture.md §7.2): whether to upload again is the person's decision.
     case storeReset
-    /// The provider holds more than one version of one object (an iCloud Drive conflict, `NSFileVersion`): an
-    /// immutable object was written twice. The transport chooses neither; the object is refused like a damaged one.
+    /// More than one copy of one object verifies where the engine cannot merge them: a shared vault, whose write
+    /// cuts bind one digest per position (docs/02-architecture.md §7.5, "Conflict copies"). The engine's reason for
+    /// refusing the object; no transport throws it, since a transport chooses between copies no more than it trusts
+    /// one (`SyncTransport.fetchCopies`).
     case conflictingVersions(String)
     /// One object cannot be read now (a CloudKit asset that is missing or not available, a coordinated read of one
     /// file that failed or timed out). Refused like a damaged object: its stream waits at it, everything else syncs.
@@ -65,27 +67,108 @@ public enum SyncTransportError: Error, Equatable, Sendable {
 /// engine's, so each transport only maps names to storage and the provider's failures to `SyncTransportError`.
 ///
 /// There is deliberately no "update": an object, once created, is never modified, only deleted by its author.
+///
+/// A provider can still end up holding more than one copy under one name (iCloud Drive keeps both when a name is
+/// created twice before it has synced, as a conflict version or a renamed file; A1 can plant either). A transport
+/// that can hold such copies says so (`listWithCopies`) and hands every copy over as bytes (`fetchCopies`); it never
+/// chooses between them and never resolves the conflict. Which copies count is the engine's decision
+/// (docs/02-architecture.md §7.5, "Conflict copies").
 public protocol SyncTransport: Sendable {
     /// Names of every object whose name begins with `prefix`, in no particular order.
     func list(prefix: String) async throws -> [String]
     /// An object's bytes, or `nil` if there is none (including one deleted since `list`). `maximumLength` is the most
-    /// the caller will read; larger objects throw `objectTooLarge` without being read.
+    /// the caller will read; larger objects throw `objectTooLarge` without being read. Where the provider holds
+    /// several copies, this is the one it calls current.
     func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]?
     /// Creates an object. Fails with `objectExists` if one is already there: objects are written once.
     func create(_ name: String, contents: [UInt8]) async throws
-    /// Deletes an object (garbage collection of the writer's own superseded objects). Succeeds if it is absent.
+    /// Deletes an object (garbage collection of the writer's own superseded objects), with every copy the provider
+    /// holds under its name. Succeeds if it is absent.
     func delete(_ name: String) async throws
+    /// `list`, and for each name the provider holds anything besides the one current object under, how many copies
+    /// it holds in all. Metadata only: nothing is read. The default is `list` with no such names.
+    func listWithCopies(prefix: String) async throws -> SyncListing
+    /// Every copy the provider holds under `name`, the current one first: at most `maximumCopies`, each at most
+    /// `maximumLength` bytes. A copy over either bound, or one that cannot be read, is counted in `omitted` and never
+    /// fails the call, so a planted copy cannot hide the others. No copies and none omitted means there is no object.
+    /// The default is the one `fetch` returns.
+    func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) async throws -> SyncObjectCopies
+}
+
+/// What a transport lists under a prefix (`SyncTransport.listWithCopies`).
+public struct SyncListing: Sendable, Hashable {
+    /// As `SyncTransport.list`: in no particular order, and a name may repeat.
+    public var names: [String]
+    /// The names with anything besides the one current object under them, and the number of copies under each in
+    /// all. A claim by the store (A1), used only to decide what to look at.
+    public var copied: [String: Int]
+
+    public init(names: [String] = [], copied: [String: Int] = [:]) {
+        self.names = names
+        self.copied = copied
+    }
+}
+
+/// The copies a transport holds under one name (`SyncTransport.fetchCopies`). Bytes and nothing else: the transport
+/// does not say which is genuine, and the engine does not ask.
+public struct SyncObjectCopies: Sendable, Hashable {
+    public var copies: [[UInt8]]
+    /// Copies not returned: past the caller's count, over its size limit, or unreadable.
+    public var omitted: Int
+
+    public init(copies: [[UInt8]] = [], omitted: Int = 0) {
+        self.copies = copies
+        self.omitted = omitted
+    }
+}
+
+extension SyncTransport {
+    public func listWithCopies(prefix: String) async throws -> SyncListing {
+        SyncListing(names: try await list(prefix: prefix))
+    }
+
+    public func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) async throws -> SyncObjectCopies {
+        do {
+            guard let bytes = try await fetch(name, maximumLength: maximumLength) else { return SyncObjectCopies() }
+            return maximumCopies > 0 ? SyncObjectCopies(copies: [bytes]) : SyncObjectCopies(omitted: 1)
+        } catch SyncTransportError.objectTooLarge {
+            return SyncObjectCopies(omitted: 1)
+        }
+    }
 }
 
 /// A transport in memory. Shared by every simulated device that should see the same store; wrap it in a
 /// fault-injecting view (`WatchwordTestSupport.SimulatedNetwork`) to model partitions and a hostile server.
 public actor InMemorySyncTransport: SyncTransport {
     private var objects: [String: [UInt8]] = [:]
+    /// Copies beside (or without) the current object of a name, as iCloud Drive keeps a conflict version or a
+    /// renamed second create.
+    private var otherCopies: [String: [[UInt8]]] = [:]
 
     public init() {}
 
     public func list(prefix: String) -> [String] {
-        objects.keys.filter { $0.hasPrefix(prefix) }.sorted()
+        Set(objects.keys).union(otherCopies.keys).filter { $0.hasPrefix(prefix) }.sorted()
+    }
+
+    public func listWithCopies(prefix: String) -> SyncListing {
+        var listing = SyncListing(names: list(prefix: prefix))
+        for (name, copies) in otherCopies where name.hasPrefix(prefix) {
+            listing.copied[name] = copies.count + (objects[name] == nil ? 0 : 1)
+        }
+        return listing
+    }
+
+    public func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) -> SyncObjectCopies {
+        var found = SyncObjectCopies()
+        for bytes in (objects[name].map { [$0] } ?? []) + (otherCopies[name] ?? []) {
+            if found.copies.count < maximumCopies, bytes.count <= maximumLength {
+                found.copies.append(bytes)
+            } else {
+                found.omitted += 1
+            }
+        }
+        return found
     }
 
     public func fetch(_ name: String, maximumLength: Int) throws -> [UInt8]? {
@@ -101,6 +184,7 @@ public actor InMemorySyncTransport: SyncTransport {
 
     public func delete(_ name: String) {
         objects[name] = nil
+        otherCopies[name] = nil
     }
 
     // MARK: - Test seams: what anyone with write access to the store (A1) can do.
@@ -113,5 +197,15 @@ public actor InMemorySyncTransport: SyncTransport {
     /// Writes or overwrites an object without any checks.
     public func tamper(_ name: String, contents: [UInt8]?) {
         objects[name] = contents
+    }
+
+    /// Adds a copy beside whatever is under `name`: a conflict version, or a second create the provider renamed.
+    public func plantCopy(_ name: String, contents: [UInt8]) {
+        otherCopies[name, default: []].append(contents)
+    }
+
+    /// The copies under `name` that are not its current object.
+    public func plantedCopies(_ name: String) -> [[UInt8]] {
+        otherCopies[name] ?? []
     }
 }

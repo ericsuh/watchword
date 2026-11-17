@@ -228,7 +228,8 @@ half delivered** on a Mac; the transports are open.
     the transport contract moved to `WatchwordTestSupport` (`SyncTransportContract`); `AutoSyncDriver`, the timer,
     with an injected clock. Tests: "Sync transport failures", "File sync transport: iCloud placeholders", "Automatic
     sync policy" (throttling), "Automatic sync driver".
-  - Mac only: `CoordinatedFileSyncTransport` (file coordination, placeholders and evicted files, conflicts refused)
+  - Mac only: `CoordinatedFileSyncTransport` (file coordination, placeholders and evicted files; conflicts were
+    refused then, and are handed to the engine now, below)
     with `SyncFolderPresenter`; `CloudKitTransport` (private database, custom zone, create-only saves, typed errors)
     over the `CloudKitDatabase` seam. Tests: "Coordinated iCloud Drive transport", "CloudKit transport" (the contract
     over a fake database with CloudKit's save-policy semantics; a real-container test only with
@@ -242,10 +243,26 @@ half delivered** on a Mac; the transports are open.
     never writes through a link. The first macOS run (Xcode 27) compiled the adapters and found two test faults (AD9,
     AD10), fixed. Linux tests: "Automatic sync outcome", "Sync transport failures", "Sync store marker", the
     device-local store's suites and "sync log"; the rest are Mac only.
-  - **Decisions for the owner:** what to do with an iCloud Drive object that has conflict versions (refused today,
-    so its stream waits for good) and with iCloud's `N 2.wwe` copy of a duplicate create (ignored): keeping "the copy
-    that verifies" (§7.3) needs the engine; and the flow to start CloudKit again after a `storeReset`, which is also
-    where the person's choice forgets the `SyncStoreMarker`.
+  - **Decisions for the owner:** what to do with an iCloud Drive object that has conflict versions and with iCloud's
+    `N 2.wwe` copy of a duplicate create — decided on 2026-11-17, "try to detect and merge them", and built (next
+    point); and the flow to start CloudKit again after a `storeReset`, which is also where the person's choice forgets
+    the `SyncStoreMarker`.
+  - **Conflict copies** (owner decision, 2026-11-17; architecture §7.5 "Conflict copies", §7.3). Portable, run on
+    Linux: `SyncTransport.listWithCopies` and `fetchCopies` (default: one copy), with `InMemorySyncTransport`,
+    `FileSyncTransport` (renamed duplicates `N 2.wwe` to `N 64.wwe`) and `SimulatedServer` able to hold copies; the
+    engine checks each copy alone (container, kind and context, signatures; then the usual checks at merge), refuses a
+    name none of whose copies verifies, uses the one that does, merges every verifying copy of a fork in a vault of
+    one account (acknowledgements by minimum, snapshot coverage by maximum, late copies applied like a stale
+    snapshot, a forked device owing a hand-on snapshot, `SyncState.handOnOwed`), and refuses several verifying copies
+    in a shared vault (`conflictingVersions`); bounds per name and per sync; nothing is resolved on the provider and
+    the count examined is remembered (`SyncState.examinedCopies`); staged copies are stored together
+    (`StagedObject.storageBytes`). Tests: "Conflict copies: transports", "… what is staged and remembered", "… the
+    engine", six in "sync log" and two in "sync with real keys", and the long simulation plants junk and forked
+    copies. Mac only, **drafted and not compiled**: `CoordinatedFileSyncTransport.listWithCopies`/`fetchCopies`
+    (conflict versions and renamed copies under coordination; `fetch` no longer refuses a conflict; `delete` removes
+    the versions with the object), `SQLiteSyncStateStore`'s staged rows through `storageBytes`, and their tests
+    ("renamed duplicates…", "an engine reads the genuine object…", "planted renamed copies…"). `NSFileVersion`
+    conflict versions themselves exist only in a real ubiquity container: no test creates one.
   - **Before relying on any of it:** dispatch `mac-run.yml` (package tests, adversarial, strict) on the branch, then
     run the CloudKit test from a signed host against a development container (its schema needs `WWObject.name`
     queryable) and the coordinated transport in a real ubiquity container (downloads and evictions by iCloud itself
@@ -267,8 +284,9 @@ half delivered** on a Mac; the transports are open.
 - **Still open (Mac):** sync in production builds (choosing a transport, enrolment and settings; until then the app is
   built without `SyncSettings`), with the app creating an `AutoSyncDriver` and registering for CloudKit pushes;
   `CKSyncEngine`, if its scheduling is wanted over the driver; re-uploading after a CloudKit reset (`storeReset` stops
-  sync today); keeping the copy that verifies when iCloud Drive holds conflict versions (refused today); the manual
-  CloudKit workflow; the Secure Enclave `DeviceKeyStore` adapter; a macOS build and run of the account screens and
+  sync today); a Mac build of the conflict-copy adapter and a run in a real ubiquity container, where alone an
+  `NSFileVersion` conflict exists; merging a forked position in a shared vault (refused: `02-architecture.md` §7.5);
+  the manual CloudKit workflow; the Secure Enclave `DeviceKeyStore` adapter; a macOS build and run of the account screens and
   their XCUITests; and item history in records of its own, so the never-pruned history (F1.4) no longer counts
   against an item's 1 MiB payload.
 - **Still open (design):** an account re-key — new keyset and Secret Key, vault keys rotated — which is what ends a
@@ -335,7 +353,7 @@ down. Note-line removals, discards and history entries name the write that made 
 (S32, S43), and a version whose clock holds an edit outside a cut is held aside with it (S44), as is one claiming
 edits a current member has not published (S46) and a tombstone whose erasure summary does either (S45). Only the
 owner or an administrator renames a shared vault (PRD F4.7, owner decision of 2026-11-17; `06-adversarial-review.md`
-§R): the session refuses a member, every record that ends an administrator's role carries a cut, the judge counts a
+§T): the session refuses a member, every record that ends an administrator's role carries a cut, the judge counts a
 description only as an administrator's work, descriptions merge by the stamp of the write that chose them, and a
 device seals again, after a rotation, only what it has judged against the new head (S59; `02-architecture.md` §8.7,
 §8.10). The rename control in `VaultsView` follows `VaultRow.mayRename`; that view change

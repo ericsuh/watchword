@@ -49,6 +49,9 @@ struct LongRunningSyncSimulationTests {
         var savedStates: [Int: SyncState] = [:]
         var locked: Set<Int> = []
         var rejections: [SyncRejection] = []
+        var plantedCopies = 0
+        var forkedNames: Set<String> = []
+        var forksMerged: Set<String> = []
         for step in 0..<steps {
             await server.advance()
             let index = Int.random(in: 0..<deviceCount, using: &generator)
@@ -88,13 +91,40 @@ struct LongRunningSyncSimulationTests {
                 } else if let current = await device.state() {
                     savedStates[index] = current
                 }
+            case 59:
+                // Someone with the store (A1) plants a junk copy beside an object: a conflict version, or a renamed
+                // file (§7.5). It must cost a check and change nothing.
+                let names = await server.allObjects.keys.sorted()
+                if !names.isEmpty {
+                    let name = names[Int.random(in: 0..<names.count, using: &generator)]
+                    await server.plantCopy(name, contents: [UInt8(truncatingIfNeeded: step), 0x4A, 0x55, 0x4E, 0x4B])
+                    plantedCopies += 1
+                }
+            case 60 where !locked.contains(index):
+                // The device's stream forks: a second, validly signed copy of its newest segment, carrying what it
+                // holds of its own writing now, as an installation restored from a backup would publish it.
+                if let sequence = await device.state()?.lastPublishedSequence, sequence > 0 {
+                    let name = SyncObjectLocation.segment(
+                        vaultID: Household.vault, author: await device.deviceID, sequence: sequence
+                    ).name
+                    if await server.allObjects[name] != nil {
+                        let id = await device.deviceID
+                        let rows = await device.store.records(in: Household.vault, kind: .item).filter {
+                            $0.deviceID == id
+                        }
+                        await server.plantCopy(name, contents: try await device.signedSegment(sequence, carrying: rows))
+                        forkedNames.insert(name)
+                    }
+                }
             default:
                 // A locked device syncs (download only) or is unlocked first, as the person returns to it.
                 if locked.contains(index), Bool.random(using: &generator) {
                     locked.remove(index)
                     await device.keyring.unlock()
                 }
-                rejections += try await device.sync().rejected
+                let report = try await device.sync()
+                rejections += report.rejected
+                forksMerged.formUnion(report.forkedObjects)
             }
         }
 
@@ -108,11 +138,17 @@ struct LongRunningSyncSimulationTests {
             for device in devices {
                 let report = try await device.sync()
                 rejections += report.rejected
+                forksMerged.formUnion(report.forkedObjects)
                 #expect(report.quarantined.isEmpty)
                 if report.applied > 0 || report.segmentsWritten > 0 || report.snapshotsWritten > 0 { settled = false }
             }
         }
         #expect(settled, "seed \(seed): devices kept changing after the partition healed")
+        // The schedule did exercise conflict copies, and only names that were forked were merged as forks.
+        #expect(plantedCopies > 0 && forksMerged.isSubset(of: forkedNames), "seed \(seed)")
+        for device in devices {
+            #expect(await device.state()?.handOnOwed == false, "seed \(seed): a fork was never handed on")
+        }
         // The stray object is the only thing an honest run rejects.
         #expect(
             rejections.allSatisfy { $0.reason == .format(.badMagic) || $0.reason == .format(.truncated) },

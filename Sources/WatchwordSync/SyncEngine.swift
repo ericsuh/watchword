@@ -34,6 +34,15 @@ public struct SyncConfiguration: Sendable {
     public var maximumStashedBytes = 4 << 20
     public var maximumStashedEntriesPerAuthor = 2048
     public var maximumStashedBytesPerAuthor = 2 << 20
+    /// Copies of one name that are fetched and checked when the transport holds several (an iCloud Drive conflict
+    /// version, a renamed second create, or anything A1 plants as one; docs/02-architecture.md §7.5, "Conflict
+    /// copies"). More are counted, not read: a genuine copy behind that many planted ones is a withheld object.
+    public var maximumCopiesPerObject = 16
+    /// Once a sync has fetched this many copies of such names, it looks at no further name's copies (the name it is
+    /// on is finished, so a name is never half examined): a name the stream needs is fetched as its current file
+    /// alone, and the rest wait for a later sync. A flood of copies so costs a bounded number of reads and signature
+    /// checks, fewer than this plus `maximumCopiesPerObject`, and stalls nothing.
+    public var maximumCopiesPerSync = 512
 
     public init(schemaVersions: [EnvelopeKind: UInt64]) {
         self.schemaVersions = schemaVersions
@@ -160,6 +169,20 @@ public struct SyncReport: Sendable, Equatable {
     /// after a sync), or a shared vault holds kept entries this version can now read: the vault's log had to be
     /// replayed. The engine does it itself unless the vault has a judge, whose session replays it in the same sync.
     public var replayNeeded = false
+    /// Copies fetched and checked under names the transport listed with more than the one object
+    /// (docs/02-architecture.md §7.5, "Conflict copies").
+    public var copiesExamined = 0
+    /// Of those, copies that did not parse or verify: junk beside (or in front of) an object. Never staged.
+    public var copiesRefused = 0
+    /// Copies the transport held and did not hand over (past `maximumCopiesPerObject` or the size limit), and names
+    /// listed with copies that were left for a later sync because `maximumCopiesPerSync` was spent.
+    public var copiesNotExamined = 0
+    /// Names under which more than one copy verified, all of which were merged: a device signed different bytes under
+    /// one name (its state was rolled back and it wrote again before seeing what it had published).
+    public var forkedObjects: [String] = []
+    /// This device owes a snapshot for a fork of its own stream and has not been able to write it yet
+    /// (`SyncState.handOnOwed`); until it has, it collects nothing.
+    public var handOnOwed = false
 
     public init() {}
 
@@ -303,7 +326,7 @@ public actor SyncEngine {
             report.noteTransportFailure(transportStopped)
         } else {
             do {
-                listing = try await pull(state: state, retired: retired, report: &report)
+                listing = try await pull(state: &state, retired: retired, report: &report)
                 // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
                 // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
                 if let highest = listing.segments[deviceID]?.max() {
@@ -379,13 +402,16 @@ public actor SyncEngine {
             report.noteTransportFailure(transportStopped)
             return report
         }
-        let state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
+        var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
+        let examined = state.examinedCopies
         do {
             _ = try await pull(
-                state: state, retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
+                state: &state, retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
         } catch let error as SyncTransportError where error.stopsSync {
             report.noteTransportFailure(error)
         }
+        // Which copies were looked at and found to be junk is remembered while locked too, so they are not read again.
+        if state.examinedCopies != examined { try await syncState.saveState(state) }
         return report
     }
 
@@ -394,12 +420,15 @@ public actor SyncEngine {
     struct Listing {
         var segments: [UUID: [UInt64]] = [:]
         var snapshots: [SyncObjectLocation] = []
+        /// Names the transport holds more than the one object under, and how many copies it says it holds.
+        var copies: [SyncObjectLocation: Int] = [:]
     }
 
-    private func pull(state: SyncState, retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
+    private func pull(state: inout SyncState, retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
         var listing = Listing()
+        let listed = try await transport.listWithCopies(prefix: SyncObjectLocation.vaultPrefix(vaultID))
         // A listing may name an object twice (providers do); each is fetched once.
-        for name in Set(try await transport.list(prefix: SyncObjectLocation.vaultPrefix(vaultID))) {
+        for name in Set(listed.names) {
             guard let location = SyncObjectLocation(name: name), location.vaultID == vaultID,
                 location.number
                     <= (location.kind == .segment
@@ -418,7 +447,10 @@ public actor SyncEngine {
             case .segment: listing.segments[location.author, default: []].append(location.number)
             case .snapshot: listing.snapshots.append(location)
             }
+            if let count = listed.copied[name], count > 0 { listing.copies[location] = count }
         }
+        // What was decided about copies is remembered only for names that still have them.
+        state.examinedCopies = state.examinedCopies.filter { listing.copies[$0.key] != nil }
 
         // Every snapshot not yet merged, not only the newest: which one is newest is not which one covers most, and a
         // device's own garbage collection may rely on any of them.
@@ -437,8 +469,16 @@ public actor SyncEngine {
         let listedSnapshots = Set(listing.snapshots)
         let collected = alreadyStaged.filter { $0.kind == .snapshot && !listedSnapshots.contains($0) }
         if !collected.isEmpty { try await syncState.unstage(Array(collected)) }
+        var budget = max(0, configuration.maximumCopiesPerSync)
         for location in wanted where !alreadyStaged.contains(location) {
             do {
+                // Several copies under one name: each is checked alone, and what verifies is staged together. With
+                // the sync's bound spent, the current file alone, as for any name; its copies are looked at later.
+                if let count = listing.copies[location], budget > 0 {
+                    try await examine(
+                        location, listed: count, late: false, budget: &budget, state: &state, report: &report)
+                    continue
+                }
                 guard
                     let bytes = try await transport.fetch(
                         location.name, maximumLength: configuration.maximumObjectLength)
@@ -456,7 +496,101 @@ public actor SyncEngine {
                 }
             }
         }
+        // Copies under a name this device has already merged (a second copy that appeared since, or junk planted
+        // beside the object): looked at once per count the transport gives, and what verifies is applied late.
+        let wantedNames = Set(wanted)
+        for (location, count) in listing.copies.sorted(by: { $0.key.name < $1.key.name })
+        where !wantedNames.contains(location) && !alreadyStaged.contains(location)
+            && state.examinedCopies[location] != count
+        {
+            guard budget > 0 else {
+                report.copiesNotExamined += 1
+                continue
+            }
+            do {
+                try await examine(location, listed: count, late: true, budget: &budget, state: &state, report: &report)
+            } catch let error as SyncTransportError where error.stopsSync {
+                throw error
+            } catch {
+                report.rejected.append(SyncRejection(name: location.name, reason: Self.reason(error)))
+            }
+        }
         return listing
+    }
+
+    /// Fetches the copies the transport holds under one name and checks each alone: the container, the envelope's
+    /// kind and context against the name, then the signatures against the author the name gives
+    /// (docs/02-architecture.md §7.5, "Conflict copies"). Every copy that passes is staged, together; the rest are
+    /// counted and dropped, each having cost at most one signature check. Identical bytes are one copy.
+    ///
+    /// No copy verifying throws the first refusal, which the caller reports against the name as it would a damaged
+    /// object. In a vault with a judge, more than one verifying copy is refused (`conflictingVersions`): a write cut
+    /// binds one digest per position (§8.10). `late` is a name whose position this device has already merged: nothing
+    /// waits on it, a refusal is only reported, and the count is remembered so the copies are not read again.
+    private func examine(
+        _ location: SyncObjectLocation, listed count: Int, late: Bool, budget: inout Int, state: inout SyncState,
+        report: inout SyncReport
+    ) async throws {
+        let name = location.name
+        let found = try await transport.fetchCopies(
+            name, maximumLength: configuration.maximumObjectLength,
+            maximumCopies: max(1, configuration.maximumCopiesPerObject))
+        budget -= max(1, found.copies.count)
+        report.copiesNotExamined += found.omitted
+        // Deleted since the listing: no object.
+        guard !found.copies.isEmpty || found.omitted > 0 else { return }
+        report.fetched += found.copies.count
+        var seen: Set<[UInt8]> = []
+        var verified: [(bytes: [UInt8], object: SignedObject)] = []
+        var refusal: (any Error)?
+        // Whether every refusal says the copy itself is not genuine, rather than that this device cannot tell yet
+        // (no registry or account key to check against, an author it has not heard of).
+        var conclusive = true
+        for bytes in found.copies where seen.insert(bytes).inserted {
+            report.copiesExamined += 1
+            do {
+                let object = try SignedObject.parse(bytes)
+                // Kind and context need no key, so a copy sealed for another name is junk here already, whatever
+                // signed it; then the signatures.
+                let header = try EnvelopeHeader.parse(object.envelope, expecting: location.envelopeKind).header
+                _ = try Envelope.parse(object.envelope, expecting: location.envelopeContext(keyID: header.keyID))
+                try await keyring.verify(object.signature, over: object.envelope, at: location)
+                verified.append((bytes, object))
+            } catch let error as SyncTransportError where error.stopsSync {
+                throw error
+            } catch {
+                report.copiesRefused += 1
+                if let error = error as? SyncKeyringError, error != .authenticationFailed {
+                    // The reason reported for the name is this one: it is why nothing could be told, not a verdict.
+                    if conclusive { refusal = error }
+                    conclusive = false
+                }
+                refusal = refusal ?? error
+            }
+        }
+        // One order on every device and in every sync, whatever order the transport gave.
+        verified.sort { $0.bytes.lexicographicallyPrecedes($1.bytes) }
+        var failure: (any Error)?
+        if verified.isEmpty {
+            failure = refusal ?? SyncTransportError.objectTooLarge(name)
+        } else if judge != nil, verified.count > 1 {
+            failure = SyncTransportError.conflictingVersions(name)
+        }
+        if let failure {
+            guard late else { throw failure }
+            if conclusive { state.examinedCopies[location] = count }
+            report.rejected.append(SyncRejection(name: name, reason: Self.reason(failure)))
+            return
+        }
+        if late, judge != nil {
+            // One verifying copy at a position already merged and judged: nothing to apply.
+            if conclusive { state.examinedCopies[location] = count }
+            return
+        }
+        try await syncState.stage(
+            StagedObject(
+                location: location, object: verified[0].object, alternates: verified.dropFirst().map(\.object),
+                copies: count))
     }
 
     // MARK: - Merge
@@ -504,20 +638,27 @@ public actor SyncEngine {
         var waitingForNewerVersion: Set<SyncObjectLocation> = []
         for snapshot in snapshots {
             do {
-                let payload = try await open(snapshot)
-                try validate(payload, at: snapshot.location)
+                // Every copy that verified (nearly always the one), each checked and opened before any is applied.
+                let copies = try await openCopies(snapshot)
                 // A snapshot that covers nothing new is counted, and merged all the same: merging is idempotent, and
                 // a snapshot can hold what no segment this device accepts does — what its author merged from a
                 // device revoked since (§7.8).
-                if Self.covers(state.merged, payload.vector) { report.staleSnapshots += 1 }
-                for entry in payload.entries {
-                    try await apply(
-                        entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
-                        highWater: &highWater, report: &report)
+                if copies.allSatisfy({ Self.covers(state.merged, $0.payload.vector) }) { report.staleSnapshots += 1 }
+                // Of several copies, the most any covers: once the entries of each are applied, the effects of the
+                // segments each names are in the store (§7.5, "Conflict copies").
+                var coverage = state.snapshots[snapshot.location] ?? [:]
+                for copy in copies {
+                    for entry in copy.payload.entries {
+                        try await apply(
+                            entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                            highWater: &highWater, report: &report)
+                    }
+                    keep(copy.payload.unknownEntries, from: snapshot.location, state: &state, report: &report)
+                    coverage.merge(copy.payload.vector, uniquingKeysWith: max)
                 }
-                keep(payload.unknownEntries, from: snapshot.location, state: &state, report: &report)
-                state.snapshots[snapshot.location] = payload.vector
-                state.snapshotCoverage.merge(payload.vector, uniquingKeysWith: max)
+                state.snapshots[snapshot.location] = coverage
+                state.snapshotCoverage.merge(coverage, uniquingKeysWith: max)
+                noteExamined(snapshot, verified: copies.count, state: &state, report: &report)
             } catch let error where Self.isFatal(error) {
                 throw error
             } catch {
@@ -545,7 +686,10 @@ public actor SyncEngine {
         // version decides whose work it is, and a write cut binds a run of segments (docs/02-architecture.md §8.8).
         if let judge {
             for object in segments.values.joined().sorted(by: { $0.location.name < $1.location.name }) {
-                guard let payload = try? await open(object), (try? validate(payload, at: object.location)) != nil
+                // One digest per position: a position staged with several copies (only by an edit of the file, A8;
+                // the download refuses them) is refused below, and binds nothing here.
+                guard object.alternates.isEmpty, let payload = try? await open(object.object, at: object.location),
+                    (try? validate(payload, at: object.location)) != nil
                 else { continue }
                 try await judge.record(
                     segment: object.location, signature: object.object.signature,
@@ -563,6 +707,13 @@ public actor SyncEngine {
                     next = state.merged[author]! + 1
                 }
                 if sequence < next {
+                    // A position already merged. Copies found under it since are applied late, as a stale
+                    // snapshot's entries are; anything else staged below the stream's position is spent.
+                    if object.copies > 0, judge == nil {
+                        try await applyLate(
+                            object, pending: pending, reconciling: reconciling, state: &state, highWater: &highWater,
+                            report: &report)
+                    }
                     try await syncState.unstage([object.location])
                     continue
                 }
@@ -573,8 +724,10 @@ public actor SyncEngine {
                 let acknowledgement: [UUID: UInt64]
                 var waitsForJudge = false
                 do {
-                    let payload = try await open(object)
-                    try validate(payload, at: object.location)
+                    // Every copy of the position that verified, each checked and opened before any entry of any is
+                    // applied: the position is passed whole or not at all.
+                    let copies = try await openCopies(object)
+                    let payload = copies[0].payload
                     switch try await judge?.admitsSegment(
                         object.location, signature: object.object.signature, envelope: object.object.envelope)
                         ?? .apply
@@ -599,26 +752,33 @@ public actor SyncEngine {
                         continue
                     }
                     if waitsForJudge { break }
-                    let keyID = try EnvelopeHeader.parse(
-                        object.object.envelope, expecting: object.location.envelopeKind
-                    ).header.keyID
-                    for entry in payload.entries {
-                        if entry.isDeletion, let judge,
-                            !(try await judge.admitsErasure(entry, in: object.location, sealedUnder: keyID))
-                        {
-                            // What its author had seen does not all count (review finding S45): kept for the person,
-                            // never applied, and judged again by a replay.
-                            report.heldAside.append(entry.key)
-                            try await syncState.quarantine(entry, vaultID: vaultID)
-                            continue
+                    for copy in copies {
+                        let keyID = try EnvelopeHeader.parse(
+                            copy.object.envelope, expecting: object.location.envelopeKind
+                        ).header.keyID
+                        for entry in copy.payload.entries {
+                            if entry.isDeletion, let judge,
+                                !(try await judge.admitsErasure(entry, in: object.location, sealedUnder: keyID))
+                            {
+                                // What its author had seen does not all count (review finding S45): kept for the
+                                // person, never applied, and judged again by a replay.
+                                report.heldAside.append(entry.key)
+                                try await syncState.quarantine(entry, vaultID: vaultID)
+                                continue
+                            }
+                            try await apply(
+                                entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                                highWater: &highWater, report: &report)
                         }
-                        try await apply(
-                            entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
-                            highWater: &highWater, report: &report)
+                        // Kept aside, and the stream goes on: an ignorable kind this version does not know (ADR 0009).
+                        keep(copy.payload.unknownEntries, from: object.location, state: &state, report: &report)
                     }
-                    // Kept aside, and the stream goes on: an ignorable kind this version does not know (ADR 0009).
-                    keep(payload.unknownEntries, from: object.location, state: &state, report: &report)
-                    acknowledgement = payload.vector
+                    // An acknowledgement lets its readers collect their segments, so of several copies only what
+                    // every one of them acknowledges counts (§7.5, "Conflict copies").
+                    acknowledgement = copies.dropFirst().reduce(payload.vector) { lowest, copy in
+                        lowest.filter { copy.payload.vector[$0.key] != nil }.merging(
+                            copy.payload.vector.filter { lowest[$0.key] != nil }, uniquingKeysWith: min)
+                    }
                 } catch let error where Self.isFatal(error) {
                     throw error
                 } catch {
@@ -656,6 +816,7 @@ public actor SyncEngine {
                     break
                 }
                 state.merged[author] = sequence
+                noteExamined(object, verified: object.all.count, state: &state, report: &report)
                 if author == deviceID {
                     // Not one this device remembers publishing: a crash after publishing, or another installation
                     // using this device ID (a restored backup). Merged like any other, and reported.
@@ -673,16 +834,73 @@ public actor SyncEngine {
 
     /// Checks and opens a staged object: kind and context before decryption, the signature again (staged objects sit
     /// in a local file an attacker may edit), then the AEAD, then the payload, whose own location must match.
-    private func open(_ staged: StagedObject) async throws -> SyncPayload {
-        let location = staged.location
-        let header = try EnvelopeHeader.parse(staged.object.envelope, expecting: location.envelopeKind).header
+    private func open(_ object: SignedObject, at location: SyncObjectLocation) async throws -> SyncPayload {
+        let header = try EnvelopeHeader.parse(object.envelope, expecting: location.envelopeKind).header
         let context = location.envelopeContext(keyID: header.keyID)
-        _ = try Envelope.parse(staged.object.envelope, expecting: context)
-        try await keyring.verify(staged.object.signature, over: staged.object.envelope, at: location)
-        let plaintext = try await keyring.open(staged.object.envelope, context: context)
+        _ = try Envelope.parse(object.envelope, expecting: context)
+        try await keyring.verify(object.signature, over: object.envelope, at: location)
+        let plaintext = try await keyring.open(object.envelope, context: context)
         let payload = try SyncPayload.parse(plaintext, allowedKinds: Set(configuration.schemaVersions.keys))
         guard payload.location == location else { throw Rejection(reason: .locationMismatch) }
         return payload
+    }
+
+    /// Every staged copy of one name, each checked and opened as `open` does and its entries validated: all of
+    /// them, or the first failure, so that nothing of a name is applied in part (§7.5, "Conflict copies"). A vault
+    /// with a judge takes one copy only: a write cut binds one digest per position, and the staging area is a file
+    /// A8 can edit.
+    private func openCopies(_ staged: StagedObject) async throws -> [(object: SignedObject, payload: SyncPayload)] {
+        guard staged.alternates.isEmpty || judge == nil else {
+            throw SyncTransportError.conflictingVersions(staged.location.name)
+        }
+        guard staged.all.count <= max(1, configuration.maximumCopiesPerObject) else {
+            throw Rejection(reason: .other("tooManyCopies"))
+        }
+        var copies: [(object: SignedObject, payload: SyncPayload)] = []
+        for object in staged.all {
+            let payload = try await open(object, at: staged.location)
+            try validate(payload, at: staged.location)
+            copies.append((object, payload))
+        }
+        return copies
+    }
+
+    /// Applies the copies staged under a name whose position is already merged: every entry of every copy, through
+    /// the path of any entry, and nothing else — the stream's position and its acknowledgement stay as they are. The
+    /// same as merging a stale snapshot: idempotent, and unable to displace what was written knowing more. A copy
+    /// that does not open refuses the name, which is reported and looked at again by the next sync.
+    private func applyLate(
+        _ staged: StagedObject, pending: [RecordKey: PendingDeletion], reconciling: Bool, state: inout SyncState,
+        highWater: inout UInt64, report: inout SyncReport
+    ) async throws {
+        do {
+            let copies = try await openCopies(staged)
+            for copy in copies {
+                for entry in copy.payload.entries {
+                    try await apply(
+                        entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
+                        highWater: &highWater, report: &report)
+                }
+                keep(copy.payload.unknownEntries, from: staged.location, state: &state, report: &report)
+            }
+            noteExamined(staged, verified: copies.count, state: &state, report: &report)
+            try await syncState.saveState(state)
+        } catch let error where Self.isFatal(error) {
+            throw error
+        } catch {
+            report.rejected.append(SyncRejection(name: staged.location.name, reason: Self.reason(error)))
+        }
+    }
+
+    /// Remembers that the copies under a name have been dealt with, and what a fork means: reported, and, in this
+    /// device's own stream, a snapshot owed, because no other device can be assumed to have read both copies.
+    private func noteExamined(
+        _ staged: StagedObject, verified: Int, state: inout SyncState, report: inout SyncReport
+    ) {
+        if staged.copies > 0 { state.examinedCopies[staged.location] = staged.copies }
+        guard verified > 1 else { return }
+        report.forkedObjects.append(staged.location.name)
+        if staged.location.author == deviceID { state.handOnOwed = true }
     }
 
     /// Structural checks on every entry before any is applied, so a malformed segment changes nothing.
@@ -1220,7 +1438,8 @@ public actor SyncEngine {
     private func writeSnapshotIfElected(
         state: inout SyncState, retired: Set<UUID>, report: inout SyncReport
     ) async throws {
-        let owed = holdsUnsharedRetiredContent(state, retired: retired)
+        // Owed for a revoked device's work, or for a fork of this device's own stream (§7.5, "Conflict copies").
+        let owed = holdsUnsharedRetiredContent(state, retired: retired) || state.handOnOwed
         if !owed {
             let uncovered = state.merged.reduce(0) { total, element in
                 total + Int(clamping: element.value &- min(element.value, state.snapshotCoverage[element.key] ?? 0))
@@ -1288,6 +1507,7 @@ public actor SyncEngine {
             state.snapshotCoverage.merge(vector, uniquingKeysWith: max)
             // Handed on: what this device merged from revoked devices is now in a snapshot of its own.
             state.snapshots = state.snapshots.filter { !retired.contains($0.key.author) }
+            state.handOnOwed = false
             report.snapshotsWritten += 1
             return
         }
@@ -1305,6 +1525,12 @@ public actor SyncEngine {
         // A revoked device's snapshots are not listed (they are not read); what this device merged from one is
         // remembered until it has written the snapshot that hands it on.
         state.snapshots = state.snapshots.filter { listed.contains($0.key) || retired.contains($0.key.author) }
+        // A fork of this device's own stream is not collected (its copies go with the object) before the snapshot
+        // that hands both copies on is on the transport.
+        guard !state.handOnOwed else {
+            report.handOnOwed = true
+            return
+        }
         let covered = listed.reduce(UInt64(0)) { highest, location in
             max(highest, state.snapshots[location]?[deviceID] ?? 0)
         }

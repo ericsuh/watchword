@@ -10,7 +10,7 @@ import WatchwordTestSupport
 @testable import WatchwordKit
 
 /// Only a shared vault's owner or an administrator may rename it (owner decision of 2026-11-17;
-/// docs/02-architecture.md §8.7, §8.10; docs/06-adversarial-review.md §R). The session refuses its own account, but
+/// docs/02-architecture.md §8.7, §8.10; docs/06-adversarial-review.md §T). The session refuses its own account, but
 /// what binds a client that does not ask is every other device's write judge: a description counts only as the work
 /// of an account that holds the role, or held it and wrote the description inside the cut of the record that ended
 /// it. In the suite "shared vaults through the session"; the adversaries are those of §2.

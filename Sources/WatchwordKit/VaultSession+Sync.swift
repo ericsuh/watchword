@@ -165,6 +165,10 @@ extension VaultSession {
         // Either run's: a stop the second did not reach (it replayed instead, say) is still a stop to report.
         total.requiresNewerVersion = total.requiresNewerVersion || first.requiresNewerVersion
         total.replayNeeded = total.replayNeeded || first.replayNeeded
+        total.copiesExamined += first.copiesExamined
+        total.copiesRefused += first.copiesRefused
+        total.copiesNotExamined += first.copiesNotExamined
+        total.forkedObjects = first.forkedObjects + second.forkedObjects
         return total
     }
 
@@ -703,6 +707,11 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.snapshotWithheld = total.snapshotWithheld || report.snapshotWithheld
             total.snapshotWithheldBy.formUnion(report.snapshotWithheldBy)
             total.replayNeeded = total.replayNeeded || report.replayNeeded
+            total.copiesExamined += report.copiesExamined
+            total.copiesRefused += report.copiesRefused
+            total.copiesNotExamined += report.copiesNotExamined
+            total.forkedObjects += report.forkedObjects
+            total.handOnOwed = total.handOnOwed || report.handOnOwed
         }
         return total
     }

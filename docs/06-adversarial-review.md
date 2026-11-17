@@ -710,7 +710,28 @@ the rest were fixed with their tests written alongside.
 | Q7 | Low | `QuarantinedVersion.id` could repeat for two kept versions at one stamp; every shared-vault version got §8.7's "held aside" explanation, U5's implausible ones included; and a version's title was looked up by record ID in any vault. | **Fixed.** The ID covers the key ID and a digest of the bytes; `QuarantineReason` (derived, since the state store keeps no reason: beyond the jump allowed above what the vault holds is U5's, other shared-vault versions the judge's, the rest Y37's), each with its own explanation; a title only from an item of the same vault. Storing the reason with the entry is left for a state-store format change. |
 | Q8 | Low | Device names are chosen by whoever enrolled the device, and the screen appended "(this device)" to the name text, so a name could claim it, or reverse the text around it. Accepting an invitation from an owner pinned earlier joined at once. | **Fixed.** Names are cleaned of control, formatting and separator characters and of any "(this device)"; this device is marked from its ID, apart from the name, and sentences quote names. Accepting always asks before joining. |
 
-## R. Owner decision of 2026-11-17: only the owner or an administrator renames a shared vault
+## R. Review of conflict copies (owner decision, 2026-11-17; architecture §7.5)
+
+Review date: 2026-11-17, by the author of the change, in a remote Linux session; the Apple adapter is drafted and not
+compiled. Adversaries: **A1** (the store: plants, replaces, hides and deletes copies), an **insider device** (holds
+every key; a forked device is one in effect), **A4** (a member of a shared vault) and **A8** (the local file: staged
+copies, the sync state). Each attack below was tried as a test before or while the code was written; "held" means the
+test passed against the first implementation.
+
+| ID | Severity | Attack tried, or finding | Disposition |
+| --- | --- | --- | --- |
+| R1 | Medium | *Finding.* A genuine object of another name planted as a copy passed the fakes' signature check (their checksum does not cover the name), was staged beside the genuine object, failed its context at merge, and so stopped the whole position: one planted file, a stream waiting for good. Production signatures bind the name, so there it failed at download; but the engine should not lean on that. | **Fixed.** Every copy's kind and context are checked against the name at download (they need no key), before its signature; a copy for another name is junk for any keyring. Test: `plantedJunkCopies`. |
+| R2 | Medium | *Finding.* With the sync's bound nearly spent, a name's copies were fetched up to what was left of the bound and the name was then remembered as examined in full, so the copies not fetched were never looked at. | **Fixed.** A name is examined whole or not at all: the bound is checked before a name, never inside one. Test: `boundPerSync`. |
+| R3 | — | Junk beside a genuine object; junk as the provider's current version with the genuine object as the copy; noise, a truncated object, a replaced signature, a revoked device's segment. | Held: each costs one check, none is staged, the genuine object is applied locked-then-unlocked and with real keys. Tests: `plantedJunkCopies`, `genuineBehindJunk`, `plantedCopiesBesideARealSegment`. |
+| R4 | — | A flood: 400 copies of one name, 20 of each of 39 more, to stall a stream or stop publishing. | Held: bounded checks per sync, the stream merged from its current files, the device's edit published in the same sync, the flood worked through and then not read again. Test: `copyFlood`. |
+| R5 | — | A forked device, to make devices disagree or lose one copy's edits: two verifying copies read in either order, by a device before and after it merged the position, and by the author. | Held: every device ends with the same items, both writes of one revision kept. Tests: `twoVerifyingForks`, `orderOfCopies`, `lateCopy`, `reallySignedFork`. The limit of `10-sync-correctness.md` §8 (a write that had seen one is taken to have seen the other) is unchanged. |
+| R6 | — | A member's fork in a shared vault, to have the administrator's write cut bind one copy and the other members read another. | Refused by design: several verifying copies are never merged where there is a judge, at download, late, or from an edited staging row, and the judge is never given a second digest. Tests: `sharedVaultFork`, `judged`, `judgedStagingEdited`. **Open:** the position then waits until one copy is gone; a rule for which copy a cut binds is not designed. |
+| R7 | — | A8 adds a copy to the staging area, or edits the count of copies examined. | Held: staged copies are verified again one by one and a failure refuses the position whole; the count only decides whether to look again. Test: `stagedCopyPlanted`. |
+| R8 | Low, accepted | A genuine second copy behind more than 15 planted ones, or swapped in while A1 holds the count steady, is not examined. | Accepted: A1 can delete that copy (Y7). The forked author, which holds both, still hands them on in its snapshot. |
+| R9 | Low, accepted | A copy that its own author signed for the right name and that does not open (an insider's garbage, or a key not yet held) stops that author's position for every reader. | Accepted: only the stream's own author can do it, to its own stream, which it can as well stop writing. |
+| R10 | Low, open | Copies of the account's own objects and of sharing objects are not examined: a junk current version in front of a genuine header or registry entry hides it. | Open. Those are content-addressed or written once per device and are put back by any device that holds them; A1 can delete them anyway. |
+
+## T. Owner decision of 2026-11-17: only the owner or an administrator renames a shared vault
 
 | ID | Decision | Threat and residual | Disposition |
 | --- | --- | --- | --- |

@@ -72,6 +72,15 @@ public struct SyncState: Sendable, Hashable {
     /// The generation of the last stash row saved (`SyncStash.generation`). A row of another generation, or none while
     /// this is above zero, is not trusted to hold what this state says was merged, and the log is replayed.
     public var stashGeneration: UInt64 = 0
+    /// For each name the transport listed with copies beside its object (`SyncListing.copied`), the number of copies
+    /// this device has examined and, where they verified, merged (docs/02-architecture.md §7.5, "Conflict copies").
+    /// A name is looked at again only when the transport's count differs: the copies stay on the provider, and the
+    /// decision about them is remembered here. Pruned to the names still listed with copies.
+    public var examinedCopies: [SyncObjectLocation: Int] = [:]
+    /// This device owes a snapshot of everything it holds, beyond the ones `SyncEngine` owes for a revoked device's
+    /// work: its own stream forked (several verifying copies of one of its names, which no other device can be
+    /// assumed to have seen both of). Cleared when the snapshot is written; until then it collects nothing.
+    public var handOnOwed = false
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID
@@ -109,13 +118,70 @@ public struct PendingDeletion: Sendable, Hashable {
 }
 
 /// An object downloaded and signature-checked, waiting for keys to be merged (§7.4: downloading needs no keys).
+///
+/// Where the transport held several copies under the name (§7.5, "Conflict copies"), every copy that verified is
+/// staged together: `object` and `alternates`, in no order that means anything, with the transport's count in
+/// `copies` so that the merge can remember the name as examined.
 public struct StagedObject: Sendable, Hashable {
     public var location: SyncObjectLocation
     public var object: SignedObject
+    /// The other copies under the name that verified. Empty for an object with one copy, which is nearly all.
+    public var alternates: [SignedObject]
+    /// The number of copies the transport listed under the name when this was staged; 0 if it listed only the object.
+    public var copies: Int
 
-    public init(location: SyncObjectLocation, object: SignedObject) {
+    public init(location: SyncObjectLocation, object: SignedObject, alternates: [SignedObject] = [], copies: Int = 0) {
         self.location = location
         self.object = object
+        self.alternates = alternates
+        self.copies = copies
+    }
+
+    /// Every staged copy.
+    public var all: [SignedObject] { [object] + alternates }
+
+    static let magic: [UInt8] = Array("WWSC".utf8)
+    static let formatVersion: UInt8 = 1
+    /// More than any engine stages (`SyncConfiguration.maximumCopiesPerObject`); a row claiming more is not one.
+    static let maximumStoredCopies = 64
+
+    /// What a state store keeps for this object. One copy with nothing to remember is the `SignedObject` as it has
+    /// always been stored; otherwise `"WWSC" ‖ version u8 = 1 ‖ copies u32 ‖ count u8 ‖ (length u32 ‖ object)…`.
+    public var storageBytes: [UInt8] {
+        guard !alternates.isEmpty || copies != 0 else { return object.serialized() }
+        var out = Self.magic + [Self.formatVersion]
+        out += SyncPayload.littleEndian(UInt32(clamping: copies))
+        out.append(UInt8(clamping: all.count))
+        for copy in all.prefix(Int(UInt8.max)) {
+            let bytes = copy.serialized()
+            out += SyncPayload.littleEndian(UInt32(clamping: bytes.count)) + bytes
+        }
+        return out
+    }
+
+    /// Reads `storageBytes`. The row is in a local file (A8): bounded, exact, and `nil` for anything else. What it
+    /// yields is still verified copy by copy before it is merged.
+    public init?(location: SyncObjectLocation, storageBytes bytes: [UInt8]) {
+        guard bytes.count >= 4, Array(bytes[0..<4]) == Self.magic else {
+            guard let object = try? SignedObject.parse(bytes) else { return nil }
+            self.init(location: location, object: object)
+            return
+        }
+        var reader = ByteReader(bytes)
+        guard (try? reader.read(4)) != nil, (try? reader.byte()) == Self.formatVersion,
+            let copies = try? reader.uint32(), let count = try? reader.byte(),
+            count >= 1, Int(count) <= Self.maximumStoredCopies
+        else { return nil }
+        var objects: [SignedObject] = []
+        for _ in 0..<count {
+            guard let length = try? reader.uint32(), let raw = try? reader.read(Int(length)),
+                let object = try? SignedObject.parse(raw)
+            else { return nil }
+            objects.append(object)
+        }
+        guard reader.remaining == 0 else { return nil }
+        self.init(
+            location: location, object: objects[0], alternates: Array(objects.dropFirst()), copies: Int(copies))
     }
 }
 
@@ -156,7 +222,7 @@ public protocol SyncStateStore: Sendable {
 
 public actor InMemorySyncStateStore: SyncStateStore {
     private var states: [UUID: SyncState] = [:]
-    private var stagedObjects: [UUID: [SyncObjectLocation: SignedObject]] = [:]
+    private var stagedObjects: [UUID: [SyncObjectLocation: StagedObject]] = [:]
     private var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
     private var quarantinedEntries: [UUID: [SyncEntry]] = [:]
     private var stashes: [UUID: [UInt8]] = [:]
@@ -174,11 +240,11 @@ public actor InMemorySyncStateStore: SyncStateStore {
     }
 
     public func stage(_ object: StagedObject) {
-        stagedObjects[object.location.vaultID, default: [:]][object.location] = object.object
+        stagedObjects[object.location.vaultID, default: [:]][object.location] = object
     }
 
     public func staged(vaultID: UUID) -> [StagedObject] {
-        (stagedObjects[vaultID] ?? [:]).map { StagedObject(location: $0.key, object: $0.value) }
+        Array((stagedObjects[vaultID] ?? [:]).values)
     }
 
     public func unstage(_ locations: [SyncObjectLocation]) {
