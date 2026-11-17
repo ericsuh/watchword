@@ -670,7 +670,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   only downloads, and `checkSharedWrite`/`checkSharedDeletion` throw `ledgerUnavailable`. Never add a path that asks
   only `sharing.vaults[vaultID]` to decide a vault is private; ask `isMarkedShared`. Until the markers are read every
   vault but the Personal one is held closed, so call `loadSharedMarkersIfNeeded()` before a path that picks a key. A
-  second device gets out by `acceptInvitation`, whose `knownOwner` comes from the marker.
+  second device gets out by `acceptInvitation`, whose `knownOwner` comes from the marker. `knownOwner` **throws**
+  when a granted key is held and the owner cannot be named (`ownerUnknown`, Z48), and when the account's markers name
+  two owners (`markerConflicts`); never let it answer `nil` for a vault a key of which is held. The held-key fallback
+  in `IncomingInvitation.accept` is for an invitation whose owner is this account, and for nothing else.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds

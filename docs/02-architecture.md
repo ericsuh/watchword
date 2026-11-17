@@ -1642,7 +1642,10 @@ or published there and its engine only downloads (no snapshot, no collection); e
 it, its rename, a second `shareVault` and its deletion are refused. Until the markers have been read in a session,
 every vault but the Personal one is treated so, and a sharing state that cannot be read closes its vaults until it can:
 a failed read is not an answer. The way out is the device accepting the vault's invitation itself, which works on a
-second device because the owner it must name is the one the marker gives (`sharedVaultInvitation`; before, the
+second device because the owner it must name is the one the marker gives, and only that one: a device that holds a
+granted key of the vault and cannot name its owner (no ledger, no marker yet) accepts no invitation for it at all
+(`ownerUnknown`), since anyone the person might verify could otherwise sign a chain for the same vault ID and stand in
+as its owner (Z48), and one whose account's markers name two owners accepts none either (`sharedVaultInvitation`; before, the
 directory row made by the granted key counted as "this account's own vault" and the invitation was refused as an owner
 conflict). The person compares the owner's fingerprint there too, since pins are per device, unless the owner is the
 account itself; the key is the grant's, or, where no grant was ever made (the owner's first key on the owner's other

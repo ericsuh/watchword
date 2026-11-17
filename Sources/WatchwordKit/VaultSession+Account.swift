@@ -1641,6 +1641,8 @@ extension VaultSession {
         }
         if !change.upserts.isEmpty { try await store.commit(change) }
         if !fetched.markers.isEmpty { await loadSharedMarkersIfNeeded(force: true) }
+        // Every device's marker for a vault must name the same owner (VaultSession+SharedMarker.swift, Z48).
+        await examineSharedMarkers(listed: fetched.listed, view: view, account: account, transport: transport)
         if report.vaultKeysFetched > 0 { try await adoptNewVaultKeys(account: account) }
         if report.vaultDeletionsFetched > 0 { try? await adoptVerifiedDeletions(account: account) }
 

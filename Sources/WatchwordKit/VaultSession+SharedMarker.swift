@@ -41,19 +41,25 @@ extension VaultSession {
         return (uuid(Array(rest[..<16])), uuid(Array(rest[16...])))
     }
 
-    /// The record ID of a vault's marker row: derived from the vault's, since the vault's own ID is its directory
-    /// row's and a store keeps one row per record ID and kind.
-    static func sharedMarkerRecordID(_ vaultID: UUID) -> UUID {
-        var id = Array(ObjectDigest(hashing: Array("WW-shared-marker-v1".utf8) + bytes(vaultID)).bytes[..<16])
+    /// The record ID of a marker's row: derived from the vault and the owner it names, since the vault's own ID is
+    /// its directory row's and a store keeps one row per record ID and kind. One row for each owner the account's
+    /// markers name for a vault: there should be one, and a second is kept so that the disagreement is not forgotten
+    /// with the session (`markerConflicts`, Z48).
+    static func sharedMarkerRecordID(_ vaultID: UUID, owner: UUID) -> UUID {
+        let seed = Array("WW-shared-marker-v2".utf8) + bytes(vaultID) + bytes(owner)
+        var id = Array(ObjectDigest(hashing: seed).bytes[..<16])
         id[6] = (id[6] & 0x0F) | 0x80
         id[8] = (id[8] & 0x3F) | 0x80
         return uuid(id)
     }
 
+    /// The row for a marker object. `object`'s body says which owner it names; a body that is no marker's gives a
+    /// row that marks nothing (`verifiedSharedMarker`).
     static func sharedMarkerRow(vaultID: UUID, accountID: UUID, author: UUID, object: SignedObject) -> StoredRecord {
-        StoredRecord(
-            recordID: sharedMarkerRecordID(vaultID), kind: .vaultDirectory, vaultID: accountID, keyID: zeroUUID,
-            version: 1, deviceID: author, envelope: [sharedMarkerTag] + object.serialized())
+        let owner = parseSharedMarkerBody(object.envelope)?.owner ?? zeroUUID
+        return StoredRecord(
+            recordID: sharedMarkerRecordID(vaultID, owner: owner), kind: .vaultDirectory, vaultID: accountID,
+            keyID: zeroUUID, version: 1, deviceID: author, envelope: [sharedMarkerTag] + object.serialized())
     }
 
     /// The vault and owner a marker row names, if the account key signed it for the device the row names. Only the
@@ -68,7 +74,7 @@ extension VaultSession {
         guard row.kind == .vaultDirectory, row.vaultID == accountID, row.envelope.first == sharedMarkerTag,
             let object = try? SignedObject.parse(Array(row.envelope.dropFirst())),
             let marker = parseSharedMarkerBody(object.envelope),
-            row.recordID == sharedMarkerRecordID(marker.vaultID),
+            row.recordID == sharedMarkerRecordID(marker.vaultID, owner: marker.owner),
             let parts = DualSignature.decode(object.signature)
         else { return nil }
         let name = AccountObjectLocation.vaultShared(
@@ -90,18 +96,55 @@ extension VaultSession {
         guard let account = try? await loadAccount(), let signingKey = await trustedAccountSigningKey(account),
             let rows = try? await store.records(in: account.accountID, kind: .vaultDirectory)
         else { return }
-        var markers: [UUID: UUID] = [:]
-        for row in rows {
+        // In row order, so that which owner is listed first does not depend on the store.
+        for row in rows.sorted(by: { $0.recordID.uuidString < $1.recordID.uuidString }) {
             guard
                 let marker = Self.verifiedSharedMarker(
                     row, accountID: account.accountID, accountSigningKey: signingKey),
                 marker.vaultID != account.personalVaultID
             else { continue }
-            markers[marker.vaultID] = marker.owner
+            // Markers are only ever added: one this session has seen is not forgotten because a later read lacks
+            // it. A second owner for a vault is a disagreement between the account's devices, and is kept as one.
+            if let held = sharing.markers[marker.vaultID], held != marker.owner {
+                sharing.markerConflicts.insert(marker.vaultID)
+            } else {
+                sharing.markers[marker.vaultID] = marker.owner
+            }
         }
-        // Markers are only ever added: one this session has seen is not forgotten because a later read lacks it.
-        sharing.markers.merge(markers) { held, _ in held }
         sharing.markersLoaded = true
+    }
+
+    /// Compares every marker in the account's vault directory with the one this device holds for its vault: each
+    /// device vouches for the markers it holds under its own name, so the directory may hold several for one vault,
+    /// and they must agree. One that names another owner is kept beside the first (a row of its own) and the vault
+    /// is in `markerConflicts` from then on, on this device and after a restart. `listed` is the directory's listing
+    /// this sync already made; each object is fetched once a session, and must carry the signatures of the account
+    /// and of a device registered now.
+    func examineSharedMarkers(
+        listed: Set<String>, view: RegistryView, account: AccountRecord, transport: any SyncTransport
+    ) async {
+        for name in listed.sorted() where !sharing.examinedMarkers.contains(name) {
+            guard case .vaultShared(let accountID, let vaultID, let author)? = AccountObjectLocation(name: name),
+                accountID == account.accountID, vaultID != account.personalVaultID,
+                view.state.devices[author] != nil
+            else { continue }
+            guard
+                let bytes = try? await transport.fetch(name, maximumLength: Self.directoryObjectMaximumLength),
+                let object = try? SignedObject.parse(bytes),
+                (try? Self.verifyDual(
+                    object.signature, over: Self.directoryMessage(name: name, body: object.envelope),
+                    domain: .vaultDirectory, author: author, view: view)) != nil,
+                let marker = Self.parseSharedMarkerBody(object.envelope), marker.vaultID == vaultID
+            else { continue }
+            sharing.examinedMarkers.insert(name)
+            guard let held = sharing.markers[vaultID], held != marker.owner else { continue }
+            let row = Self.sharedMarkerRow(
+                vaultID: vaultID, accountID: account.accountID, author: author, object: object)
+            if (try? await store.record(row.key)) == nil {
+                try? await store.commit(StoreChange(upserts: [row], expectations: [row.key: .absent]))
+            }
+            sharing.markerConflicts.insert(vaultID)
+        }
     }
 
     /// Records, signed by the account key and this device, that `vaultID` is governed by a membership chain owned
@@ -110,7 +153,11 @@ extension VaultSession {
     func markShared(_ vaultID: UUID, owner: UUID, account: AccountRecord, epoch: UInt64) async throws {
         await loadSharedMarkersIfNeeded()
         guard vaultID != account.personalVaultID else { return }
-        let key = RecordKey(recordID: Self.sharedMarkerRecordID(vaultID), kind: .vaultDirectory)
+        // Never a second owner for a vault under this account's signature.
+        if let held = sharing.markers[vaultID], held != owner {
+            throw SharingError.vaultOwnerConflict(vaultID: vaultID)
+        }
+        let key = RecordKey(recordID: Self.sharedMarkerRecordID(vaultID, owner: owner), kind: .vaultDirectory)
         if sharing.markers[vaultID] != nil, try await store.record(key) != nil { return }
         let location = AccountObjectLocation.vaultShared(
             accountID: account.accountID, vaultID: vaultID, author: account.deviceID)
@@ -164,9 +211,11 @@ extension VaultSession {
         _ = try requireKeys()
         await loadSharedMarkersIfNeeded()
         await loadSharedVaultsIfNeeded()
-        if let owner = sharing.vaults[vaultID]?.ledger.owner.accountID ?? sharing.markers[vaultID] {
+        if let owner = sharing.vaults[vaultID]?.ledger.owner.accountID {
             return Invitation(vaultID: vaultID, ownerAccountID: owner)
         }
-        return nil
+        // Not where the account's markers disagree about the owner (Z48).
+        guard !sharing.markerConflicts.contains(vaultID), let owner = sharing.markers[vaultID] else { return nil }
+        return Invitation(vaultID: vaultID, ownerAccountID: owner)
     }
 }

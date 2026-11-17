@@ -129,6 +129,11 @@ struct SharingRuntime: Sendable {
     /// account-signed rows, VaultSession+SharedMarker.swift), and whether they have been read this session.
     var markers: [UUID: UUID] = [:]
     var markersLoaded = false
+    /// Vaults for which the account's markers name more than one owner: its devices disagree about whose the vault
+    /// is. A device with no ledger for such a vault accepts no invitation to it and offers none (Z48).
+    var markerConflicts: Set<UUID> = []
+    /// The marker objects of the account's vault directory this session has fetched and compared, by name.
+    var examinedMarkers: Set<String> = []
     /// Vaults the sharing state names whose ledger did not load (no owner row, no pin for the owner, a ledger that
     /// does not restore): shared, and unavailable until this device accepts their invitation again (Z41).
     var unloadable: Set<UUID> = []
@@ -801,20 +806,31 @@ extension VaultSession {
     }
 
     /// The owner of the vault this device already holds under `vaultID`, or `nil` if it holds none: what an
-    /// invitation's owner must equal (S6). From what is authenticated first: the loaded ledger; the account's own
+    /// invitation's owner must equal (S6). From what is authenticated: the loaded ledger; then the account's own
     /// marker for the vault; then, for a vault in the account's directory none of whose keys arrived by grant, the
     /// account itself, since it made the vault (a directory row made by a key that came by grant says nothing of the
-    /// kind, which is what refused a member's second device before, Z41). Last, the owner the sharing state names
-    /// for a vault whose ledger did not load.
+    /// kind, which is what refused a member's second device before, Z41).
+    ///
+    /// A vault this device holds a **granted** key of has an owner whether or not this device can name them. With no
+    /// ledger and no marker it cannot, and then no invitation is accepted, whoever it names (`ownerUnknown`): the
+    /// store withholding the marker would otherwise let anyone the person has reason to verify stand in as the
+    /// vault's owner with a chain and a key of their own (review finding Z48). Two markers of the account naming
+    /// different owners (`markerConflicts`) say that its devices disagree, and nothing is accepted on either. The
+    /// owner the sharing state names is asked last, only for a vault this device holds no key of: that row is not
+    /// signed.
     private func knownOwner(of vaultID: UUID, account: AccountRecord, settings: SharingSettings) async throws
         -> UUID?
     {
         if let ledger = sharing.vaults[vaultID]?.ledger { return ledger.owner.accountID }
         if vaultID == account.personalVaultID { return account.accountID }
+        guard !sharing.markerConflicts.contains(vaultID) else {
+            throw SharingError.vaultOwnerConflict(vaultID: vaultID)
+        }
         if let marked = sharing.markers[vaultID] { return marked }
-        let granted = keys?.vaultKeys.values.contains { $0.vaultID == vaultID && $0.arrivedByGrant } ?? false
-        if !granted, try await vaultDirectory(account)[vaultID] != nil { return account.accountID }
-        if let saved = try await settings.state.value(.owner, vaultID: vaultID), saved.count == 16 {
+        let held = keys?.vaultKeys.values.filter { $0.vaultID == vaultID } ?? []
+        if held.contains(where: \.arrivedByGrant) { throw SharedVaultError.ownerUnknown(vaultID) }
+        if try await vaultDirectory(account)[vaultID] != nil { return account.accountID }
+        if held.isEmpty, let saved = try await settings.state.value(.owner, vaultID: vaultID), saved.count == 16 {
             return Self.uuid(saved)
         }
         return nil

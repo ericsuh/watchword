@@ -131,6 +131,9 @@ public enum ErrorWording {
         case .memberDevicesCodeUnknown:
             return "That code does not match any of this person's devices. Ask them to read it again from Devices "
                 + "on their own device."
+        case .ownerUnknown:
+            return "This device cannot yet tell whose shared vault that is, so it cannot accept an invitation to it. "
+                + "Sync, then try again."
         case .stillAMember:
             return "You are still a member of this vault. Leave it first; its items can be removed from this device "
                 + "once you are no longer a member."
