@@ -1,6 +1,6 @@
 """mise-tasks/app/build, test, test-keychain and release, run as they are with a stand-in `xcodebuild`.
 
-Two things these tasks decide that no Swift test can reach (docs/06-adversarial-review.md Z102, Z111):
+Two things these tasks decide that no Swift test can reach (docs/06-adversarial-review.md Z102, Z105):
 
 - Which swift-crypto an app is built from. The pin in the root Package.resolved covers `swift build`; xcodebuild
   resolves the generated project's local package for itself and writes a Package.resolved of its own inside the

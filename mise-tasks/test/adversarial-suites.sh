@@ -6,7 +6,7 @@
 # "Ran" means Swift Testing's own line for the suite: `<symbol> Suite "Adversarial: <area>" passed after <n> seconds`,
 # with the whole display name between the quotes and nothing but the result symbol before it. The area's name merely
 # appearing in the log is not enough: "sync log" is inside "sync log, item metadata", a test's title or output can say
-# anything, and a suite that was skipped or disabled is named on a line too (docs/06-adversarial-review.md Z105;
+# anything, and a suite that was skipped or disabled is named on a line too (docs/06-adversarial-review.md Z104;
 # Tests/ScriptTests/test_audit_tasks.py). A suite that failed has already failed `swift test`.
 suite_passed() { # suite_passed <log> <area>
   SUITE_LINE="Suite \"Adversarial: $2\" passed after " awk '

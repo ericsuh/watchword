@@ -39,24 +39,30 @@ mise run test --filter WatchwordMatchingTests.ItemRankerTests   # one XCTest cla
 mise run test --coverage                               # also writes an llvm-cov report to coverage.txt
 mise run test:adversarial                              # security suite only (its own CI job)
 mise run test:long --seed 1234                         # the nightly long randomised run; replay a nightly's seed
-mise run test:scripts                                  # the repository's own scripts (screenshots.yml's steps, app:screenshots), against stand-in tools
+mise run test:scripts                                  # the repository's own scripts (workflow steps, app tasks, audits, cloud-setup.sh), against stand-in tools
 mise run fuzz --max-total-time 60                      # libFuzzer over every target in Fuzz/ (--target <name>, --list)
 
 mise run lint                                          # swift format lint --strict (alias fmt:check)
 mise run fmt                                           # swift format --in-place
 mise run audit                                         # dependency, unsafe, strict-build, action-pin, mise-pin tripwires
+mise run audit:actions                                 # every `uses:` a 40-hex SHA; reads the workflows as YAML and refuses what it cannot read
 mise run build:strict                                  # -strict-memory-safety, warnings as errors; skips before Swift 6.2
 
 # Apps (macOS only; mirrors the app-tests CI job). Each regenerates the project from Apps/project.yml first.
 mise run app:generate                                  # xcodegen; refuses an XcodeGen other than mise.toml's
 mise run app:build [ios|macos]                         # both by default; --configuration Release
 mise run app:test [ios|macos]                          # both by default; --only-testing/--skip-testing <ids,…> (need a platform), --results, --simulator
+mise run app:release [ios|macos]                       # Release builds, read for the Debug-only UI-test switch (the release-build CI job)
 mise run app:diagnose [TestResults]                    # a failed run's summary, runner logs, crash reports; ends in STEP lines and "UI-test summary"
 mise run app:screenshots [ios|macos]                   # the screenshot tour: Screenshots/<set>/*.png, index and a one-PNG contact sheet; --appearance dark, --device ipad
 mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
 mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs (app:screenshots too)
 ```
+
+Every app task has Xcode resolve the package's dependencies first and refuses to build unless the `Package.resolved`
+Xcode writes inside the generated project pins the commits `assert-no-dependencies.sh` names (`packages.sh`): the root
+`Package.resolved` does not govern an Xcode build. A new task that runs `xcodebuild` sources `packages.sh` too.
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and syncs
 over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only Settings
@@ -270,7 +276,9 @@ lists what is open (file protection and the screens, Credential Exchange, restor
 - Only five hexadecimal characters of a password's SHA-1 ever leave the device, in
   `GET https://api.pwnedpasswords.com/range/XXXXX` with `Add-Padding: true` and the `User-Agent`. The hosts are the two
   constants of `HygieneHost`; `HTTPSURL` has no public initialiser. Never add a configurable host, follow a
-  redirect, or put anything else in a request.
+  redirect, or put anything else in a request. That is a statement about each request. Across a vault's weekly
+  checks the service holds a linkable set of prefixes, its size, its changes and which belong to one item
+  (`docs/02-architecture.md` §13.1): never describe the checks as telling the service nothing.
 - A response that could not be read is an error, never "not breached": the parser's bounds (bytes, lines) fail closed
   and counts saturate. Suffix comparison (`PwnedRange.result`) scans every entry without branching on a match. The
   breached-account response is bounded *while reading* (entry 2,001 ends the read); never decode a whole array and
@@ -793,8 +801,15 @@ directions are tested; keep both when adjusting constants.
 - **No third-party dependencies, ever, without an ADR.** The one exception is swift-crypto (ADR 0006).
   `.github/scripts/assert-no-dependencies.sh` fails CI on any other package or product, a version or
   `Package.resolved` commit other than the ones it names, `CryptoExtras` linked on a non-Linux platform,
-  `.binaryTarget`, `.plugin(` or `unsafeFlags`. Shipped crypto comes only from CryptoKit, Security.framework and
-  CommonCrypto.
+  `.binaryTarget`, `.plugin(` or `unsafeFlags`, a manifest that imports anything but `PackageDescription` or uses
+  `#if`, `Context.`, `ProcessInfo` or `getenv` (it must evaluate to the same package everywhere), and a language mode
+  other than Swift 6. Shipped crypto comes only from CryptoKit, Security.framework and CommonCrypto.
+- **`Apps/project.yml` is held to an allowlist** (`.github/scripts/yaml-audit.py`, run by the same script): every key,
+  target type, dependency kind and build setting the spec may hold is named there, source paths stay inside `Apps/`,
+  and the strict-memory-safety, warnings-as-errors, script-sandboxing and Swift 6 settings must be present. A new
+  key or setting is refused until it is added to that list in the same pull request. The reader takes a subset of
+  YAML (block mappings and sequences, one-line scalars, one-line flow sequences) and refuses the rest, so write the
+  spec and the workflows plainly: no anchors, flow mappings, quoted keys or values continued on the next line.
 - **No unsafe constructs** outside `SecureMemory` — enforced by the `strict-memory-safety` job plus the
   `.github/scripts/assert-unsafe-confined.sh` tripwire (a marked construct would compile anywhere, and
   `@_silgen_name`-style bindings are not flagged by the compiler at all). No symlinks or non-Swift files
@@ -829,7 +844,9 @@ directions are tested; keep both when adjusting constants.
   `"account enrolment and device registry"`, `"hygiene in the vault session"`,
   `"shared vaults through the session"`, `"encrypted Watchword archive"`, `"interchange through the session"`,
   `"synced breach-check results"`, `"device-local store files"`), so **renaming a suite breaks CI deliberately** — update
-  `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
+  `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). The suite's
+  display name is `"Adversarial: <area>"`, and the check wants Swift Testing's own `Suite "Adversarial: <area>" passed`
+  line: a suite that is disabled or skipped counts as missing, as does one whose name merely contains another's. Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks. A suite only an Apple platform can
   build (`"local vault store"`, `"Keychain item protection"`, `"Apple adapters: HTTP client"`, `"…: iCloud Drive
   transport"`, `"…: CloudKit transport"`) has a `darwin:` line: required on macOS, reported as not required on Linux
@@ -851,10 +868,13 @@ directions are tested; keep both when adjusting constants.
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 
 - **Script tests** (`Tests/ScriptTests`, Python `unittest`, `mise run test:scripts`) cover the scripts Swift tests
-  cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, and the inline steps of
-  `screenshots.yml`, each run
-  as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun` and `sips`. Standard library only, Python 3.9 syntax
-  (Xcode's `python3`), and bash that macOS's 3.2 runs.
+  cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, the inline steps of
+  `screenshots.yml`, and the supply-chain gates themselves (`audit:actions`, the adversarial-suite check,
+  `audit:mise-pins`, `assert-no-dependencies.sh` with its `Apps/project.yml` allowlist, the app tasks' resolved-package
+  check and `app:release`, `cloud-setup.sh`), each run
+  as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun`, `sips`, `swift`, `xcodebuild` and `gpg`. Standard library
+  only, Python 3.9 syntax (Xcode's `python3`), and bash that macOS's 3.2 runs. A change to one of those scripts needs
+  its test here; a gate nobody tests is how a `grep` came to stand for a parser.
 
 `docs/04-test-plan.md` maps every requirement to its obligated tests and is the place to check before
 claiming a layer is covered.
@@ -862,14 +882,17 @@ claiming a layer is covered.
 ## CI
 
 `.github/workflows/ci.yml` — `package-tests` (2-runner matrix), `adversarial-tests`,
-`strict-memory-safety`, `lint`, `app-tests` (a macOS leg and four iOS-simulator legs, each a group of UI-test classes
-passed to `app:test` as `--only-testing`/`--skip-testing`), and `required` (`Required checks`), which
+`strict-memory-safety`, `lint` (swift-format, the script tests, and the action-pinning and mise-pin audits),
+`app-tests` (a macOS leg and four iOS-simulator legs, each a group of UI-test classes
+passed to `app:test` as `--only-testing`/`--skip-testing`), `release-build` (`app:release` for macOS and the iOS
+simulator: the only job that compiles the Release configuration, read afterwards for the Debug-only UI-test switch),
+and `required` (`Required checks`), which
 fails unless every other job succeeded and is the one check branch protection names, so renaming a matrix leg for a
 runner bump never strands `main` waiting on a check that no longer reports. Everything Xcode-, AppKit- or
 screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is
 `mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
-runs, the libFuzzer harness in `Fuzz/` (`mise run fuzz`), and an audit that every `uses:` is a 40-hex
-commit SHA. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS runner (`mise run ci:gate`), so a cloud
+runs, the libFuzzer harness in `Fuzz/` (`mise run fuzz`), and the audit that every `uses:` is a 40-hex
+commit SHA, which also gates pull requests in `lint`. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS runner (`mise run ci:gate`), so a cloud
 session can run Mac-only gates before opening a pull request; it gates nothing. A dispatch runs the workflow and
 `ci:gate` as they are on that branch (one cut before mac-run.yml merged needs a rebase first), so `ci:gate`'s refusals
 catch mistyped requests, not attackers: write access, no secrets and the read-only token are the controls.
@@ -878,7 +901,10 @@ in a PR comment, review or review comment (in the thread, or on the whole PR for
 with a secret and a write-scoped token (`pull-requests: write`, never `contents: write`); its Claude job alone runs in
 the `staging` environment, which holds that secret. Its controls are in
 `docs/07-supply-chain.md` §3.2. `issue_comment` runs the default branch's copy of the file; the other triggers run the
-PR's. Its action is the one third-party action, so it needs its own entry in the repository's allowed-actions list
+PR's, so the `authorize` job's "admin only" binds `issue_comment` alone, and what keeps the secret from an account
+that can push is the environment's required reviewer (`docs/08-repository-hardening.md` §1.2), a setting the tree
+cannot show. The allowlist bounds what Claude can change, not what a comment can say: a steered review could post
+the job's secrets, which §3.2 records as open. Don't describe either control as more. Its action is the one third-party action, so it needs its own entry in the repository's allowed-actions list
 (`docs/08-repository-hardening.md` §1).
 `screenshots.yml` — captures the tour's screens for a PR and attaches them: on the `screenshots` label (and each push
 while it is on), on a same-repository head commit whose message has a line that is exactly `[screenshots]` (never a
@@ -913,7 +939,7 @@ silently drops it from any branch-protection list that named the old one.
 Supply-chain rules that apply to edits in `.github/`:
 
 - **Pin actions to full commit SHAs**, never tags; add the `# v4`-style comment and the mapping in the
-  header block. The nightly audit fails the build otherwise.
+  header block. `audit:actions` fails the pull request otherwise (`lint` job), and the nightly again.
 - Keep `permissions: contents: read` at workflow and job level, `persist-credentials: false` on every
   checkout, and the trigger as `pull_request` — never `pull_request_target`. The two jobs with more
   (`pull-requests: write` in `claude-pr.yml` and in `screenshots.yml`'s `comment`) check out and run nothing from
@@ -922,10 +948,15 @@ Supply-chain rules that apply to edits in `.github/`:
 - Build tools reach CI only through mise with `MISE_LOCKED=1`, so every tool needs a `mise.lock` entry
   (URL and SHA-256). Bump a tool by editing `mise.toml` and running
   `mise lock --platform macos-arm64,linux-x64`; commit both files. mise itself is pinned by version and
-  SHA-256 in `.github/scripts/install-mise.sh` (and again in `cloud-setup.sh`; `mise run audit:mise-pins` fails if
-  they differ), and a bump is reviewed like an action pin. That script also writes mise's CI settings to
+  SHA-256 in `.github/scripts/install-mise.sh` (and again in `cloud-setup.sh`; `mise run audit:mise-pins`, in the
+  `lint` job, fails if they differ), and a bump is reviewed like an action pin. That script also writes mise's CI settings to
   `$GITHUB_ENV`, including `MISE_TASK_RUN_AUTO_INSTALL=0`, so a job that needs a tool installs it by name
   (`mise install xcodegen`).
+
+- `cloud-setup.sh` installs a toolchain as root on a cloud session's VM. A download that does not verify against the
+  pinned key ends the attempt: never add a fallback that runs after a failed verification, and keep the unverified
+  swiftly installer behind `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` until it is pinned by a checksum checked against
+  the publisher's.
 
 `.claude/` and other agent/editor configuration is intentionally uncommitted
 (`docs/07-supply-chain.md` §5). `docs/08-repository-hardening.md` is the `gh` runbook for branch

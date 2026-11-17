@@ -132,9 +132,11 @@ jobs:
         run: mise run audit:unsafe
 
   lint:
+    # swift-format, the script tests and the two audits that need no build. The name is what the check has always been
+    # called; nothing but `required` below depends on it.
     name: swift-format lint
     runs-on: xcode-27
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

@@ -77,7 +77,9 @@ Status: delivered as specified, with these scoping notes.
   presented as a newer one.
 - `VaultKeyGrant` has no persisted encoding yet; it arrives with the membership records it travels
   in (milestone 4).
-- Secure Enclave wrapping of the Secret Key is part of the Keychain adapter (milestone 2).
+- Secure Enclave wrapping of the Secret Key was planned for the Keychain adapter (milestone 2) and was **not built**:
+  the adapter stores the Secret Key as a Keychain item of class `WhenPasscodeSetThisDeviceOnly` and nothing more
+  (`02-architecture.md` §4; review finding Z107). Open, with the Enclave device key of milestone 3.
 - Crypto tests need CryptoKit and run on the macOS CI matrix; since ADR 0006 they also run on Linux against
   swift-crypto, which is evidence about the logic and not about the implementation that ships.
 

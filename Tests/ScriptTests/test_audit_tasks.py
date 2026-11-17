@@ -3,7 +3,7 @@ check that every adversarial area's suite ran, and mise-tasks/audit/mise-pins.
 
 The suite check was `grep -F <name>` anywhere in the log, so one area's name inside another's ("sync log" in "sync
 log, item metadata"), in a test's display name, or on the line that says a suite was skipped all counted as that area
-having run (docs/06-adversarial-review.md Z105)."""
+having run (docs/06-adversarial-review.md Z104)."""
 
 import os
 import shutil

@@ -1,7 +1,7 @@
 """mise-tasks/audit/actions, run as it is in scratch directories holding made-up workflows.
 
 The audit is the control behind "every action is pinned to a commit SHA" (docs/07-supply-chain.md §3.1). It was a
-`grep` for one spelling of `uses:`, and YAML has several: an end-to-end audit (docs/06-adversarial-review.md Z105)
+`grep` for one spelling of `uses:`, and YAML has several: an end-to-end audit (docs/06-adversarial-review.md Z104)
 wrote each of the spellings below and none was reported. Each is a test here, with the two cases the grep got wrong
 the other way: a correctly pinned value in quotes, and the word in a script or a comment."""
 

@@ -5,7 +5,7 @@ Its checks of Apps/project.yml were four `grep`s. An end-to-end audit (docs/06-a
 spec with each of the things below in it and none was reported: shell at generation and at build time, files no check
 reads, native sources from outside Apps/, a remote package in flow style, and the memory-safety setting quoted or
 simply deleted. The spec is now parsed and held to an allowlist (.github/scripts/yaml-audit.py); every case is a
-test. The manifest half (Z105) is here too: a Package.swift that reads its environment, or puts a target back in
+test. The manifest half (Z104) is here too: a Package.swift that reads its environment, or puts a target back in
 the Swift 5 language mode."""
 
 import json

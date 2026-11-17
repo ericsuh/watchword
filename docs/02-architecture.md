@@ -32,7 +32,7 @@ Field values (passwords, TOTP secrets, passkey private keys, answers, codes), it
 | Adversary | Has | Must not get | Primary mitigations |
 | --- | --- | --- | --- |
 | A1 Sync-store attacker (compromised iCloud account, Apple insider, Dropbox breach) | All ciphertext, record structure, timestamps, sizes | Any field value or title; ability to inject/replay/swap records undetected | 2SKD (128-bit Secret Key makes cracking infeasible), AES-GCM with AAD binding, signed change log, fingerprint-verified member keys |
-| A2 Thief with a locked device | Encrypted flash, Keychain items bound to passcode/biometry | Secret Key, derived keys | Keychain classes `WhenPasscodeSetThisDeviceOnly`, Secure Enclave wrapping, no plaintext on disk |
+| A2 Thief with a locked device | Encrypted flash, Keychain items bound to passcode/biometry | Secret Key, derived keys | Keychain class `WhenPasscodeSetThisDeviceOnly` (passcode- and device-bound through the Keychain's own key hierarchy), no plaintext on disk. No further wrap of the Secret Key is built (§4; review finding Z107) |
 | A3 Thief with an unlocked device, app locked | App sandbox, pasteboard | Vault contents | Auto-lock, zeroised memory, pasteboard expiry, password required after interval |
 | A4 Malicious household member (current) | Vault key for shared vaults, their own devices | Items in vaults they are not a member of; ability to impersonate the owner | Per-vault keys, signed membership changes, owner-only admin operations |
 | A5 Former member | Old vault key, items synced before removal | Items created/changed after removal | Vault key rotation and re-encryption on removal (F4.3) |
@@ -118,7 +118,19 @@ Rationale and parameters:
   primitive root mod 31), which detects every one- or two-character error, including every adjacent
   transposition. It is a typo check, not a MAC. Implemented in `WatchwordCrypto.SecretKey`. Stored in the Keychain
   (`kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, non-synchronisable, Keychain access group
-  shared with the extension), additionally wrapped by a Secure Enclave P-256 key where available.
+  shared with the extension) as a generic-password item holding the key's bytes: that class is the
+  whole of its protection at rest. Earlier versions of this section and of §2 said it was
+  "additionally wrapped by a Secure Enclave P-256 key where available". That was never built:
+  `SystemKeychainStore` stores every item but the Local Unlock Key with the accessibility class
+  alone, nothing under `Sources/` or `Apps/` creates an Enclave key, and ADR 0004 does not mention
+  one (review finding Z107). So an adversary who can extract an item of that class (the device
+  passcode known or found, a forensic extraction that defeats the Keychain's hardware binding) has
+  the Secret Key itself, with no second hardware-bound layer in between; the account password is
+  then all that stands between them and the sync store's ciphertext. **Open:** an Enclave-held
+  P-256 key that wraps the Secret Key (ECIES, unwrapped per unlock). It would need an amendment to
+  ADR 0004 and an adversarial test, and it is worth less than it sounds: an Enclave key with no
+  access control is usable by anything that can run as the app, so it adds to the Keychain class
+  only against extraction of the item's bytes. Tracked with the Enclave device key (W11).
   It is never placed in iCloud Keychain by default (`adr/0004-secret-key-storage.md`).
 - **KDF.** PBKDF2-HMAC-SHA256 from CommonCrypto with iterations calibrated at account creation to
   ≥650,000 and ≥300 ms on the creating device; parameters are stored in the account header and have
@@ -1989,10 +2001,41 @@ generator, and reaches the network only through the `HTTPClient` port. Everythin
 Hygiene is the one feature that talks to a third party, so it adds two positions to §2:
 
 - **The service and the network path** (the Have I Been Pwned operator, its CDN, a TLS-intercepting proxy
-  the device trusts). Sees every request and chooses every response. It learns five hexadecimal characters
-  of a password's SHA-1 per check and the times of the checks, and nothing else; it cannot move a request
-  to another host, exhaust the device with a response, or switch the scanner off. It can always lie by
-  omission (leave a breached suffix out of a range), which nothing on the device can detect.
+  the device trusts). Sees every request and chooses every response. From any one request it learns five
+  hexadecimal characters (twenty bits) of one password's SHA-1 and the time, and nothing else: no request
+  carries more, and no other request is made. It cannot move a request to another host, exhaust the device
+  with a response, or switch the scanner off. It can always lie by omission (leave a breached suffix out of
+  a range), which nothing on the device can detect.
+
+  What it learns *across* requests is more, and an earlier version of this section stopped at "nothing
+  else" (review finding Z108). One device asks about all its passwords from one address on a weekly
+  cadence, so the service can group the requests and then holds:
+  - **A linkable set.** The weekly pass asks again for every prefix it checks (the cache is bypassed for
+    a pass's own checks, so that a pass is a fresh look), in an order that repeats (failures, reason, last
+    check, item ID). The set of prefixes, twenty bits for each distinct password, is a fingerprint of the
+    vault that survives a change of address or a VPN: the same set next week is the same vault.
+  - **Its size.** Requests per pass is the number of distinct prefixes, close to the number of distinct
+    passwords (two that share a prefix cost one request).
+  - **Its changes.** A changed password is one prefix leaving the set and another arriving, with the day; a
+    new item is a new prefix.
+  - **Grouping by item.** An item with several password fields sends its requests back to back, before the
+    spacing and jitter that separate items, so the service sees which prefixes belong to one item.
+  - **A match against known people.** Whoever holds breach data with identities can compare the set with
+    the prefixes of a named person's leaked passwords. A prefix is twenty bits, so a set of a few hundred
+    coincides with one given leaked password by chance about once in a few thousand vaults: one match with
+    a named person's leaked password is suggestive, two or three are close to naming them, and each says
+    that leaked password is probably still in use. These are estimates from the prefix length, not
+    measurements.
+
+  This is the upper bound, not the rule for every device: in a household another device's synced check
+  stands in for this device's own for up to 28 days (`maximumSyncDeferral`, §13.9), so a device may send
+  only part of its set in a given week, and the household's devices then show as several partial sets.
+  It is inherent in using the range API for a whole vault from one address, and padding (`Add-Padding`)
+  hides response sizes, not requests. Shuffling the weekly order with the injected generator and spreading
+  one item's fields over separate steps would remove the order and the per-item grouping; neither removes
+  the set, its size or its changes. Not built; for the owner to weigh against F9.2's weekly pass. What is
+  promised is therefore what F9.1 says and no more: no password, no full hash, no item title and no
+  account identifier leaves the device. It is not that the service learns nothing about the vault.
 - **Whoever reads the device at rest** (A2, A3, A8). Finds nothing derived from a password in the clear:
   no hash, no prefix, no reuse token, no breach result (ADR 0005).
 - **A malicious household member** (A4) chooses the items a victim's device analyses, so the cost of one

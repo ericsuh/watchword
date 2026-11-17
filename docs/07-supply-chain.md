@@ -35,8 +35,45 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
   dependency therefore requires editing the guard in the same pull request, which is visible in review. It also checks
   the resolved manifest (`swift package dump-package`):
   only plain Swift source and test targets, each at its conventional path (a custom `path:` could
-  compile files no other check scans), no experimental features or C++ interop, and the test-only
+  compile files no other check scans), no experimental features or C++ interop, the Swift 6
+  language mode for the package and no target put back into Swift 5, and the test-only
   `WatchwordTestSupport` (seeded and deliberately broken RNGs) linked only into test targets.
+  That dump is what the manifest evaluates to on the machine running the check, and a manifest is
+  a program, so the script also holds it to being one value everywhere: it may import
+  `PackageDescription` and nothing else, and may not use `#if`, `Context.`, `ProcessInfo` or
+  `getenv`. Without that, a dependency added only where `GITHUB_ACTIONS` is unset shows CI a clean
+  dump (review finding Z104).
+- **[enforced; not yet run on a Mac]** The pin reaches the apps only through a second check. The
+  committed `Package.resolved` governs `swift build` and `swift test`, where this package is the
+  root. The apps are built by xcodebuild from a generated project that names the package by path,
+  and Xcode resolves a local package's dependencies for itself, into a `Package.resolved` of its
+  own inside the generated, uncommitted project: by the `4.5.2` tag, which can be moved, and for
+  swift-asn1 by the newest release in swift-crypto's range. So `app:build`, `app:test`,
+  `app:release` and `app:test-keychain` have Xcode resolve first
+  (`xcodebuild -resolvePackageDependencies`) and stop, before anything is compiled, unless that
+  file pins exactly the commits `assert-no-dependencies.sh` names; they check it again after the
+  build, and a missing file fails (`mise-tasks/app/packages.sh`, review finding Z102). Until this
+  existed, a re-pointed tag left every package gate green and was compiled into the next app
+  build, which is the artefact T1 is about. `Tests/ScriptTests/test_app_tasks.py` drives the tasks
+  with a stand-in `xcodebuild`; where Xcode writes the file, and that a build after an explicit
+  resolution does not resolve differently, are Xcode's documented behaviour and have not been
+  seen on a Mac. If the first Mac run shows the file elsewhere, the tasks fail closed.
+- **[enforced]** `Apps/project.yml` can add everything the manifest is forbidden: a remote
+  package, shell at generation or build time, prebuilt frameworks, native sources, settings that
+  switch off what the compiler enforces. `assert-no-dependencies.sh` hands it to
+  `.github/scripts/yaml-audit.py`, which parses it and holds it to an allowlist: the top-level
+  keys, option keys, target types, per-target keys, dependency kinds, scheme keys and build
+  settings it may contain are each named there, the one package is the repository's own by path,
+  every source path stays inside `Apps/` except the one named Keychain test file, and
+  `SWIFT_STRICT_MEMORY_SAFETY`, `SWIFT_TREAT_WARNINGS_AS_ERRORS`, `ENABLE_USER_SCRIPT_SANDBOXING`,
+  `SWIFT_STRICT_CONCURRENCY` and the Swift 6 language version must be *present* with their values,
+  since a setting that is merely deleted is off. No settings per configuration, so nothing can
+  define `DEBUG` for Release. It was four `grep`s until review finding Z103, which a flow-style
+  package, a quoted key or value, a key they did not list, a dependency written as a list entry
+  or a deleted line all passed. A tripwire still, with review as the backstop: it reads the spec,
+  not the project XcodeGen generates from it, and a new XcodeGen key is refused until it is added
+  to the list in the same pull request. Adding a setting or target type is therefore an edit to
+  that list, visible in review, like a dependency.
 - **[enforced]** `.github/scripts/assert-unsafe-confined.sh` (strict-memory-safety job) fails on
   unsafe constructs, `@unchecked`, or underscored attributes outside `Sources/SecureMemory`, on
   hand-bound foreign symbols (`@_silgen_name`, `@_cdecl`, `@_extern`) anywhere, and on symlinks or
@@ -136,8 +173,19 @@ covers its own code and its nested `oven-sh/setup-bun`, which it pins to a SHA i
 Code CLI it installs is pinned by version inside the action but fetched from `claude.ai/install.sh`
 at run time, so that download is trusted the way the runner image is (§3.3).
 
-- **[enforced]** the `action-pinning-audit` job in `security-nightly.yml` fails if any `uses:` in
-  any workflow is not a 40-hex SHA.
+- **[enforced]** `mise run audit:actions` fails if any `uses:` in any workflow (or in a composite
+  action kept under `.github/`) is not a 40-hex SHA. It runs on every pull request, in `ci.yml`'s
+  `lint` job, which `Required checks` needs, and again in the `action-pinning-audit` job of
+  `security-nightly.yml`. It ran nightly only until review finding Z104, so an unpinned action
+  merged green and was reported up to a day later. It reads the workflows as YAML
+  (`.github/scripts/yaml-audit.py`), because a `grep` for `uses:` reads one spelling and GitHub
+  reads several: a quoted or escaped key, a flow mapping, a space before the colon and a value on
+  the line after its key all passed the grep. The reader takes the subset of YAML the workflows
+  are written in and refuses everything else, so a spelling it does not understand fails the
+  audit instead of passing unread; where PyYAML is installed, the script tests compare its
+  reading of every workflow with PyYAML's. The residual is the reader itself: it is this
+  repository's code, a few hundred lines, and a workflow it accepts but GitHub reads differently
+  would be a hole. That is why it refuses rather than interprets.
 - **[done]** `maxim-lobanov/setup-xcode` was removed entirely and replaced by
   `.github/scripts/select-xcode.sh`. It was the only third-party action in the project, it ran in
   every job, and it did work that is a few lines of `xcode-select`. Fewer actions is a better
@@ -167,13 +215,28 @@ at run time, so that download is trusted the way the runner image is (§3.3).
   review or review comment. It is the one workflow that holds a secret (`ANTHROPIC_API_KEY` or
   `CLAUDE_CODE_OAUTH_TOKEN`) and a token that can write, and its `issue_comment` trigger runs the
   default branch's copy with secrets even when the pull request comes from a fork. Its controls:
-  - **Admin only.** A separate `authorize` job, read-only and without secrets, asks the API for the
-    sender's permission; the Claude job runs only on `admin`. Bots never pass. The action also
-    requires write access and a human actor. Fork pull requests are skipped on the `pull_request`
-    and review triggers, which get no secrets.
-  - **One job sees the secret.** The Claude job runs in the `staging` GitHub Environment, so the
-    key can be an environment secret that the `authorize` job and every other workflow cannot
-    read, and staging's protection rules (required reviewers, deployment branches) gate it.
+  - **Admins only, on the trigger where this file decides.** A separate `authorize` job, read-only
+    and without secrets, asks the API for the sender's permission; the Claude job runs only on
+    `admin`. Bots never pass. The action also requires write access and a human actor. Fork pull
+    requests are skipped on the `pull_request` and review triggers, which get no secrets. This is a
+    rule of the default branch's copy of the file, so it binds `issue_comment`, which always runs
+    that copy, and nothing else: on `pull_request`, `pull_request_review` and
+    `pull_request_review_comment` GitHub runs the pull request's own copy, in which `authorize` is
+    whatever the branch says, and a same-repository branch can add any other workflow that names
+    `environment: staging`. Against an account that can push (a later collaborator, a stolen
+    write-scoped token, a prompt-influenced session acting as the owner, for whom `authorize`
+    passes unedited), "admin only" therefore protects nothing. The next control does.
+  - **One job sees the secret, and a person releases it.** The Claude job runs in the `staging`
+    GitHub Environment, and the key is an environment secret there, never a repository secret, so
+    the `authorize` job and every workflow that does not name the environment cannot read it. A
+    job that does name it waits for the environment's **required reviewer**, and runs only from a
+    ref its deployment-branch rule admits (the default branch and pull-request merge refs: the
+    rule cannot be narrower while the pull-request triggers exist). That approval is what stands
+    between write access and the secret. Whoever approves checks which workflow is asking and
+    whether the pull request touches `.github/`, because an approval on a pull-request trigger
+    releases the secret to the pull request's own workflow files. The environment and its rules
+    are repository settings, invisible in the tree: `08-repository-hardening.md` §1.2 creates
+    them and its §9 prints them. Until that has been run and checked, this control is unverified.
   - **Comment, not change.** The Claude job has `contents: read` and `pull-requests: write`, and
     uses the job's own `GITHUB_TOKEN` rather than the Claude GitHub App's broader one. The tool
     allowlist admits reading files, `gh pr view`/`diff`/`comment` on that pull request, inline
@@ -191,8 +254,45 @@ at run time, so that download is trusted the way the runner image is (§3.3).
     (`08-repository-hardening.md` §1); a bump changes those entries with the pin.
 
   The residual risk is prompt injection: an admin can ask Claude about a pull request written by
-  someone else, whose text can try to steer what Claude posts. The tool allowlist bounds what it
-  can do to commenting on that one pull request.
+  someone else, whose text can try to steer what Claude posts. The tool allowlist bounds what
+  Claude can *change* to comments on that one pull request. It does not bound what a comment can
+  *say*, and an earlier version of this section claimed it did. **[open]** The action runs Claude
+  Code with the job's secrets in its process environment (`ANTHROPIC_API_KEY` or
+  `CLAUDE_CODE_OAUTH_TOKEN`, and the job's `pull-requests: write` token; read in the action's
+  `action.yml` at the pinned commit). The allowlist grants `Read`, `Glob` and `Grep` with no path
+  limit, which reaches `/proc/self/environ`; `Bash(gh pr comment <n>:*)` is a prefix rule that
+  also admits `--body-file <path>`, `--edit-last` and `--delete-last`; and the thread reply's
+  `gh api` rule admits `--input <file>` and `-F body=@<file>`. A shell variable in a `--body`
+  argument is expanded from the same environment. So a review that the pull request's text
+  steered could post the Anthropic credential and the job token in a comment on a public
+  repository, where the author of that pull request reads them. The token dies with the job (30
+  minutes at most) and cannot approve or push; the Anthropic credential does not expire by
+  itself. It needs an admin to mention Claude on a hostile pull request and the injection to
+  land, which is why it is recorded as medium (review finding Z100) and not fixed by assertion.
+
+  What would narrow it, none of it applied, because none of it can be run from this repository
+  and a wrong guess breaks every review without a red check:
+
+  - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"` in the Claude job's `env:`. The pinned `action.yml`
+    passes it to the CLI, and the action's `docs/security.md` describes it as a best-effort scrub
+    of Anthropic, cloud and GitHub Actions secrets from the environment of the commands Claude
+    runs. Whether `gh` keeps the token it needs under the scrub is the thing to test.
+  - Deny rules beside the allowlist (`--disallowedTools`, which the action documents): reading
+    under `/proc`, the runner's temporary directory and the home directory, and the file-taking
+    and comment-rewriting flags of `gh pr comment` and `gh api`. Rules that constrain a command's
+    arguments are pattern matches on the command line and are fragile; they reduce the routes,
+    they do not close them. The scrub does not cover `Read` of `/proc/self/environ`, which is the
+    CLI's own process, so the deny rule for it is needed as well.
+  - Refusing fork pull requests on `issue_comment`, in `authorize`. That removes the outside
+    author from the path entirely and also removes the use the trigger exists for, so it is the
+    owner's choice.
+
+  The test is the one the finding gives: in a scratch repository with this workflow and a dummy
+  secret, an admin asks Claude outright to run `gh pr comment <n> --body-file /proc/self/environ`,
+  `gh pr comment <n> --body "$ANTHROPIC_API_KEY"`, `gh api … -F body=@/proc/self/environ` and to
+  `Read` `/proc/self/environ`; with the changes in place none posts the dummy, and an ordinary
+  review still does its work. Until then the stated bound is this paragraph, and the Anthropic
+  credential in `staging` should be one that can be revoked without ceremony.
 - **[done]** `screenshots.yml` captures the screenshot tour's pictures (`04-test-plan.md` §5.1) for a pull request
   and attaches them to it. It holds no secret. It runs on the `screenshots` label, on each push while the pull
   request carries the label, on a push to a same-repository branch whose head commit message has a line that is
@@ -320,12 +420,21 @@ at run time, so that download is trusted the way the runner image is (§3.3).
   command. That puts mise in the trust base of every job, not only `app-tests`: the same pinned
   release, installed by `install-mise.sh` (macOS arm64, and linux x64 for the nightly pinning
   audit, whose digest is the one `cloud-setup.sh` already pins; `mise run audit:mise-pins` fails if
-  the two scripts ever disagree). The same script writes mise's CI settings to `$GITHUB_ENV`, so
+  the two scripts ever disagree, on every pull request since review finding Z104: it used to run in
+  no workflow, only in a local `mise run audit`). The same script writes mise's CI settings to `$GITHUB_ENV`, so
   every job gets them from one place. Auto-install is off (`MISE_TASK_RUN_AUTO_INSTALL=0`), so a
   job downloads no tool it does not name; only `app-tests` installs one, and the Linux job disables
   the macOS-only XcodeGen outright. The residual is the one above: mise as its maintainers built it, with
   `contents: read` and no secrets in reach. The task scripts are repository files, reviewed like
   the workflow steps they replaced.
+- **The cloud session's toolchain.** **[done]** `cloud-setup.sh` installs Swift as root on the VM that holds a cloud
+  session's checkout. The release tarball is verified against a pinned signing key, and a tarball that does not
+  verify now ends the attempt. It used to be followed by a second installer, swiftly, downloaded from an
+  unversioned URL with no checksum and run as root, so the one check could be failed on purpose to reach the path
+  without one (review finding Z106). swiftly is now fetched and run only when the tarball could not be downloaded at
+  all *and* `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` is set (`09-cloud-sessions.md` §3). **[open]** swiftly itself is
+  still unpinned: no published checksum for it is recorded in this repository, and pinning one that was not checked
+  against the publisher's would be worse than the opt-in.
 - **The runner image itself** is a large trust base (Xcode, Homebrew, preinstalled tooling) that we
   do not control. Accepted: the alternative is self-hosted runners, which trade this for a
   machine we would have to secure ourselves. Revisit if the project ever signs releases in CI.
@@ -369,8 +478,9 @@ so that dismissing it in the web UI is never the only record:
 in an order that does not lock you out, are in `08-repository-hardening.md`:
 
 - Branch protection on `main`: require `Required checks`, the `ci.yml` job that fails unless
-  `package-tests` (both runners), `adversarial-tests`, `strict-memory-safety`, `lint` and both
-  `app-tests` legs succeeded; require review; no force-push; no deletion.
+  `package-tests` (both runners), `adversarial-tests`, `strict-memory-safety`, `lint` (which also
+  runs the script tests and the action-pinning and mise-pin audits), every `app-tests` leg and
+  both `release-build` legs succeeded; require review; no force-push; no deletion.
 - Require signed commits on `main`, so a push with stolen credentials is distinguishable.
 - Restrict who may edit `.github/` (a CODEOWNERS entry), because a workflow edit is code execution.
 - Tag protection on release tags, with two-person review.

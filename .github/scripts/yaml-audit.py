@@ -6,7 +6,7 @@
     yaml-audit.py dump <file>             the document as JSON, for the script tests
 
 Both audits used to be `grep`s, and a grep reads spellings: `- {uses: a/b@v1}`, `"uses": a/b@v1`, a value on the next
-line, a flow-style remote package or a quoted `"NO"` all passed (docs/06-adversarial-review.md Z103, Z105). The runners
+line, a flow-style remote package or a quoted `"NO"` all passed (docs/06-adversarial-review.md Z103, Z104). The runners
 promise no YAML library (Xcode's python3 is the standard library alone), so this file reads a small subset of YAML
 itself and refuses everything outside it. That is the point of it, not a limitation to be worked round: a file this
 does not understand fails the audit, so nothing can be hidden in a construct it skipped. The subset is what the

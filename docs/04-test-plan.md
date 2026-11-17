@@ -977,7 +977,16 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   not be able to smuggle through; the BMP reader), the `app:screenshots` task with stand-ins for `mise`, `xcrun`
   and `sips` (what it writes, announces and summarises when a capture fails), and the two inline scripts of
   `screenshots.yml`, read out of the file and run against a stand-in `gh` and `curl` (who can start a capture, what
-  the comment job will and will not post or link, and which comment it will overwrite) [`lint`, `test:scripts`].
+  the comment job will and will not post or link, and which comment it will overwrite). Since the audit of
+  2026-11-17 (`06-adversarial-review.md` §Z) the script tests also hold the supply-chain gates themselves, each run
+  as it is in a scratch directory: `audit:actions` over every spelling of `uses:` a grep did not read; the
+  adversarial-suite check over logs in which a suite is missing, skipped, or named only inside another's name;
+  `audit:mise-pins`; the dependency tripwire with a stand-in `swift` (the `Apps/project.yml` allowlist over each
+  planted bypass, a manifest that reads its environment or leaves Swift 6 mode, and a `Package.resolved` that pins
+  anything else); the app tasks with a stand-in `xcodebuild` (no build from a resolution other than the pinned
+  commits; a Release product holding a Debug-only marker); and `cloud-setup.sh` with stand-ins for `curl` and `gpg`
+  (a tarball that does not verify installs nothing and tries nothing else). The job then runs the two audits that
+  need no build [`lint`, `test:scripts`, `audit:actions`, `audit:mise-pins`].
 - `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator on `xcode-27`: one leg for macOS, and the
   iOS UI tests split over four legs that run side by side, because one simulator running them all took longer than a
   job may: the tour; `ImportExportTests`; `VaultSharingTests` and `DeviceRevocationTests`; and the rest (the other
@@ -993,12 +1002,18 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   missing `Apps/project.yml` fails `app:generate` [`app:test macos`, `app:test ios`]. The macOS scheme includes the app-hosted
   `WatchwordKeychainTests` bundle, unentitled, so it compiles and its round trip skips; the signed
   run is local only (`app:test-keychain`, §6.2), because CI has no provisioning profile.
+- `release-build`: both apps in the Release configuration, which no other job compiles, one leg each for macOS and
+  the iOS simulator. The task fails on a build error and then if the app bundle or its embedded AutoFill extension
+  contains the text of a Debug-only UI-test facility (`--uitest`, `WATCHWORD_UITEST_PASSWORD`, the Settings section
+  and the "Lock now" button): the evidence that the `--uitest` switch of §5 does not ship. Each marker must still be
+  in the sources, and a script test holds that each is used only inside `#if DEBUG`. Not yet run on a Mac
+  [`app:release macos`, `app:release ios`].
 - `security-nightly.yml`: scheduled fuzzing, long randomised sync simulations and the action
-  pinning audit [`fuzz`, `test:long`, `audit:actions`].
+  pinning audit again [`fuzz`, `test:long`, `audit:actions`].
 
 - `required` (`Required checks`): needs every job above and fails unless each succeeded. Branch
   protection requires this one check (`08-repository-hardening.md` §5), so every job above blocks a
-  merge, including every app-test leg (a matrix job's result is all its legs'), and a runner bump or a regrouping
+  merge, including every app-test and release-build leg (a matrix job's result is all its legs'), and a runner bump or a regrouping
   that renames a matrix leg needs no protection change.
 
 - `screenshots.yml`: not a gate. On the `screenshots` label (and each push while a pull request carries it), a

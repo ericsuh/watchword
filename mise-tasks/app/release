@@ -11,7 +11,7 @@
 # environment, the stand-in file sources and the Settings section that drives them. That they are absent from a build
 # that ships was asserted by comments alone: every scheme and every CI leg built Debug, so Release was never compiled,
 # and a spec edit or an XcodeGen default that defined DEBUG there would have shipped the switch with every check green
-# (docs/06-adversarial-review.md Z111). This task compiles Release, which also finds a Release-only build error before
+# (docs/06-adversarial-review.md Z105). This task compiles Release, which also finds a Release-only build error before
 # a release does, and then reads the product.
 #
 # What it reads for is text those facilities cannot be built without. Each marker must still be in the sources, or the

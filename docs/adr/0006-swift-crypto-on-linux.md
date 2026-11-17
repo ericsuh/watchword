@@ -51,6 +51,11 @@ Options considered:
   else fails CI, so a bump is an edit to that script and an amendment here, reviewed like an action pin. Vendoring was
   rejected: it would put several hundred thousand lines of BoringSSL C under the repository, which the Swift-only rule
   for `Sources/` exists to prevent, and nobody would review it; a pinned commit gives the same integrity.
+  *Amended 2026-11-17 (review finding Z102):* the same integrity for `swift build` and `swift test` only, as first
+  written. The committed `Package.resolved` is not what an Xcode build reads: the apps' generated project names this
+  package by path, and Xcode resolves its dependencies again, by the tag, into a file inside the uncommitted project.
+  The pin covers an app build only through the app tasks, which have Xcode resolve first and refuse to build unless
+  the file it wrote pins these same two commits (`mise-tasks/app/packages.sh`). That step has not yet run on a Mac.
 - **macOS stays the gate.** A Linux pass is evidence about logic (the unlock state machine, AAD binding, the key
   hierarchy, error mapping, zeroisation order), not about the implementation that ships. The known-answer suites run on
   both platforms, so both backends are held to the same RFC outputs.

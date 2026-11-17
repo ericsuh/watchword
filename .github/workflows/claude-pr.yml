@@ -6,11 +6,22 @@ name: Claude PR
 #
 # This is the one workflow here that holds a secret and a token that can write. It is held to the rules of
 # docs/07-supply-chain.md §3.2 as far as its purpose allows:
-#   - Admin only. The `authorize` job (read-only token, no secrets) asks the API for the sender's permission, and the
-#     job holding the secret runs only on `admin`. Bots never pass; the action also refuses non-human actors.
+#   - Admins only, where this file decides. The `authorize` job (read-only token, no secrets) asks the API for the
+#     sender's permission, and the job holding the secret runs only on `admin`. Bots never pass; the action also refuses
+#     non-human actors. That is a rule of the default branch's copy, so it holds for `issue_comment`, which always runs
+#     that copy. On the other three triggers GitHub runs the pull request's own copy of this file: there `authorize`
+#     says whatever the branch says, and any workflow on a same-repository branch can name `environment: staging`. So
+#     against an account that can push, "admin only" is not what keeps the secret. The environment is: staging's
+#     required reviewer, who approves each run, and its deployment-branch rule (docs/08-repository-hardening.md §1.2).
+#     A fork's pull request gets no secrets on those triggers whatever its copy says.
 #   - The token can comment, nothing else: `contents: read` and `pull-requests: write`. Claude cannot push, and the
 #     tool allowlist below admits reading files, `gh pr view`/`diff`/`comment` on this PR, inline review comments, and a
 #     reply in the one thread that mentioned it. No build, test or other command runs, so nothing in the PR executes.
+#     That bounds what Claude can change, not what a comment can say. The action's process holds this job's secrets
+#     in its environment (the Anthropic key or OAuth token, and the job's token), `Read` has no path limit, and
+#     `gh pr comment` and `gh api` take a body from a file or a variable. A review steered by text in the pull request
+#     could therefore post them in a comment anyone can read. Open: §3.2 states it as the residual and lists the
+#     hardening that waits on a test run (review finding Z100).
 #   - The PR's files are never checked out. Only the base branch is on disk, so the CLAUDE.md and `.claude/` that
 #     steer Claude are the reviewed ones, and a CLAUDE.md or skill the PR adds is never loaded as instructions; Claude
 #     reads the change through `gh pr diff`.
@@ -20,8 +31,9 @@ name: Claude PR
 # run the PR's own copy, and on a fork's PR get no secrets, so those are skipped.
 #
 # The Claude job runs in the `staging` environment, so its secret, ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (from
-# `claude setup-token`), can be an environment secret that no other job can read, and staging's protection rules apply
-# to it. The repository allows GitHub-owned actions only, so this action and the `oven-sh/setup-bun` it uses are
+# `claude setup-token`), is an environment secret, never a repository secret: no job reads it without naming the
+# environment, and a job that names it waits for staging's required reviewer (docs/08-repository-hardening.md §1.2
+# creates the environment and its rules, and §9 prints them). The repository allows GitHub-owned actions only, so this action and the `oven-sh/setup-bun` it uses are
 # listed in `patterns_allowed` at their SHAs (docs/08-repository-hardening.md §1); without that, every run is a startup
 # failure.
 
@@ -99,8 +111,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Only this job holds the secret, so only it names the environment. Each run also records a deployment to staging
-    # on the PR. A deployment-branch rule on staging must admit the default branch (issue_comment) and PR merge refs
-    # (the other triggers), or those runs are refused.
+    # on the PR, and waits there for the environment's required reviewer: that approval, not the `if:` above, is what
+    # stands between a pushed branch and the secret (the header says why). A deployment-branch rule on staging must
+    # admit the default branch (issue_comment) and PR merge refs (the other triggers), or those runs are refused.
     environment: staging
     permissions:
       contents: read

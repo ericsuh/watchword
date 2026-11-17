@@ -76,7 +76,7 @@ Why each host is there, and which ones the default list already covers:
 | `mise.jdx.dev` | The pinned mise binary (first source tried) | **No** — must be added |
 | `mise-versions.jdx.dev` | mise's version index; with exact pins it is rarely consulted, but without it mise falls back to the GitHub API, which the GitHub proxy can refuse (below) | **No** — must be added |
 | `github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` | The mise fallback download and the release assets of the tools pinned in `mise.toml` | Yes |
-| `archive.ubuntu.com`, `security.ubuntu.com`, `*.ubuntu.com` | apt dependencies, and the keyserver GPG may consult | Yes |
+| `archive.ubuntu.com`, `security.ubuntu.com`, `*.ubuntu.com` | apt dependencies | Yes |
 
 The default **Trusted** allowlist contains `swift.org` and `www.swift.org` but *not*
 `download.swift.org`, and that host is where every toolchain tarball lives.
@@ -127,7 +127,7 @@ authenticate to, and the GitHub proxy handles git.
      or key bundle that cannot be fetched: the download is discarded, nothing else is tried, and the
      session starts without a toolchain and is told that the download did not verify. The script
      used to answer this by running the second method below, which meant the one check it makes
-     could be failed on purpose to reach the path that makes none (review finding Z112).
+     could be failed on purpose to reach the path that makes none (review finding Z106).
    - **[swiftly](https://www.swift.org/install/linux/), only when asked for.** It resolves release
      URLs itself, so it is the second opinion if the URL layout has moved. But the script downloads
      it from an unversioned URL and has no checksum or signer pinned for it, and then runs it as
@@ -232,9 +232,10 @@ checksum did not match), or `mise trust/install FAILED` followed by the tail of
 `/tmp/watchword-cloud-setup/mise.log`. The usual cause is `mise.jdx.dev` or `mise-versions.jdx.dev`
 missing from the allowlist (§2).
 
-GPG needs `keyserver.ubuntu.com` to fetch the signing key; it is covered by the `*.ubuntu.com` entry
-in the Trusted defaults, which is one more reason to keep **"Also include default list of common
-package managers"** ticked in step 2.
+GPG contacts no keyserver: the script fetches Swift's key bundle over HTTPS from `www.swift.org` and pins
+the signer by fingerprint, because a keyserver lookup is not something the session's egress proxy
+carries. A verification failure is therefore never a keyserver problem; §3 says what the script does
+about one.
 
 Mind the compiler-version gap: a cloud session builds with Swift 6.4, while `ci.yml` also runs the
 Xcode 16.4 leg on macOS 15. Something can compile cleanly in a cloud session and still fail that
@@ -249,16 +250,17 @@ gates a merge; `ci.yml` does.
 
 | Input | Values | Meaning |
 | --- | --- | --- |
-| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `app:screenshots`, `check` | The steps of the matching `ci.yml` job (below); `app:screenshots` is `screenshots.yml`'s capture |
+| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `app:release`, `app:screenshots`, `check` | The steps of the matching `ci.yml` job (below); `app:screenshots` is `screenshots.yml`'s capture |
 | `filter` | empty, or one line not starting with `-` | `test`: a `swift test --filter` regex. `app:test` with `ios` or `macos`: an `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Must match at least one test |
-| `platform` | `macos`, `ios`, `all` | `app:test` and `app:screenshots` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
+| `platform` | `macos`, `ios`, `all` | `app:test`, `app:release` and `app:screenshots` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
 | `appearance` | `light`, `dark` | `app:screenshots` only: `dark` captures the dark set |
 | `device` | `iphone`, `ipad` | `app:screenshots` with `ios` or `all` only: `ipad` captures on an iPad simulator |
 | `xcode` | `27.0`, `16.4` | `xcode-27` (macOS 27), every gate; or `macos-15`, `ci.yml`'s oldest leg, `build` and `test` only |
 
 Each gate runs what its `ci.yml` job runs: `test` is the package-tests job (`audit:dependencies`, `build -v`,
 `test --coverage`), `build:strict` is the strict-memory-safety job (`build:strict --require`, then `audit:unsafe`),
-`lint` is the lint job (`lint`, then `test:scripts`), and `build`, `test:adversarial` and `app:test` are their own
+`lint` is the lint job (`lint`, then `test:scripts`, `audit:actions` and `audit:mise-pins`), `app:release` is the
+release-build job (the Release configuration built and read for Debug-only facilities), and `build`, `test:adversarial` and `app:test` are their own
 job's step. The exceptions: a filtered `test`
 runs only the matching tests, without coverage or the audit and build steps; `app:test` omits the iOS leg's
 best-effort AutoFill step; and `check` has no `ci.yml` job, being `mise.toml`'s local aggregate. A request that
@@ -343,6 +345,10 @@ What it is not:
   the repository default, `08-repository-hardening.md` §1). What the workflow and `ci:gate` add is narrower: inputs
   reach the shell only through `env:`, and `ci:gate`'s refusals stop a mistyped or prompt-influenced request from
   running something other than what was meant, or from passing without testing anything (`07-supply-chain.md` §3.2).
+  The same write access reaches further than this workflow: a session that can push a branch can open a pull request
+  whose workflow files name the `staging` environment, where the repository's one secret lives. What refuses that is
+  the environment's required reviewer (`08-repository-hardening.md` §1.2), not anything in the tree, so a pending
+  deployment to `staging` that a session caused is approved only after reading what it will run.
 
 ## 6. Related
 

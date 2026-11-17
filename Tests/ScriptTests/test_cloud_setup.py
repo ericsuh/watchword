@@ -4,7 +4,7 @@ it writes moved below a scratch directory (WATCHWORD_SETUP_TEST_ROOT).
 The script runs as root on the VM that holds a cloud session's checkout, so which toolchain it will install is a
 security decision. It verified the release tarball against a pinned key, and then answered a failed verification by
 running a second installer, swiftly, that it downloads from an unversioned URL and checks in no way: the check could
-be failed on purpose to reach the path that has none (docs/06-adversarial-review.md Z112). The tests hold what it does
+be failed on purpose to reach the path that has none (docs/06-adversarial-review.md Z106). The tests hold what it does
 now: a download that does not verify ends the attempt, and swiftly is fetched and run only when the tarball could not
 be had at all and the person opted in."""
 
