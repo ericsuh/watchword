@@ -1650,9 +1650,18 @@ directory row made by the granted key counted as "this account's own vault" and 
 conflict). The person compares the owner's fingerprint there too, since pins are per device, unless the owner is the
 account itself; the key is the grant's, or, where no grant was ever made (the owner's first key on the owner's other
 device), the one the account's own directory gave the device. What this leaves: a device of the **owner's** account
-that holds only the first key and has not yet been shown the marker (the store withholds it, or the row was removed
-from the file and no sync has run since) still takes the vault for its own until the next sync that delivers it; the
-key it seals under is then the right one, and what it wrote is not published once the marker is there. And the ledger
+that holds only the first key and has not been shown the marker (the store withholds it, or the row was removed from
+the file and no sync has run since) still takes the vault for its own until a sync delivers the marker or any later
+key's wrap; from then on it writes and publishes nothing there. Until then it seals under the first key. That is the
+right key only while the vault has not rotated: after a removal it is the key the removed member kept, so a store
+that keeps both the marker and the new key's wrap from that device, with the removed member reading what it serves,
+gets what the owner writes there (Z49). This is the exposure of any device a store keeps a removal from (§8.3, "what
+the store can do"; D6), reached here by a device with no ledger, which also publishes unjudged and maintains a log
+that should stay whole for as long as it is kept in the dark. Closing it would take sharing under a fresh key that no
+member is ever given the predecessor of, by a grant from the owner's account to itself, so that no key of a shared
+vault is of the account's own class; then every member is one who joined after a rotation, passes over the whole of
+the vault's earlier log, and takes its earlier values on a later sealer's word (S42's vouching, with what S42 leaves
+open for S36 and S46, for every member instead of for latecomers). That trade was not made here. And the ledger
 itself is still not synced between an account's devices (S35): each accepts the invitation.
 
 **A vault this account is no longer in** (review finding Z45). Leaving and removal change the chain and the key;

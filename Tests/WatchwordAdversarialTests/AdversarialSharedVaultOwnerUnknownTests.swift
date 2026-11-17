@@ -185,3 +185,49 @@ extension AdversarialSharedVaultTests {
         #expect(try await member.session.sharedVaultStatus(vaultID).membership.owner.accountID == owner.accountID)
     }
 }
+
+// Review finding Z49: what Z41 left, stated as it is.
+extension AdversarialSharedVaultTests {
+    /// Threat: the store (A1) with a former member (A5). The owner shared the vault from one device, removed a member
+    /// and so rotated its key. The store keeps from the owner's other device both the marker and the new key's wrap,
+    /// for as long as it likes. That device holds the first key as one of the account's own, has nothing to tell it
+    /// the vault is shared, and runs it as private: it seals under the first key, which the removed member kept.
+    /// This is the exposure any device has from which the store withholds a removal (architecture §8.8), reached
+    /// here with no ledger; Z41's row said the device "seals under the right key", which is true only until the first
+    /// rotation. Recorded as a known issue: closing it means sharing under a key no member is ever given, which
+    /// makes every member one who joined after a rotation (S42), and is the owner's decision (Z49).
+    @Test("the owner's other device, kept from the marker and the new key, seals under the first key (Z49, tracked)")
+    func ownerDeviceKeptFromTheMarkerAfterARotation() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 4910)
+        let former = try await household.account(seed: 4911)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.sync()
+        let view = WithholdingTransport(base: household.transport)
+        await view.withholdNew(under: AccountObjectLocation.vaultsPrefix(owner.accountID) + "\(vaultID.uuidString)/")
+        try await owner.session.shareVault(vaultID)
+        let firstKey = try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID
+        try await owner.invite(former, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([owner, former])
+        try await owner.session.removeMember(former.accountID, from: vaultID)
+        try await owner.session.sync()
+        #expect(try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID != firstKey)
+
+        let laptop = try await owner.enrolledDevice(over: view, directory: household.directory)
+        try await laptop.session.sync()
+        // Nothing it was shown says the vault is shared: it is not held closed.
+        #expect(try await laptop.session.vaults().first { $0.id == vaultID }?.isSharedUnavailable == false)
+        let written = try await laptop.session.save(Self.bank(in: vaultID))
+        let row = try #require(try await laptop.vault.store.record(RecordKey(recordID: written.id, kind: .item)))
+        withKnownIssue("Z49: sealed under the key the removed member kept; tracked for the owner's decision") {
+            #expect(row.keyID != firstKey)
+        }
+        // The moment the store shows it the marker, it stops: nothing more is written or published there.
+        await view.reveal()
+        try await laptop.session.sync()
+        #expect(try await laptop.session.vaults().first { $0.id == vaultID }?.isSharedUnavailable == true)
+        await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
+            try await laptop.session.save(Self.bank(in: vaultID))
+        }
+    }
+}
