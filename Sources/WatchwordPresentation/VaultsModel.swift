@@ -41,16 +41,32 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     public let name: String
     public let isPersonal: Bool
     public let createdAt: Date?
-    /// `nil` for a vault that is not shared.
+    /// `nil` for a vault that is not shared, and for one that is shared but not set up on this device
+    /// (`isSharedUnavailable`).
     public let sharing: VaultSharing?
+    /// The vault is shared and this device holds no membership ledger for it (`VaultInfo.isSharedUnavailable`): its
+    /// account's other device shared or joined it, or this device's sharing data was lost. Never labelled "Only
+    /// you": other accounts read it. Nothing can be changed in it from here until its invitation is accepted here.
+    public let isSharedUnavailable: Bool
 
-    public var isReadOnly: Bool { sharing?.readOnlyReason != nil }
+    public var isReadOnly: Bool { readOnlyReason != nil }
+
+    /// Why nothing can be written to this vault from this device now, worded; `nil` while it can.
+    public var readOnlyReason: String? {
+        isSharedUnavailable ? Self.notSetUpReason : sharing?.readOnlyReason
+    }
+
+    public static let notSetUpBadge = "Shared · not set up on this device"
+    public static let notSetUpReason =
+        "This shared vault is not set up on this device, so it cannot be changed from here. Accept its invitation "
+        + "on this device to use it."
 
     /// Whose vault this is and this account's part in it, from the session's facts rather than the name: a member who
     /// may write can name a shared vault anything, "Personal" included (review of the account screens, finding 4).
     /// Shown wherever a vault is named, beside the name.
     public var badge: String {
         if isPersonal { return "Your own vault" }
+        if isSharedUnavailable { return Self.notSetUpBadge }
         guard let sharing else { return "Only you" }
         if sharing.role == .owner { return "Shared by you" }
         return "Shared with you · " + sharing.roleName
@@ -60,11 +76,12 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     public var label: String { "\(name) (\(badge))" }
 
     /// Whether other accounts can read what is saved here.
-    public var isShared: Bool { sharing != nil }
+    public var isShared: Bool { sharing != nil || isSharedUnavailable }
 
     /// What the row says under the name.
     public var detail: String {
         if isPersonal { return "Your own vault. It is never shared." }
+        if isSharedUnavailable { return Self.notSetUpReason }
         guard let sharing else { return "Only you" }
         if sharing.requiresNewerVersion { return "Read-only: update Watchword" }
         let members = sharing.memberCount == 1 ? "1 member" : "\(sharing.memberCount) members"
@@ -77,6 +94,8 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
         isPersonal = info.isPersonal
         createdAt = info.createdAt
         self.sharing = sharing
+        // A ledger this device holds is the better fact; without one, the session's own answer.
+        isSharedUnavailable = sharing == nil && info.isSharedUnavailable
     }
 }
 

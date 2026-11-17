@@ -100,4 +100,9 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// (grant names, envelope headers) and, for a shared vault, chosen by its owner: adopting one would displace the
     /// other vault's key. Refused before anything is stored or made resident.
     case keyIDInUse(UUID)
+    /// The vault is shared and this device holds no verified membership ledger for it (another device of the account
+    /// shared or joined it; or the saved ledger, or the owner's pin that anchors it, is gone). Nothing is written,
+    /// sealed, published or deleted there until this device accepts the vault's invitation itself (review finding
+    /// Z41): a shared vault is never run as one of the account's own.
+    case ledgerUnavailable(UUID)
 }

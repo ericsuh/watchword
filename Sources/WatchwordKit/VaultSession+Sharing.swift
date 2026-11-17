@@ -42,6 +42,13 @@ struct SharingRuntime: Sendable {
     var loaded = false
     /// Other accounts' registries, evaluated from the transport, by the anchor a vault's chain gives them.
     var registries: [MemberRegistryAnchor: DeviceRegistryState] = [:]
+    /// The vaults the account's own markers say are shared, each with its chain's owner (the record store's
+    /// account-signed rows, VaultSession+SharedMarker.swift), and whether they have been read this session.
+    var markers: [UUID: UUID] = [:]
+    var markersLoaded = false
+    /// Vaults the sharing state names whose ledger did not load (no owner row, no pin for the owner, a ledger that
+    /// does not restore): shared, and unavailable until this device accepts their invitation again (Z41).
+    var unloadable: Set<UUID> = []
 }
 
 /// A contact as the key directory gives it, with what this device knows of it: the fingerprint to compare out of
@@ -155,23 +162,57 @@ extension VaultSession {
     // MARK: - Loading and saving
 
     /// Reads every saved ledger, plan, proposal list and stream index, each verified again (docs/02-architecture.md
-    /// §8.3, §8.6). Needs the keyset (the account's own bundle anchors the checks); a ledger whose owner's pin is
-    /// gone is not loaded, which puts the vault back in front of the person.
+    /// §8.3, §8.6). Needs the keyset (the account's own bundle anchors the checks). A vault the sharing state names
+    /// whose ledger does not load (its owner row or the owner's pin is gone, or the ledger does not restore) is not
+    /// run as a private vault: it is `unloadable`, held closed until this device accepts its invitation again
+    /// (review finding Z41). A read that fails is not an answer either: the vault is held closed for now and the
+    /// load is tried again by the next caller.
     func loadSharedVaultsIfNeeded() async {
+        await loadSharedMarkersIfNeeded()
         guard !sharing.loaded, let settings = sharing.settings, keys != nil else { return }
         let epoch = lockEpoch
         guard let ids = try? await settings.state.sharedVaultIDs() else { return }
         var loaded: [UUID: SharedVault] = [:]
+        var unloadable: Set<UUID> = []
+        var complete = true
         for vaultID in ids {
-            guard let ownerBytes = try? await settings.state.value(.owner, vaultID: vaultID), ownerBytes.count == 16,
-                let saved = try? await settings.state.value(.ledger, vaultID: vaultID),
-                let keys = try? requireKeys(since: epoch), let bundle = try? keys.keyset.publicKeyBundle()
-            else { continue }
+            guard let keys = try? requireKeys(since: epoch), let bundle = try? keys.keyset.publicKeyBundle() else {
+                return
+            }
+            let ownerBytes: [UInt8]?
+            let saved: [UInt8]?
+            do {
+                ownerBytes = try await settings.state.value(.owner, vaultID: vaultID)
+                saved = try await settings.state.value(.ledger, vaultID: vaultID)
+            } catch {
+                unloadable.insert(vaultID)
+                complete = false
+                continue
+            }
+            guard let ownerBytes, ownerBytes.count == 16, let saved else {
+                unloadable.insert(vaultID)
+                continue
+            }
             let ownerID = Self.uuid(ownerBytes)
             let contacts = VerifiedContacts(store: settings.contacts, account: bundle)
-            guard let owner = ownerID == bundle.accountID ? contacts.myself : try? await contacts.pinned(ownerID),
+            let owner: VerifiedContact?
+            if ownerID == bundle.accountID {
+                owner = contacts.myself
+            } else {
+                do {
+                    owner = try await contacts.pinned(ownerID)
+                } catch {
+                    unloadable.insert(vaultID)
+                    complete = false
+                    continue
+                }
+            }
+            guard let owner,
                 let ledger = try? MembershipLedger.restore(saved, vaultID: vaultID, owner: owner, account: bundle)
-            else { continue }
+            else {
+                unloadable.insert(vaultID)
+                continue
+            }
             var vault = SharedVault(ledger: ledger)
             if let bytes = try? await settings.state.value(.proposals, vaultID: vaultID) {
                 vault.proposals = SharedBytes.decodeRecords(bytes).filter {
@@ -205,7 +246,8 @@ extension VaultSession {
         for (vaultID, vault) in loaded where sharing.vaults[vaultID] == nil {
             sharing.vaults[vaultID] = vault
         }
-        sharing.loaded = true
+        sharing.unloadable = unloadable.subtracting(sharing.vaults.keys)
+        sharing.loaded = complete
     }
 
     /// Saves one vault's ledger, proposals, plan and index, each signed by the account (or verified again on load).
@@ -400,7 +442,7 @@ extension VaultSession {
         guard let key = try? ledger.openGrant(of: state.vaultKeyID, from: grants, as: current.keyset) else {
             return false
         }
-        try await adoptVaultKey(key, account: account, epoch: epoch)
+        try await adoptVaultKey(key, owner: ledger.owner.accountID, account: account, epoch: epoch)
         // Records sealed under this key, held aside while it was missing, can be judged now; written down in the
         // index too, so that a restart before the replay still replays (S41).
         requestReplay(vaultID)
@@ -429,11 +471,17 @@ extension VaultSession {
     }
 
     /// Stores a vault key received through a grant as this account's own (a `vaultKeyWrap` row, and a directory row
-    /// if the vault is new here), and makes it resident.
-    func adoptVaultKey(_ vaultKey: VaultKey, account: AccountRecord, epoch: UInt64) async throws {
+    /// if the vault is new here), and makes it resident. The wrap says the key arrived by grant
+    /// (`VaultKey.arrivedByGrant`), so every device of the account that receives it knows the vault is shared; a key
+    /// this device already holds under that ID must be the same key, or the grant is refused (the ID is public, and
+    /// whoever introduced the key chose it). Then the account's marker for the vault, naming the chain's owner.
+    func adoptVaultKey(_ vaultKey: VaultKey, owner: UUID, account: AccountRecord, epoch: UInt64) async throws {
         let vaultID = vaultKey.vaultID
         do {
             try await checkKeyIDFree(vaultKey.key.keyID, for: vaultID)
+            if let resident = self.keys?.vaultKeys[vaultKey.key.keyID], !resident.hasSameMaterial(as: vaultKey) {
+                throw SharedVaultError.keyIDInUse(vaultKey.key.keyID)
+            }
         } catch {
             vaultKey.zeroise()
             throw error
@@ -458,10 +506,26 @@ extension VaultSession {
             vaultKey.zeroise()
             throw VaultError.locked
         }
-        var vaultKeys = current.vaultKeys
-        vaultKeys[vaultKey.key.keyID] = vaultKey
-        self.keys = UnlockedKeys(
-            accountUnlockKey: current.accountUnlockKey, keyset: current.keyset, vaultKeys: vaultKeys)
+        // A key already resident is kept: it is the same key (checked above), with the nonces sealed under it so far.
+        if current.vaultKeys[vaultKey.key.keyID] == nil {
+            var vaultKeys = current.vaultKeys
+            vaultKeys[vaultKey.key.keyID] = vaultKey
+            self.keys = UnlockedKeys(
+                accountUnlockKey: current.accountUnlockKey, keyset: current.keyset, vaultKeys: vaultKeys)
+        }
+        // Best effort: a granted key already says the vault is shared; the marker adds whose it is, for the
+        // account's other devices. The next sync writes it if this cannot (`ensureSharedMarkers`).
+        try? await markShared(vaultID, owner: owner, account: account, epoch: epoch)
+    }
+
+    /// The account's marker for every shared vault this device holds a ledger for, written if it is missing: a vault
+    /// joined before markers existed, or one whose marker could not be signed when its key was adopted.
+    func ensureSharedMarkers(account: AccountRecord) async {
+        guard keys != nil else { return }
+        let epoch = lockEpoch
+        for (vaultID, vault) in sharing.vaults where sharing.markers[vaultID] == nil {
+            try? await markShared(vaultID, owner: vault.ledger.owner.accountID, account: account, epoch: epoch)
+        }
     }
 
     // MARK: - Creating, inviting, accepting, leaving (PRD F4.1, F4.2, F4.4)
@@ -477,9 +541,14 @@ extension VaultSession {
         guard vaultID != account.personalVaultID else { throw SharedVaultError.personalVaultCannotBeShared }
         guard sharing.vaults[vaultID] == nil else { return }
         let keys = try requireKeys(since: epoch)
+        // Refused for a vault that is already shared and has no ledger here (`ledgerUnavailable`): a second genesis
+        // from the account's other device, or from a member's, is never signed (Z41).
         let vaultKey = try await writableVaultKey(vaultID, keys: keys, account: account)
         let current = try requireKeys(since: epoch)
         let ledger = try MembershipLedger.create(vaultKey: vaultKey, owner: current.keyset)
+        // The marker first: from here on every device of the account that syncs learns the vault is shared, whether
+        // or not it ever sees the chain. If it cannot be signed and stored, the vault is not shared.
+        try await markShared(vaultID, owner: account.accountID, account: account, epoch: epoch)
         sharing.vaults[vaultID] = SharedVault(ledger: ledger)
         try await saveSharedVault(vaultID)
         try await publishSharingObject(SharingObject(ledger.chain[0].record))
@@ -515,6 +584,12 @@ extension VaultSession {
     /// must be a member with its own keys, and the grant must come from the account the chain entitles. A vault this
     /// device ever held continues its ledger (S26); one it holds under another owner, its own vaults included, is
     /// refused (`vaultOwnerConflict`, S6).
+    ///
+    /// This is also how another device of an account sets up a shared vault its account already takes part in
+    /// (review findings S35, Z41): the owner it must name is the one the account's own marker gives
+    /// (`sharedVaultInvitation`), the owner's fingerprint is compared on this device too (pins are per device) unless
+    /// the owner is this account, and the key is the one the account's vault directory already gave this device when
+    /// no grant is addressed to it (the owner's own genesis key).
     @discardableResult
     public func acceptInvitation(_ invitation: Invitation, ownerEvidence: VerificationEvidence? = nil)
         async throws -> UUID
@@ -525,16 +600,7 @@ extension VaultSession {
         await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         let vaultID = invitation.vaultID
-        var knownOwner = sharing.vaults[vaultID]?.ledger.owner.accountID
-        if knownOwner == nil, let saved = try await settings.state.value(.owner, vaultID: vaultID),
-            saved.count == 16
-        {
-            knownOwner = Self.uuid(saved)
-        }
-        if knownOwner == nil {
-            let held = try await vaultDirectory(account)[vaultID] != nil
-            if held || vaultID == account.personalVaultID { knownOwner = account.accountID }
-        }
+        let knownOwner = try await knownOwner(of: vaultID, account: account, settings: settings)
         var incoming = try await IncomingInvitation.begin(
             invitation, knownOwner: knownOwner, directory: settings.directory, contacts: contacts)
         if incoming.fingerprintToConfirm != nil {
@@ -549,26 +615,62 @@ extension VaultSession {
         let grants = try await listSharingObjects(
             prefix: SharingObjectLocation.vaultPrefix(vaultID) + "grant/", maximumLength: KeyGrantCodec.encodedLength)
         let keys = try requireKeys(since: epoch)
+        // Keys of this vault the account's own vault directory gave this device: signed by the account and a
+        // registered device, and opened under the keyset.
+        let held = keys.vaultKeys.values.filter { $0.vaultID == vaultID }
         let joined = try incoming.accept(
             membership: records.map(\.contents), grants: grants, as: keys.keyset,
-            continuing: sharing.vaults[vaultID]?.ledger)
+            continuing: sharing.vaults[vaultID]?.ledger, holding: held)
+        let adopted = held.contains { $0.key.material === joined.vaultKey.key.material }
         // Before anything is held: a chain whose key ID is another vault's here would displace that vault's key
-        // (S38). Its owner chose the ID, and key IDs are public.
+        // (S38), and one whose key ID is this vault's with other bytes would displace this vault's. Its owner chose
+        // the ID, and key IDs are public.
         do {
             try await checkKeyIDFree(joined.vaultKey.key.keyID, for: vaultID)
-            _ = try requireKeys(since: epoch)
+            if let resident = try requireKeys(since: epoch).vaultKeys[joined.vaultKey.key.keyID],
+                !resident.hasSameMaterial(as: joined.vaultKey)
+            {
+                throw SharedVaultError.keyIDInUse(joined.vaultKey.key.keyID)
+            }
         } catch {
-            joined.vaultKey.zeroise()
+            if !adopted { joined.vaultKey.zeroise() }
             throw error
         }
         var vault = sharing.vaults[vaultID] ?? SharedVault(ledger: joined.ledger)
         vault.ledger = joined.ledger
         vault.needsReconcile = true
         vault.index.judgedHead = nil
+        if sharing.vaults[vaultID] == nil {
+            // A vault this device held without a ledger (its account's other device joined or shared it) may hold
+            // rows of its own: the index is built from the log before any of them is judged (Z42).
+            vault.indexRebuilding = true
+        }
         sharing.vaults[vaultID] = vault
-        try await adoptVaultKey(joined.vaultKey, account: account, epoch: epoch)
+        sharing.unloadable.remove(vaultID)
+        try await adoptVaultKey(
+            joined.vaultKey, owner: joined.ledger.owner.accountID, account: account, epoch: epoch)
         try await saveSharedVault(vaultID)
         return vaultID
+    }
+
+    /// The owner of the vault this device already holds under `vaultID`, or `nil` if it holds none: what an
+    /// invitation's owner must equal (S6). From what is authenticated first: the loaded ledger; the account's own
+    /// marker for the vault; then, for a vault in the account's directory none of whose keys arrived by grant, the
+    /// account itself, since it made the vault (a directory row made by a key that came by grant says nothing of the
+    /// kind, which is what refused a member's second device before, Z41). Last, the owner the sharing state names
+    /// for a vault whose ledger did not load.
+    private func knownOwner(of vaultID: UUID, account: AccountRecord, settings: SharingSettings) async throws
+        -> UUID?
+    {
+        if let ledger = sharing.vaults[vaultID]?.ledger { return ledger.owner.accountID }
+        if vaultID == account.personalVaultID { return account.accountID }
+        if let marked = sharing.markers[vaultID] { return marked }
+        let granted = keys?.vaultKeys.values.contains { $0.vaultID == vaultID && $0.arrivedByGrant } ?? false
+        if !granted, try await vaultDirectory(account)[vaultID] != nil { return account.accountID }
+        if let saved = try await settings.state.value(.owner, vaultID: vaultID), saved.count == 16 {
+            return Self.uuid(saved)
+        }
+        return nil
     }
 
     /// Asks to leave a shared vault (PRD F4.4): publishes a signed leave request. An administrator's device turns it
@@ -830,25 +932,44 @@ extension VaultSession {
 
     /// The key new records of a shared vault are sealed under: the one the membership chain names, if this device
     /// holds it (docs/02-architecture.md §7.7, the seam left for this). `nil` for a vault that is not shared.
-    func sharedCurrentKey(_ vaultID: UUID, keys: UnlockedKeys) -> VaultKey?? {
-        guard let vault = sharing.vaults[vaultID] else { return nil }
+    ///
+    /// A vault that is shared with no verified ledger loaded here has no current key at all (`.some(nil)`): never
+    /// the lowest key ID this device holds, which after a rotation may be the key a removed member kept (Z41). With
+    /// no current key nothing is sealed, signed or published for it, and its engine only downloads.
+    func sharedCurrentKey(_ vaultID: UUID, keys: UnlockedKeys, personalVaultID: UUID?) -> VaultKey?? {
+        guard let vault = sharing.vaults[vaultID] else {
+            return isMarkedShared(vaultID, keys: keys, personalVaultID: personalVaultID) ? .some(nil) : nil
+        }
         let key = keys.vaultKeys[vault.ledger.state.vaultKeyID]
         return .some(key?.vaultID == vaultID ? key : nil)
     }
 
-    /// The client's half of F4.5: a write the person makes to a shared vault needs `writePermission`.
+    /// The client's half of F4.5: a write the person makes to a shared vault needs `writePermission`. A shared vault
+    /// with no ledger loaded here takes no write at all (`ledgerUnavailable`).
     func checkSharedWrite(_ vaultID: UUID, account: AccountRecord) async throws {
         await loadSharedVaultsIfNeeded()
-        guard let vault = sharing.vaults[vaultID] else { return }
+        guard let vault = sharing.vaults[vaultID] else {
+            if isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+                throw SharedVaultError.ledgerUnavailable(vaultID)
+            }
+            return
+        }
         if case .refused(let refusal) = vault.ledger.writePermission(for: account.accountID) {
             throw SharedVaultError.writeRefused(refusal)
         }
     }
 
-    /// A shared vault is deleted through its chain, by its owner (§8.1); a member leaves instead.
+    /// A shared vault is deleted through its chain, by its owner (§8.1); a member leaves instead. One with no ledger
+    /// loaded here is not deleted from this device at all: it cannot tell whose the vault is, and the "delete vault"
+    /// of a member's other device would otherwise publish tombstones for every item in it (Z41).
     func checkSharedDeletion(_ vaultID: UUID, account: AccountRecord) async throws {
         await loadSharedVaultsIfNeeded()
-        guard let vault = sharing.vaults[vaultID] else { return }
+        guard let vault = sharing.vaults[vaultID] else {
+            if isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+                throw SharedVaultError.ledgerUnavailable(vaultID)
+            }
+            return
+        }
         guard vault.ledger.owner.accountID == account.accountID else { throw SharedVaultError.notOwner }
         if !vault.ledger.state.isDeleted {
             let record = try vault.ledger.proposeDeletion(signedBy: try requireKeys().keyset)

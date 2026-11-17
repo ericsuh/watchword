@@ -298,3 +298,45 @@ extension SharingScreenTests {
         #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
     }
 }
+
+extension SharingScreenTests {
+    /// A shared vault on a device that holds no ledger for it (the account's other device joined it) is another
+    /// account's too, whatever this device knows: it is labelled as shared and not set up, never "Only you", offers no
+    /// "Share", and gives the invitation to accept here, with which the ordinary accept screen sets it up (review
+    /// finding Z41).
+    @Test("a shared vault not set up on this device says so, offers no Share, and is set up by accepting here")
+    func notSetUpOnThisDevice() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 560)
+        let second = try await household.secondDevice(of: home.members[0])
+
+        let vaults = VaultsModel(context: ContextProbe().context(second.session))
+        await vaults.load()
+        let row = try #require(vaults.row(home.vaultID))
+        #expect(row.badge == VaultRow.notSetUpBadge && row.isShared && row.isReadOnly)
+        #expect(row.readOnlyReason == VaultRow.notSetUpReason && row.detail != "Only you")
+
+        let shared = SharedVaultModel(vaultID: home.vaultID, context: ContextProbe().context(second.session))
+        await shared.load()
+        #expect(shared.needsSetUp && !shared.isShared)
+        await shared.share()
+        #expect(shared.errorMessage?.contains("not set up on this device") == true)
+        let code = try #require(shared.setUpCode)
+
+        let accept = AcceptInvitationModel(context: ContextProbe().context(second.session))
+        accept.codeText = code
+        await accept.read()
+        guard case .compareOwner(let owner) = accept.step else {
+            Issue.record("expected the owner's fingerprint, got \(accept.step)")
+            return
+        }
+        #expect(owner.accountID == home.owner.accountID)
+        accept.confirmation.typedSafetyNumber = home.owner.safetyNumber
+        await accept.accept()
+        #expect(accept.step == .joined(vaultID: home.vaultID), "\(accept.errorMessage ?? "")")
+        await vaults.load()
+        #expect(vaults.row(home.vaultID)?.badge == "Shared with you · Can edit")
+        await shared.load()
+        #expect(shared.isShared && !shared.needsSetUp && shared.members.count == 2)
+    }
+}

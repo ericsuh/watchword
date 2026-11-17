@@ -19,6 +19,11 @@ public struct VaultInfo: Sendable, Hashable, Identifiable {
     public var isPersonal: Bool
     /// Deleted, here or on another device. Listed only on request, for what the deletion left in it.
     public var isDeleted: Bool
+    /// The vault is shared (governed by a membership chain) and this device holds no verified ledger for it: its
+    /// account's other device shared or joined it, or the saved ledger no longer loads. Held closed here until this
+    /// device accepts the vault's invitation itself: readable, but nothing is written, sealed, published or deleted
+    /// (docs/02-architecture.md §8.10; review finding Z41).
+    public var isSharedUnavailable = false
 }
 
 /// A vault's own description, sealed under the vault key as a `.vaultMetadata` record whose record ID is the vault's
@@ -128,7 +133,8 @@ extension VaultSession {
         let rows = try await store.records(in: account.accountID, kind: .vaultDirectory)
         guard !rows.isEmpty else { return result }
         let view = try? await registry(account)
-        for row in rows where row.recordID != account.personalVaultID {
+        // A shared marker's row is a fact about a vault, not a vault (VaultSession+SharedMarker.swift).
+        for row in rows where row.recordID != account.personalVaultID && row.envelope.first != Self.sharedMarkerTag {
             let isDeleted = view.map { Self.isVerifiedDeletion(row, accountID: account.accountID, view: $0) } ?? false
             result[row.recordID] = DirectoryEntry(isDeleted: isDeleted)
         }
@@ -203,7 +209,10 @@ extension VaultSession {
 
     func currentVaultKey(_ vaultID: UUID, keys: UnlockedKeys, account: AccountRecord) -> VaultKey? {
         // A shared vault's key is the one its membership chain names (VaultSession+Sharing.swift).
-        if let shared = sharedCurrentKey(vaultID, keys: keys) { return shared }
+        // A shared vault with no ledger here has none (Z41).
+        if let shared = sharedCurrentKey(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+            return shared
+        }
         return Self.currentKeyID(for: vaultID, among: Array(keys.vaultKeys.values), personal: account).flatMap {
             keys.vaultKeys[$0]
         }
@@ -306,6 +315,7 @@ extension VaultSession {
     public func vaults(includingDeleted: Bool = false) async throws -> [VaultInfo] {
         let epoch = lockEpoch
         _ = try requireKeys()
+        await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         let directory = try await vaultDirectory(account)
         var rows: [UUID: StoredRecord] = [:]
@@ -315,15 +325,20 @@ extension VaultSession {
         let keys = try requireKeys(since: epoch)
         var result: [VaultInfo] = []
         for (vaultID, entry) in directory where includingDeleted || !entry.isDeleted {
-            // A vault whose key this device does not hold (yet) is not one it can show.
-            guard currentVaultKey(vaultID, keys: keys, account: account) != nil else { continue }
+            // A vault whose key this device does not hold (yet) is not one it can show. A shared vault with no
+            // ledger here is shown, as shared and unavailable, if it holds any key for it: never hidden, and never
+            // shown as one of the account's own (Z41).
+            let unavailable =
+                isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID)
+                && keys.vaultKeys.values.contains { $0.vaultID == vaultID }
+            guard unavailable || currentVaultKey(vaultID, keys: keys, account: account) != nil else { continue }
             let isPersonal = vaultID == account.personalVaultID
             let metadata = rows[vaultID].flatMap { try? openMetadata($0, keys: keys) }
             result.append(
                 VaultInfo(
                     id: vaultID, name: metadata?.name ?? (isPersonal ? VaultInfo.defaultPersonalName : ""),
                     createdAt: metadata?.createdAt ?? (isPersonal ? account.createdAt : nil), isPersonal: isPersonal,
-                    isDeleted: entry.isDeleted))
+                    isDeleted: entry.isDeleted, isSharedUnavailable: unavailable))
         }
         return result.sorted {
             if $0.isPersonal != $1.isPersonal { return $0.isPersonal }

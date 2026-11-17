@@ -57,6 +57,15 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
 public final class SharedVaultModel {
     public let vaultID: UUID
     public private(set) var isShared = false
+    /// The vault is shared and not set up on this device (`VaultInfo.isSharedUnavailable`): the screen says so and
+    /// offers neither "Share" nor a member list. `setUpCode` is the invitation to accept here, when this device knows
+    /// the vault's owner from its account's own marker; otherwise the person uses the invitation they were sent.
+    public private(set) var needsSetUp = false
+    public private(set) var setUpCode: String?
+    public static let setUpNotice =
+        "This vault is shared, and this device has not joined it yet: another of your devices shared or joined it. "
+        + "Until you accept its invitation on this device, nothing in it can be changed from here, and this device "
+        + "does not receive what the other members write."
     public private(set) var sharingAvailable = true
     public private(set) var members: [MemberRow] = []
     public private(set) var sharing: VaultSharing?
@@ -182,8 +191,16 @@ public final class SharedVaultModel {
         guard shared.contains(vaultID) else {
             isShared = false
             members = []
+            needsSetUp =
+                (try? await session.vaults(includingDeleted: true))?
+                .first { $0.id == vaultID }?.isSharedUnavailable ?? false
+            setUpCode =
+                needsSetUp
+                ? (try? await session.sharedVaultInvitation(vaultID)).flatMap { $0 }.map(SharingCodes.text(for:)) : nil
             return
         }
+        needsSetUp = false
+        setUpCode = nil
         let status = try await session.sharedVaultStatus(vaultID)
         isShared = true
         sharing = VaultSharing(status)

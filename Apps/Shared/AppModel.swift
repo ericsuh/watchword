@@ -293,7 +293,7 @@ final class AppModel {
     /// Why `vaultID` cannot be written to by this account now, or `nil` (PRD F4.5; §8.9). The session refuses such a
     /// write whatever the screen offers; this is what the screen says instead of offering it.
     func readOnlyReason(_ vaultID: UUID) -> String? {
-        vault(vaultID)?.sharing?.readOnlyReason
+        vault(vaultID)?.readOnlyReason
     }
 
     /// Where a new item goes: the vault the list shows, if this account may write to it, else Personal.

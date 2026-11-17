@@ -321,6 +321,9 @@ public actor VaultSession: SharesExecutor {
         }
         install(newKeys, at: now)
         try? await refreshSigningKey(account: record, keys: newKeys)
+        // Which vaults are shared, read before anything picks a key for one (VaultSession+SharedMarker.swift). Last:
+        // nothing after it reads `newKeys`, which a lock during the read would have zeroised.
+        await loadSharedMarkersIfNeeded(force: true)
         return kit
     }
 
@@ -440,6 +443,9 @@ public actor VaultSession: SharesExecutor {
         } catch {
             // Sync says why (`deviceRegistryUnavailable`); the person keeps access to their vault.
         }
+        // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
+        // Personal one is held closed.
+        await loadSharedMarkersIfNeeded(force: true)
         try? await purgeExpiredTrash()
     }
 
@@ -656,6 +662,7 @@ public actor VaultSession: SharesExecutor {
         } catch {
             // As after a password unlock: sync reports a registry it cannot use.
         }
+        await loadSharedMarkersIfNeeded(force: true)
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).

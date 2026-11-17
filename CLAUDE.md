@@ -624,7 +624,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 
 - A shared vault's records are sealed under the key its chain names (`currentVaultKey` asks `sharedCurrentKey`), and
   every write the person makes asks `writePermission` (in `writableVaultKey`). Keys from grants are stored as
-  `vaultKeyWrap` rows like any other; their identity comes from where the grant is filed.
+  `vaultKeyWrap` rows; their identity comes from where the grant is filed.
+- **"Shared" does not depend on the ledger a device happens to hold** (Z41; `VaultSession+SharedMarker.swift`). A key
+  opened from a grant is `arrivedByGrant`, which its wrap's context authenticates on every device of the account; the
+  account signs a marker beside the vault's directory entry (`AccountObjectLocation.vaultShared`) naming the chain's
+  owner; and the sharing state naming a vault whose ledger does not load counts too. A vault any of them names with no
+  verified ledger loaded is **unavailable**: `sharedCurrentKey` gives it no key (never the lowest key ID), its engine
+  only downloads, and `checkSharedWrite`/`checkSharedDeletion` throw `ledgerUnavailable`. Never add a path that asks
+  only `sharing.vaults[vaultID]` to decide a vault is private; ask `isMarkedShared`. Until the markers are read every
+  vault but the Personal one is held closed, so call `loadSharedMarkersIfNeeded()` before a path that picks a key. A
+  second device gets out by `acceptInvitation`, whose `knownOwner` comes from the marker.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds

@@ -527,7 +527,15 @@ again until it stops the chain, and later records signed by a member or by nobod
 From the end-to-end audit (`AdversarialSharedVaultShownKeysTests.swift`, Z40): a key directory that changes its answer
 between the safety number shown and the pin, for each kind of evidence and for each entry point (`verifyContact`,
 `invite`, `acceptInvitation` with a chain the store's own bundle signed, and the two screens' comparison toggle);
-nothing is pinned, wrapped or joined.
+nothing is pinned, wrapped or joined. A shared vault with no ledger on the device
+(`AdversarialSharedVaultWithoutLedgerTests.swift`, Z41): a member's second device after a rotation (no write, rename,
+second genesis or vault deletion, nothing of its own in the log, then the invitation accepted there and the next item
+sealed under the chain's key); the owner's second device, told by the marker, joining its own chain with the key the
+directory gave it; a read-only member's device whose ledger, owner row or owner's pin was deleted; the store
+withholding the marker while serving the granted key; a marker row deleted from the file and one planted; a sharing
+state that cannot be read at unlock; and an invitation naming another owner refused on a second device. In "crypto
+core", that the class of a vault key's wrap is authenticated (`grantedKeyWrapClass`). "Screen models: sharing" has the
+vault's label and the accept screen setting it up.
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

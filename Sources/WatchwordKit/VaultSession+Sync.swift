@@ -241,7 +241,8 @@ extension VaultSession {
                 for row in try await store.records(in: vaultID, kind: kind) { highWater = max(highWater, row.version) }
             }
             let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
-            let shared = sharedIDs.contains(vaultID) || sharing.vaults[vaultID] != nil
+            let shared =
+                sharedIDs.contains(vaultID) || sharing.vaults[vaultID] != nil || sharing.markers[vaultID] != nil
             for entry in entries {
                 let implausible = entry.version > configuration.maximumVersion || (!overflow && entry.version > ceiling)
                 let reason: QuarantineReason =

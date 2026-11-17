@@ -17,8 +17,11 @@ extension VaultSession {
     /// changed since the vault's items were last judged, every local version that no longer counts taken out and
     /// held aside, and the log replayed. While locked only the membership is ingested.
     func syncSharedVaultsBeforeLogs(account: AccountRecord) async -> [UUID: SharedVaultSyncReport] {
+        // The markers whether or not sharing is configured: they are what holds a shared vault closed without it.
+        await loadSharedMarkersIfNeeded()
         guard sharing.settings != nil, syncSettings != nil else { return [:] }
         await loadSharedVaultsIfNeeded()
+        await ensureSharedMarkers(account: account)
         var reports: [UUID: SharedVaultSyncReport] = [:]
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var report = SharedVaultSyncReport()
@@ -73,7 +76,16 @@ extension VaultSession {
     func sharedEngineOptions(_ vaultID: UUID, base: SyncConfiguration, account: AccountRecord)
         -> (configuration: SyncConfiguration, judge: (any WriteJudge)?, publishing: Bool, reconcile: Bool)
     {
-        guard let vault = sharing.vaults[vaultID] else { return (base, nil, true, false) }
+        guard let vault = sharing.vaults[vaultID] else {
+            // Shared, with no ledger here (Z41): there is no judge to give it, so it is never published to and its
+            // log is left whole. `syncAll` only downloads for it anyway, having no current key.
+            if isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+                var configuration = base
+                configuration.maintainsLog = false
+                return (configuration, nil, false, false)
+            }
+            return (base, nil, true, false)
+        }
         var configuration = base
         configuration.maintainsLog = false
         // A replay judges every version again, and notes again which devices' streams it is waiting on.

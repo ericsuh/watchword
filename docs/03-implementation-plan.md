@@ -339,7 +339,11 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
 **Still open:**
 
 - A macOS run of all of it against CryptoKit, and of `SQLiteSharingStore` at all.
-- Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself.
+- Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself,
+  and until it has, holds the vault closed and says so (Z41: the account's signed marker and the granted key's wrap
+  tell it the vault is shared). Syncing the ledger and pins between an account's devices, signed by the account, is
+  not built; nor is a screen flow of its own for "set up this shared vault here" (the vault's screen shows the
+  invitation to paste into the accept screen).
 - An erasure summary claims what a late writer had seen when the deleting device had merged its version (S45), and a
   late version's claims about current members' future edits are carried on (S46).
 - A member invited after a demotion with no rotation since holds aside what only vouching could attribute (S42):

@@ -56,6 +56,25 @@ public struct SharingAccount: Sendable {
             accountID: bundle.accountID, bundle: bundle)
     }
 
+    /// Another device of this account (PRD F5.2), enrolled from the transport with the password and the Secret Key,
+    /// unlocked, with sharing configured over sharing state and contacts of its own: pins, ledgers and stream
+    /// indexes are per device (review finding S35), so it starts with none.
+    public func enrolledDevice(
+        deviceID: UUID = UUID(), over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory
+    ) async throws -> SharingAccount {
+        let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport)
+        let state = InMemorySharingStateStore()
+        let contacts = InMemoryVerifiedContactStore()
+        let shareAccess = RecordingShareAccess()
+        await device.session.configureSharing(
+            SharingSettings(state: state, contacts: contacts, directory: directory, shareAccess: shareAccess))
+        try await device.session.unlock(password: TestVault.password)
+        try await device.session.sync()
+        return SharingAccount(
+            vault: device, state: state, contacts: contacts, shareAccess: shareAccess, accountID: accountID,
+            bundle: bundle)
+    }
+
     /// Invites `invitee` to `vaultID` the way a person does: compares their safety number first, then invites; the
     /// invitee compares the owner's (`ownerSafetyNumber`) and accepts.
     public func invite(_ invitee: SharingAccount, to vaultID: UUID, as role: MemberRole, owner: SharingAccount)
@@ -140,6 +159,11 @@ public actor WithholdingTransport: SyncTransport {
 }
 
 extension SharedVaultHousehold {
+    /// Another device of `account`, enrolled over the household's transport (`SharingAccount.enrolledDevice`).
+    public func secondDevice(of account: SharingAccount, deviceID: UUID = UUID()) async throws -> SharingAccount {
+        try await account.enrolledDevice(deviceID: deviceID, over: transport, directory: directory)
+    }
+
     /// An account whose view of the transport the store controls.
     public func withheldAccount(seed: UInt64, hygiene: HygieneSettings? = nil) async throws -> (
         account: SharingAccount, view: WithholdingTransport

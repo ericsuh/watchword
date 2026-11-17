@@ -698,6 +698,7 @@ account/<accountID>/header/<generation>-<deviceID>             the account heade
 account/<accountID>/registry/<sha256 of the entry, hex>        one device-registry entry (§7.8)
 account/<accountID>/vault/<vaultID>/key/<keyID>/<deviceID>     a vault key wrapped under Ksym, vouched for by that device
 account/<accountID>/vault/<vaultID>/deleted/<deviceID>         the vault was deleted, as stated by that device
+account/<accountID>/vault/<vaultID>/shared/<deviceID>          the vault is shared, as stated by that device (§8.10)
 ```
 
 - **The header** is everything a new device needs to derive the AUK and open the keyset: KDF algorithm,
@@ -719,6 +720,17 @@ account/<accountID>/vault/<vaultID>/deleted/<deviceID>         the vault was del
   that does not open (edited in the file, A8: moved under another vault, corrupted) counts as missing while
   unlocked, and the next sync replaces it with a copy from the transport that passed those checks; until then the
   vault is not listed or written and its items are reported unreadable, never opened under another key.
+- **A wrap says whether its key arrived by grant.** The wrap's context (its authenticated data) carries schema
+  version 1 for a key the account made and 2 for one another account's grant gave it (`VaultKey.arrivedByGrant`,
+  set by `VaultKeyGrant.open`). Either form is accepted from the directory; `VaultKey.unwrap` reports which. So the
+  fact that a vault is governed by a membership chain reaches every device of a member's account with the key itself,
+  and neither the store (A1, by withholding) nor someone with the file (A8, who cannot seal under Ksym) can take it
+  off. **A marker** (`shared/<deviceID>`, body `"WWVS1-shared" ‖ vault ID ‖ the chain owner's account ID`, the same
+  two signatures) says the same for a vault its owner shared, whose first key is the account's own and says nothing,
+  and gives every device the owner. Markers are a third grow-only set: vouched for by each device under its own name,
+  fetched before any vault's log is touched, and kept as a row of the record store that counts on the account key's
+  signature alone, so revoking the device that wrote one does not unmark the vault. What a device does with a vault
+  marked either way is §8.10's.
 
 Names reveal the account ID, vault, key and device IDs and the credential generation; a device's name is sealed
 under Ksym inside its registry entry; vault names are in the vaults' own logs.
@@ -1478,21 +1490,51 @@ entries are values too, S32 and S43, so an older index is refused and rebuilt by
 is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
 account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
 account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
-anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Pins live behind `VerifiedContactStore`.
+anchors the ledger, and a ledger whose owner's pin is gone is not loaded: the vault is then held closed (below), not
+run as a private one. Pins live behind `VerifiedContactStore`.
 In-memory implementations serve tests; `SQLiteSharingStore` (`sharing.sqlite`, both ports) is the production one.
-A vault key received through a grant is stored like any other, as a `vaultKeyWrap` row under the keyset, with a
-directory row when the vault is new on the device; a key whose ID the device already holds for another vault is
-refused (`keyIDInUse`, S38), because key IDs are public and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
+A vault key received through a grant is stored as a `vaultKeyWrap` row under the keyset whose context says it arrived
+by grant (§7.7), with a directory row when the vault is new on the device and the account's marker naming the chain's
+owner; a key whose ID the device already holds for another vault is
+refused (`keyIDInUse`, S38), as is one whose ID it holds for this vault with other bytes, because key IDs are public
+and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
 chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission` (in
 `writableVaultKey`, so every write path asks: save, move, copy, rename, conflict resolution). Deleting a shared vault
 is the owner's and also proposes `deleteVault`; a member leaves instead.
+
+**"Shared" is a fact a device cannot lose** (review finding Z41). Whether a vault is governed by a chain was once
+answered by the ledger a device had loaded. The ledger is per-device state, so two kinds of device ran a shared vault
+as one of the account's own, with no role, the lowest key ID held as the current key (after a rotation, about half the
+time the key a removed member kept), no judge, snapshots and collection in a log that must stay whole, a second
+"Share", and "delete vault" open to it: any other device of a member's or the owner's account, which receives the keys
+through the vault directory and never held the ledger; and a device whose saved ledger, owner row or owner's pin was
+deleted (A8) or lost. Three things answer the question now, none of which goes with the ledger: a key of the vault that
+**arrived by grant**, the account's **marker** for it (both §7.7), and the sharing state naming the vault while its
+ledger does not load. A vault any of them names with no verified ledger loaded is **unavailable** on that device
+(`VaultInfo.isSharedUnavailable`, `SharedVaultError.ledgerUnavailable`): it is listed, labelled as shared and not set
+up here, and what the device already holds of it stays readable; it has no current key, so nothing is sealed, signed
+or published there and its engine only downloads (no snapshot, no collection); every write, the move of an item out of
+it, its rename, a second `shareVault` and its deletion are refused. Until the markers have been read in a session,
+every vault but the Personal one is treated so, and a sharing state that cannot be read closes its vaults until it can:
+a failed read is not an answer. The way out is the device accepting the vault's invitation itself, which works on a
+second device because the owner it must name is the one the marker gives (`sharedVaultInvitation`; before, the
+directory row made by the granted key counted as "this account's own vault" and the invitation was refused as an owner
+conflict). The person compares the owner's fingerprint there too, since pins are per device, unless the owner is the
+account itself; the key is the grant's, or, where no grant was ever made (the owner's first key on the owner's other
+device), the one the account's own directory gave the device. What this leaves: a device of the **owner's** account
+that holds only the first key and has not yet been shown the marker (the store withholds it, or the row was removed
+from the file and no sync has run since) still takes the vault for its own until the next sync that delivers it; the
+key it seals under is then the right one, and what it wrote is not published once the marker is there. And the ledger
+itself is still not synced between an account's devices (S35): each accepts the invitation.
 
 **The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
 own safety number), `contactCandidate` and `verifyContact` (fingerprint by typed number, scanned code or comparison;
 a different pinned bundle is `keySubstituted` unless the person replaces the pin), `shareVault` (the genesis
 record), `invite` (needs a verified contact: wraps the current key and proposes the addition), `acceptInvitation`
 (confirms the owner's fingerprint if not pinned, continues any ledger the device ever held for the vault, S26, and
-passes the owner it knows for the vault ID, the account itself for its own vaults, S6), `leaveSharedVault`,
+passes the owner it knows for the vault ID: the loaded ledger's, else the account's marker's, else the account itself
+for a vault none of whose keys arrived by grant, S6 and Z41), `sharedVaultInvitation` (the invitation a second device
+accepts to set up a vault its account already takes part in), `leaveSharedVault`,
 `changeRole`, `removeMember`, `rotateVaultKey`, `sharedVaultIDs` and `sharedVaultStatus`. Each is checked by
 `MembershipRules` (through the ledger's proposing functions and `RotationPlanner`) before anything is signed.
 
@@ -1599,8 +1641,10 @@ chain once that record is here. Tests: "Vault session: a shared vault in a later
 - A member who joined after a rotation reads records sealed before it only once a device that holds the old key has
   sealed them again (rotation does so for every record a member who may write holds), and a version of a shared vault
   that does not open here is held aside, not merged (S34).
-- Another device of a member's account receives the vault's keys through the account's own vault directory but no
-  ledger and no pins: it accepts the invitation itself. The ledger, pins and plans are per device (S35).
+- Another device of a member's or the owner's account receives the vault's keys through the account's own vault
+  directory but no ledger and no pins. It holds the vault closed, says so, and accepts the invitation itself (Z41,
+  above); until then it neither writes there nor receives what the other members write. The ledger, pins and plans
+  are per device, and syncing them between an account's devices is still open (S35).
 - The transports' own sharing (`ShareAccessControl` is the port), the key directory's adapter, and the UI are open
   (`03-implementation-plan.md` milestone 4).
 

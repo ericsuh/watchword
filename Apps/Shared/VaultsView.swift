@@ -192,6 +192,14 @@ struct VaultDetailView: View {
             Section("Sharing") {
                 Text("Sharing vaults is not available in this version yet.").foregroundStyle(.secondary)
             }
+        } else if model.needsSetUp {
+            Section("Sharing") {
+                Text(SharedVaultModel.setUpNotice).foregroundStyle(.secondary)
+                if let code = model.setUpCode {
+                    Text("Invitation to accept on this device:").font(.caption).foregroundStyle(.secondary)
+                    Text(code).font(.caption.monospaced()).textSelection(.enabled)
+                }
+            }
         } else if !model.isShared {
             Section("Sharing") {
                 Text("Only you can open this vault.").foregroundStyle(.secondary)
