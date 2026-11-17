@@ -75,6 +75,34 @@ extension AdversarialSharedVaultTests {
         #expect(try await first.session.items(in: vaultID).items.count == 8)
     }
 
+    /// Threat: the store (A1), or a provider that loses an object: the vault's log was compacted and the snapshot is
+    /// no longer listed. The transport shows a log with no snapshot in it, but this device merged streams through
+    /// one, and the segments it covered are gone all the same. `requireWholeLog` asks the device's own signed sync
+    /// state as well as the listing, and that half must refuse alone.
+    @Test("a compacted vault is not shared when its snapshot is no longer listed, by what this device merged")
+    func compactedVaultWithItsSnapshotGone() async throws {
+        let household = SharedVaultHousehold()
+        var configuration = SyncSettings(state: InMemorySyncStateStore(), transport: household.transport).configuration
+        configuration.snapshotThreshold = 2
+        let owner = try await household.account(seed: 925, configuration: configuration)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        for number in 0..<6 {
+            var item = Self.bank(in: vaultID)
+            item.title = "Item \(number)"
+            _ = try await owner.session.save(item)
+            try await owner.session.sync()
+        }
+        let snapshots = await household.transport.list(prefix: SyncObjectLocation.vaultPrefix(vaultID))
+            .filter { SyncObjectLocation(name: $0)?.kind == .snapshot }
+        #expect(!snapshots.isEmpty, "the vault's log was not compacted: the test proves nothing")
+        for name in snapshots { await household.transport.tamper(name, contents: nil) }
+
+        await #expect(throws: SharedVaultError.historyCompacted(vaultID)) {
+            try await owner.session.shareVault(vaultID)
+        }
+        #expect(try await owner.session.sharedVaultIDs().isEmpty)
+    }
+
     /// Threat: none needed; a transport that fails at the wrong moment. The marker is what tells the account's other
     /// devices to stop compacting the vault's log, and it used to be published if it could be and otherwise left to
     /// the next sync, while the chain's first record went out regardless. The chain must not be on the transport
@@ -109,13 +137,15 @@ extension AdversarialSharedVaultTests {
 actor RefusingTransport: SyncTransport {
     let base: InMemorySyncTransport
     private var refused: String?
+    private var failure = SyncTransportError.unavailable
 
     init(base: InMemorySyncTransport) {
         self.base = base
     }
 
-    func refuseCreates(under prefix: String?) {
+    func refuseCreates(under prefix: String?, with failure: SyncTransportError = .unavailable) {
         refused = prefix
+        self.failure = failure
     }
 
     func list(prefix: String) async throws -> [String] {
@@ -127,7 +157,7 @@ actor RefusingTransport: SyncTransport {
     }
 
     func create(_ name: String, contents: [UInt8]) async throws {
-        if let refused, name.hasPrefix(refused) { throw SyncTransportError.unavailable }
+        if let refused, name.hasPrefix(refused) { throw failure }
         try await base.create(name, contents: contents)
     }
 

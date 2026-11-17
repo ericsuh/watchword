@@ -231,4 +231,47 @@ extension AdversarialSharingTests {
         #expect(device.state.members.map(\.accountID) == [base.owner.accountID])
         #expect(!device.isOwnersAlone, "a vault everyone was removed from was taken for one nobody had joined")
     }
+
+    /// Threat: the key directory (A1) between a safety number being shown and the confirmation (review finding Z40),
+    /// at the two places an invitation takes evidence itself rather than through a screen. The directory serves the
+    /// bundle the person compared when the fingerprint was displayed, and another when the invitation begins: the
+    /// evidence names the fingerprint that was shown, and each invitation must refuse to pin the other bundle on it,
+    /// leaving nobody pinned.
+    @Test(
+        "evidence of a comparison by eye is refused by both sides of an invitation for a bundle other than the one shown"
+    )
+    func invitationRefusesEvidenceForAnotherBundle() async throws {
+        let household = try await SharingHousehold.make()
+        let guest = try SharingParty(seed: 51)
+        let impostor = try SharingParty(accountID: guest.accountID, seed: 52)
+        let ownerImpostor = try SharingParty(accountID: household.owner.accountID, seed: 53)
+
+        // The inviter was shown the guest's fingerprint; the directory now serves the impostor's bundle.
+        let inviterStore = InMemoryVerifiedContactStore()
+        let inviterContacts = VerifiedContacts(store: inviterStore, account: household.owner.bundle)
+        let directory = InMemoryKeyBundleDirectory()
+        await directory.publish(impostor.bundle)
+        var outgoing = try await OutgoingInvitation.begin(
+            vaultID: household.vaultID, inviting: guest.accountID, as: .readWrite, directory: directory,
+            contacts: inviterContacts)
+        await #expect(throws: SharingError.fingerprintMismatch) {
+            try await outgoing.confirm(
+                .comparedByEye(shown: guest.bundle.fingerprint), contacts: inviterContacts,
+                signedBy: household.owner.keyset, at: Self.now)
+        }
+        #expect(try await inviterContacts.pinned(guest.accountID) == nil)
+
+        // The invitee was shown the owner's fingerprint; the directory serves another bundle under the owner's ID.
+        let guestContacts = VerifiedContacts(store: InMemoryVerifiedContactStore(), account: guest.bundle)
+        await directory.publish(ownerImpostor.bundle)
+        var incoming = try await IncomingInvitation.begin(
+            Invitation(vaultID: household.vaultID, ownerAccountID: household.owner.accountID), knownOwner: nil,
+            directory: directory, contacts: guestContacts)
+        await #expect(throws: SharingError.fingerprintMismatch) {
+            try await incoming.confirm(
+                .comparedByEye(shown: household.owner.bundle.fingerprint), contacts: guestContacts,
+                signedBy: guest.keyset, at: Self.now)
+        }
+        #expect(try await guestContacts.pinned(household.owner.accountID) == nil)
+    }
 }

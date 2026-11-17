@@ -604,7 +604,12 @@ owner's aside and stops the first invitation, and the marker published before th
 membership". A deletion unpublished at a demotion, withdrawn and not published at the promotion
 (`AdversarialSharedVaultDeletionGateTests.swift`), and a left vault's removal from a device that holds unsynced work
 of its own, refused until the number is acknowledged (`AdversarialSharedVaultFormerMemberTests.swift`), with the
-confirmation's text in "Screen models: sharing" (Z57).
+confirmation's text in "Screen models: sharing" (Z57). Claims of rows Z40 to Z47 that had no test of their own (Z58,
+which also lists those still without one): every remaining write path under `ledgerUnavailable`, a marker outliving
+its device's revocation and a newly enrolled device before its first sync
+(`AdversarialSharedVaultClosedWritePathTests.swift`); the whole-log check by the device's own sync state; the
+deletion gate's first clause; a key no record introduced; and, in "sharing and membership", both sides of an
+invitation refusing evidence for a bundle other than the one shown.
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

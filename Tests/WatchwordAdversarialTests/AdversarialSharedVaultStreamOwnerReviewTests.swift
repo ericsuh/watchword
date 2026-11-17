@@ -155,4 +155,19 @@ extension AdversarialSharedVaultTests {
         #expect(await owner.session.streamOwner(setting.victimDevice, in: vaultID) == setting.victim.accountID)
         #expect(await owner.session.replayIsRequested(vaultID), "what was admitted under the wrong owner stays merged")
     }
+
+    /// Threat: a member (A4), or the store (A1) by timing. A segment is sealed under a key ID this device has no
+    /// record of: a rotation whose record has not arrived yet, or an ID someone made up. Passing over it for good
+    /// (Z47 does that for a key only a losing branch introduced) would drop an honest writer's segment whenever the
+    /// rotation's record is late, so a key no record held here introduced is waited for; the vault's own current key,
+    /// which this account is entitled to, is not passed over either.
+    @Test("a segment under a key no record here introduced is waited for, not passed over")
+    func unknownKeyIsNotPassedOver() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 995)
+        let member = home.members[0]
+        let current = try await member.session.sharedVaultStatus(home.vaultID).membership.vaultKeyID
+        #expect(await !member.session.judgePassesOver(keyID: UUID(), vaultID: home.vaultID))
+        #expect(await !member.session.judgePassesOver(keyID: current, vaultID: home.vaultID))
+    }
 }

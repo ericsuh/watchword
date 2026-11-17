@@ -133,4 +133,50 @@ extension AdversarialSharedVaultTests {
         try await Self.syncAll([member, owner])
         #expect(try await owner.session.items(in: vaultID).items.isEmpty)
     }
+
+    /// Threat: someone with the device's files (A8), or a restore that loses the sharing state. A member moves an
+    /// item from their own vault into a shared one: a copy there, and the original's deletion queued here. Before
+    /// the device syncs, its saved ledger is gone, so the shared vault is held closed and nothing is published to
+    /// it (Z41). The copy exists on this device alone, and the deletion must wait for it: published now, the
+    /// account's other devices would erase the original while the only copy sat here (PRD F7.6). This is the gate's
+    /// first clause, a row this device wrote that its sync state does not know as published, which Z44's tests
+    /// reached only through a copy held aside.
+    @Test("a move's deletion waits while the copy's vault is held closed, and the sync says which vault it waits for")
+    func deletionWaitsForAnUnpublishedCopy() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 990)
+        let (owner, member) = (home.owner, home.members[0])
+        let vaultID = home.vaultID
+        let personal = try #require(await member.session.personalVaultID)
+        let item = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([owner, member])
+        let moved = try await member.session.move(itemID: item.id, to: vaultID)
+        let syncState = try #require(member.vault.sync?.state)
+        #expect(try await syncState.pendingDeletions(vaultID: personal).count == 1)
+
+        await member.session.lock()
+        await member.state.tamper(.ledger, vaultID: vaultID, value: nil)
+        let device = member.vault.relaunched()
+        await device.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await device.session.unlock(password: TestVault.password)
+        let held = try await device.session.syncAll()
+        #expect(held.deletionsHeldBack == [vaultID], "nothing said which vault the deletions are waiting for")
+        #expect(
+            try await syncState.pendingDeletions(vaultID: personal).count == 1,
+            "the original's deletion was published while its copy had reached nobody")
+        try await owner.session.sync()
+        #expect(try await !owner.session.items(in: vaultID).items.contains { $0.id == moved.id })
+
+        // The device sets the vault up again, the copy goes out, and the deletion follows it.
+        try await device.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        let released = try await device.session.syncAll()
+        let after = released.deletionsHeldBack.isEmpty ? released : try await device.session.syncAll()
+        #expect(after.deletionsHeldBack.isEmpty)
+        #expect(try await syncState.pendingDeletions(vaultID: personal).isEmpty)
+        try await owner.session.sync()
+        #expect(try await owner.session.items(in: vaultID).items.contains { $0.id == moved.id })
+    }
 }
