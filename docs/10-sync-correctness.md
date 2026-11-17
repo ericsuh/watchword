@@ -392,8 +392,9 @@ failed each time.
   catches up when it is updated and processes what it kept (or replays the log, if it had to drop some, or its stash
   was not saved after a crash). What makes that safe for the *other* devices is that it writes no ordinary snapshot
   while it holds entries a trusted device carried, or a version of one in its quarantine: every ordinary snapshot is
-  then the state of a device that merged everything it covers, which is all §7.5's collection rule relies on. The one snapshot it still writes, for a revoked
-  device's work, covers only revoked streams, which nobody collects, so it changes nothing that rule relies on; and
+  then the state of a device that merged everything it covers, which is all §7.5's collection rule relies on. The
+  one snapshot it still writes, for a revoked device's work, covers only revoked streams, which nobody collects, so
+  it changes nothing that rule relies on; and
   what a revoked device carried is forgotten (except its own versions, which nothing else carries), so a device
   revoked after planting an unreadable entry cannot hold snapshots back for good. A critical
   kind it cannot read stops that stream at the object, as a gap does; nothing past it is applied, so nothing is merged

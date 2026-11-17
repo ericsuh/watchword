@@ -590,7 +590,8 @@ reads the kind would never see what it left out. The same holds for a version ke
 merged (an implausible jump, a join that does not fit in one record, a colliding record ID): its segment counts as
 merged, so while the quarantine holds a version a trusted device wrote, the device writes no ordinary snapshot either
 (`snapshotWithheldForQuarantine`, Z26), until the person has discarded what was kept. A snapshot's coverage of the
-reader's own stream is believed no further than that stream can have got (Z21). The snapshot a device owes for a revoked device's work is written
+reader's own stream is believed no further than that stream can have got (Z21). The snapshot a device owes for a
+revoked device's work is written
 all the same, with coverage only of revoked devices' streams, which nobody reads or collects, so it hands that work on
 and makes nothing collectable.
 
@@ -1704,7 +1705,8 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   claim to have seen a current member's edits that their stream has not published is a claim about edits that do not
   exist yet, which would supersede them when they are made, so the version waits for that stream (S46; one about this
   device's own edits is refused). A current member's device whose stream this device cannot read from its first
-  segment is not checked. A tombstone, from a segment or from a snapshot (Z21), is judged the same way before it is applied or remembered
+  segment is not checked. A tombstone, from a segment or from a snapshot (Z21), is judged the same way before it is
+  applied or remembered
   (`WriteJudge.admitsErasure`): its erasure summary is its author's clock, and one built on a late write would erase
   what its author was shown only through it, so it is held aside and the item stays (S45; `10-sync-correctness.md`
   §9). A value is judged by its **bytes, stamp included**

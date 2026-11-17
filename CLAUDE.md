@@ -500,7 +500,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   device holding entries carried by a trusted device writes no ordinary snapshot, only the one it owes a revoked
   device's work, covering revoked streams alone; what a revoked device carried is forgotten except its own versions,
   which hold nothing back and survive a replay. The same goes for the quarantine: while it holds a version a trusted
-  device wrote, no ordinary snapshot (`snapshotWithheldForQuarantine`, Z26). `stashUnsaved` makes a sync after a crash replay the log. A critical
+  device wrote, no ordinary snapshot (`snapshotWithheldForQuarantine`, Z26). `stashUnsaved` makes a sync after a
+  crash replay the log. A critical
   kind stops the stream at the object, skips nothing and sets `requiresNewerVersion`. Never let a stashed entry reach
   the store or a merger except through `processStashed`, which drops any critical kind (only A8 can plant one). In a
   shared vault nothing a held-aside segment carried is kept, a trusted device's kept entries are judged by the replay

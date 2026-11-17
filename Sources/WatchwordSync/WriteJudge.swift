@@ -22,9 +22,9 @@ public enum SegmentAdmission: Sendable, Hashable {
 /// The engine asks before it applies anything: `admitsSegment` for each segment in stream order, and `admits` for
 /// every record version a segment or snapshot carries, whoever signed it, because a member who merged a write before
 /// it stopped counting publishes that write on inside versions of their own, and `admitsErasure` for every tombstone
-/// of a segment or a snapshot it applies, whose erasure summary is a claim about what its author had seen. A version or tombstone
-/// that is not admitted is held aside like a quarantined one (kept, not merged, not published on) and the stream
-/// continues.
+/// of a segment or a snapshot it applies, whose erasure summary is a claim about what its author had seen. A version
+/// or tombstone that is not admitted is held aside like a quarantined one (kept, not merged, not published on) and
+/// the stream continues.
 ///
 /// Portable: the judge does the cryptography (digests, signatures) and the engine passes bytes, so this module
 /// stays free of CryptoKit.
