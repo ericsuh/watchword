@@ -390,4 +390,32 @@ extension SharingScreenTests {
         await vaults.load()
         #expect(vaults.row(home.vaultID) == nil)
     }
+
+    /// A vault the account was removed from while this device held a change it had not synced (review finding Z57):
+    /// the confirmation says that the change is nobody else's and would be discarded, with the number, in place of
+    /// only "the vault's members keep theirs", and the removal the person then confirms goes through.
+    @Test("removing a left vault's items says what would be discarded for good")
+    func removingCopiesSaysWhatIsNotACopy() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 585)
+        let member = home.members[0]
+        var item = AutoFillFixtures.bank
+        item.id = UUID()
+        item.vaultID = home.vaultID
+        _ = try await member.session.save(item)
+        try await home.owner.session.removeMember(member.accountID, from: home.vaultID)
+        for _ in 0..<3 {
+            try await home.owner.session.sync()
+            try await member.session.sync()
+        }
+
+        let shared = SharedVaultModel(vaultID: home.vaultID, context: ContextProbe().context(member.session))
+        await shared.load()
+        #expect(shared.membershipEnded && shared.unsharedChanges == 1)
+        #expect(shared.removeCopiesMessage.contains(SharedVaultModel.unsharedWarning(1)))
+        #expect(shared.removeCopiesMessage.contains("discards them for good"))
+        await shared.removeFromThisDevice()
+        #expect(shared.errorMessage == nil, "\(shared.errorMessage ?? "")")
+        #expect(try await member.session.items(in: home.vaultID).items.isEmpty)
+    }
 }

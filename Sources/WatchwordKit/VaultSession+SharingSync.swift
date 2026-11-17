@@ -1098,6 +1098,19 @@ extension VaultSession {
                 if kind == .item { hygieneRuntime?.takenOut.insert(row.recordID) }
             }
         }
+        // A deletion this device queued and had not published when its account's permission to write ended is
+        // outside the cut, as an edit of that moment is, and does not count either. Left queued it erased the
+        // record in every merge here and went out, signed, on the day the account was let write again, with
+        // nothing asking (Z57). It is withdrawn; the replay puts back what the log holds of the record.
+        if let me = account?.accountID {
+            if case .mayWrite = vault.ledger.writeStanding(of: me) {
+            } else {
+                let pending = try await syncSettings.state.pendingDeletions(vaultID: vaultID)
+                if !pending.isEmpty {
+                    try await syncSettings.state.removePendingDeletions(pending.mapValues(\.stamp), vaultID: vaultID)
+                }
+            }
+        }
         sharing.vaults[vaultID]?.needsReconcile = true
     }
 

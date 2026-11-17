@@ -94,4 +94,43 @@ extension AdversarialSharedVaultTests {
         #expect(try await syncState.pendingDeletions(vaultID: first).isEmpty)
         #expect(try await owner.session.items(in: first).items.isEmpty)
     }
+
+    /// Threat: none needed; a member who may write deletes an item for good, and is made read-only before their
+    /// device has synced (review finding Z57). The deletion is outside the cut the demotion carries, like any write
+    /// of theirs the others had not seen: published late it would be held aside by everyone. Unpublished, it used to
+    /// stay queued and signed on their device, where it counted as an erasure in every merge, and went out on the
+    /// day they were allowed to write again, months later perhaps, with nothing asking. It is withdrawn with the
+    /// rest of what no longer counts: the item is back on their device, and nothing waits to be published.
+    @Test("a deletion not yet published when its author was made read-only is withdrawn, not kept for a later day")
+    func deletionUnpublishedAtDemotion() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 975)
+        let (owner, member) = (home.owner, home.members[0])
+        let vaultID = home.vaultID
+        let item = try await owner.session.save(Self.bank(in: vaultID))
+        try await owner.session.trash(id: item.id)
+        try await Self.syncAll([owner, member])
+        let syncState = try #require(member.vault.sync?.state)
+
+        try await member.session.deletePermanently(id: item.id)
+        #expect(try await syncState.pendingDeletions(vaultID: vaultID).count == 1)
+        try await owner.session.changeRole(of: member.accountID, in: vaultID, to: .readOnly)
+        try await Self.syncAll([owner, member])
+        try await Self.syncAll([owner, member])
+        #expect(
+            try await syncState.pendingDeletions(vaultID: vaultID).isEmpty,
+            "the deletion is still queued, to go out when they may write again")
+        #expect(try await member.session.items(in: vaultID).items.map(\.id) == [item.id])
+
+        try await owner.session.changeRole(of: member.accountID, in: vaultID, to: .readWrite)
+        try await Self.syncAll([owner, member])
+        try await Self.syncAll([owner, member])
+        #expect(
+            try await owner.session.items(in: vaultID).items.map(\.id) == [item.id],
+            "a deletion made before the demotion was published after the promotion")
+        // Theirs to make again, now that it counts.
+        try await member.session.deletePermanently(id: item.id)
+        try await Self.syncAll([member, owner])
+        #expect(try await owner.session.items(in: vaultID).items.isEmpty)
+    }
 }

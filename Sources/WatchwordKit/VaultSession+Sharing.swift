@@ -1181,8 +1181,17 @@ extension VaultSession {
     /// nothing is recorded to publish, no other member's copy is touched, and the ledger is kept (S26). Refused while
     /// this account is still a member (it leaves first) and for a vault with no ledger here. Returns how many items
     /// went.
+    ///
+    /// Not everything here is a copy. A change made on this device that never reached the others (written and not
+    /// published, or put aside when the account's permission ended) exists nowhere else, and removing it is a discard
+    /// only the person can make (PRD F7.6; review finding Z57): the call is refused (`unsharedWork`) unless
+    /// `acknowledged` is at least the number of such changes, which is the number the person was shown
+    /// (`unsharedWork(inSharedVault:)`). A removal that later loses a fork gives the membership back, and those
+    /// changes would have gone out then.
     @discardableResult
-    public func removeLocalCopies(ofSharedVault vaultID: UUID) async throws -> Int {
+    public func removeLocalCopies(ofSharedVault vaultID: UUID, discardingUnshared acknowledged: Int = 0)
+        async throws -> Int
+    {
         _ = try sharingSettings()
         _ = try requireKeys()
         await loadSharedVaultsIfNeeded()
@@ -1192,6 +1201,8 @@ extension VaultSession {
                 ? SharedVaultError.ledgerUnavailable(vaultID) : SharedVaultError.notShared(vaultID)
         }
         guard membershipEnded(vaultID, account: account) else { throw SharedVaultError.stillAMember(vaultID) }
+        let unshared = await unsharedWorkCount(vaultID, account: account)
+        guard unshared <= acknowledged else { throw SharedVaultError.unsharedWork(vaultID, unshared) }
         let items = try await store.records(in: vaultID, kind: .item)
         let scans = try await store.records(in: vaultID, kind: .scanStatus)
         _ = try requireKeys()
@@ -1205,6 +1216,35 @@ extension VaultSession {
         }
         try? await reconcileHygiene()
         return items.count
+    }
+
+    /// How many changes this device made in a shared vault that nobody else has: items whose latest version it
+    /// wrote and has not published, and versions of its own that were put aside before they were (review finding
+    /// Z57). What `removeLocalCopies` would discard for good, for the screen that offers it to say.
+    public func unsharedWork(inSharedVault vaultID: UUID) async throws -> Int {
+        _ = try requireKeys()
+        await loadSharedVaultsIfNeeded()
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        return await unsharedWorkCount(vaultID, account: account)
+    }
+
+    func unsharedWorkCount(_ vaultID: UUID, account: AccountRecord) async -> Int {
+        guard let syncState, let base = syncSettings?.state else { return 0 }
+        // What was published, as this device's signed sync state has it (Z20).
+        let published = (try? await syncState.loadState(vaultID: vaultID))?.published ?? [:]
+        var count = 0
+        for row in (try? await store.records(in: vaultID, kind: .item)) ?? []
+        where row.deviceID == account.deviceID && !(published[row.key].map { $0 >= RecordStamp(row) } ?? false) {
+            count += 1
+        }
+        // What this device's own take-out put aside (Z54), never an entry's own word for whose it is.
+        let takenOut = sharing.vaults[vaultID]?.index.ownTakenOut ?? []
+        for entry in (try? await base.quarantined(vaultID: vaultID)) ?? []
+        where entry.kind == .item && !entry.isDeletion && entry.device == account.deviceID {
+            let version = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
+            if takenOut.contains(version) { count += 1 }
+        }
+        return count
     }
 
     // MARK: - Hooks the rest of the session calls

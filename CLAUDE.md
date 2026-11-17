@@ -732,6 +732,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (`vaultsWithheldFromAutoFill`, which also withholds a vault with no ledger), the vault stays listed while items of
   it are here, and only `removeLocalCopies` takes them off the device, without publishing anything (Z45). Leaving does
   not remove them, and no screen may say it does; read-only is worded as a client rule, never as encryption (F4.5).
+  What this device wrote there and nobody else has is not a copy: `removeLocalCopies` refuses (`unsharedWork`) unless
+  given the number the person was shown, and the take-out at a change of head withdraws a deletion this device had
+  queued and not published when its account's permission to write ended, never leaving it for a later day (Z57).
 - A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
   `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
   judge a cut. The only snapshots a shared vault reads are its owner's account's, from before it was shared, for

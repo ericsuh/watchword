@@ -78,6 +78,9 @@ public final class SharedVaultModel {
     /// "Pending rotation" and the other reasons a rotation is unfinished, worded (F4.3).
     public private(set) var pending: [String] = []
     public private(set) var ownRole: MemberRole?
+    /// Changes this device made in a vault its account is no longer in that nobody else has: what
+    /// `removeFromThisDevice` would discard, and the number its confirmation shows.
+    public private(set) var unsharedChanges = 0
     public private(set) var fingerprint: OwnFingerprint?
     public private(set) var isWorking = false
     public var errorMessage: String?
@@ -115,6 +118,20 @@ public final class SharedVaultModel {
 
     public static let removeCopiesExplanation =
         "This removes the vault's items from this device only. The vault's members keep theirs."
+
+    /// What the removal would discard that is not a copy (review finding Z57): changes made here that never
+    /// reached anyone else. "The vault's members keep theirs" is not true of those.
+    public static func unsharedWarning(_ count: Int) -> String {
+        "\(count) change(s) made on this device never reached the other members. Nobody else has them, and "
+            + "removing discards them for good."
+    }
+
+    /// The text for the confirmation, as it stands for this vault now.
+    public var removeCopiesMessage: String {
+        unsharedChanges == 0
+            ? Self.removeCopiesExplanation
+            : Self.removeCopiesExplanation + " " + Self.unsharedWarning(unsharedChanges)
+    }
     public var mayRotate: Bool { ownRole?.isAdministrator == true && !isReadOnly }
 
     /// The roles `member` can be given by this account: the owner gives any role but owner to anyone else, an
@@ -183,9 +200,18 @@ public final class SharedVaultModel {
     /// the only thing that does.
     public func removeFromThisDevice() async {
         await perform {
-            let removed = try await context.session.removeLocalCopies(ofSharedVault: vaultID)
-            try await reload()
-            notice = "\(removed) item(s) of this vault were removed from this device."
+            // The number the confirmation showed: more than that, and the session refuses (Z57).
+            let shown = unsharedChanges
+            do {
+                let removed = try await context.session.removeLocalCopies(
+                    ofSharedVault: vaultID, discardingUnshared: shown)
+                try await reload()
+                notice = "\(removed) item(s) of this vault were removed from this device."
+            } catch let error as SharedVaultError {
+                // The count moved since it was shown: show the new one before anything is asked again.
+                try? await reload()
+                throw error
+            }
         }
     }
 
@@ -250,6 +276,7 @@ public final class SharedVaultModel {
         isShared = true
         sharing = VaultSharing(status)
         ownRole = status.role
+        unsharedChanges = status.role == nil ? ((try? await session.unsharedWork(inSharedVault: vaultID)) ?? 0) : 0
         members = Self.rows(status, me: accountID)
         pending = status.pendingRotation.map(Self.describe)
     }

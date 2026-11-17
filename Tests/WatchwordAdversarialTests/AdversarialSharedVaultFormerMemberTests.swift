@@ -85,4 +85,42 @@ extension AdversarialSharedVaultTests {
         #expect(try await relaunched.session.item(id: bank.id).title == bank.title)
         #expect(try await !relaunched.session.credentialItems().contains { $0.id == bank.id })
     }
+
+    /// Threat: none needed; a member removed while their device held work it had not synced (review finding Z57).
+    /// What `removeLocalCopies` takes off the device is described as copies, "the vault's members keep theirs", and
+    /// that is not true of an item written here that reached nobody: it is the only one. Removing it is a discard
+    /// only the person can make (F7.6), and a removal that later loses a fork would have given the membership back
+    /// and let it be published. So the removal is refused until the caller says how many such changes the person
+    /// was told of, and the session reports the number.
+    @Test("removing a left vault's items from a device does not discard its own unsynced work without being told to")
+    func removingCopiesKeepsUnsharedWork() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 985)
+        let (owner, member) = (home.owner, home.members[0])
+        let vaultID = home.vaultID
+        _ = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, member])
+        var own = Self.bank(in: vaultID)
+        own.title = "Written here, synced nowhere"
+        let unsynced = try await member.session.save(own)
+        try await owner.session.removeMember(member.accountID, from: vaultID)
+        try await Self.syncAll([owner, member], rounds: 3)
+        #expect(try await member.session.sharedVaultStatus(vaultID).role == nil)
+        #expect(try await !owner.session.items(in: vaultID).items.contains { $0.id == unsynced.id })
+
+        let unshared = try await member.session.unsharedWork(inSharedVault: vaultID)
+        #expect(unshared == 1)
+        await #expect(throws: SharedVaultError.unsharedWork(vaultID, unshared)) {
+            try await member.session.removeLocalCopies(ofSharedVault: vaultID)
+        }
+        let syncState = try #require(member.vault.sync?.state)
+        let here = try await member.session.items(in: vaultID).items.contains { $0.id == unsynced.id }
+        let aside = try await syncState.quarantined(vaultID: vaultID).contains { $0.recordID == unsynced.id }
+        #expect(here || aside, "the only copy of the item went with a refusal")
+
+        // Told of it, the person may discard it with the rest.
+        try await member.session.removeLocalCopies(ofSharedVault: vaultID, discardingUnshared: unshared)
+        #expect(try await member.session.items(in: vaultID).items.isEmpty)
+        #expect(try await syncState.quarantined(vaultID: vaultID).isEmpty)
+    }
 }

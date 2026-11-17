@@ -601,7 +601,10 @@ deletions (Z54), and a second replay in one sync that must not publish the delet
 waiting on (Z55). A log the account's other device compacted after the vault was shared, which holds nothing of the
 owner's aside and stops the first invitation, and the marker published before the chain
 (`AdversarialSharedVaultLateCompactionTests.swift`, Z56), with the ledger's "its owner's alone" in "sharing and
-membership".
+membership". A deletion unpublished at a demotion, withdrawn and not published at the promotion
+(`AdversarialSharedVaultDeletionGateTests.swift`), and a left vault's removal from a device that holds unsynced work
+of its own, refused until the number is acknowledged (`AdversarialSharedVaultFormerMemberTests.swift`), with the
+confirmation's text in "Screen models: sharing" (Z57).
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

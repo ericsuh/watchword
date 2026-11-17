@@ -137,6 +137,9 @@ public enum ErrorWording {
         case .stillAMember:
             return "You are still a member of this vault. Leave it first; its items can be removed from this device "
                 + "once you are no longer a member."
+        case .unsharedWork(_, let count):
+            return "\(count) change(s) made on this device never reached the vault's other members. Removing the "
+                + "vault's items from this device would discard them for good, so nothing was removed."
         case .historyCompacted:
             return "This vault has been in use too long to be shared as it is: its sync history was compacted. "
                 + "Create a new vault, share that one, and move the items you want to share into it."

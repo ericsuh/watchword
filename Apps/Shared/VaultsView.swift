@@ -177,7 +177,7 @@ struct VaultDetailView: View {
             Button("Remove", role: .destructive) { Task { await model.removeFromThisDevice() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(SharedVaultModel.removeCopiesExplanation)
+            Text(model.removeCopiesMessage)
         }
         .confirmationDialog(
             "Remove \(removing?.name ?? "this member")?", isPresented: removingBinding, titleVisibility: .visible
@@ -258,7 +258,7 @@ struct VaultDetailView: View {
                     }
                     .disabled(model.isWorking)
                 } footer: {
-                    Text(VaultSharing.endedDetail + " " + SharedVaultModel.removeCopiesExplanation)
+                    Text(VaultSharing.endedDetail + " " + model.removeCopiesMessage)
                 }
             }
         }

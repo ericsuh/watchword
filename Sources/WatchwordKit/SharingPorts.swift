@@ -120,6 +120,10 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// `verifyMemberDevices` was given a code that no entry of that account's device registry, or more than one,
     /// answers to. Nothing was anchored: read the code again from the member's own device.
     case memberDevicesCodeUnknown(UUID)
+    /// `removeLocalCopies` was asked for a vault in which this device holds changes of its own that nobody else has,
+    /// more of them than the caller said the person had been told of (review finding Z57): those are not copies,
+    /// and discarding them is the person's choice, made knowing the number. Carries the number.
+    case unsharedWork(UUID, Int)
     /// An invitation for a vault this device holds keys of, which arrived by grant, without knowing whose the vault
     /// is: it has no ledger for it and the account's marker has not reached it (review finding Z48). The vault has an
     /// owner, and an invitation is accepted only if it names them; one this device cannot check is not accepted,

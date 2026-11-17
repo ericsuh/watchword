@@ -1700,7 +1700,11 @@ shared with no ledger here, where membership cannot be told), the vault stays in
 of it, labelled as one this account is no longer in, and the person removes what the device holds with
 `removeLocalCopies(ofSharedVault:)`: the rows, their synced scan results and what was held aside, taken out of the
 store directly, so nothing is recorded to publish and nobody else's copy is touched. It is refused while the account is
-still a member. The key wraps and the ledger stay (S26). One consequence for the AutoFill extension, whose adapter is
+still a member. Not all of it need be a copy: a change made on this device that never reached the others (written and
+not published, or put aside when the account's permission ended) exists nowhere else, so the call is refused
+(`unsharedWork`) unless it is given the number of such changes the person was shown
+(`unsharedWork(inSharedVault:)`), and the confirmation says that number and that they would be discarded for good
+(review finding Z57). The key wraps and the ledger stay (S26). One consequence for the AutoFill extension, whose adapter is
 not built: its session must be given the sharing state (`configureSharing` over the App Group's `sharing.sqlite`)
 like the app's, or every shared vault is one with no ledger there and none of its items is offered. What the leaver's device already copied elsewhere, and what a
 removed member's device holds, cannot be taken back, which the removal dialog says (F4.3); "read-only" is worded as a
@@ -1735,6 +1739,14 @@ take its first member (`historyCompacted`) and goes on as its owner's. What is l
 the invitation's check, by a device whose sync had read the account's directory before the marker was there and is
 still running, or a store that hides the snapshot from the inviting device: the outcome is Z42's, items held aside,
 nothing lost.
+
+**A deletion not yet published when permission ended** (review finding Z57). A member who may write deletes an item
+for good and is made read-only, or removed, before their device syncs. The deletion is outside the cut like any write
+of that moment, and published late it would be held aside by everyone. Left queued on the device it counted as an
+erasure in every merge there and went out, signed, on the day the account was let write again. The take-out at the
+change of head withdraws it with the rest of what no longer counts: the pending deletion is removed, and the replay
+puts back what the log holds of the record. The person deletes it again if they are let write again and still want
+to.
 
 **The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
 own safety number), `contactCandidate` and `verifyContact` (fingerprint by typed number, scanned code or comparison;
