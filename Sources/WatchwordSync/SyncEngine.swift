@@ -1073,9 +1073,21 @@ public actor SyncEngine {
             state.erasures[entry.key] = try await join(
                 state.erasures[entry.key], Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
         }
-        if entry.device == deviceID {
+        if entry.device == deviceID, try await isHeldAsPublished(entry) {
             state.published[entry.key] = max(state.published[entry.key] ?? entry.stamp, entry.stamp)
         }
+    }
+
+    /// Whether a version found in the log under this device's name is one it need not publish: its own deletion, or
+    /// exactly the row it holds. The log is believed about what this device *published* only that far (review finding
+    /// Z29): an entry naming this device at a version above its row, whose content the row already contains, changes
+    /// nothing in the store, and marking its stamp as published would pass over a row that holds an edit nobody
+    /// else has. A row that differs is published again, which costs a segment and merges to nothing.
+    private func isHeldAsPublished(_ entry: SyncEntry) async throws -> Bool {
+        guard !entry.isDeletion else { return true }
+        guard let row = try await store.record(entry.key) else { return false }
+        return row.vaultID == vaultID && row.version == entry.version && row.deviceID == entry.device
+            && row.keyID == entry.keyID && row.envelope == entry.envelope
     }
 
     /// Returns whether the local store changed. `erasure` is the latest erasure of the record known here, published

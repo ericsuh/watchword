@@ -159,6 +159,33 @@ extension AdversarialSyncTests {
         #expect(await f.transport.allObjects[f.segmentName(4)] != nil)
     }
 
+    /// Threat: whoever can put a validly signed object in the victim's own stream, or sign a snapshot that attributes
+    /// a version to the victim's device (in a shared vault, a member who lists the victim's device ID in their own
+    /// registry, S33; in any vault a device of the account). The object carries an *older* state of an item, sealed
+    /// again at a higher version under the victim's device ID. The victim's copy holds an edit it has not published;
+    /// the merge keeps the local copy, which contains everything the planted one says. But the entry names the
+    /// victim's device, so its stamp was recorded as *published*, above the unpublished row: the outbox then passed
+    /// the row over, and the edit never left the device (Z29). A version found in the log counts as published only
+    /// if it is the row this device holds.
+    @Test("a planted version in a device's own name does not mark its unpublished edit as sent")
+    func plantedOwnVersionDoesNotSuppressPublishing() async throws {
+        let f = try await Self.fixture()
+        let original = try await f.writer.save(Self.login("Bank", password: "old"))
+        try await f.writer.sync()
+        try await f.writer.edit(original.id) { $0.fields[1].value = "new, and not yet published" }
+
+        let resealed = try await f.writer.keyring.sealItem(
+            ItemMerge.written(original, as: Revision(version: 10, device: Self.a)))
+        try await f.plant(Self.payload([resealed], sequence: 2), signedBy: f.writer.keyring)
+
+        let report = try await f.writer.sync()
+        #expect(report.pushedEntries == 1, "the unpublished edit was passed over")
+        #expect(try await f.writer.item(original.id).field(.password)?.value == "new, and not yet published")
+        let reader = await f.reader()
+        try await reader.sync()
+        #expect(try await reader.item(original.id).field(.password)?.value == "new, and not yet published")
+    }
+
     // MARK: - The version-jump ceiling
 
     static func jumpConfiguration() -> SyncConfiguration {
