@@ -88,6 +88,12 @@ struct SharedVaultLaterFormatTests {
         await #expect(throws: SharingError.requiresNewerVersion) {
             try await member.session.leaveSharedVault(vaultID)
         }
+        // Nor is anything moved out of the vault, which would delete it there (review finding Z44).
+        let personal = try #require(await member.session.personalVaultID)
+        await #expect(throws: SharedVaultError.writeRefused(.requiresNewerVersion)) {
+            try await member.session.move(itemID: bank.id, to: personal)
+        }
+        #expect(try await member.session.items(in: personal).items.isEmpty)
         // A second sync, and one after the later record is no longer listed, still stop there and publish nothing.
         _ = try await member.session.sync()
         #expect(await Self.vaultObjects(household.transport, vaultID) == before)
