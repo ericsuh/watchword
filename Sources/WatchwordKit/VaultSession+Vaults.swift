@@ -465,7 +465,7 @@ extension VaultSession {
         var tombstone = Self.directoryRow(
             vaultID: id, accountID: account.accountID, deviceID: account.deviceID,
             deletion: SignedObject(signature: signature, envelope: Self.deletionMarker))
-        tombstone.version = max(tombstone.version, (existing?.version ?? 0) + 1)
+        tombstone.version = max(tombstone.version, try Self.version(replacing: existing))
         // Conditional on every version just counted, so an edit that lands in between fails the whole deletion.
         // The items' synced scan results go with them (§13.9).
         let scanStatus = try await store.records(in: id, kind: .scanStatus).map(\.key)

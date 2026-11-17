@@ -367,6 +367,15 @@ extension VaultSession {
 
     /// The header as the local row that mirrors the account record (`recordID` the account's own) or, under any
     /// other record ID, as a candidate waiting for the person's new password.
+    /// The version a row that replaces `existing` is written at: one above it, or 1 where there is none. A row at the
+    /// last version there is can only come from an edited file (A8), since nothing writes one: refused with a typed
+    /// error, never trapped on (review finding Z23).
+    static func version(replacing existing: StoredRecord?) throws -> UInt64 {
+        guard let existing else { return 1 }
+        guard existing.version < UInt64.max else { throw VaultError.versionOverflow }
+        return existing.version + 1
+    }
+
     static func headerRow(_ header: AccountHeaderObject, recordID: UUID, version: UInt64) -> StoredRecord {
         StoredRecord(
             recordID: recordID, kind: .accountHeader, vaultID: header.accountID, keyID: header.unlockKeyID,
@@ -1412,7 +1421,11 @@ extension VaultSession {
             }
         }
         for var deletion in fetched.deletions {
-            if let existing = try await store.record(deletion.key) { deletion.version = existing.version + 1 }
+            if let existing = try await store.record(deletion.key) {
+                // A row at the last version (an edited file, Z23) cannot be replaced: left as it is, like a wrap.
+                guard existing.version < UInt64.max else { continue }
+                deletion.version = existing.version + 1
+            }
             change.upserts.append(deletion)
             report.vaultDeletionsFetched += 1
         }

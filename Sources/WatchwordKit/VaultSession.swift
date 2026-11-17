@@ -535,7 +535,7 @@ public actor VaultSession: SharesExecutor {
                     account: .update(updated, expectedKeysetVersion: record.keysetVersion),
                     upserts: [
                         Self.headerRow(
-                            candidate, recordID: record.accountID, version: (existing?.version ?? 0) + 1)
+                            candidate, recordID: record.accountID, version: try Self.version(replacing: existing))
                     ], deletions: stale))
             try await pinRegistry(followed, accountID: record.accountID)
         } catch {
@@ -1007,7 +1007,7 @@ public actor VaultSession: SharesExecutor {
                 .filter { $0.recordID != record.accountID }.map(\.key)
             rows.append(Self.registryRow(credential, account: record))
             rows.append(
-                Self.headerRow(header, recordID: record.accountID, version: (existing?.version ?? 0) + 1))
+                Self.headerRow(header, recordID: record.accountID, version: try Self.version(replacing: existing)))
             try await store.commit(
                 StoreChange(
                     account: .update(updated, expectedKeysetVersion: record.keysetVersion), upserts: rows,

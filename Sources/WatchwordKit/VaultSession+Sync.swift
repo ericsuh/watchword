@@ -814,6 +814,8 @@ struct VaultMetadataMerger: RecordMerger {
         var copy = incoming
         // Still the remote writer's description: in a shared vault the judge attributes it to them (review S37).
         copy.writtenBy = incoming.writtenBy ?? Revision(version: remote.version, device: remote.deviceID)
+        // A local row at the last version (an edited file, Z23) has nothing above it: the object is refused.
+        guard local.version < UInt64.max else { throw ItemMergeError.versionOverflow }
         copy.version = local.version + 1
         return .replace(try await sealer.sealMetadata(copy))
     }
