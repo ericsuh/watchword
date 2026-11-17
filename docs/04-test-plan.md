@@ -144,7 +144,11 @@ with password re-entry, import of 1PUX/CSV fixtures.
   failed tests' text attachments (`xcresulttool export attachments --only-failures`, capped), so a failure can be
   read from the job log alone. On iOS a row is judged against the window alone, with no query for its container:
   those queries, made on every check, made each step of an iOS run several seconds long, and the window is the app's
-  own frame there (one query, not two). Every test sets an `executionTimeAllowance` (600 s, the tour 1800 s), which
+  own frame there (one query, not two). The keyboard is not part of that frame, so a row under it passed as on
+  screen and was not hittable (the export report's Save File… after the password was typed): once the quick check
+  fails, `reveal` puts away a keyboard that covers the target or that a row below the fold would scroll under
+  (Return, else a downward swipe), and the password screens (export, restore, a device's removal) end editing when
+  they run and dismiss the keyboard on scrolling, as people need too. Every test sets an `executionTimeAllowance` (600 s, the tour 1800 s), which
   `app:test` turns on (`-test-timeouts-enabled YES`, a default of 600 s and a ceiling of 2400 s), so a hang fails that
   test with a report. A text expected below the fold (an
   export's report) is scrolled to as well.

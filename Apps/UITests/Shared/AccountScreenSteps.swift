@@ -37,6 +37,11 @@ extension XCUIApplication {
         let target = element(identifier)
         // The common case, at the cost of one check: there, on screen and hittable.
         if target.waitForExistence(timeout: 2), isReachable(target) { return target }
+        #if os(iOS)
+            // A password field typed into leaves the keyboard up over the foot of the form, which the window's frame
+            // does not show: a row under it passes as on screen and is not hittable.
+            dismissKeyboard(ifCovering: target)
+        #endif
         let defaults: [Bool]
         switch position {
         case .top: defaults = Array(repeating: false, count: 8)
@@ -48,6 +53,9 @@ extension XCUIApplication {
             if target.exists, let towardsEnd = direction(toward: target) {
                 scroll(towardsEnd: towardsEnd, to: identifier)
             } else if target.exists, isOnScreen(target) {
+                #if os(iOS)
+                    dismissKeyboard(ifCovering: target)
+                #endif
                 if waitUntilHittable(target, timeout: 2) || mayBeDisabled { break }
                 scroll(towardsEnd: defaults[scrolls], to: identifier)
             } else {
@@ -142,6 +150,35 @@ extension XCUIApplication {
         if frame.midY < visible.minY { return false }
         return nil
     }
+
+    #if os(iOS)
+        /// Puts the keyboard away if it is up and `target` is under it, or not there yet (a row below the fold, which
+        /// the form will scroll up into the keyboard's place). Asked only once the quick check has failed, so a step
+        /// with no keyboard pays one query. Return first, which ends editing in a SwiftUI field with no submit action;
+        /// then a downward swipe on the form, which a form that dismisses its keyboard on scrolling honours.
+        func dismissKeyboard(ifCovering target: XCUIElement) {
+            let keyboard = keyboards.firstMatch
+            guard keyboard.exists else { return }
+            let covered = keyboard.frame
+            if target.exists {
+                let frame = target.frame
+                guard frame.isEmpty || frame.maxY > covered.minY else { return }
+            }
+            for label in ["Return", "return", "Done", "done", "Go", "go"] {
+                let key = keyboard.buttons[label]
+                if key.exists, key.isHittable {
+                    key.tap()
+                    if keyboard.waitForNonExistence(timeout: 2) { return }
+                    break
+                }
+            }
+            // As `scroll` does on iOS: the swipe lands on whatever is on top, the sheet's form included.
+            swipeDown()
+            if !keyboard.waitForNonExistence(timeout: 2) {
+                print("UI-test note: the keyboard is still up over \(target.identifier)")
+            }
+        }
+    #endif
 
     /// On screen and hittable; `isHittable` is asked only of an element on screen.
     func isReachable(_ element: XCUIElement) -> Bool {

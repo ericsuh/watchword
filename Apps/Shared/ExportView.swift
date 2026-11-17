@@ -18,6 +18,11 @@ struct ExportView: View {
     @State private var model: ExportModel
     @State private var moving = false
     @State private var staged: URL?
+    /// Cleared when the export runs and when its report appears: on iOS the keyboard would otherwise stay up over the
+    /// report and its Save button.
+    @FocusState private var focus: SecretField?
+
+    private enum SecretField: Hashable { case password, passphrase, confirmation }
 
     init(context: ScreenContext) {
         _model = State(initialValue: ExportModel(context: context))
@@ -54,16 +59,22 @@ struct ExportView: View {
             }
             Section {
                 SecureField("Account password", text: $model.password)
+                    .focused($focus, equals: .password)
                     .accessibilityIdentifier(AccessibilityID.Export.password)
                 if model.kind == .archive {
                     SecureField("Archive passphrase", text: $model.passphrase)
+                        .focused($focus, equals: .passphrase)
                         .accessibilityIdentifier(AccessibilityID.Export.passphrase)
                     SecureField("Confirm archive passphrase", text: $model.passphraseConfirmation)
+                        .focused($focus, equals: .confirmation)
                         .accessibilityIdentifier(AccessibilityID.Export.passphraseConfirmation)
                 }
-                Button(model.kind == .archive ? "Create Backup" : "Export") { Task { await model.export() } }
-                    .disabled(model.problem != nil || model.isWorking)
-                    .accessibilityIdentifier(AccessibilityID.Export.run)
+                Button(model.kind == .archive ? "Create Backup" : "Export") {
+                    focus = nil
+                    Task { await model.export() }
+                }
+                .disabled(model.problem != nil || model.isWorking)
+                .accessibilityIdentifier(AccessibilityID.Export.run)
             } footer: {
                 if model.kind == .archive {
                     Text(
@@ -107,11 +118,13 @@ struct ExportView: View {
             ErrorText(message: model.errorMessage)
         }
         .formStyle(.grouped)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle("Export and Back Up")
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
         .task { await model.load() }
         .onChange(of: model.file) {
+            if model.file != nil { focus = nil }
             #if DEBUG
                 if app.uiTestPeer != nil, let archive = model.archiveBytes { app.uiTestArchive = archive }
             #endif

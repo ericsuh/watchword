@@ -101,6 +101,10 @@ struct RevokeDeviceView: View {
     let model: DevicesModel
     /// Clears the presenting state (see `ScreenSheet`).
     let close: @MainActor () -> Void
+    /// Cleared when Remove is pressed: on iOS the keyboard would otherwise stay up over the outcome.
+    @FocusState private var focus: SecretField?
+
+    private enum SecretField: Hashable { case current, new, confirmation }
 
     var body: some View {
         @Bindable var model = model
@@ -116,11 +120,14 @@ struct RevokeDeviceView: View {
                     Toggle("Change the account password too", isOn: $model.revocation.changesPassword)
                         .accessibilityIdentifier(AccessibilityID.Devices.changePassword)
                     SecureField("Current account password", text: $model.revocation.currentPassword)
+                        .focused($focus, equals: .current)
                         .accessibilityIdentifier(AccessibilityID.Devices.current)
                     if model.revocation.changesPassword {
                         SecureField("New account password", text: $model.revocation.newPassword)
+                            .focused($focus, equals: .new)
                             .accessibilityIdentifier(AccessibilityID.Devices.new)
                         SecureField("Confirm new password", text: $model.revocation.confirmation)
+                            .focused($focus, equals: .confirmation)
                             .accessibilityIdentifier(AccessibilityID.Devices.confirmation)
                     } else {
                         Toggle("The device was locked when I last had it", isOn: $model.revocation.deviceWasLocked)
@@ -138,6 +145,7 @@ struct RevokeDeviceView: View {
                 ErrorText(message: model.errorMessage)
             }
             .formStyle(.grouped)
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Remove \(device.name)")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -145,6 +153,7 @@ struct RevokeDeviceView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Remove", role: .destructive) {
+                        focus = nil
                         let submitted = model.revocation
                         model.revocation.currentPassword = ""
                         model.revocation.newPassword = ""

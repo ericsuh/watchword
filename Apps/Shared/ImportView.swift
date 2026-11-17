@@ -13,6 +13,11 @@ struct ImportView: View {
     @Environment(\.screenCloser) private var closer
     @State private var model: ImportModel
     @State private var choosingFile = false
+    /// Cleared when a file or backup is chosen and when the review appears: on iOS the keyboard would otherwise stay
+    /// up over what comes next.
+    @FocusState private var focus: SecretField?
+
+    private enum SecretField: Hashable { case passphrase, secretKey }
     private let restoring: Bool
 
     /// The largest file read: an archive's bound (`AccountArchive`); the parsers bound the rest themselves.
@@ -45,10 +50,12 @@ struct ImportView: View {
             ErrorText(message: model.errorMessage)
         }
         .formStyle(.grouped)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle(restoring ? "Restore from a Backup" : "Import")
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
         .task { await model.load() }
+        .onChange(of: model.stage) { focus = nil }
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: contentTypes) { read($0) }
         .confirmationDialog(
             "Accept \(model.hostAwaitingConfirmation?.host.ascii ?? "this address")?",
@@ -108,21 +115,27 @@ struct ImportView: View {
         if restoring {
             Section {
                 SecureField("Archive passphrase", text: $model.archivePassphrase)
+                    .focused($focus, equals: .passphrase)
                     .accessibilityIdentifier(AccessibilityID.Import.passphrase)
                 SecureField("Secret Key, for another account's backup", text: $model.archiveSecretKey)
+                    .focused($focus, equals: .secretKey)
                     .accessibilityIdentifier(AccessibilityID.Import.secretKey)
             } footer: {
                 Text("Leave the Secret Key empty for a backup of this account: this device has its Secret Key.")
             }
         }
         Section {
-            Button(restoring ? "Choose Backup…" : "Choose File…") { choosingFile = true }
-                .disabled(model.vaultID == nil || (restoring && model.archivePassphrase.isEmpty) || model.isWorking)
-                .accessibilityIdentifier(AccessibilityID.Import.chooseFile)
+            Button(restoring ? "Choose Backup…" : "Choose File…") {
+                focus = nil
+                choosingFile = true
+            }
+            .disabled(model.vaultID == nil || (restoring && model.archivePassphrase.isEmpty) || model.isWorking)
+            .accessibilityIdentifier(AccessibilityID.Import.chooseFile)
             #if DEBUG
                 if app.uiTestPeer != nil {
                     if restoring {
                         Button("Use the archive just exported") {
+                            focus = nil
                             if let archive = app.uiTestArchive { Task { await model.readArchive(archive) } }
                         }
                         .disabled(app.uiTestArchive == nil || model.archivePassphrase.isEmpty)
