@@ -600,7 +600,15 @@ struct AuthenticatedSyncState: SyncStateStore {
         try await base.unstage(locations)
     }
 
+    /// Signs the deletion now, while the keys are there, so that recording it after its commit needs none (Z28).
+    func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion {
+        try await session.authenticatePendingDeletion(deletion)
+    }
+
+    /// Records a deletion `prepared` signed; one that carries no signature yet is signed here. Either way it counts
+    /// only if it verifies when it is read.
     func addPendingDeletion(_ deletion: PendingDeletion) async throws {
+        guard deletion.authenticator.isEmpty else { return try await base.addPendingDeletion(deletion) }
         try await base.addPendingDeletion(try await session.authenticatePendingDeletion(deletion))
     }
 

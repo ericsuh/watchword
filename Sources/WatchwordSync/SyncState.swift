@@ -141,6 +141,10 @@ public protocol SyncStateStore: Sendable {
     func staged(vaultID: UUID) async throws -> [StagedObject]
     func unstage(_ locations: [SyncObjectLocation]) async throws
 
+    /// A pending deletion made ready to be recorded: production signs it here (`PendingDeletion.authenticator`),
+    /// which needs the keys, so that recording it once the deletion has committed needs none. A store with nothing
+    /// to sign with hands it back as it is. Throws `SyncKeyringError.locked` while locked.
+    func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion
     /// Deletions made locally and not yet published. Kept apart from `SyncState` so that a sync in progress, which
     /// saves the state it loaded, can never drop a deletion recorded meanwhile.
     func addPendingDeletion(_ deletion: PendingDeletion) async throws
@@ -169,6 +173,13 @@ public protocol SyncStateStore: Sendable {
     func saveStash(_ bytes: [UInt8], vaultID: UUID) async throws
 
     func eraseAll() async throws
+}
+
+extension SyncStateStore {
+    /// A store that signs nothing records a pending deletion as it was made.
+    public func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion {
+        deletion
+    }
 }
 
 public actor InMemorySyncStateStore: SyncStateStore {
@@ -287,7 +298,12 @@ public actor InMemorySyncStateStore: SyncStateStore {
 /// attacker with the file (A8) deleted the row, or a backup was restored — is not a deletion to propagate to every
 /// other device, but damage that a reconciling sync repairs from the log. The tombstone is recorded after the deletion
 /// commits, so a crash in between loses the tombstone (the record comes back from another device) rather than
-/// publishing a deletion that never happened.
+/// publishing a deletion that never happened. It is *made* before the deletion commits, though
+/// (`SyncStateStore.prepared`): making it needs the session's keys, and a lock that landed after the commit used to
+/// leave rows deleted here with no tombstone, so that a vault deleted as the app went to the background was deleted
+/// everywhere while its items stayed on every other device (review finding Z28). A lock while the tombstones are
+/// being made now fails the deletion before anything changes; one after the commit changes nothing, because
+/// recording a tombstone already made needs no key.
 public struct DeletionRecordingStore: RecordStore {
     public let base: any RecordStore
     public let syncState: any SyncStateStore
@@ -312,16 +328,16 @@ public struct DeletionRecordingStore: RecordStore {
     }
 
     public func commit(_ change: StoreChange) async throws {
-        var deleted: [StoredRecord] = []
+        var tombstones: [PendingDeletion] = []
         for key in change.deletions + Array(change.conditionalDeletions.keys) {
-            if let row = try await base.record(key) { deleted.append(row) }
+            guard let row = try await base.record(key), row.version < UInt64.max else { continue }
+            tombstones.append(
+                try await syncState.prepared(
+                    PendingDeletion(
+                        stamp: RecordStamp(version: row.version + 1, device: deviceID, deleted: true), record: row)))
         }
         try await base.commit(change)
-        for row in deleted where row.version < UInt64.max {
-            try await syncState.addPendingDeletion(
-                PendingDeletion(
-                    stamp: RecordStamp(version: row.version + 1, device: deviceID, deleted: true), record: row))
-        }
+        for tombstone in tombstones { try await syncState.addPendingDeletion(tombstone) }
     }
 
     public func eraseAll() async throws {
