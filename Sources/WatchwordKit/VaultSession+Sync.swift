@@ -103,6 +103,7 @@ extension VaultSession {
                 if vaultReport.deletionsDeferred > 0 { deferred.append(vaultID) }
                 if vaultReport.transportUnavailable || vaultReport.deferredUntilUnlock
                     || vaultReport.ownStreamConflict != nil || vaultReport.ownStreamExhausted
+                    || vaultReport.ownStreamUnverified != nil
                 {
                     restPublished = false
                 }
@@ -784,6 +785,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.snapshotWithheldBy.formUnion(report.snapshotWithheldBy)
             total.replayNeeded = total.replayNeeded || report.replayNeeded
             total.ownStreamExhausted = total.ownStreamExhausted || report.ownStreamExhausted
+            total.ownStreamUnverified = total.ownStreamUnverified ?? report.ownStreamUnverified
         }
         return total
     }

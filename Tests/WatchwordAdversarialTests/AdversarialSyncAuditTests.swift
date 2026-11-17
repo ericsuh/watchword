@@ -64,6 +64,101 @@ extension AdversarialSyncTests {
         #expect(await f.writer.state()?.published[RecordKey(recordID: item.id, kind: .item)] == nil)
     }
 
+    /// Threat: A1, or anyone who can create a file under the vault's prefix without holding a key (a read-only or
+    /// former member of a shared folder): one object, any bytes, named as a segment of the *victim's own* stream at
+    /// 2^48, the highest number a reader lists. The victim took its next sequence number from the listing's names, so
+    /// its next segment went to 2^48 + 1, which every reader ignores; its rows were marked as sent; and the number was
+    /// saved, so the device stayed mute in that vault after the object was gone (Z24). A name moves nothing: the
+    /// object is refused, as before, and the stream goes on from where it was.
+    @Test("an unsigned object named far ahead in a device's own stream does not move its numbering")
+    func junkFarAheadInOwnStream() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("Bank", password: "x"))
+        try await f.writer.sync()
+        let junk = f.segmentName(1 << 48)
+        await f.transport.tamper(junk, contents: [1, 2, 3])
+
+        let later = try await f.writer.save(Self.login("Later", password: "y"))
+        let report = try await f.writer.sync()
+        #expect(report.rejected.map(\.name) == [junk], "refused, and said so")
+        #expect(report.segmentsWritten == 1 && !report.ownStreamExhausted)
+        #expect(await f.writer.state()?.nextSequence == 3)
+        let reader = await f.reader()
+        let read = try await reader.sync()
+        #expect(read.waiting[Self.a] == nil || read.waiting[Self.a] == 1 << 48)
+        #expect(try await reader.items()[later.id] != nil, "the later edit never arrived")
+    }
+
+    /// Threat: the same adversary plants the object a little past the victim's head instead. Taken as the stream's
+    /// highest number it left a hole below it that no device can fill: every reader waited at the hole for good,
+    /// while the victim marked each later row as sent. The victim goes on publishing below it; when it reaches the
+    /// number itself its create is refused (objects are never overwritten), which it reports at every sync without
+    /// marking anything as sent, and it goes on once the object is gone.
+    @Test("an unsigned object just ahead in a device's own stream leaves no hole and loses no edit")
+    func junkJustAheadInOwnStream() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("One", password: "1"))
+        try await f.writer.sync()
+        let junk = f.segmentName(3)
+        await f.transport.tamper(junk, contents: Array(repeating: 0x41, count: 300))
+
+        let second = try await f.writer.save(Self.login("Two", password: "2"))
+        let published = try await f.writer.sync()
+        #expect(published.segmentsWritten == 1)
+        #expect(await f.transport.allObjects[f.segmentName(2)] != nil, "published at its next number, below the junk")
+        let reader = await f.reader()
+        try await reader.sync()
+        #expect(try await reader.items()[second.id] != nil)
+
+        // At the squatted number the stream cannot go on, and says so; nothing is marked as sent.
+        let third = try await f.writer.save(Self.login("Three", password: "3"))
+        for _ in 0..<2 {
+            let blocked = try await f.writer.sync()
+            #expect(blocked.ownStreamConflict == 3 && blocked.segmentsWritten == 0)
+            #expect(blocked.rejected.map(\.name) == [junk])
+        }
+        #expect(await f.writer.state()?.published[RecordKey(recordID: third.id, kind: .item)] == nil)
+        // The object removed (by the provider, or the person): the stream goes on, and the edit arrives.
+        await f.transport.tamper(junk, contents: nil)
+        #expect(try await f.writer.sync().segmentsWritten == 1)
+        try await reader.sync()
+        #expect(try await reader.items()[third.id] != nil)
+    }
+
+    /// Threat: none; the case the listing was read for (Y8). A device whose state was rolled back (a restored
+    /// backup) finds its newest segment listed but cannot read it yet (a file not downloaded). It must neither take
+    /// the bare name as its own nor publish below it, where the numbers were collected and no reader looks: it
+    /// publishes nothing until it can tell, and then continues above its own segment.
+    @Test("an own segment that cannot be read yet holds publishing back, not the numbering")
+    func unreadableOwnSegment() async throws {
+        let f = try await Self.fixture()
+        for index in 0..<3 {
+            try await f.writer.save(Self.login("Item \(index)", password: "p"))
+            try await f.writer.sync()
+        }
+        // Segments 1 and 2 collected; the state lost; segment 3 listed and unreadable.
+        await f.transport.tamper(f.segmentName(1), contents: nil)
+        await f.transport.tamper(f.segmentName(2), contents: nil)
+        let newest = f.segmentName(3)
+        let store = await f.writer.store
+        let restored = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys,
+            transport: UnreadableObjectTransport(base: f.transport, unreadable: newest), store: store)
+        try await restored.save(Self.login("After the restore", password: "q"))
+        let held = try await restored.sync()
+        #expect(held.ownStreamUnverified == 3)
+        #expect(held.segmentsWritten == 0 && held.pushedEntries == 0)
+        #expect(await f.transport.allObjects[f.segmentName(1)] == nil, "a collected number was not used again")
+
+        let readable = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport, store: store,
+            syncState: await restored.syncState)
+        let resumed = try await readable.sync()
+        #expect(resumed.ownStreamUnverified == nil)
+        #expect(await readable.state()?.nextSequence == 5)
+        #expect(await f.transport.allObjects[f.segmentName(4)] != nil)
+    }
+
     // MARK: - One key space for every vault
 
     /// Threat: A4, a writer in one shared vault who knows (or can compute, for a moved item) a record ID that will

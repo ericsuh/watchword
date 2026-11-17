@@ -127,6 +127,12 @@ public struct SyncReport: Sendable, Equatable {
     /// This device's next sequence number was already taken: a crash after publishing, or another installation using
     /// this device ID (a restored backup). The object is merged on the next sync and nothing is overwritten.
     public var ownStreamConflict: UInt64?
+    /// An object in this device's own stream, at or beyond its next sequence number, that could not be fetched or
+    /// checked in this sync (listed and not there yet, unreadable, or no key to check it with): the lowest such
+    /// number. Whether this device wrote it decides where its next segment goes — a state older than the transport
+    /// must not reuse a number, and a name anyone can create must not move it — so nothing was published, and the
+    /// next sync asks again (review finding Z24).
+    public var ownStreamUnverified: UInt64?
     /// This device's next sequence number is beyond `SyncConfiguration.maximumSequence`, where no reader lists a
     /// segment: nothing was published, and nothing was marked as published (review finding Z21). Not reachable by
     /// publishing; it means the stream's position was damaged, and this device cannot publish in this vault.
@@ -312,27 +318,31 @@ public actor SyncEngine {
                 listing = try await pull(state: state, retired: retired, report: &report)
                 // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
                 // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
-                if let highest = listing.segments[deviceID]?.max() {
-                    state.nextSequence = max(state.nextSequence, highest + 1)
-                }
+                // Taken from this stream's objects that verify, never from a name: anyone who can create a file
+                // under the vault's prefix can list one, and a number taken from it would leave a hole no device can
+                // fill, or put every later segment out of range (review finding Z24).
+                state.nextSequence = max(state.nextSequence, listing.ownVerified + 1)
             } catch let error as SyncTransportError where error.stopsSync {
                 // Offline (PRD N3), throttled, signed out: still merge what was downloaded earlier, perhaps locked.
                 report.noteTransportFailure(error)
             }
         }
         // The furthest this device's own stream can have got: what it remembers publishing or merging of it, and
-        // what the transport lists. A snapshot's word for it counts no further (review finding Z21).
-        let ownHead = max(
-            state.lastPublishedSequence, state.merged[deviceID] ?? 0, listing.segments[deviceID]?.max() ?? 0)
+        // its own objects on the transport that verify. A snapshot's word for it counts no further (review finding
+        // Z21).
+        let ownHead = max(state.lastPublishedSequence, state.merged[deviceID] ?? 0, listing.ownVerified)
         do {
             try await mergeStaged(
                 state: &state, retired: retired, reconciling: reconcile, ownHead: ownHead, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             try await syncState.saveState(state)
-            if !report.transportUnavailable, publishing {
+            // An object of this stream at or past the next number that could not be told from this device's own:
+            // publishing waits for the sync that can tell (Z24).
+            report.ownStreamUnverified = listing.ownUndecided.filter { $0 >= state.nextSequence }.min()
+            if !report.transportUnavailable, publishing, report.ownStreamUnverified == nil {
                 try await push(
                     state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
-                if report.ownStreamConflict == nil, configuration.maintainsLog {
+                if report.ownStreamConflict == nil, !report.ownStreamExhausted, configuration.maintainsLog {
                     try await maintain(state: &state, listing: listing, retired: retired, report: &report)
                 }
             }
@@ -411,6 +421,24 @@ public actor SyncEngine {
     struct Listing {
         var segments: [UUID: [UInt64]] = [:]
         var snapshots: [SyncObjectLocation] = []
+        /// The highest number in this device's own stream whose object was fetched (now or earlier) and carries this
+        /// device's signatures. Zero if none.
+        var ownVerified: UInt64 = 0
+        /// Numbers listed in this device's own stream, past what it has merged, whose objects could be neither
+        /// verified nor shown not to be this device's: not fetched, unreadable, or no key to check them with.
+        var ownUndecided: [UInt64] = []
+    }
+
+    /// Whether a failure to stage an object of this device's own stream shows that this device did not write it: it
+    /// was read in full and is not a signed object, or its signatures are not this device's. Anything else (it could
+    /// not be read, there is no key to check it with) leaves the question open.
+    static func isNotOwn(_ error: any Error) -> Bool {
+        switch error {
+        case is SyncFormatError: return true
+        case SyncKeyringError.authenticationFailed: return true
+        case SyncTransportError.objectTooLarge: return true
+        default: return false
+        }
     }
 
     private func pull(state: SyncState, retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
@@ -454,16 +482,23 @@ public actor SyncEngine {
         let listedSnapshots = Set(listing.snapshots)
         let collected = alreadyStaged.filter { $0.kind == .snapshot && !listedSnapshots.contains($0) }
         if !collected.isEmpty { try await syncState.unstage(Array(collected)) }
+        let isOwn = { (location: SyncObjectLocation) in location.kind == .segment && location.author == self.deviceID }
         for location in wanted where !alreadyStaged.contains(location) {
             do {
                 guard
                     let bytes = try await transport.fetch(
                         location.name, maximumLength: configuration.maximumObjectLength)
-                else { continue }
+                else {
+                    // Listed and not there (not downloaded yet, or deleted since): of this device's own stream,
+                    // not known to be anyone else's.
+                    if isOwn(location) { listing.ownUndecided.append(location.number) }
+                    continue
+                }
                 report.fetched += 1
                 let object = try SignedObject.parse(bytes)
                 try await keyring.verify(object.signature, over: object.envelope, at: location)
                 try await syncState.stage(StagedObject(location: location, object: object))
+                if isOwn(location) { listing.ownVerified = max(listing.ownVerified, location.number) }
             } catch let error as SyncTransportError where error.stopsSync {
                 throw error
             } catch {
@@ -471,6 +506,18 @@ public actor SyncEngine {
                 if location.kind == .segment {
                     report.waiting[location.author] = min(report.waiting[location.author] ?? .max, location.number)
                 }
+                if isOwn(location), !Self.isNotOwn(error) { listing.ownUndecided.append(location.number) }
+            }
+        }
+        // Staged earlier (downloaded while locked, or waiting behind a gap): checked again, since the staging area is
+        // a local file (A8), before its number counts. The merge checks it once more and unstages what fails.
+        for object in try await syncState.staged(vaultID: vaultID)
+        where isOwn(object.location) && alreadyStaged.contains(object.location) {
+            do {
+                try await keyring.verify(object.object.signature, over: object.object.envelope, at: object.location)
+                listing.ownVerified = max(listing.ownVerified, object.location.number)
+            } catch {
+                if !Self.isNotOwn(error) { listing.ownUndecided.append(object.location.number) }
             }
         }
         return listing
