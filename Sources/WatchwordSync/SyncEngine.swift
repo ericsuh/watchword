@@ -125,6 +125,10 @@ public struct SyncReport: Sendable, Equatable {
     /// This device's next sequence number was already taken: a crash after publishing, or another installation using
     /// this device ID (a restored backup). The object is merged on the next sync and nothing is overwritten.
     public var ownStreamConflict: UInt64?
+    /// This device's next sequence number is beyond `SyncConfiguration.maximumSequence`, where no reader lists a
+    /// segment: nothing was published, and nothing was marked as published (review finding Z21). Not reachable by
+    /// publishing; it means the stream's position was damaged, and this device cannot publish in this vault.
+    public var ownStreamExhausted = false
     /// Objects on the transport written by a device since revoked: not fetched, not counted as waiting, and not
     /// waited for by garbage collection (review finding Y6).
     public var retiredObjects = 0
@@ -314,8 +318,13 @@ public actor SyncEngine {
                 report.noteTransportFailure(error)
             }
         }
+        // The furthest this device's own stream can have got: what it remembers publishing or merging of it, and
+        // what the transport lists. A snapshot's word for it counts no further (review finding Z21).
+        let ownHead = max(
+            state.lastPublishedSequence, state.merged[deviceID] ?? 0, listing.segments[deviceID]?.max() ?? 0)
         do {
-            try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
+            try await mergeStaged(
+                state: &state, retired: retired, reconciling: reconcile, ownHead: ownHead, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             try await syncState.saveState(state)
             if !report.transportUnavailable, publishing {
@@ -473,7 +482,7 @@ public actor SyncEngine {
     }
 
     private func mergeStaged(
-        state: inout SyncState, retired: Set<UUID>, reconciling: Bool, report: inout SyncReport
+        state: inout SyncState, retired: Set<UUID>, reconciling: Bool, ownHead: UInt64, report: inout SyncReport
     ) async throws {
         var staged = try await syncState.staged(vaultID: vaultID)
         // Staged before its author was revoked: dropped unmerged, like anything else that device wrote.
@@ -502,6 +511,16 @@ public actor SyncEngine {
                 report: &report)
         }
         let segments = Dictionary(grouping: staged.filter { $0.location.kind == .segment }, by: \.location.author)
+        // What the snapshots cover of a stream, as far as it is believed. Of another device's stream, all of it: its
+        // author signed for what it merged. Of this device's own, no further than the stream can have got (`ownHead`,
+        // or a segment of it staged here): this device's next sequence number follows from it, and a snapshot that
+        // claimed 2^48 would otherwise move every later segment of this device to a name no reader lists, for good
+        // (review finding Z21).
+        let ownLimit = max(ownHead, segments[deviceID]?.map(\.location.number).max() ?? 0)
+        func covered(_ author: UUID, _ state: SyncState) -> UInt64 {
+            let claimed = state.snapshotCoverage[author] ?? 0
+            return author == deviceID ? min(claimed, ownLimit) : claimed
+        }
 
         // Snapshots first: they bootstrap a new device and fill gaps left by garbage collection.
         let snapshots = staged.filter { $0.location.kind == .snapshot }.sorted {
@@ -516,7 +535,19 @@ public actor SyncEngine {
                 // a snapshot can hold what no segment this device accepts does — what its author merged from a
                 // device revoked since (§7.8).
                 if Self.covers(state.merged, payload.vector) { report.staleSnapshots += 1 }
+                let keyID = try EnvelopeHeader.parse(
+                    snapshot.object.envelope, expecting: snapshot.location.envelopeKind
+                ).header.keyID
                 for entry in payload.entries {
+                    if entry.isDeletion, let judge,
+                        !(try await judge.admitsErasure(entry, in: snapshot.location, sealedUnder: keyID))
+                    {
+                        // A snapshot's tombstone is its author's claim like a segment's, and is judged like one
+                        // (review finding Z21): not admitted, it is kept for the person and erases nothing.
+                        report.heldAside.append(entry.key)
+                        try await syncState.quarantine(entry, vaultID: vaultID)
+                        continue
+                    }
                     try await apply(
                         entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
                         highWater: &highWater, report: &report)
@@ -540,10 +571,10 @@ public actor SyncEngine {
 
         // A stream whose next segment is not here continues from what the snapshots cover: their effects are in
         // the store. One whose next segment is here is merged from its own segments.
-        for (author, covered) in state.snapshotCoverage where covered > (state.merged[author] ?? 0) {
+        for author in state.snapshotCoverage.keys where covered(author, state) > (state.merged[author] ?? 0) {
             let next = (state.merged[author] ?? 0) + 1
             if !(segments[author] ?? []).contains(where: { $0.location.number == next }) {
-                state.merged[author] = covered
+                state.merged[author] = covered(author, state)
             }
         }
 
@@ -563,9 +594,9 @@ public actor SyncEngine {
             var next = (state.merged[author] ?? 0) + 1
             for object in segments[author]!.sorted(by: { $0.location.number < $1.location.number }) {
                 let sequence = object.location.number
-                if sequence > next, next <= (state.snapshotCoverage[author] ?? 0) {
+                if sequence > next, next <= covered(author, state) {
                     // A gap the snapshots cover (the missing segment was collected after they were merged).
-                    state.merged[author] = state.snapshotCoverage[author]!
+                    state.merged[author] = covered(author, state)
                     next = state.merged[author]! + 1
                 }
                 if sequence < next {
@@ -641,8 +672,8 @@ public actor SyncEngine {
                         continue
                     }
                     report.rejected.append(SyncRejection(name: object.location.name, reason: Self.reason(error)))
-                    let covered = sequence <= (state.snapshotCoverage[author] ?? 0)
-                    if Self.requiresNewerVersion(error), !covered {
+                    let isCovered = sequence <= covered(author, state)
+                    if Self.requiresNewerVersion(error), !isCovered {
                         // A critical kind this version does not know (ADR 0009): the stream stops here and skips
                         // nothing. The segment is complete and authentic, so it stays staged for the version that
                         // can read it. (One a merged snapshot covers is passed below, as any refused segment is.)
@@ -652,9 +683,9 @@ public actor SyncEngine {
                         // completed.
                         try await syncState.unstage([object.location])
                     }
-                    if sequence <= (state.snapshotCoverage[author] ?? 0) {
+                    if isCovered {
                         // Its effects are in a merged snapshot already: continue past it rather than stall.
-                        state.merged[author] = state.snapshotCoverage[author]!
+                        state.merged[author] = covered(author, state)
                         next = state.merged[author]! + 1
                         continue
                     }
@@ -1095,6 +1126,12 @@ public actor SyncEngine {
         if batches.count > 1, batches[0].isEmpty { batches.removeFirst() }
         for chunk in batches {
             let sequence = state.nextSequence
+            guard sequence <= configuration.maximumSequence else {
+                // No reader lists a name beyond this: published there, these rows would be marked as sent and never
+                // seen (review finding Z21). Nothing is written and nothing marked.
+                report.ownStreamExhausted = true
+                return
+            }
             var vector = state.merged
             vector[deviceID] = sequence - 1
             let location = SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence)

@@ -327,8 +327,11 @@ extension VaultSession {
 
     /// `syncVerify` for a shared vault: the object must carry the dual signature of a device registered to an
     /// account the chain lists, under that account's key in the chain, and that account's writes must be able to
-    /// count (`writeStanding` is not `nothingCounts`). A snapshot needs an account that may write now. Whether a
-    /// segment of an account whose permission ended is inside its cut is the judge's question, at merge.
+    /// count (`writeStanding` is not `nothingCounts`). A snapshot needs the owner's account: no device writes one in
+    /// a shared vault (`maintainsLog` is off), so the only honest ones are from before the vault was shared, when its
+    /// owner's devices were its only writers, and a member's would have its coverage believed unjudged (review
+    /// finding Z21). Whether a segment of an account whose permission ended is inside its cut is the judge's
+    /// question, at merge.
     func sharedVerify(
         _ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation, ownView: RegistryView?,
         account: AccountRecord
@@ -350,6 +353,9 @@ extension VaultSession {
         // Keys in the chain that differ from this device's pin: the person has been warned, and nothing they sign
         // counts here until that is settled (S39).
         if vault.keyCheck?.substituted.contains(signer) == true {
+            throw SyncKeyringError.untrustedAuthor(location.author)
+        }
+        guard location.kind == .segment || signer == vault.ledger.owner.accountID else {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
         switch vault.ledger.writeStanding(of: signer) {

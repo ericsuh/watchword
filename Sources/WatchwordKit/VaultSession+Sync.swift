@@ -102,7 +102,7 @@ extension VaultSession {
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
                 if vaultReport.deletionsDeferred > 0 { deferred.append(vaultID) }
                 if vaultReport.transportUnavailable || vaultReport.deferredUntilUnlock
-                    || vaultReport.ownStreamConflict != nil
+                    || vaultReport.ownStreamConflict != nil || vaultReport.ownStreamExhausted
                 {
                     restPublished = false
                 }
@@ -191,6 +191,7 @@ extension VaultSession {
         // Either run's: a stop the second did not reach (it replayed instead, say) is still a stop to report.
         total.requiresNewerVersion = total.requiresNewerVersion || first.requiresNewerVersion
         total.replayNeeded = total.replayNeeded || first.replayNeeded
+        total.ownStreamExhausted = total.ownStreamExhausted || first.ownStreamExhausted
         return total
     }
 
@@ -774,6 +775,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.snapshotWithheld = total.snapshotWithheld || report.snapshotWithheld
             total.snapshotWithheldBy.formUnion(report.snapshotWithheldBy)
             total.replayNeeded = total.replayNeeded || report.replayNeeded
+            total.ownStreamExhausted = total.ownStreamExhausted || report.ownStreamExhausted
         }
         return total
     }

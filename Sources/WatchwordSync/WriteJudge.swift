@@ -22,7 +22,7 @@ public enum SegmentAdmission: Sendable, Hashable {
 /// The engine asks before it applies anything: `admitsSegment` for each segment in stream order, and `admits` for
 /// every record version a segment or snapshot carries, whoever signed it, because a member who merged a write before
 /// it stopped counting publishes that write on inside versions of their own, and `admitsErasure` for every tombstone
-/// of a segment it applies, whose erasure summary is a claim about what its author had seen. A version or tombstone
+/// of a segment or a snapshot it applies, whose erasure summary is a claim about what its author had seen. A version or tombstone
 /// that is not admitted is held aside like a quarantined one (kept, not merged, not published on) and the stream
 /// continues.
 ///
@@ -49,9 +49,10 @@ public protocol WriteJudge: Sendable {
     /// Whether a permanent deletion a segment carries may be applied and remembered: what its erasure summary says its
     /// author had seen must be work that counts here, as a version's clock must (review finding S45). A device that
     /// merged a late write and then deleted the item claims, in its summary, what the late writer had seen, and would
-    /// erase an honest version it was shown only through that write. Asked for each tombstone of a segment that is
-    /// applied, before anything else is done with it; one that is not admitted is held aside like a version, and a
-    /// replay asks again. `keyID` is the key the segment was sealed under.
+    /// erase an honest version it was shown only through that write. Asked for each tombstone of a segment or a
+    /// snapshot that is applied, before anything else is done with it; one that is not admitted is held aside like a
+    /// version, and a replay asks again. `location` is the object that carried it and `keyID` the key that object
+    /// was sealed under.
     func admitsErasure(_ entry: SyncEntry, in location: SyncObjectLocation, sealedUnder keyID: UUID) async throws
         -> Bool
 
