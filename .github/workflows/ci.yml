@@ -148,14 +148,24 @@ jobs:
       - name: mise run lint
         run: mise run lint
 
+      # The scripts CI is made of (screenshots.yml's inline steps, app:screenshots and its helper), run against
+      # stand-ins for the tools they call. Here because it is as quick as the lint and needs no build.
+      - name: mise run test:scripts
+        run: mise run test:scripts
+
   app-tests:
     # The Xcode app, unit and UI test suites (milestone 2 in docs/03-implementation-plan.md): AppKit and UIKit, the
     # AutoFill extension shells, and XCUITest, which needs the logged-in GUI session, automation mode and simulators
-    # that only the macOS runner image provides. One leg per platform, so each reports as its own check and a failing
-    # macOS leg does not stop the iOS leg from running. Both block merges through `required` below.
+    # that only the macOS runner image provides. One leg for macOS, and the iOS simulator's UI tests split over four
+    # legs that run side by side, each on its own runner and simulator, because one simulator running them all took
+    # longer than a job may: the tour alone, the import and export tests, the sharing and device tests, and the rest
+    # (everything the other three name, skipped). A new UI-test class lands in the rest; one as long as the tour gets
+    # a leg of its own. Each leg reports as its own check, and every leg blocks merges through `required` below, which
+    # needs this whole job: the legs can be renamed, added or removed without touching branch protection.
     name: App tests (${{ matrix.name }})
     runs-on: xcode-27
-    timeout-minutes: 60
+    # A leg's limit is its tests' allowances (`app:test`: 600 s a test, the tour 1800 s) plus a build and headroom.
+    timeout-minutes: ${{ matrix.timeout }}
     permissions:
       contents: read
     strategy:
@@ -164,8 +174,30 @@ jobs:
         include:
           - name: macOS
             platform: macos
-          - name: iOS simulator
+            leg: macos
+            timeout: 60
+          - name: iOS simulator, tour
             platform: ios
+            leg: ios-tour
+            only: WatchwordUITests/ScreenshotTourTests
+            timeout: 75
+          - name: iOS simulator, import and export
+            platform: ios
+            leg: ios-interchange
+            only: WatchwordUITests/ImportExportTests
+            timeout: 55
+          - name: iOS simulator, sharing and devices
+            platform: ios
+            leg: ios-sharing
+            only: WatchwordUITests/VaultSharingTests,WatchwordUITests/DeviceRevocationTests
+            timeout: 55
+          - name: iOS simulator, the rest
+            platform: ios
+            leg: ios-rest
+            skip: >-
+              WatchwordUITests/ScreenshotTourTests,WatchwordUITests/ImportExportTests,WatchwordUITests/VaultSharingTests,WatchwordUITests/DeviceRevocationTests
+            autofill: true
+            timeout: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,13 +215,19 @@ jobs:
         run: mise install xcodegen
 
       # The task regenerates the project from Apps/project.yml first. See mise-tasks/app/test for the signing settings.
+      # An iOS leg passes its group as `--only-testing` or `--skip-testing` (comma-separated identifiers).
       - name: mise run app:test ${{ matrix.platform }}
         env:
           PLATFORM: ${{ matrix.platform }}
-        run: mise run app:test "$PLATFORM" --results TestResults
+          ONLY: ${{ matrix.only }}
+          SKIP: ${{ matrix.skip }}
+        run: >-
+          mise run app:test "$PLATFORM" --results TestResults
+          ${ONLY:+"--only-testing=$ONLY"} ${SKIP:+"--skip-testing=$SKIP"}
 
       # Puts the failed run's summary, runner logs and crash reports into this log, which is readable without
-      # downloading the result bundle or having Xcode's xcresulttool.
+      # downloading the result bundle or having Xcode's xcresulttool, and ends it with each failed test's last STEP
+      # lines and a one-line "UI-test summary".
       - name: mise run app:diagnose TestResults
         if: failure()
         run: mise run app:diagnose TestResults
@@ -197,7 +235,7 @@ jobs:
       # Enabling a third-party AutoFill provider from automation is unreliable on the simulator;
       # this attempt is informational and never blocks the pull request.
       - name: AutoFill extension UI test (best effort)
-        if: matrix.platform == 'ios'
+        if: matrix.autofill
         continue-on-error: true
         run: mise run app:test ios --only-testing WatchwordUITests/AutoFillSettingsTests
 
@@ -205,14 +243,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: xcresults-${{ matrix.platform }}
+          name: xcresults-${{ matrix.leg }}
           path: TestResults
           if-no-files-found: ignore
 
   required:
     # The one check branch protection on `main` requires (docs/08-repository-hardening.md §5). Matrix legs are named
-    # after their runner and Xcode, so a runner bump renames them, and a required check that never reports again
-    # blocks every pull request; this job's name does not change. It fails unless every job above succeeded:
+    # after their runner and Xcode, or (app-tests) their group of tests, so a runner bump or a regrouping renames them,
+    # and a required check that never reports again blocks every pull request; this job's name does not change. A
+    # matrix job's result is its legs' together (failure if any leg failed), so needing the job needs every leg. It fails unless every job above succeeded:
     # `always()` makes it run (and fail) when one failed or was cancelled, where a plain `needs` would skip it, and a
     # skipped required check counts as passing.
     name: Required checks

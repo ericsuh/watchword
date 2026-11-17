@@ -1,6 +1,8 @@
 import Foundation
+import WatchwordHygiene
 import WatchwordKit
 import WatchwordPlatform
+import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
 
@@ -12,17 +14,33 @@ import WatchwordSync
 /// simulated second device (`UITestPeer`). That switch does not exist in Release builds.
 ///
 /// Production builds do not sync yet: the CloudKit and iCloud Drive transports are milestone 3's open work, and the
-/// session is built without `SyncSettings` until one exists.
+/// session is built without `SyncSettings` until one exists. Without sync there is no sharing either, and the key
+/// directory's adapter is still to come. Nor do they check breaches: the security report needs `HygieneSettings`,
+/// which wait for `URLSessionHTTPClient` and the file adapter for `DeviceLocalStore` (milestone 6). Each of those
+/// screens says so. A `--uitest` launch has all three, over in-memory ports: sync and sharing shared with
+/// `UITestPeer`, and breach checks answered by `UITestPwnedPasswords`, which never touches the network.
 enum AppEnvironment {
     case ready(VaultSession)
     #if DEBUG
-        /// A UI-test launch: in-memory ports, and another device of the same account the test drives from Settings.
-        case uiTest(VaultSession, UITestPeer)
+        /// A UI-test launch: in-memory ports, the rest of the household the test drives from Settings, and the
+        /// sharing settings the app's session is configured with when it starts.
+        case uiTest(VaultSession, UITestPeer, SharingSettings)
     #endif
     /// The App Group container is missing (an unsigned build, or a provisioning problem).
     case unavailable(String)
 
     static let keychainService = "com.ericsuh.Watchword"
+
+    /// The session this launch has, if any.
+    var session: VaultSession? {
+        switch self {
+        case .ready(let session): return session
+        #if DEBUG
+            case .uiTest(let session, _, _): return session
+        #endif
+        case .unavailable: return nil
+        }
+    }
 
     static var appVersion: String {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -31,21 +49,57 @@ enum AppEnvironment {
         return "\(version) (\(build))"
     }
 
+    #if DEBUG
+        /// The appearance a UI-test launch asks to be drawn in whatever the system's is: `--uitest-appearance=light`
+        /// or `--uitest-appearance=dark`, beside `--uitest`. The screenshot tour passes one for every set it captures
+        /// (docs/04-test-plan.md §5.1), so a set named light is light on a machine in Dark Mode, and a dark set needs
+        /// no setting changed. Without the argument, or with any other value, the app follows the system, as every
+        /// other UI test does. Like `--uitest` itself, the switch does not exist in Release builds, and it changes
+        /// nothing but colours.
+        enum UITestAppearance: String {
+            case light
+            case dark
+        }
+
+        static func uiTestAppearance(arguments: [String] = ProcessInfo.processInfo.arguments) -> UITestAppearance? {
+            let prefix = "--uitest-appearance="
+            guard arguments.contains("--uitest"), let argument = arguments.last(where: { $0.hasPrefix(prefix) }) else {
+                return nil
+            }
+            return UITestAppearance(rawValue: String(argument.dropFirst(prefix.count)))
+        }
+    #endif
+
     static func make(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         #if DEBUG
             if arguments.contains("--uitest") {
                 let store = InMemoryRecordStore()
                 let keychain = InMemoryKeychainStore()
                 let transport = InMemorySyncTransport()
-                return .uiTest(
-                    VaultSession(
-                        store: store,
-                        keychain: keychain,
-                        biometrics: UnavailableBiometricGate(),
-                        configuration: VaultConfiguration(appVersion: appVersion, kdf: .fixed(.baseline)),
-                        sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport)
-                    ),
-                    UITestPeer(primaryStore: store, primaryKeychain: keychain, transport: transport))
+                let directory = InMemoryKeyBundleDirectory()
+                let peer = UITestPeer(transport: transport, directory: directory)
+                // A version more than this far above anything seen is held aside (review finding U5). The default is
+                // 2^20; a UI test cannot make a jump that large, and `UITestPeer.makeImplausibleEdit` makes one of 40,
+                // so the quarantine screen can be reached through the real sync path.
+                var sync = SyncSettings(state: InMemorySyncStateStore(), transport: transport)
+                sync.configuration.maximumVersionJump = UITestPeer.maximumVersionJump
+                let session = VaultSession(
+                    store: store,
+                    keychain: keychain,
+                    biometrics: UnavailableBiometricGate(),
+                    configuration: VaultConfiguration(
+                        appVersion: appVersion, kdf: .fixed(.baseline),
+                        // No auto-lock a UI test does not ask for: a slow simulator run must not lock part way. The
+                        // tests lock through the Lock button and the screens' Debug-only "Lock now".
+                        autoLock: AutoLockSettings(
+                            idleTimeout: 24 * 60 * 60, backgroundGracePeriod: 24 * 60 * 60, lockOnSleep: false),
+                        deviceName: UITestPeer.appDeviceName,
+                        hygiene: HygieneSettings(
+                            http: UITestPwnedPasswords(), userAgent: HygieneUserAgent(version: "uitest")!,
+                            localStore: InMemoryDeviceLocalStore())),
+                    sync: sync
+                )
+                return .uiTest(session, peer, UITestPeer.appSharing(directory: directory))
             }
         #endif
         let info = Bundle.main.infoDictionary ?? [:]

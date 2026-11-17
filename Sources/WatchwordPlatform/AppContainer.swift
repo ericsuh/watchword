@@ -16,5 +16,31 @@
                 .appendingPathComponent("Library/Application Support/Watchword", isDirectory: true)
                 .appendingPathComponent(databaseName, isDirectory: false)
         }
+
+        /// `<App Group container>/Library/Application Support/Watchword/DeviceLocal`: this device's sealed, unsynced
+        /// records (the scan ledger and the prefix cache, §13.8), for `FileDeviceLocalStore`. Beside the database, so
+        /// erasing the account's files reaches both; never in a folder a sync provider or a backup reads. `nil` without
+        /// the App Group, as for the database.
+        public static func deviceLocalStoreURL(appGroup: String) -> URL? {
+            deviceLocalStore(appGroup: appGroup)?.directory
+        }
+
+        /// The device-local store at `deviceLocalStoreURL`, with the container as its trusted ancestor, so a link
+        /// planted anywhere below the container is refused.
+        public static func deviceLocalStore(appGroup: String) -> FileDeviceLocalStore? {
+            guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
+            else { return nil }
+            return FileDeviceLocalStore(
+                ancestor: container, components: ["Library", "Application Support", "Watchword", "DeviceLocal"])
+        }
+
+        /// Which remote stores this device has seen exist (`SyncStoreMarker`, §7.2), beside the device-local records
+        /// and under the same checks. Erasing the account's files should erase it too.
+        public static func syncStoreMarker(appGroup: String) -> FileSyncStoreMarker? {
+            guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
+            else { return nil }
+            return FileSyncStoreMarker(
+                ancestor: container, components: ["Library", "Application Support", "Watchword", "SyncStores"])
+        }
     }
 #endif

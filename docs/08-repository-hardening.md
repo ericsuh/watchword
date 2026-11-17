@@ -69,6 +69,27 @@ SHA** (`owner/repo@<40-hex>`), which also keeps the nightly `action-pinning-audi
 `claude-code-action` means updating both entries: its own SHA, and the `setup-bun` SHA in that
 release's `action.yml`.
 
+### 1.1 The `screenshots` label
+
+`screenshots.yml` (`07-supply-chain.md` §3.2) captures a pull request's screens when the pull request carries the
+`screenshots` label. It uses GitHub-owned actions only, so the allowed-actions list above needs no entry for it, and
+the read-only default token is right for it: its one comment job asks for `pull-requests: write` in the file.
+The label exists: it was created, plain grey and without a description, the first time it was applied through the
+API. Give it a description, or recreate it in a repository that lacks it, with:
+
+```sh
+gh label create screenshots --repo ericsuh/watchword --color 5319E7 --force \
+  --description "Capture the app's screens for this pull request and attach them (screenshots.yml)"
+```
+
+Applying a label needs triage access, which is who may start a capture this way. (The other way, a line that is
+exactly `[screenshots]` in a head commit's message, works only on a branch of this repository, where pushing needs
+write access.) GitHub treats label names that differ only in case as one label, and so does the workflow, so a
+label created as `Screenshots` works too. The comment job asks for `actions: read` beside `pull-requests: write`, to
+list the run's own artifacts; neither needs a repository setting changed. Do not add any `Screenshots` job
+to the required checks in step 5: the workflow skips most pull requests, and a required check that is skipped counts
+as passing while one that never reports blocks the merge.
+
 ## 2. Set up commit signing locally (prerequisite for step 8)
 
 SSH signing is the least friction on macOS if you already have an SSH key.

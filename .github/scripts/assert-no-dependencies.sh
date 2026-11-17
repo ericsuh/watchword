@@ -88,6 +88,69 @@ sys.exit(1 if problems else 0)
   fail=1
 fi
 
+# Fuzz/ is a package of its own (the libFuzzer harness, docs/04-test-plan.md §6.8), so that nothing in it can reach an
+# app: the manifest above does not mention it. It is held to the same rules, and to these: its only dependency is this
+# repository, by path; its only product is the harness executable; its Package.resolved pins exactly the commits the
+# root's does; and the root package depends on nothing in it.
+if grep -nE '"Fuzz|Fuzz/' Package.swift; then
+  echo "::error file=Package.swift::The shipped package must not refer to Fuzz/."
+  fail=1
+fi
+if [ -d Fuzz ]; then
+  if grep -nE 'unsafeFlags|\.binaryTarget|\.plugin\(|packageAccess|url:' Fuzz/Package.swift; then
+    echo "::error file=Fuzz/Package.swift::Remote packages, binary targets, build plugins and unsafeFlags are not permitted."
+    fail=1
+  fi
+  if ! python3 -I -c '
+import json, os, sys
+expected = dict(pin.split("=") for pin in os.environ["ALLOWED_PINS"].split())
+try:
+    resolved = json.load(open("Fuzz/Package.resolved"))
+except FileNotFoundError:
+    print("::error::Fuzz/Package.resolved is missing; it must be committed so the harness builds the pinned commits.")
+    sys.exit(1)
+pins = {pin["identity"]: pin["state"].get("revision") for pin in resolved.get("pins", [])}
+if pins != expected:
+    print(f"::error file=Fuzz/Package.resolved::Fuzz/Package.resolved pins {pins}; expected exactly {expected} (ADR 0006).")
+    sys.exit(1)
+'; then
+    fail=1
+  fi
+  if ! swift package --package-path Fuzz dump-package | python3 -I -c '
+import json, os, sys
+manifest = json.load(sys.stdin)
+problems = []
+forbidden_settings = {"unsafeFlags", "enableExperimentalFeature", "interoperabilityMode"}
+root = os.path.realpath(os.getcwd())
+dependencies = manifest["dependencies"]
+paths = [entry.get("path") for package in dependencies for entry in package.get("fileSystem", [])]
+if len(dependencies) != 1 or len(paths) != 1 or os.path.realpath(paths[0]) != root:
+    problems.append("the only dependency allowed is this repository, by path (..)")
+products = [(product["name"], list(product["type"])) for product in manifest["products"]]
+if products != [("WatchwordFuzz", ["executable"])]:
+    problems.append(f"the only product allowed is the WatchwordFuzz executable, found {products}")
+for target in manifest["targets"]:
+    name, kind = target["name"], target["type"]
+    if kind not in ("regular", "executable"):
+        problems.append(f"{name}: target type {kind} is not permitted")
+    if target.get("path") is not None or target.get("sources") is not None:
+        problems.append(f"{name}: custom path/sources are not permitted")
+    for setting in target.get("settings", []):
+        for key in setting.get("kind", {}):
+            if key in forbidden_settings:
+                problems.append(f"{name}: setting {key} is not permitted")
+    for dependency in target["dependencies"]:
+        if "product" in dependency and dependency["product"][1] != "Watchword":
+            product = dependency["product"][0]
+            problems.append(f"{name}: product {product} is not from this repository")
+for problem in problems:
+    print("::error file=Fuzz/Package.swift::" + problem)
+sys.exit(1 if problems else 0)
+'; then
+    fail=1
+  fi
+fi
+
 # Apps/project.yml can add the same things through XcodeGen: a remote package, a build script that runs arbitrary
 # shell, prebuilt frameworks, or settings that switch off what the compiler enforces. Text checks, like the rest of this
 # script: a tripwire, with review as the backstop.
@@ -112,6 +175,6 @@ if [ -f Apps/project.yml ]; then
 fi
 
 if [ "$fail" -eq 0 ]; then
-  echo "No third-party dependencies beyond swift-crypto (CryptoExtras on Linux only), binary targets, build plugins, custom target paths, or compiler-relaxing settings."
+  echo "No third-party dependencies beyond swift-crypto (CryptoExtras on Linux only), binary targets, build plugins, custom target paths, or compiler-relaxing settings; Fuzz/ depends on this repository alone."
 fi
 exit "$fail"

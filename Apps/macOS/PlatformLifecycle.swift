@@ -24,6 +24,16 @@ extension PlatformLifecycle {
 /// clipboard copy on the way out, since the 60-second clear runs in this process (F5.6).
 @MainActor
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
+    #if DEBUG
+        /// The appearance the screenshot tour asked for (`AppEnvironment.uiTestAppearance`). The application's
+        /// appearance, rather than one window's, so sheets and dialogs follow it too.
+        func applicationWillFinishLaunching(_ notification: Notification) {
+            if let appearance = AppEnvironment.uiTestAppearance() {
+                NSApplication.shared.appearance = NSAppearance(named: appearance == .dark ? .darkAqua : .aqua)
+            }
+        }
+    #endif
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

@@ -42,6 +42,18 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
   hand-bound foreign symbols (`@_silgen_name`, `@_cdecl`, `@_extern`) anywhere, and on symlinks or
   non-Swift files under `Sources/`. It is a tripwire for a malicious or careless contribution
   (milestone-1 review finding R1), with review as the backstop.
+- **[enforced]** The libFuzzer harness is a package of its own, `Fuzz/`, which depends on this repository by
+  path; the root `Package.swift` does not mention it, so nothing in it can be linked into an app. libFuzzer
+  calls a C function with a pointer and a length, which is the one thing outside `SecureMemory` that must name
+  a pointer type; keeping it outside the shipped package keeps "no unsafe code outside `SecureMemory`" true of
+  everything that ships. Both scripts cover the harness: `assert-no-dependencies.sh` fails if the root manifest
+  refers to `Fuzz/`, if `Fuzz/Package.swift` has any dependency but the repository itself, any product but the
+  `WatchwordFuzz` executable, a custom target path, a binary target, a plugin or `unsafeFlags`, or if
+  `Fuzz/Package.resolved` pins anything but the commits the root's does; `assert-unsafe-confined.sh` fails on
+  non-Swift files under `Fuzz/Sources`, on unsafe constructs or underscored attributes anywhere in `Fuzz/` but
+  `LibFuzzerEntry.swift`, and on any attribute there but `@_cdecl("LLVMFuzzerTestOneInput")`. The harness is
+  built with `-sanitize=fuzzer` from the command line (`mise run fuzz`), never from a manifest. Its seed
+  corpus (`Fuzz/Corpus/`) is data that only the fuzzer reads.
 - **[convention]** Any new dependency requires an ADR covering: why no first-party API suffices,
   the maintenance and audit story, and the pin-and-vendor plan. ADR 0001 already forbids
   third-party cryptography outright.
@@ -78,6 +90,33 @@ A zxcvbn-class strength estimator is also planned. **[decision]** port a minimal
 than vendoring a package: the dictionaries are the bulk of the code and can be checked in as
 verified data, and the estimator's output drives advice rather than any security boundary.
 
+**As built (milestone 6).** The estimator is written in `WatchwordHygiene` and its data is embedded as Swift
+source, one multi-line string literal per list, so there is still no non-Swift file under `Sources/` and
+nothing to load at run time. Each file's header names its source, the commit it was taken at and its licence:
+
+| File | Data | Source and licence |
+| --- | --- | --- |
+| `WordListCommonPasswords.swift` | 10,000 common passwords | zxcvbn `data/passwords.txt`, commit `67c4ece9`, MIT |
+| `WordListEnglish.swift` | 5,000 English words | zxcvbn `data/english_wikipedia.txt`, same commit, MIT |
+| `WordListNames.swift` | 500 surnames, 300 + 300 given names | zxcvbn, same commit, MIT (1990 US census) |
+| `WordListEFF.swift` | EFF large wordlist, 7,776 words | EFF, CC BY 3.0 US; text from a GitHub mirror (ulif/diceware `b3138e95`, SHA-256 `addd3553…b903e`), compared word for word with a second (redacted/XKCD-password-generator `b9813612`) because eff.org was unreachable; verified against EFF's own `eff_large_wordlist.txt` on 2026-11-16 (same SHA-256, all 7,776 words equal, in order) |
+| `SiteDirectoryData.swift` | about 240 domains: TOTP and passkey support | 2factorauth/twofactorauth `9b39477c` (MIT) and 2factorauth/passkeys `ede77017` (CC BY 4.0), retrieved 2026-11-15 |
+
+- **[enforced]** `StrengthEstimatorTests` asserts each list's exact count, that the EFF list has 7,776 unique
+  words in its published order from `abacus` to `zoom`, and that every entry is lower-case and 3 to 32
+  characters. That is the uniqueness-and-count test asked for above, for the estimator's copy.
+- **[convention]** The MIT and Creative Commons notices travel in the file headers; an app release must
+  reproduce them in its acknowledgements.
+- **[open]** The EFF text has not been compared with EFF's own file. It is used here to *estimate* (where an
+  altered list could only misjudge a passphrase), not to *generate*; before the generator draws from it, verify
+  it against eff.org and keep a single copy.
+- **[decision]** These lists do not refresh. A stale password list only makes the estimator a little generous;
+  a stale site directory makes a suggestion late or wrong, which is why `EmbeddedSiteDirectory` is opt-in and
+  small. Adopting the full, regularly updated 2fa.directory dataset would be a standing data dependency of the
+  same kind as the full Public Suffix List and needs the same ADR.
+- The only code that makes network requests for this feature builds them from two constant hosts
+  (`HygieneHost`); N5's "only network destinations" is checked by the adversarial suite on the request values.
+
 ## 3. GitHub Actions and CI
 
 ### 3.1 Actions pinned to commit SHAs (T2)
@@ -109,7 +148,8 @@ at run time, so that download is trusted the way the runner image is (§3.3).
 ### 3.2 Token and secret exposure (T5)
 
 - **[done]** `permissions: contents: read` at workflow level and repeated per job. No job needs
-  write access, except the Claude job in `claude-pr.yml` (below).
+  write access, except the Claude job in `claude-pr.yml` and the comment job in `screenshots.yml`
+  (both below), each `pull-requests: write` and nothing more.
 - **[done]** `persist-credentials: false` on every checkout, so the `GITHUB_TOKEN` is not left in
   `.git/config` for later steps (including any future step that runs third-party code) to read.
 - **[done]** the trigger is `pull_request`, never `pull_request_target`, so a fork's code never
@@ -153,11 +193,103 @@ at run time, so that download is trusted the way the runner image is (§3.3).
   The residual risk is prompt injection: an admin can ask Claude about a pull request written by
   someone else, whose text can try to steer what Claude posts. The tool allowlist bounds what it
   can do to commenting on that one pull request.
+- **[done]** `screenshots.yml` captures the screenshot tour's pictures (`04-test-plan.md` §5.1) for a pull request
+  and attaches them to it. It holds no secret. It runs on the `screenshots` label, on each push while the pull
+  request carries the label, on a push to a same-repository branch whose head commit message has a line that is
+  exactly `[screenshots]`, and on dispatch. Its controls:
+  - **Three jobs, split by what they may touch.** `decide` reads the event and, for the commit marker, one commit
+    message through the API: `contents: read`, no checkout. `capture` checks out and runs the pull request's code,
+    so it gets exactly what `ci.yml`'s `app-tests` job gets: `contents: read`, no secrets,
+    `persist-credentials: false`. `comment` is the only job with `pull-requests: write`; its one other permission
+    is `actions: read`, and it has not even `contents: read`.
+  - **The job that can write runs nothing from the pull request, and takes one thing from the job that did.**
+    `comment` has no checkout step and downloads no artifact. All it receives from `capture` is, per platform, a
+    list of screen names as a job output. A list is used only if every name is what `Screens.capture` can produce
+    (`NN-` and at most 40 characters of lower-case words joined by single hyphens) and there are at most 99;
+    otherwise that platform's line reads "the capture failed or is incomplete". Every other word of the comment is
+    the job's own. A build script, a test, or a tool the build fetched can therefore do nothing with the write
+    token, and the most it can put into a comment posted in the repository's name is a short list of such names.
+  - **The links are the job's own finding, not the build's report.** `comment` does not take artifact ids from
+    `capture`. It lists this run's artifacts through the API and links the one named `screenshots-<set>` and the
+    one named `watchword-screens-<set>.png`, so a link cannot be pointed at some other run's or some other file.
+  - **The one link that opens in the browser is to a picture.** An artifact uploaded unzipped
+    (`actions/upload-artifact`'s `archive: false`, read from the action's `action.yml` at the pinned commit) is
+    served inline from GitHub's artifact storage, with the content type its uploader declared: the action derives
+    it from the file's extension (read in `@actions/artifact` 6.3.1, `getMimeType`), but the declaration is the
+    client's, and the client is the job that ran the pull request's code. An HTML contact sheet there would be a
+    page of the build's making, script included, one click behind a link the repository's bot posted. So the file
+    uploaded unzipped is a PNG (every screen in one picture), and before linking it `comment` asks the API where
+    the artifact's download is and reads the type out of the address (`rsct`, which fixes the `Content-Type` of
+    the response) without following it: anything but `image/png` is not linked. No browser renders `image/png` as
+    a page. The check reads an address format GitHub does not document; if it changes, the sheet link disappears
+    from the comment (with a warning in the job log) rather than being posted unchecked. The HTML sheet,
+    `index.html`, is inside the zipped set, which downloads as a file.
+  - **The comment says what its links are.** It tells the reader that both are files the pull request's build
+    produced, served from GitHub's artifact storage and not from github.com, and that nothing behind them should
+    ever ask for a password. (It used to say "sign-in needed", which is the wrong expectation to set beside a
+    link to a build's output.)
+  - **One comment, and only its own.** The comment is updated in place. `github-actions[bot]` is not an identity
+    this workflow has to itself: every workflow that comments with the default token is that author, and
+    `claude-pr.yml`'s reviews, whose text is model output that a pull request can try to steer, are among them. So
+    the comment this job overwrites must be by that author *and* begin with the whole header this job writes: the
+    hidden marker, the `### Screenshots` heading, and a first line that names a 40-hex commit and links a run of
+    this repository. A comment that merely begins with the marker is left alone, whoever wrote it. If two
+    comments pass, the job fails without writing rather than choose. `claude-pr.yml`'s prompt also tells Claude
+    never to begin a comment with an HTML comment or a heading copied from another comment. Comment jobs for one
+    pull request run one at a time, so two runs cannot each create one.
+  - **Who can start it.** Adding a label needs triage access; a dispatch needs write access. The commit marker is
+    honoured only when the pull request's branch is in this repository, where pushing needs write access, so it
+    gives nobody a capture they could not already start: a fork's author can write the marker in every commit and
+    get nothing (the message is not even fetched), and a fork's pull request is captured only when someone with
+    triage access labels it. The marker must be a line of its own, so a commit that mentions it in prose, quotes
+    it, or reverts one that had it starts nothing. On a fork's pull request GitHub makes the token read-only
+    whatever the file says, so the capture and its artifacts are produced and `comment` is skipped. A dispatch may
+    name a pull request to attach to only if that pull request is open, in this repository, and its head is the
+    dispatched commit.
+  - **Event text reaches the shell only through `env:`**, and the commit message is fetched as data and searched
+    with a fixed-string, whole-line `grep`, never interpolated.
+  - **Inline shell, in two jobs only, and tested.** `decide` and `comment` check nothing out, so they cannot run a
+    mise task; their `gh api` calls are in the workflow file, as in `claude-pr.yml`'s `authorize` job. Everything
+    that touches the code is `mise run app:screenshots`. `mise run test:scripts`, in `ci.yml`'s `lint` job, reads
+    those two `run:` blocks out of the file and runs them against a stand-in `gh` and `curl`
+    (`Tests/ScriptTests`): the cases above are its tests.
+  - **Pictures are linked, not embedded.** GitHub does not serve artifact files inside a comment. The ways round
+    that (committing images to a branch, or an image host) need `contents: write` or a third party, and neither
+    is acceptable here.
+  - **A set is complete or it is not a set.** A capture that failed, or whose pictures are missing, blank or in
+    the wrong appearance, uploads no `screenshots-<set>` artifact and no sheet, and announces no names; what it
+    did capture is in the `screenshots-failed-<platform>` artifact with the result bundle, in a directory and
+    under an index that say it is incomplete (`04-test-plan.md` §5.1).
+  - **Not a gate.** It is not in `ci.yml`'s `required` job and must not be named in branch protection
+    (`08-repository-hardening.md` §5): a workflow that most pull requests skip would otherwise report as passing
+    without having run, or block the ones it never ran on.
+
+  **No comment command, deliberately.** A `/screenshots` line in a pull-request comment arrives as `issue_comment`,
+  which always runs the default branch's copy of the workflow in the base repository's context. Building the pull
+  request's head there is the `pull_request_target` pattern this repository rules out: nothing but this file would
+  stand between that code and the repository's token, caches and environment, where on `pull_request` GitHub itself
+  withholds them from a fork. The safe variant is a relay, in which the comment job runs no pull-request code and
+  only dispatches this workflow on the pull request's branch; that needs a second write-scoped job (`actions:
+  write`), works for same-repository branches only, and cannot be exercised before it is on the default branch.
+  The label does the same for anyone with triage access, and a dispatch for anyone with write access, so the
+  relay was not worth a second token. Having the comment job add the label would not work either: events caused by
+  the workflow token start no workflows.
+
+  The residual risks. The artifacts and the job summary are whatever the pull request's code produced: they are
+  labelled with the commit, and a reviewer reads them as that code's output, as with a test log. The contact
+  sheet is a picture, but a picture of the build's choosing, and the zip holds an `index.html` that a hostile
+  build can replace with any page, so a downloaded set is opened as one would open any file a stranger's build
+  produced. The header check does not make the sticky comment unforgeable: a review that a pull request steered
+  into reproducing the whole header would be overwritten in its place (or, beside the real one, would stop the
+  job), which is why the prompt forbids it and why this is written down. And a same-repository pull request can
+  edit this file, as it can any workflow, so the split protects the write token from the build, not from someone
+  who already has write access.
 - **[convention]** the CloudKit integration tests (milestone 3) need an iCloud container and
   therefore secrets. They must stay `workflow_dispatch`-only, in a GitHub Environment with required
   reviewers, and must never be reachable from a `pull_request` trigger.
-- **[convention]** no secret is ever `echo`ed; artifact uploads are limited to test logs and
-  `.xcresult` bundles, which contain only synthetic fixture data.
+- **[convention]** no secret is ever `echo`ed; artifact uploads are limited to test logs,
+  `.xcresult` bundles and the screenshot tour's pictures, which contain only synthetic fixture data
+  (the tour refuses to capture anything but a `--uitest` launch).
 
 ### 3.3 Remaining CI exposure, stated honestly
 
@@ -223,6 +355,13 @@ Two properties to keep in mind:
 - **Default setup can be reconfigured from the web UI** by anyone with admin, including turning it
   off, and that leaves no diff in the repository. Treat `code-scanning/default-setup` as part of
   the settings surface to re-verify, not as something the tree protects.
+
+**Alert dispositions.** An alert closed without a code change is recorded here, with its reason,
+so that dismissing it in the web UI is never the only record:
+
+| Alert | Where | Disposition |
+| --- | --- | --- |
+| Use of a broken or weak cryptographic hashing algorithm (SHA-1) | `PasswordDigest.init(password:)`, `Sources/WatchwordHygiene/PasswordDigest.swift` | **Accepted, won't fix** (owner decision, 2026-11-16). The Have I Been Pwned range API is defined over SHA-1, so no other hash can be asked about, and the hash protects nothing here: only the first five hexadecimal characters (twenty bits) leave the device, and the rest is compared locally (`02-architecture.md` §13.2). Nothing else in the package uses SHA-1 except HMAC-SHA-1 for TOTP, which RFC 6238 defines. Dismiss the alert as "won't fix" with a link to this row. |
 
 ## 4. Repository and release integrity (T5, T6)
 

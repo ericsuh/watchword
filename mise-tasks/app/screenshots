@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+#MISE description="Run the screenshot tour and write every screen to Screenshots/<set>/<name>.png, with an index and a contact sheet"
+#MISE depends=["app:generate"]
+#USAGE arg "[platform]" default="all" help="Which app to tour; with `all`, both run even if the first fails" {
+#USAGE   choices "ios" "macos" "all"
+#USAGE }
+#USAGE flag "--appearance <appearance>" default="light" help="The appearance the app is drawn in, whatever the machine's is; `dark` writes to Screenshots/<platform>-dark" {
+#USAGE   choices "light" "dark"
+#USAGE }
+#USAGE flag "--device <family>" default="iphone" help="iOS only: `ipad` tours on an iPad simulator on the newest iOS the scheme supports, in landscape, and writes to Screenshots/ios-ipad" {
+#USAGE   choices "iphone" "ipad"
+#USAGE }
+#USAGE flag "--output <dir>" default="Screenshots" help="Where the sets go; each run replaces the sets it captures"
+#USAGE flag "--results <dir>" default="TestResults/Screenshots" help="Where each set's result bundle goes, as <dir>/<set>/iOS.xcresult or macOS.xcresult"
+#USAGE flag "--simulator <udid>" help="iOS Simulator to tour on, instead of the first available one of the --device family"
+#USAGE flag "--source <text>" help="What the screens are of, for the index; defaults to the checked-out commit"
+#USAGE flag "--previews" help="Also print a coarse text rendering of each screen, for reading a run from its log when the pictures cannot be fetched"
+#
+# The tour is `ScreenshotTourTests` (Apps/UITests/Shared), an XCUITest that drives the app, launched with `--uitest`
+# so nothing real is on screen, through every flow and attaches a picture of each major screen. This task runs it
+# through `app:test` (same project generation, signing and simulator boot), exports the attachments from the result
+# bundle with the selected Xcode's `xcresulttool`, and hands them to screenshots-index.py, which names them, checks
+# them and writes the index. It fails if the tour failed, if a screen the tour listed has no picture, if a picture is
+# blank, or if the pictures are not in the appearance asked for.
+#
+# A set is a platform plus what differs from the default: ios, macos, ios-ipad, ios-dark, macos-dark, ios-ipad-dark.
+# A complete set gets <output>/<set>/ (the PNGs, index.md, index.html) and <output>/watchword-screens-<set>.png, every
+# screen in one picture, which is the one file to open or to upload on its own. A set that is not complete (the tour
+# stopped part way, or a picture is missing or blank) never gets either: what there is of it goes to
+# <output>/<set>-incomplete/, whose index says first what is wrong, with XCUITest's own screenshots of a failure.
+#
+# In GitHub Actions the index (or, for an incomplete set, what is wrong with it) is appended to the job summary, and
+# the step's outputs name what was written (`set`, `directory`, `sheet` and `incomplete` for the last set captured,
+# and `screens_ios` or `screens_macos`, the comma-separated names of a set that is complete), for screenshots.yml's
+# upload and comment steps.
+set -euo pipefail
+
+here=$(dirname "${BASH_SOURCE[0]}")
+platform="$usage_platform"
+appearance="$usage_appearance"
+device="$usage_device"
+output="$usage_output"
+results="$usage_results"
+
+if [ "$device" = ipad ] && [ "$platform" = macos ]; then
+  echo "::error::--device ipad applies to ios (or all), not macos"
+  exit 2
+fi
+
+source_text="${usage_source:-}"
+if [ -z "$source_text" ]; then
+  source_text="Commit $(git rev-parse HEAD)."
+fi
+
+capture() { # capture <ios|macos>: tour one app and write its set; non-zero if the tour or the extraction failed
+  local os="$1" set="$1" title target bundle test_args=() index_args=() status=0
+  if [ "$os" = ios ]; then
+    title="iOS simulator"
+    target=WatchwordUITests
+    bundle=iOS.xcresult
+    if [ "$device" = ipad ]; then
+      set="$set-ipad"
+      title="$title, iPad"
+    fi
+    if [ -n "${usage_simulator:-}" ]; then
+      test_args+=("--simulator=$usage_simulator")
+    elif [ "$device" = ipad ]; then
+      local udid
+      udid=$(.github/scripts/pick-simulator.sh iPad) || udid=""
+      if [ -z "$udid" ]; then
+        echo "::error::No iPad simulator the Watchword-iOS scheme can run on; \`xcodebuild -showdestinations\` shows what there is"
+        return 1
+      fi
+      test_args+=("--simulator=$udid")
+    fi
+  else
+    title="macOS"
+    target=WatchwordMacUITests
+    bundle=macOS.xcresult
+  fi
+  if [ "$appearance" = dark ]; then
+    set="$set-dark"
+    title="$title, dark"
+  fi
+  local directory="$output/$set" sheet="$output/watchword-screens-$set.png" incomplete="$output/$set-incomplete"
+  bundle="$results/$set/$bundle"
+
+  # Written before the tour runs, so a failed run's upload steps still know where to look.
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    printf '%s\n' "set=$set" "directory=$directory" "sheet=$sheet" "incomplete=$incomplete" >> "$GITHUB_OUTPUT"
+  fi
+  # An earlier run's set must not stand in for this one's if the tour or the export fails.
+  rm -rf "$directory" "$sheet" "$incomplete"
+
+  # `${array[@]+...}` below: macOS's bash 3.2 treats an empty array as unset under `set -u`.
+  # xcodebuild hands TEST_RUNNER_-prefixed variables to the test process without the prefix; the tour reads this one
+  # and launches the app with `--uitest-appearance=light` or `=dark` (Screens.swift), so a set is in the appearance
+  # it is named for whatever the machine's is.
+  echo "+ mise run app:test $os --only-testing=$target/ScreenshotTourTests --results $results/$set ($appearance)"
+  TEST_RUNNER_WATCHWORD_SCREENSHOT_APPEARANCE="$appearance" \
+    mise run app:test "$os" "--only-testing=$target/ScreenshotTourTests" --results "$results/$set" \
+    ${test_args[@]+"${test_args[@]}"} || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "::error::The screenshot tour failed on $title (exit $status); what it captured goes to $incomplete"
+  fi
+  if [ ! -d "$bundle" ]; then
+    echo "::error::No result bundle at $bundle: xcodebuild failed before the tour ran"
+    return 1
+  fi
+
+  local exported names
+  exported=$(mktemp -d)
+  names="$exported/names.txt"
+  if ! xcrun xcresulttool export attachments --path "$bundle" --output-path "$exported/attachments"; then
+    # The subcommand is the selected Xcode's; print what that Xcode offers, so the log says what to change here.
+    echo "::error::xcresulttool could not export the attachments of $bundle. Its export subcommands:"
+    xcrun xcresulttool export --help || true
+    rm -rf "$exported"
+    return 1
+  fi
+
+  mkdir -p "$output"
+  index_args=(--attachments "$exported/attachments" --output "$directory" --incomplete "$incomplete"
+    --title "Watchword screens: $title" --source "$source_text" --standalone "$sheet" --names "$names"
+    --appearance "$appearance")
+  if [ "${usage_previews:-false}" = true ]; then
+    index_args+=(--previews)
+  fi
+  if [ "$status" -ne 0 ]; then
+    index_args+=(--tour-failed)
+  fi
+  if ! python3 "$here/screenshots-index.py" "${index_args[@]}"; then
+    echo "::group::What the result bundle's attachments were"
+    head -c 20000 "$exported/attachments/manifest.json" || true
+    echo
+    echo "::endgroup::"
+    status=1
+  fi
+
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      if [ "$status" -eq 0 ]; then
+        cat "$directory/index.md"
+      else
+        echo "### The screenshots of $title are missing or incomplete"
+        echo
+        echo "The capture failed (the step's log says why), so there is no set of screens for this run."
+        if [ -f "$incomplete/index.md" ]; then
+          echo "What there is of it, in \`$incomplete\`:"
+          echo
+          cat "$incomplete/index.md"
+        fi
+      fi
+      echo
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  # Only a complete set is announced: the comment job reads an absent list as "this platform's capture failed".
+  if [ "$status" -eq 0 ] && [ -n "${GITHUB_OUTPUT:-}" ] && [ -f "$names" ]; then
+    echo "screens_$os=$(cat "$names")" >> "$GITHUB_OUTPUT"
+  fi
+  rm -rf "$exported"
+  return "$status"
+}
+
+failed=""
+if [ "$platform" = macos ] || [ "$platform" = all ]; then
+  capture macos || failed="$failed macOS"
+fi
+if [ "$platform" = ios ] || [ "$platform" = all ]; then
+  capture ios || failed="$failed iOS"
+fi
+
+if [ -n "$failed" ]; then
+  echo "::error::Screenshots are missing or incomplete for:$failed"
+  exit 1
+fi
+echo "Screens are in $output/: open a set's index.html, or watchword-screens-<set>.png, every screen in one picture."

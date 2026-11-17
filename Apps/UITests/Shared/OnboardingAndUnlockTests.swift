@@ -9,6 +9,8 @@ final class OnboardingAndUnlockTests: XCTestCase {
 
     override func setUp() {
         continueAfterFailure = false
+        // A hang fails with a report rather than eating the job (`app:test` turns the allowances on).
+        executionTimeAllowance = 600
     }
 
     @MainActor
@@ -110,13 +112,25 @@ extension XCUIElement {
 
     /// Turns a SwiftUI `Toggle` on. In an iOS `Form` the switch element spans the whole row and a tap on its centre
     /// does nothing, so the tap goes to the knob at the trailing edge.
+    ///
+    /// A coordinate tap is not retried by XCUITest the way an element tap is, and one made while the screen is still
+    /// settling (the keyboard leaving after onboarding) can land beside the knob: the screenshot tour saw the switch
+    /// stay off. So the tap is repeated, up to three times, but only once the switch has stayed off for two seconds,
+    /// so a slow first tap is never undone by a second.
     func toggleOn() {
-        #if os(macOS)
-            click()
-        #else
-            coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
-        #endif
         // iOS reports a switch's value as the string "1"; macOS reports a checkbox's as the number 1.
+        let isOn = NSPredicate { element, _ in
+            (element as? XCUIElement)?.value.map { "\($0)" } == "1"
+        }
+        for _ in 0..<3 {
+            #if os(macOS)
+                click()
+            #else
+                coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+            #endif
+            let turnedOn = XCTNSPredicateExpectation(predicate: isOn, object: self)
+            if XCTWaiter().wait(for: [turnedOn], timeout: 2) == .completed { return }
+        }
         XCTAssertEqual(value.map { "\($0)" }, "1", "toggle did not turn on")
     }
 

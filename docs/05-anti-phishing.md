@@ -59,6 +59,11 @@ authorize(item, for: identifier, among: items) -> Result<NormalizedHost, FillRef
 "did they choose it" but "is this item for this site". A UI bug, a tampered record, or a mis-ranked
 list cannot become a wrong-site fill without going through a function whose refusal is tested.
 
+Both refuse a page loaded over plain `http` first (`FillRefusal.insecurePage`, PRD F6.9, owner decision
+2026-11-16): the host may be right, but on such a page an attacker on the network path can read what is
+filled and rewrite the form. The person's explicit choice does not get past it, and no login is saved from
+such a page.
+
 `.chooseAmong` exists because two accounts can legitimately tie on one host (scenario S1 at
 `amazon.com`). The extension must present both and fill neither automatically: auto-filling the
 first of an ambiguous set is how the AWS root password ends up in a retail login form.
@@ -164,6 +169,23 @@ dialog people click through.
 the item, inside the app, which requires: unlocking, opening the item, typing the host, and
 confirming a warning that names the site being added. That deliberate friction is the feature.
 
+**A website an import would add to an existing item.** The duplicate screen (`ImportModel`, `MergeHost`) shows
+each host a merge would add in its ASCII form, punycode for any label in another alphabet (`аmazon.com` is
+`xn--mazon-3ve.com`), with the registrable domain in bold, how far the scope reaches ("and its subdomains", "this
+address only", and its exclusions), and `PhishingDetector`'s assessment against every item in the vault. A host that
+resembles a saved site, or uses another alphabet at all, carries a warning that names the site, and switching it on
+asks a second time ("Accept Anyway"). The switch is off to begin with, as every addition is (`MergeChoices`). Before
+this, the screen showed the host as the file spelled it, so a file could offer the bank's item a look-alike that
+rendered as the bank (review of the account screens, finding 3).
+
+**Comparing fingerprints before sharing.** A fingerprint code (`WWFP1-…`) pasted from a message only names the
+account: anyone who can message the person can send a code for an account of their own. The invite screen still asks
+for the typed safety number or the person's own "they match", and the pin records which (`VerificationMethod`,
+S16). `scannedCode` is for a code read by the camera from the other person's screen, which the app does not do yet,
+so it never records one. The role step names the account being invited and says how its keys were confirmed, never
+"the numbers match" unless they were compared (finding 2). Accepting an invitation from an owner verified before
+still asks before joining (finding 8).
+
 **Ambiguous match.** Both accounts listed with their distinguishing field (username/email) and the
 matched scope. Nothing pre-selected.
 
@@ -181,3 +203,23 @@ matched scope. Nothing pre-selected.
   malicious host match. Membership and record signing (`02-architecture.md` §8) is what defends
   that, not this document.
 - Scope matching depends on the OS reporting the true host. A compromised OS is out of scope.
+- Text insertion (PRD F6.4) is requested by the system without naming a site, so there is no host to
+  check and no mismatch to detect. `CredentialProviderModel` then lets the person pick an item by hand,
+  as they would in the app, and inserts only fields that are not secrets (user names, emails, phone,
+  account and card numbers, dates). Passwords, one-time codes, passkeys, recovery codes, API keys,
+  security answers and PINs cannot leave that way (`02-architecture.md` §9.2): each is replayable by a
+  look-alike page, which is F11.4's reason for withholding a code instead of warning about it. They are
+  inserted as text where the system does name the host, through the gate, and otherwise copied from the
+  app, where the item's scopes are in view. This narrows F6.4 as written and is the owner's to revisit.
+- QuickType suggestions are offered by the operating system's own domain matching, and a tap does not
+  tell the extension which page it came from. Watchword therefore publishes a password or code identity
+  only for an item that is the right answer on every page of its site (`02-architecture.md` §9.1); the
+  two Amazon accounts of S1, a login saved for one exact host, and a tenant of a shared host are reached
+  through the extension's list instead. What the system really matches on is unverified until
+  milestone 5's on-device QA; the rule assumes the widest case.
+- Plain `http` (F6.9). The gate refuses a page loaded over `http`, but two cases cannot be refused in the
+  extension. A form on an `https` page that *submits* to an `http` address is filled: the credential
+  provider API names the page, not the form's action. And a QuickType suggestion the system offers on an
+  `http` page is filled when tapped, because the tap hands back the published identity (a domain, with no
+  scheme) and not the page; a scope records no scheme, so there is nothing to withhold the identity on. The
+  hygiene report flags every saved `http://` address, and no login is saved from an `http` page.

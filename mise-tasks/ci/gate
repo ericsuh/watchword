@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 #MISE description="Run one CI gate as its ci.yml job does and end the log with a failure summary (the Mac run workflow's only step)"
 #USAGE arg "<gate>" help="The gate to run, as its mise task name" {
-#USAGE   choices "build" "test" "test:adversarial" "build:strict" "lint" "app:test" "check"
+#USAGE   choices "build" "test" "test:adversarial" "build:strict" "lint" "app:test" "app:screenshots" "check"
 #USAGE }
-#USAGE flag "--filter <pattern>" help="For `test`: a `swift test --filter` regex. For `app:test` (with ios or macos): an xcodebuild `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Other gates take none. It must match at least one test and must not start with `-`; write it as `--filter=<pattern>`"
-#USAGE flag "--platform <platform>" default="macos" help="For `app:test`: which app's scheme to test" {
+#USAGE flag "--filter <pattern>" help="For `test`: a `swift test --filter` regex. For `app:test` (with ios or macos): xcodebuild `-only-testing` identifiers, comma-separated, such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Other gates take none. It must match at least one test and must not start with `-`; write it as `--filter=<pattern>`"
+#USAGE flag "--platform <platform>" default="macos" help="For `app:test` and `app:screenshots`: which app's scheme to test or tour" {
 #USAGE   choices "macos" "ios" "all"
+#USAGE }
+#USAGE flag "--appearance <appearance>" default="light" help="For `app:screenshots`: `dark` tours the app in the dark appearance" {
+#USAGE   choices "light" "dark"
+#USAGE }
+#USAGE flag "--device <family>" default="iphone" help="For `app:screenshots` with ios or all: `ipad` tours on an iPad simulator" {
+#USAGE   choices "iphone" "ipad"
 #USAGE }
 #USAGE flag "--xcode <version>" help="The Xcode the runner selected, which mac-run.yml passes. With 16.4 only `build` and `test`, the gates ci.yml's Xcode 16.4 leg runs, are accepted" {
 #USAGE   choices "27.0" "16.4"
@@ -22,6 +28,8 @@ set -euo pipefail
 gate="$usage_gate"
 filter="${usage_filter:-}"
 platform="$usage_platform"
+appearance="$usage_appearance"
+device="$usage_device"
 log="$usage_log"
 
 refuse() {
@@ -48,12 +56,22 @@ if [ -n "$filter" ]; then
   esac
 fi
 
+# The screenshot options change nothing in any other gate, so asking for one there is a request that does not mean what
+# it says; an iPad has no macOS app to tour.
+if [ "$gate" != app:screenshots ] && { [ "$appearance" != light ] || [ "$device" != iphone ]; }; then
+  refuse "--appearance and --device apply only to app:screenshots, not $gate"
+fi
+if [ "$gate" = app:screenshots ] && [ "$device" = ipad ] && [ "$platform" = macos ]; then
+  refuse "--device ipad needs --platform ios or all"
+fi
+
 # Xcode 16.4 is ci.yml's floor leg, which runs the package build and tests only; every other job, and anything that
 # needs AppKit, a simulator or a screen, runs on xcode-27 with Xcode 27.0.
 if [ "${usage_xcode:-}" = 16.4 ]; then
   case "$gate" in
     build | test) ;;
     build:strict) refuse "build:strict needs Swift 6.2 (Xcode 26) and fails on Xcode 16.4; ci.yml runs it on 27.0" ;;
+    app:screenshots) refuse "screenshots.yml runs app:screenshots on Xcode 27.0 (xcode-27) only" ;;
     *) refuse "ci.yml runs $gate on Xcode 27.0 (xcode-27) only; on 16.4 it runs build and test" ;;
   esac
 fi
@@ -64,9 +82,13 @@ fi
 #                     filter, only `test --filter=<pattern> --log test-output.log`: no coverage, audit or build step
 #   test:adversarial  adversarial-tests
 #   build:strict      strict-memory-safety: `build:strict --require --verbose`, then audit:unsafe
-#   lint              lint
-#   app:test          app-tests: `app:test <platform> --results TestResults`, without the iOS leg's best-effort AutoFill
-#                     step. `all` runs both schemes in one job, where ci.yml runs one job per platform
+#   lint              lint: `lint`, then `test:scripts`
+#   app:test          app-tests: `app:test <platform> --results TestResults`, then `app:diagnose` if it failed, without
+#                     the best-effort AutoFill step. `all` runs both schemes in one job, and ios every iOS UI test in
+#                     one, where ci.yml runs macOS as one leg and the iOS tests as four; a filter of comma-separated
+#                     identifiers runs one of those groups
+#   app:screenshots   screenshots.yml's capture job: `app:screenshots <platform>`, with text previews of each screen in
+#                     the log, and `app:diagnose` on each result bundle if the tour fails. `all` runs both in one job
 #   check             no ci.yml job: mise.toml's local aggregate of lint, audit and test
 failed="" status=0
 step() { # step <task> [args...]: one `mise run`, appended to the log; skipped once a step has failed
@@ -93,12 +115,30 @@ case "$gate" in
     step build:strict --require --verbose
     step audit:unsafe
     ;;
-  lint) step lint ;;
+  lint)
+    step lint
+    step test:scripts
+    ;;
   app:test)
     if [ -n "$filter" ]; then
       step app:test "$platform" --results TestResults "--only-testing=$filter"
     else
       step app:test "$platform" --results TestResults
+    fi
+    if [ -n "$failed" ]; then
+      # What ci.yml's diagnose step prints, ending in each failed test's last STEP lines and the "UI-test summary" line.
+      mise run app:diagnose TestResults 2>&1 | tee -a "$log" || true
+    fi
+    ;;
+  app:screenshots)
+    step app:screenshots "$platform" "--appearance=$appearance" "--device=$device" --results TestResults/Screenshots \
+      --previews
+    if [ -n "$failed" ]; then
+      # What screenshots.yml's diagnose step prints: each bundle's summary, runner logs and crash reports.
+      for results in TestResults/Screenshots/*/; do
+        [ -d "$results" ] || continue
+        mise run app:diagnose "$results" 2>&1 | tee -a "$log" || true
+      done
     fi
     ;;
   check) step check ;;
@@ -124,6 +164,6 @@ fi
 if [ -n "$failed" ]; then
   echo
   echo "=== Failure summary: $failed ==="
-  grep -E "error:|✘|FAILED|Failing tests|failed after|\*\* TEST FAILED|^[[:space:]]+[A-Za-z]+Tests[./]" "$log" | tail -n 80 || true
+  grep -E "error:|✘|FAILED|Failing tests|failed after|\*\* TEST FAILED|^UI-test summary:|^[[:space:]]+[A-Za-z]+Tests[./]" "$log" | tail -n 80 || true
 fi
 exit "$status"

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WatchwordTestSupport
 
 @testable import WatchwordSync
 
@@ -28,49 +29,29 @@ enum TransportFixtures {
     static let prefix = SyncObjectLocation.vaultPrefix(SyncFixtures.vault)
 }
 
-/// One contract, every transport (docs/02-architecture.md §7): immutable objects in a flat namespace.
+/// One contract, every transport (docs/02-architecture.md §7): immutable objects in a flat namespace. The checks are
+/// `SyncTransportContract`'s, which `WatchwordPlatformTests` also runs against the coordinated iCloud Drive transport and
+/// the CloudKit transport.
 @Suite("Sync transport contract")
 struct SyncTransportContractTests {
     @Test("objects round-trip and are listed by prefix", arguments: TransportKind.allCases)
     func roundTrip(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        #expect(try await transport.list(prefix: TransportFixtures.prefix).isEmpty)
-        #expect(try await transport.fetch(TransportFixtures.name, maximumLength: 100) == nil)
-        try await transport.create(TransportFixtures.name, contents: [1, 2, 3])
-        let other = SyncObjectLocation.snapshot(
-            vaultID: SyncFixtures.otherVault, author: SyncFixtures.deviceB, lamport: 9)
-        try await transport.create(other.name, contents: [4])
-        #expect(try await transport.list(prefix: TransportFixtures.prefix) == [TransportFixtures.name])
-        #expect(try await transport.list(prefix: "vault/").count == 2)
-        #expect(try await transport.fetch(TransportFixtures.name, maximumLength: 100) == [1, 2, 3])
+        #expect(try await SyncTransportContract.roundTrip(kind.make()) == [])
     }
 
     @Test("an object is written once and never overwritten", arguments: TransportKind.allCases)
     func immutable(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        try await transport.create(TransportFixtures.name, contents: [1])
-        await #expect(throws: SyncTransportError.objectExists(TransportFixtures.name)) {
-            try await transport.create(TransportFixtures.name, contents: [2])
-        }
-        #expect(try await transport.fetch(TransportFixtures.name, maximumLength: 100) == [1])
+        #expect(try await SyncTransportContract.immutable(kind.make()) == [])
     }
 
     @Test("an object larger than the reader's limit is refused", arguments: TransportKind.allCases)
     func sizeLimit(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        try await transport.create(TransportFixtures.name, contents: Array(repeating: 7, count: 101))
-        await #expect(throws: SyncTransportError.objectTooLarge(TransportFixtures.name)) {
-            try await transport.fetch(TransportFixtures.name, maximumLength: 100)
-        }
+        #expect(try await SyncTransportContract.sizeLimit(kind.make()) == [])
     }
 
     @Test("deletion removes one object and tolerates absence", arguments: TransportKind.allCases)
     func deletion(_ kind: TransportKind) async throws {
-        let transport = kind.make()
-        try await transport.create(TransportFixtures.name, contents: [1])
-        try await transport.delete(TransportFixtures.name)
-        try await transport.delete(TransportFixtures.name)
-        #expect(try await transport.list(prefix: TransportFixtures.prefix).isEmpty)
+        #expect(try await SyncTransportContract.deletion(kind.make()) == [])
     }
 }
 
@@ -97,5 +78,47 @@ struct FileSyncTransportTests {
         await #expect(throws: SyncTransportError.invalidName(name)) {
             try await transport.create(name, contents: [1])
         }
+    }
+}
+
+@Suite("File sync transport: iCloud placeholders")
+struct FileSyncTransportPlaceholderTests {
+    static func placeholder(for name: String, in root: URL) throws -> URL {
+        let url = try FileSyncTransport(root: root).fileURL(for: name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        return FileSyncTransport.placeholderURL(for: url)
+    }
+
+    @Test("a placeholder is listed as its object only when asked, and fetching it finds no file yet")
+    func placeholderListed() async throws {
+        let root = TransportFixtures.temporaryRoot()
+        try Data([1]).write(to: try Self.placeholder(for: TransportFixtures.name, in: root))
+        #expect(try await FileSyncTransport(root: root).list(prefix: TransportFixtures.prefix).isEmpty)
+        let ubiquitous = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+        #expect(try await ubiquitous.list(prefix: TransportFixtures.prefix) == [TransportFixtures.name])
+        #expect(try await ubiquitous.fetch(TransportFixtures.name, maximumLength: 100) == nil)
+    }
+
+    @Test("a placeholder beside its downloaded file is one object")
+    func placeholderAndFile() async throws {
+        let root = TransportFixtures.temporaryRoot()
+        let ubiquitous = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+        try await ubiquitous.create(TransportFixtures.name, contents: [1])
+        try Data([1]).write(to: try Self.placeholder(for: TransportFixtures.name, in: root))
+        #expect(try await ubiquitous.list(prefix: TransportFixtures.prefix) == [TransportFixtures.name])
+    }
+
+    @Test(
+        "placeholder names outside the layout are not objects",
+        arguments: [".x y.wwe.icloud", "..wwe.icloud", ".a.wwe.icloud.icloud", "x.wwe.icloud", ".a.wwe", ".a.icloud"])
+    func strangePlaceholders(_ entry: String) {
+        #expect(FileSyncTransport.placeholderStem(entry) == nil)
+    }
+
+    @Test("the placeholder of an object is the dot-file iCloud Drive keeps beside it")
+    func placeholderName() {
+        #expect(FileSyncTransport.placeholderStem(".7.wwe.icloud") == "7")
+        let url = URL(fileURLWithPath: "/r/vault/v/log/d/7.wwe")
+        #expect(FileSyncTransport.placeholderURL(for: url).lastPathComponent == ".7.wwe.icloud")
     }
 }

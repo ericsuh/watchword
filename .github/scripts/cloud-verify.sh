@@ -99,6 +99,12 @@ if [ "$runner" = "mise" ]; then
             skip "no dependencies" "python3 is not on PATH, and audit:dependencies parses the manifest with it."
         fi
         run "action pins" mise run audit:actions
+        # The workflow and task scripts, against stand-ins for the tools they call (Tests/ScriptTests).
+        if command -v python3 > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
+            run "script tests" mise run test:scripts
+        else
+            skip "script tests" "python3 or jq is not on PATH, and test:scripts needs both."
+        fi
         if [ "$has_swift_format" -eq 1 ]; then
             run "lint" mise run lint
         else
@@ -114,7 +120,7 @@ else
         run "strict memory safety" swift build -Xswiftc -strict-memory-safety -Xswiftc -warnings-as-errors
         if [ "$has_swift_format" -eq 1 ]; then
             run "lint" swift format lint --strict --recursive --configuration .swift-format \
-                Package.swift Sources Tests Apps
+                Package.swift Sources Tests Apps Fuzz/Package.swift Fuzz/Sources
         else
             skip "lint" "swift format is unavailable in this toolchain; let the GitHub Actions lint job cover it."
         fi

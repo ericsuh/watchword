@@ -6,7 +6,8 @@ public struct RankedMatch: Sendable, Hashable {
     public let item: Item
     public let match: ScopeMatch
     /// `true` when another item matched the same host with a strictly higher specificity.
-    /// Shadowed items are listed under "other accounts on this site" and are never pre-selected.
+    /// A shadowed item is never offered, listed or released on that host by the AutoFill extension (PRD F6.6); it
+    /// stays reachable in the app.
     public let isShadowed: Bool
 }
 

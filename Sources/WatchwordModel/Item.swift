@@ -44,6 +44,17 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
     /// `notes` as a line-level sequence, so concurrent edits to different lines merge (PRD F7.6). Empty on items
     /// written before sync, and for empty notes.
     public var noteLines: [NoteLine]
+    /// The arrangement of the fields as the last reorder left it: a last-writer-wins register whose stamp is
+    /// `revisions[.fieldOrder]` (docs/10-sync-correctness.md §3.3). `fields` is always the present fields in this
+    /// order, then any it does not list, by ID. It may list fields that are no longer present: a field removed and
+    /// brought back by a later merge returns to its place. `nil` on items written before the order was stored, where
+    /// the order of `fields` stands in.
+    public var fieldOrder: [UUID]?
+    /// Per group, every resolution of a conflict there (`ItemMerge.resolve`) and what the person had before them:
+    /// values retained for the group and written by a revision one of these vectors contains were discarded by that
+    /// choice, and stay discarded when a copy that still holds them is merged in (PRD F7.7). Each names the
+    /// resolution that wrote it (review finding S43).
+    public var discards: [ItemGroup: [ItemDiscard]]
 
     public init(
         id: UUID = UUID(),
@@ -65,7 +76,9 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         conflicts: [ItemGroup: [ConflictingValue]] = [:],
         retainedValues: [ConflictingValue] = [],
         clock: VersionVector = VersionVector(),
-        noteLines: [NoteLine] = []
+        noteLines: [NoteLine] = [],
+        fieldOrder: [UUID]? = nil,
+        discards: [ItemGroup: [ItemDiscard]] = [:]
     ) {
         self.id = id
         self.vaultID = vaultID
@@ -87,11 +100,14 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         self.retainedValues = retainedValues
         self.clock = clock
         self.noteLines = noteLines
+        self.fieldOrder = fieldOrder
+        self.discards = discards
     }
 
     enum CodingKeys: String, CodingKey {
         case id, vaultID, title, scopes, fields, tags, notes, createdAt, modifiedAt, version, archived, trashedAt
         case keptAfterDeletion, history, excludedFromSuggestions, revisions, conflicts, retainedValues, clock, noteLines
+        case fieldOrder, discards
     }
 
     /// Synthesised decoding, except that the sync metadata may be absent: payloads written before it existed still open.
@@ -117,6 +133,14 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         retainedValues = try container.decodeIfPresent([ConflictingValue].self, forKey: .retainedValues) ?? []
         clock = try container.decodeIfPresent(VersionVector.self, forKey: .clock) ?? VersionVector()
         noteLines = try container.decodeIfPresent([NoteLine].self, forKey: .noteLines) ?? []
+        fieldOrder = try container.decodeIfPresent([UUID].self, forKey: .fieldOrder)
+        if let stamped = try? container.decodeIfPresent([ItemGroup: [ItemDiscard]].self, forKey: .discards) {
+            discards = stamped
+        } else {
+            // The first form: one vector per group, naming no resolution.
+            let vectors = try container.decodeIfPresent([ItemGroup: VersionVector].self, forKey: .discards) ?? [:]
+            discards = vectors.mapValues { [ItemDiscard(revision: nil, seen: $0)] }
+        }
     }
 
     /// The first field of a given kind, if any.
@@ -151,9 +175,30 @@ public struct Item: Hashable, Codable, Sendable, Identifiable {
         return clock.isCovered(by: trash.seen)
     }
 
-    /// Whether any group holds values written concurrently with the one shown (PRD F7.6).
+    /// Whether any group holds a value written concurrently with the one shown and different from it (PRD F7.6).
+    /// Devices that concurrently wrote the same value are not in conflict, though each write is kept.
     public var hasConflicts: Bool {
-        conflicts.contains { !$0.value.isEmpty }
+        conflicts.contains { group, values in
+            guard group.isKnown, group != .fieldOrder, let shown = value(of: group) else { return false }
+            return values.contains { $0.value != shown }
+        }
+    }
+
+    /// The value the item shows for `group`; `nil` for a group this client does not know. A field that is not
+    /// present reads as `.field(nil)`.
+    public func value(of group: ItemGroup) -> ItemGroupValue? {
+        if let id = group.fieldID { return .field(fields.first { $0.id == id }) }
+        switch group {
+        case .title: return .title(title)
+        case .scopes: return .scopes(scopes)
+        case .tags: return .tags(tags)
+        case .archived: return .archived(archived)
+        case .trashedAt: return .trashedAt(trashedAt)
+        case .keptAfterDeletion: return .keptAfterDeletion(keptAfterDeletion)
+        case .excludedFromSuggestions: return .excludedFromSuggestions(excludedFromSuggestions)
+        case .fieldOrder: return .fieldOrder(fieldOrder ?? fields.map(\.id))
+        default: return nil
+        }
     }
 }
 
@@ -164,10 +209,38 @@ public struct ItemHistoryEntry: Hashable, Codable, Sendable {
     /// The item version these fields belonged to.
     public var version: UInt64
     public var fields: [Field]
+    /// The edits that recorded the entry, in order (usually one): an entry is a write like any other, and names its
+    /// writer so that a shared vault's judge can tell whose it is (docs/02-architecture.md §8.10, review finding S43).
+    /// Set by the vault on save (`ItemMerge.stamped`), never by the caller. Empty on entries from before history named
+    /// a writer, which the merge reads as written by the record's own write.
+    public var writtenBy: [Revision]
 
-    public init(replacedAt: Date, version: UInt64, fields: [Field]) {
+    public init(replacedAt: Date, version: UInt64, fields: [Field], writtenBy: [Revision] = []) {
         self.replacedAt = replacedAt
         self.version = version
         self.fields = fields
+        self.writtenBy = writtenBy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case replacedAt, version, fields, writtenBy
+    }
+
+    /// Synthesised decoding, except that `writtenBy` may be absent: entries written before it existed still open.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        replacedAt = try container.decode(Date.self, forKey: .replacedAt)
+        version = try container.decode(UInt64.self, forKey: .version)
+        fields = try container.decode([Field].self, forKey: .fields)
+        writtenBy = try container.decodeIfPresent([Revision].self, forKey: .writtenBy) ?? []
+    }
+
+    /// Synthesised encoding, except that an empty `writtenBy` is left out, as it was before it existed.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(replacedAt, forKey: .replacedAt)
+        try container.encode(version, forKey: .version)
+        try container.encode(fields, forKey: .fields)
+        if !writtenBy.isEmpty { try container.encode(writtenBy, forKey: .writtenBy) }
     }
 }

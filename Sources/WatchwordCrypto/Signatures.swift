@@ -7,11 +7,26 @@ import Foundation
 public enum SignatureDomain: UInt8, Sendable, CaseIterable {
     case publicKeyBundle = 1
     case vaultKeyGrant = 2
+    /// Every signature of the sharing protocol (docs/02-architecture.md §8.2): membership records, leave requests,
+    /// and the two pieces of local state a device signs for itself (contact pins, ledger checkpoints). Each of those
+    /// messages begins with its own four-byte magic, so one never verifies as another.
     case membership = 3
     case logSegment = 4
     /// A deletion this device's session made and has not yet published, kept in the local sync state store
     /// (`PendingDeletion.authenticator`), so a row planted in that file cannot become a tombstone.
     case pendingDeletion = 5
+    /// An entry of the device registry (docs/02-architecture.md §7.8): a device added, a device revoked, the account's
+    /// credentials changed.
+    case deviceRegistry = 6
+    /// The account header as published on the transport (§7.7): KDF parameters, salt and the wrapped keyset.
+    case accountHeader = 7
+    /// A fact in the account's vault directory (§7.7): a vault-key wrap vouched for, or a vault deleted.
+    case vaultDirectory = 8
+    /// The stash of a vault's sync state (ADR 0009): entries of kinds this version cannot read, kept in the local
+    /// state store until a version that can processes them, so a row planted in that file is never processed. A
+    /// domain of its own rather than a magic inside `pendingDeletion`'s: those messages begin with a vault ID and
+    /// have no magic, so nothing could keep a stash message from being read as one.
+    case syncStash = 9
 }
 
 public enum Signatures {

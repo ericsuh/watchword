@@ -171,14 +171,15 @@ Ask Claude to run:
 
 That script is the honest subset of `ci.yml`: the four jobs that need no Xcode. Each gate is the same
 `mise run <task>` the matching `ci.yml` step calls — `build`, `test`, `test:adversarial`, then (without
-`--quick`) `build:strict`, `audit:unsafe`, `audit:dependencies`, `audit:actions` and `lint` — so it
+`--quick`) `build:strict`, `audit:unsafe`, `audit:dependencies`, `audit:actions`, `test:scripts` and `lint` — so it
 cannot drift from CI, and it inherits the tasks' own checks that both test frameworks and every
 adversarial suite actually ran. It prints a pass/FAIL line per gate and a summary naming which runner
 it used and the Xcode-only gates it did not run, so a green result is never mistaken for a green CI.
 
-Two gates are skipped, with a warning and a `skipped:` line in the summary, rather than failed:
-`lint` when the toolchain has no `swift format`, and `audit:dependencies` when `python3` is not on
-`PATH` (it parses `swift package dump-package` output with it; Ubuntu 24.04 ships it). `build:strict`
+Three gates are skipped, with a warning and a `skipped:` line in the summary, rather than failed:
+`lint` when the toolchain has no `swift format`, `audit:dependencies` when `python3` is not on
+`PATH` (it parses `swift package dump-package` output with it; Ubuntu 24.04 ships it), and `test:scripts`
+(the tests of the workflow and task scripts, `Tests/ScriptTests`) when `python3` or `jq` is missing. `build:strict`
 runs: the session's Swift 6.4 supports `-strict-memory-safety`.
 
 mise is installed best-effort (§3, step 5), so when `mise` is not on `PATH`, or `mise tasks info build`
@@ -229,28 +230,33 @@ gates a merge; `ci.yml` does.
 
 | Input | Values | Meaning |
 | --- | --- | --- |
-| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `check` | The steps of the matching `ci.yml` job (below) |
+| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `app:screenshots`, `check` | The steps of the matching `ci.yml` job (below); `app:screenshots` is `screenshots.yml`'s capture |
 | `filter` | empty, or one line not starting with `-` | `test`: a `swift test --filter` regex. `app:test` with `ios` or `macos`: an `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Must match at least one test |
-| `platform` | `macos`, `ios`, `all` | `app:test` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
+| `platform` | `macos`, `ios`, `all` | `app:test` and `app:screenshots` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
+| `appearance` | `light`, `dark` | `app:screenshots` only: `dark` captures the dark set |
+| `device` | `iphone`, `ipad` | `app:screenshots` with `ios` or `all` only: `ipad` captures on an iPad simulator |
 | `xcode` | `27.0`, `16.4` | `xcode-27` (macOS 27), every gate; or `macos-15`, `ci.yml`'s oldest leg, `build` and `test` only |
 
 Each gate runs what its `ci.yml` job runs: `test` is the package-tests job (`audit:dependencies`, `build -v`,
 `test --coverage`), `build:strict` is the strict-memory-safety job (`build:strict --require`, then `audit:unsafe`),
-and `build`, `test:adversarial`, `lint` and `app:test` are their own job's step. The exceptions: a filtered `test`
+`lint` is the lint job (`lint`, then `test:scripts`), and `build`, `test:adversarial` and `app:test` are their own
+job's step. The exceptions: a filtered `test`
 runs only the matching tests, without coverage or the audit and build steps; `app:test` omits the iOS leg's
 best-effort AutoFill step; and `check` has no `ci.yml` job, being `mise.toml`'s local aggregate. A request that
 cannot mean what it says is refused before anything builds: a filter that starts with `-` or is given to a gate
-other than `test` and `app:test`, `app:test all` with a filter, and on Xcode 16.4 any gate but `build` and `test`
+other than `test` and `app:test`, `app:test all` with a filter, `appearance` or `device` on any gate but
+`app:screenshots` (and `ipad` with `macos`), and on Xcode 16.4 any gate but `build` and `test`
 (16.4 cannot build `-strict-memory-safety` at all, and `ci.yml` runs everything else on 27.0). A filtered run that
 executed no test fails too, where `swift test` and `xcodebuild` would report it as passing.
 
-The step is `mise run ci:gate <gate> --platform=<platform> --xcode=<xcode> --filter=<filter>`, which reproduces
-locally on a Mac. Each value is written `--flag=value`, because mise reads a separate argument that starts with `-` as
+The step is `mise run ci:gate <gate> --platform=<platform> --appearance=<appearance> --device=<device>
+--xcode=<xcode> --filter=<filter>`, which reproduces locally on a Mac. Each value is written `--flag=value`, because mise reads a separate argument that starts with `-` as
 an option: `--filter --help` would print the task's help and pass. A failed run ends its log with a failure summary
 (the compiler errors, failing tests and xcodebuild's "Failing tests" list), because a tool reading the log may only
-fetch its tail; the full logs, `coverage.txt` and any `.xcresult` bundles are the run's `mac-run-<run id>` artifact.
-Runs are named after their gate, platform (for `app:test`), filter, branch and Xcode, and repeats of one request share
-a concurrency group: one runs, at most one waits, and a newer dispatch replaces the waiting one. Different requests
+fetch its tail; the full logs, `coverage.txt`, any `.xcresult` bundles and `Screenshots/` are the run's
+`mac-run-<run id>` artifact.
+Runs are named after their gate, platform (for `app:test` and `app:screenshots`), a screenshot set that is not the
+default (`dark`, `ipad`), filter, branch and Xcode, and repeats of one request share a concurrency group: one runs, at most one waits, and a newer dispatch replaces the waiting one. Different requests
 never cancel one another.
 
 Starting a run:
@@ -259,6 +265,50 @@ Starting a run:
   then fetch the run's job log once it completes.
 - From a terminal: `gh workflow run mac-run.yml --ref <branch> -f gate=app:test -f platform=macos -f
   filter=WatchwordMacUITests/OnboardingAndUnlockTests`, then `gh run watch` and `gh run view --log-failed`.
+
+### 5.1 Screenshots from a cloud session
+
+The `app:screenshots` gate runs the screenshot tour (`04-test-plan.md` §5.1) on the branch and uploads what it
+wrote. It is how a session without a Mac checks a screen it added to the tour, and the same capture
+`screenshots.yml` runs for a pull request.
+
+1. Add the screen to the tour: drive the app to it in `ScreenshotTourTests` and add one
+   `Screens.capture("name", in: app, showing: "…")` line. Push the branch.
+2. Dispatch `mac-run.yml` on the branch with `gate=app:screenshots` and `platform=macos` or `ios`, one run each
+   (two runs in parallel finish sooner than `all`, which tours one after the other in one job). From a terminal:
+   `gh workflow run mac-run.yml --ref <branch> -f gate=app:screenshots -f platform=ios`.
+3. Read the end of the job log. A passing run lists every screen with its pixel size, file size and average
+   brightness (`07-item-detail  1206x2622  412 KB, brightness 0.93`), then a coarse text rendering of each picture
+   (the gate passes `--previews`): enough to see that a sheet, a dialog or the keyboard is where it should be, and
+   that a dark set is dark, without the image. The contact sheet's size and its own rendering come last
+   (`contact sheet  2556x3084  487 KB`), which shows every tile is there over its name. A failing run ends with
+   the failure summary; the tour's own failure is an `XCTAssert` line naming the element that never appeared, and
+   `app:diagnose` output precedes it. A tour that
+   stopped part way leaves no set: the screens it captured before that, and XCUITest's own screenshots of the
+   failure, are in `Screenshots/<set>-incomplete/` in the artifact, and the log has a text rendering of the last
+   screen it reached and of each failure screenshot, which is usually enough to see what was on screen instead of
+   the element the tour was waiting for.
+4. Fetch the pictures. They are in the run's `mac-run-<run id>` artifact, under `Screenshots/<set>/` with
+   `index.html`, beside `Screenshots/watchword-screens-<set>.png`, every screen of the set in one picture:
+   `gh run download <run id> --name mac-run-<run id>`, or the artifact's download URL from the GitHub tools
+   (`actions_list` with `list_workflow_run_artifacts`, then `actions_get` with `download_workflow_run_artifact`),
+   then unzip and open `index.html` or the sheet, or read the PNGs with an image-capable tool.
+
+   The download URL points at GitHub's artifact storage (`*.blob.core.windows.net`), which a cloud environment's
+   network policy has to allow; the default allowlists do not, and the session's proxy then answers `403`. Without
+   it, a cloud session can verify a capture only from the log (step 3), and should say so: the pictures themselves
+   are then checked by whoever opens the artifact or the pull request's screenshot comment in a browser.
+
+`screenshots.yml` can be dispatched the same way, and then also rewrites the pull request's screenshot comment:
+`gh workflow run screenshots.yml --ref <branch> -f pull_request=<number>`, with `-f appearance=dark` or
+`-f device=ipad` for the other sets. The pull request's head must be the dispatched commit. (GitHub accepted that
+dispatch before the file was on `main`, because the workflow had already run once for the pull request.)
+
+A capture is mostly the build and, on iOS, the simulator's first boot on a fresh runner. Measured on `xcode-27`
+over the runs so far: three to five minutes for the macOS job, and nine to seventeen for the iOS simulator job
+(one took 17 min 15 s, of which the capture step was 16 min 21 s). The tour itself runs for about a minute and a
+half on macOS and up to three on the simulator (162 s in that run). Budget twenty minutes before deciding an iOS
+capture is stuck, and do not dispatch the same request again while one is queued or running.
 
 What it is not:
 

@@ -15,6 +15,11 @@
 # 4. Nowhere, SecureMemory included, binds a foreign symbol by hand (`@_silgen_name`, `@_cdecl`, `@_extern`,
 #    `@extern`): C functions come only from imported system modules.
 #
+# 5. Fuzz/ (the libFuzzer harness, a package of its own that no app links): only .swift files under Fuzz/Sources, and
+#    the same constructs confined to one file, Fuzz/Sources/WatchwordFuzz/LibFuzzerEntry.swift. libFuzzer calls a C
+#    function with a pointer and a length, so that file must name a pointer type and export the symbol; its one
+#    permitted attribute is `@_cdecl("LLVMFuzzerTestOneInput")`, and nothing in Fuzz/ may bind a foreign symbol.
+#
 # Comment lines are ignored. This is a tripwire, not a proof: review (and CODEOWNERS on Sources/SecureMemory) remains
 # the backstop. Tests are out of scope: they are not shipped and not built by the strict job.
 set -euo pipefail
@@ -26,8 +31,10 @@ report() {
   fail=1
 }
 
-links=$(find Sources Tests Apps -type l)
-[ -z "$links" ] || report "Symlinks under Sources/, Tests/ or Apps/ are not permitted (grep would not scan them):" "$links"
+roots=(Sources Tests Apps)
+[ -d Fuzz ] && roots+=(Fuzz)
+links=$(find "${roots[@]}" -type l -not -path 'Fuzz/.build/*')
+[ -z "$links" ] || report "Symlinks under Sources/, Tests/, Apps/ or Fuzz/ are not permitted (grep would not scan them):" "$links"
 
 foreign=$(find Sources -type f ! -name '*.swift')
 [ -z "$foreign" ] || report "Only .swift files may live under Sources/:" "$foreign"
@@ -49,5 +56,23 @@ outside=$(code_lines '[Uu]nsafe|@unchecked|@_[A-Za-z]|@(extern|section|used|excl
 bindings=$(code_lines '@(_silgen_name|_cdecl|_extern|extern)([^A-Za-z0-9_]|$)')
 [ -z "$bindings" ] || report "Hand-written foreign symbol bindings are not permitted anywhere:" "$bindings"
 
-[ "$fail" -eq 0 ] && echo "Unsafe constructs are confined to Sources/SecureMemory; no hand-bound foreign symbols."
+if [ -d Fuzz ]; then
+  entry=Fuzz/Sources/WatchwordFuzz/LibFuzzerEntry.swift
+  fuzz_foreign=$(find Fuzz/Sources -type f ! -name '*.swift')
+  [ -z "$fuzz_foreign" ] || report "Only .swift files may live under Fuzz/Sources/:" "$fuzz_foreign"
+
+  fuzz_lines() {
+    grep -rnE "$1" Fuzz/Sources --include='*.swift' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true
+  }
+  fuzz_outside=$(fuzz_lines '[Uu]nsafe|@unchecked|@_[A-Za-z]|@(extern|section|used|exclusivity)([^A-Za-z0-9_]|$)' | grep -v "^$entry:" || true)
+  [ -z "$fuzz_outside" ] || report "Unsafe constructs in Fuzz/ outside $entry:" "$fuzz_outside"
+
+  fuzz_attributes=$(fuzz_lines '@_[A-Za-z]|@(extern|section|used|exclusivity)([^A-Za-z0-9_]|$)' | grep -vF '@_cdecl("LLVMFuzzerTestOneInput")' || true)
+  [ -z "$fuzz_attributes" ] || report "The only underscored attribute permitted in Fuzz/ is libFuzzer's entry point:" "$fuzz_attributes"
+
+  fuzz_entries=$(fuzz_lines '@_cdecl' | wc -l | tr -d ' ')
+  [ "$fuzz_entries" -le 1 ] || report "Fuzz/ may export one symbol, libFuzzer's entry point:" "$(fuzz_lines '@_cdecl')"
+fi
+
+[ "$fail" -eq 0 ] && echo "Unsafe constructs are confined to Sources/SecureMemory (and libFuzzer's entry point in Fuzz/); no hand-bound foreign symbols."
 exit "$fail"

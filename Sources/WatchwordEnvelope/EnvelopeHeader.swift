@@ -1,6 +1,10 @@
 import Foundation
 
 /// What a ciphertext envelope contains. Checked before any decryption is attempted.
+///
+/// A raw value also says whether a sync reader that does not know the kind may pass over a record of it
+/// (`criticality`, ADR 0009): 10 through 127 are ignorable, everything else is critical. Choose a new kind's value by
+/// that rule, never by counting on from the last case; existing values are never renumbered.
 public enum EnvelopeKind: UInt8, Sendable, Hashable, CaseIterable {
     case item = 0
     case vaultKeyWrap = 1
@@ -10,6 +14,51 @@ public enum EnvelopeKind: UInt8, Sendable, Hashable, CaseIterable {
     /// A vault snapshot written by the sync layer (docs/02-architecture.md §7.1). A kind of its own, so a snapshot can
     /// never be presented as a log segment or the reverse.
     case snapshot = 5
+    /// A vault's own description (its name and creation time), sealed under the vault key like an item: a vault's name
+    /// is as private as an item's title (PRD F2.1, docs/02-architecture.md §5).
+    case vaultMetadata = 6
+    /// A fact in the account's vault directory (docs/02-architecture.md §7.7): the local index row of a vault and the
+    /// signed deletion of one. Never an item, a key or a log object.
+    case vaultDirectory = 7
+    /// The device registry (docs/02-architecture.md §7.8): a registry entry kept in the local store, and a device's
+    /// name sealed under the keyset's symmetric key inside one.
+    case deviceRegistry = 8
+    /// Everything sealed inside an encrypted Watchword archive (docs/02-architecture.md §14.1): the wrapped archive
+    /// key, the manifest and every entry. A kind of its own, so nothing from an archive file can be presented as a
+    /// record of the vault, or the reverse.
+    case archive = 9
+    /// A vault's synced breach-check results for one item (docs/02-architecture.md §13.9), sealed under the vault key
+    /// beside the item, under the item's record ID. A kind of its own, so a result can never be presented as an item
+    /// version, or the reverse, and an item's history never holds one.
+    case scanStatus = 10
+}
+
+/// What a sync reader that does not know a record kind does with a record of it (ADR 0009), in the spirit of X.509's
+/// critical extensions.
+public enum RecordCriticality: Sendable, Hashable {
+    /// Skipping it could change what is secure or lose data (items, deletions, membership, a vault's description):
+    /// the reader stops at the object carrying it, skips nothing, and says it needs a newer version.
+    case critical
+    /// Advisory (breach-check results): the reader keeps the record's bytes aside, unread, carries on merging the
+    /// rest, and processes what it kept once it learns the kind.
+    case ignorable
+}
+
+extension EnvelopeKind {
+    /// The raw values that are ignorable by definition (ADR 0009). Criticality is a function of the kind byte alone,
+    /// which every sync object authenticates twice (the segment's AEAD and signature, and each record envelope's own
+    /// context), so there is no separate flag to tamper with and no way for a kind and its criticality to disagree.
+    /// 0–9 were assigned before the rule and are critical; 128–255 are left for later critical kinds.
+    public static let ignorableRawValues: ClosedRange<UInt8> = 10...127
+
+    /// The criticality of a kind byte, including one this version does not know.
+    public static func criticality(ofRawValue rawValue: UInt8) -> RecordCriticality {
+        ignorableRawValues.contains(rawValue) ? .ignorable : .critical
+    }
+
+    public var criticality: RecordCriticality {
+        Self.criticality(ofRawValue: rawValue)
+    }
 }
 
 public enum EnvelopeError: Error, Equatable, Sendable {

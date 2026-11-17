@@ -24,8 +24,13 @@ let package = Package(
         .library(name: "WatchwordCrypto", targets: ["WatchwordCrypto"]),
         .library(name: "WatchwordStore", targets: ["WatchwordStore"]),
         .library(name: "WatchwordSync", targets: ["WatchwordSync"]),
+        .library(name: "WatchwordSharing", targets: ["WatchwordSharing"]),
+        .library(name: "WatchwordHygiene", targets: ["WatchwordHygiene"]),
         .library(name: "WatchwordKit", targets: ["WatchwordKit"]),
         .library(name: "WatchwordPlatform", targets: ["WatchwordPlatform"]),
+        .library(name: "WatchwordAutoFill", targets: ["WatchwordAutoFill"]),
+        .library(name: "WatchwordInterchange", targets: ["WatchwordInterchange"]),
+        .library(name: "WatchwordPresentation", targets: ["WatchwordPresentation"]),
     ],
     dependencies: [
         // Exact version, and Package.resolved pins the commit (ADR 0006).
@@ -63,20 +68,67 @@ let package = Package(
             dependencies: ["WatchwordModel", "WatchwordEnvelope", "WatchwordStore", "SecureMemory"]
         ),
 
+        // Shared vaults: the signed membership chain, fingerprint verification and pinned contacts, invitations, key
+        // grants, and rotation on removal or departure (§8; milestone 4). Portable: real cryptography through
+        // WatchwordCrypto, storage and the key directory through ports. VaultSession drives it (§8.10).
+        .target(
+            name: "WatchwordSharing",
+            dependencies: ["WatchwordEnvelope", "WatchwordCrypto", "SecureMemory", crypto]
+        ),
+
+        // Breach checking, strength, reuse and the report behind them (§13; milestone 6). Portable: the network is the
+        // `HTTPClient` port, time and randomness are passed in, and the only cryptography is SHA-1 for the Pwned
+        // Passwords range API and HMAC for the in-memory reuse index. It knows nothing of the session or the store.
+        .target(name: "WatchwordHygiene", dependencies: ["WatchwordModel", "SecureMemory", crypto]),
+
         // VaultSession façade, unlock and auto-lock policies, and the ports the UI and adapters plug into (§10, §15). Also
-        // the production SyncKeyring and ItemSealer, since they need the keys VaultSession holds (§7; milestone 3).
+        // the production SyncKeyring and ItemSealer, since they need the keys VaultSession holds (§7; milestone 3), the
+        // session's conformance to WatchwordAutoFill's CredentialVault port (§9.2), the hygiene engine it drives (§13.8),
+        // shared vaults in the session and in sync (§8.10; milestone 4), and import, export and the encrypted archive
+        // through the session (§14.1; milestone 7).
         .target(
             name: "WatchwordKit",
             dependencies: [
                 "WatchwordModel", "WatchwordMatching", "WatchwordEnvelope", "WatchwordCrypto", "WatchwordStore",
-                "WatchwordSync", "SecureMemory",
+                "WatchwordSync", "WatchwordSharing", "SecureMemory", "WatchwordAutoFill", "WatchwordHygiene",
+                "WatchwordInterchange",
             ]
         ),
 
-        // Apple-framework adapters for the WatchwordKit ports: Keychain, LocalAuthentication, the App Group container
-        // and the Emergency Kit PDF. In the package rather than Apps/ so the strict-memory-safety job, the unsafe
-        // tripwire, lint and `swift test` all cover them.
-        .target(name: "WatchwordPlatform", dependencies: ["WatchwordKit", "WatchwordStore", "SecureMemory"]),
+        // Apple-framework adapters for the ports: Keychain, LocalAuthentication, the App Group container and the
+        // Emergency Kit PDF (WatchwordKit); the device-local file store (§13.8); the URLSession client of hygiene's
+        // HTTPClient port; the coordinated iCloud Drive and CloudKit sync transports (§7.2, §7.3). In the package
+        // rather than Apps/ so the strict-memory-safety job, the unsafe tripwire, lint and `swift test` all cover them.
+        .target(
+            name: "WatchwordPlatform",
+            dependencies: ["WatchwordKit", "WatchwordStore", "WatchwordSync", "WatchwordHygiene", "SecureMemory"]
+        ),
+
+        // The portable core of the credential provider extension: every decision and every byte it returns, behind a
+        // vault port, so the extension itself is an adapter (§9.1; milestone 5). No AuthenticationServices, and not
+        // WatchwordKit: `VaultSession` conforms to its `CredentialVault` port, not the other way round. `Crypto` for the
+        // passkey's P-256 key, HMAC (TOTP, `prf`) and SHA-256; SecureMemory for drawing key bytes.
+        .target(
+            name: "WatchwordAutoFill",
+            dependencies: ["WatchwordModel", "WatchwordMatching", "WatchwordGenerator", "SecureMemory", crypto]
+        ),
+        // Import and export of other password managers' formats: CSV, 1PUX and the Credential Exchange Format, with the
+        // ZIP reader and DEFLATE inflater 1PUX needs (§14; milestone 7). Foundation only, and no cryptography: parsers are
+        // pure functions from hostile bytes to item drafts and a report, so all of it runs under `swift test` on Linux.
+        .target(name: "WatchwordInterchange", dependencies: ["WatchwordModel", "WatchwordMatching"]),
+
+        // What the apps' screens show and do, as view models over `VaultSession`: vaults, devices, the quarantine,
+        // sharing, the security report, import and export (§15). Portable, so the screens' logic runs under `swift test`
+        // on Linux against real sessions; the SwiftUI views in Apps/ only lay it out. Decides nothing about security:
+        // every refusal is the session's, and the models word it.
+        .target(
+            name: "WatchwordPresentation",
+            dependencies: [
+                "WatchwordKit", "WatchwordModel", "WatchwordSync", "WatchwordStore", "WatchwordEnvelope",
+                "WatchwordCrypto", "WatchwordSharing", "WatchwordHygiene", "WatchwordInterchange", "WatchwordMatching",
+                "SecureMemory",
+            ]
+        ),
 
         // Seeded and deliberately broken generators and vector helpers, for test targets only (§15). Not a product,
         // and no production target may depend on it.
@@ -84,7 +136,8 @@ let package = Package(
             name: "WatchwordTestSupport",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordStore", "WatchwordSync", "WatchwordEnvelope",
-                "SecureMemory",
+                "WatchwordAutoFill", "WatchwordMatching", "WatchwordHygiene", "SecureMemory", "WatchwordCrypto",
+                "WatchwordSharing",
             ]
         ),
 
@@ -92,6 +145,7 @@ let package = Package(
         .testTarget(name: "WatchwordMatchingTests", dependencies: ["WatchwordMatching", "WatchwordModel"]),
 
         // Swift Testing suites.
+        .testTarget(name: "WatchwordModelTests", dependencies: ["WatchwordModel"]),
         .testTarget(name: "WatchwordGeneratorTests", dependencies: ["WatchwordGenerator", "WatchwordTestSupport"]),
         .testTarget(name: "WatchwordEnvelopeTests", dependencies: ["WatchwordEnvelope", "WatchwordTestSupport"]),
         .testTarget(name: "SecureMemoryTests", dependencies: ["SecureMemory", "WatchwordTestSupport", crypto]),
@@ -117,12 +171,50 @@ let package = Package(
             name: "WatchwordKitTests",
             dependencies: [
                 "WatchwordKit", "WatchwordModel", "WatchwordMatching", "WatchwordStore", "WatchwordCrypto",
-                "WatchwordEnvelope", "WatchwordSync", "SecureMemory", "WatchwordTestSupport",
+                "WatchwordEnvelope", "WatchwordSync", "WatchwordSharing", "SecureMemory", "WatchwordTestSupport",
+                "WatchwordAutoFill", "WatchwordHygiene", "WatchwordInterchange", "WatchwordPresentation",
+            ]
+        ),
+        .testTarget(
+            name: "WatchwordAutoFillTests",
+            dependencies: [
+                "WatchwordAutoFill", "WatchwordModel", "WatchwordMatching", "WatchwordGenerator", "WatchwordKit",
+                "WatchwordTestSupport", crypto,
+            ]
+        ),
+        .testTarget(
+            name: "WatchwordHygieneTests",
+            dependencies: [
+                "WatchwordHygiene", "WatchwordModel", "WatchwordGenerator", "SecureMemory", "WatchwordTestSupport",
+            ]
+        ),
+        .testTarget(
+            name: "WatchwordSharingTests",
+            dependencies: [
+                "WatchwordSharing", "WatchwordCrypto", "WatchwordEnvelope", "SecureMemory", "WatchwordTestSupport",
+                crypto,
             ]
         ),
         .testTarget(
             name: "WatchwordPlatformTests",
-            dependencies: ["WatchwordPlatform", "WatchwordKit", "SecureMemory", "WatchwordTestSupport"]
+            dependencies: [
+                "WatchwordPlatform", "WatchwordKit", "WatchwordSync", "WatchwordHygiene", "WatchwordModel",
+                "SecureMemory", "WatchwordTestSupport",
+            ]
+        ),
+
+        .testTarget(
+            name: "WatchwordInterchangeTests",
+            dependencies: ["WatchwordInterchange", "WatchwordModel", "WatchwordMatching", "WatchwordTestSupport"]
+        ),
+
+        .testTarget(
+            name: "WatchwordPresentationTests",
+            dependencies: [
+                "WatchwordPresentation", "WatchwordKit", "WatchwordModel", "WatchwordSync", "WatchwordStore",
+                "WatchwordCrypto", "WatchwordSharing", "WatchwordHygiene", "WatchwordInterchange",
+                "WatchwordTestSupport",
+            ]
         ),
 
         // Adversarial security suite (Swift Testing, tag .adversarial, run as its own CI job).
@@ -130,8 +222,9 @@ let package = Package(
             name: "WatchwordAdversarialTests",
             dependencies: [
                 "WatchwordMatching", "WatchwordGenerator", "WatchwordEnvelope", "WatchwordModel", "WatchwordCrypto",
-                "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordKit", "WatchwordPlatform",
-                "WatchwordTestSupport", crypto,
+                "SecureMemory", "WatchwordStore", "WatchwordSync", "WatchwordSharing", "WatchwordKit",
+                "WatchwordPlatform", "WatchwordAutoFill", "WatchwordHygiene", "WatchwordInterchange",
+                "WatchwordPresentation", "WatchwordTestSupport", crypto,
             ]
         ),
     ],

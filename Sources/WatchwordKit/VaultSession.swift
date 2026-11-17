@@ -25,17 +25,26 @@ public struct VaultConfiguration: Sendable {
     public var kdf: KDFStrategy
     public var quickUnlock: QuickUnlockSettings
     public var autoLock: AutoLockSettings
+    /// What this device is called in the account's list of devices ("Eric's iPhone"). Sealed under the keyset before
+    /// it is written anywhere; at most 64 characters are kept.
+    public var deviceName: String
+    /// Breach checks and the hygiene report (docs/02-architecture.md §13.8); `nil` turns hygiene off.
+    public var hygiene: HygieneSettings?
 
     public init(
         appVersion: String,
         kdf: KDFStrategy = .calibrate,
         quickUnlock: QuickUnlockSettings = .standard,
-        autoLock: AutoLockSettings = .platformDefault
+        autoLock: AutoLockSettings = .platformDefault,
+        deviceName: String = "",
+        hygiene: HygieneSettings? = nil
     ) {
         self.appVersion = appVersion
         self.kdf = kdf
         self.quickUnlock = quickUnlock
         self.autoLock = autoLock
+        self.deviceName = deviceName
+        self.hygiene = hygiene
     }
 }
 
@@ -48,7 +57,10 @@ public struct SyncSettings: Sendable {
     public init(
         state: any SyncStateStore,
         transport: any SyncTransport,
-        configuration: SyncConfiguration = SyncConfiguration(schemaVersions: [.item: ItemCodec.schemaVersion])
+        configuration: SyncConfiguration = SyncConfiguration(schemaVersions: [
+            .item: ItemCodec.schemaVersion, .vaultMetadata: VaultMetadataCodec.schemaVersion,
+            .scanStatus: ScanStatusCodec.schemaVersion,
+        ])
     ) {
         self.state = state
         self.transport = transport
@@ -114,13 +126,14 @@ final class UnlockedKeys: Sendable {
 /// epoch before touching key material again: a `lock()` that lands while an unlock or a save is waiting on the
 /// store or the Keychain wins, and the in-flight operation fails with `locked` rather than resurrecting keys or
 /// reading a zeroised buffer.
-public actor VaultSession {
+public actor VaultSession: SharesExecutor {
     let store: any RecordStore
     let keychain: any KeychainStore
     let biometrics: any BiometricGate
     let clock: any WallClock
     let configuration: VaultConfiguration
     let syncSettings: SyncSettings?
+    let deviceKeys: any DeviceKeyStore
     var random: InjectedGenerator
 
     var keys: UnlockedKeys?
@@ -130,7 +143,30 @@ public actor VaultSession {
     private var backgroundedAt: Date?
     /// Lamport high-water mark per vault, so one record with an absurd version cannot freeze writes elsewhere.
     var highestVersionSeen: [UUID: UInt64] = [:]
+    /// Whoever asked to be told of every lock (`lockEvents()`), by a number of their own.
+    var lockListeners: [Int: AsyncStream<Void>.Continuation] = [:]
+    var nextLockListener = 0
     var syncInFlight = false
+    /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
+    var registryView: RegistryView?
+    /// Registry entries fetched from the transport and found worth nothing (they can never count, or wait on a
+    /// parent that is not there), not fetched again by this session until a sync keeps something new: a revoked
+    /// device that floods the transport costs each of them one fetch (docs/02-architecture.md §7.8).
+    var skippedRegistryEntries: Set<ObjectDigest> = []
+    /// The hygiene engine and what drives it (`VaultSession+Hygiene.swift`); built at the first unlock.
+    var hygieneRuntime: HygieneRuntime?
+    /// The serial executor the session shares with its hygiene engine, so that `lock()` drops the engine's keys
+    /// before it returns (`SharesExecutor`; docs/02-architecture.md §13.8).
+    package nonisolated let executorOwner = SerialExecutorOwner()
+    /// Shared vaults: settings, ledgers, plans, proposals and stream indexes (VaultSession+Sharing.swift).
+    var sharing = SharingRuntime()
+    /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
+    var pendingImport: PendingImport?
+    /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.
+    var importGeneration: UInt64 = 0
+    /// Tests only: called inside every step `awayFromSession` runs, off the actor, before the step itself, so a test
+    /// can hold one there and show that `lock()` does not wait for it. `nil` in production.
+    var awayWorkHook: (@Sendable (AwayWork) -> Void)?
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(
@@ -140,9 +176,12 @@ public actor VaultSession {
         clock: any WallClock = SystemWallClock(),
         configuration: VaultConfiguration,
         sync: SyncSettings? = nil,
+        deviceKeys: (any DeviceKeyStore)? = nil,
         random: any RandomNumberGenerator & Sendable = SystemRandomNumberGenerator()
     ) {
         self.store = store
+        // Until the Secure Enclave adapter exists, a device's signing key is a software key in the Keychain.
+        self.deviceKeys = deviceKeys ?? KeychainDeviceKeyStore(keychain: keychain)
         self.keychain = keychain
         self.biometrics = biometrics
         self.clock = clock
@@ -249,6 +288,15 @@ public actor VaultSession {
         )
         let vaultKeyRecord = try vaultKeyRecord(vaultKey, keyset: keyset, deviceID: record.deviceID)
         let kit = EmergencyKit(accountID: accountID, secretKey: secretKey.formatted, createdAt: now)
+        // The device registry starts here: this device, its own signing key, and the enrolment key the new AUK
+        // yields; and the account header as other devices will fetch it (docs/02-architecture.md §7.7, §7.8).
+        let genesis: (rows: [StoredRecord], anchor: RegistryAnchor)
+        do {
+            genesis = try await registryGenesis(account: record, unlockKey: unlockKey, keyset: keyset, now: now)
+        } catch {
+            newKeys.zeroise()
+            throw error
+        }
 
         // Keychain first: if the store commit then fails, an orphaned Secret Key is harmless and is replaced by
         // the next attempt. The other order could leave an account whose Secret Key exists nowhere, before the
@@ -256,13 +304,17 @@ public actor VaultSession {
         try await keychain.store(
             secretKey.bytes.extracting(0..<SecretKey.byteCount), for: .secretKey(accountID: accountID))
         do {
-            try await store.commit(StoreChange(account: .create(record), upserts: [vaultKeyRecord]))
+            try await store.commit(
+                StoreChange(account: .create(record), upserts: [vaultKeyRecord] + genesis.rows))
         } catch {
             try? await keychain.delete(.secretKey(accountID: accountID))
+            try? await deviceKeys.delete(accountID: accountID)
             newKeys.zeroise()
             throw error
         }
         account = record
+        registryView = nil
+        try? await writeAnchor(genesis.anchor, accountID: accountID)
         guard epoch == lockEpoch, keys == nil else {
             newKeys.zeroise()
             throw VaultError.lockedDuringUnlock
@@ -301,8 +353,14 @@ public actor VaultSession {
     // MARK: - Unlock (PRD F5.2)
 
     /// Unlocks with the account password and the Secret Key held in this device's Keychain.
-    public func unlock(password: String) async throws {
-        try await unlock(password: password, enteredSecretKey: nil)
+    ///
+    /// If the password was changed on another device and this one has been told, the old password is refused with
+    /// `passwordChangedOnAnotherDevice` and the new one adopts that change. `ignoringPasswordChange` is for the
+    /// person who did not make the change: it unlocks with the password this device still has, so they can revoke
+    /// the device that made it and set a password of their own (docs/02-architecture.md §7.8).
+    public func unlock(password: String, ignoringPasswordChange: Bool = false) async throws {
+        try await unlock(
+            password: password, enteredSecretKey: nil, ignoringPasswordChange: ignoringPasswordChange)
     }
 
     /// Unlocks with the password and a Secret Key typed or scanned from the Emergency Kit, for a device whose
@@ -318,13 +376,15 @@ public actor VaultSession {
         }
         let secretKey = try SecretKey(parsing: keyText)
         defer { secretKey.zeroise() }
-        try await unlock(password: password, enteredSecretKey: secretKey)
+        try await unlock(password: password, enteredSecretKey: secretKey, ignoringPasswordChange: false)
     }
 
-    private func unlock(password: String, enteredSecretKey: SecretKey?) async throws {
+    private func unlock(password: String, enteredSecretKey: SecretKey?, ignoringPasswordChange: Bool)
+        async throws
+    {
         guard keys == nil else { throw VaultError.alreadyUnlocked }
         let epoch = lockEpoch
-        guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        guard var record = try await loadAccount() else { throw VaultError.noAccount }
 
         let secretKey: SecretKey
         if let enteredSecretKey {
@@ -337,10 +397,22 @@ public actor VaultSession {
         }
         defer { secretKey.zeroise() }
 
-        let unlockKey = try deriveUnlockKey(password: password, secretKey: secretKey, account: record)
+        let opened = try await openAccount(
+            password: password, secretKey: secretKey, account: record,
+            ignoringPasswordChange: ignoringPasswordChange)
+        record = opened.account
+        let unlockKey = opened.unlockKey
         let newKeys: UnlockedKeys
         do {
-            newKeys = try await openKeys(unlockKey: unlockKey, account: record)
+            // The keyset opened, so the header's version is what its writer sealed. Older than the credentials this
+            // device already follows means the file was rolled back to a password the person retired.
+            do {
+                try await refuseRolledBackHeader(record)
+            } catch {
+                opened.keyset.zeroise()
+                throw error
+            }
+            newKeys = try await openVaultKeys(unlockKey: unlockKey, keyset: opened.keyset, account: record)
         } catch {
             unlockKey.zeroise()
             throw error
@@ -358,7 +430,116 @@ public actor VaultSession {
         // Best effort: a Keychain hiccup here must not turn a correct password into a failed unlock.
         try? await refreshQuickUnlock(after: now, account: record)
         try? await refreshSigningKey(account: record, keys: newKeys)
+        do {
+            try await reconcileAccountObjects(account: record, keys: newKeys)
+        } catch VaultError.accountHeaderRolledBack {
+            // The one failure that is not best effort: the file holds a header from before a password change this
+            // device had already followed (A8). The password that opened it is not the account's any more.
+            lock()
+            throw VaultError.accountHeaderRolledBack
+        } catch {
+            // Sync says why (`deviceRegistryUnavailable`); the person keeps access to their vault.
+        }
         try? await purgeExpiredTrash()
+    }
+
+    /// Derives the AUK and opens the keyset: under an account header for a password changed on another device, if
+    /// the password opens one (which adopts it), otherwise under the header this device has.
+    private func openAccount(
+        password: String, secretKey: SecretKey, account record: AccountRecord, ignoringPasswordChange: Bool
+    ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord) {
+        let candidates = await candidateHeaders(record)
+        var attempts = 0
+        for candidate in candidates.pending where attempts < Self.maximumHeaderAttempts {
+            attempts += 1
+            if let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record) {
+                return adopted
+            }
+        }
+        do {
+            let unlockKey = try deriveUnlockKey(password: password, secretKey: secretKey, account: record)
+            let keyset: Keyset
+            do {
+                keyset = try unwrapKeyset(unlockKey: unlockKey, account: record)
+            } catch {
+                unlockKey.zeroise()
+                throw error
+            }
+            guard candidates.pending.isEmpty || ignoringPasswordChange else {
+                unlockKey.zeroise()
+                keyset.zeroise()
+                throw VaultError.passwordChangedOnAnotherDevice
+            }
+            return (unlockKey, keyset, record)
+        } catch CryptoError.authenticationFailed {
+            // Not this device's password. One of a branch the person may have chosen elsewhere?
+            for candidate in candidates.forked where attempts < Self.maximumHeaderAttempts {
+                attempts += 1
+                if let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record) {
+                    return adopted
+                }
+            }
+            throw CryptoError.authenticationFailed
+        }
+    }
+
+    /// Tries `password` against a candidate header. If it opens the keyset — the same keyset, for the same personal
+    /// vault — the person has confirmed that password change on this device: the header becomes this device's, and
+    /// the registry is followed along its credential entry from now on. Returns `nil` if it does not open.
+    private func adopt(
+        _ candidate: AccountHeaderObject, password: String, secretKey: SecretKey, account record: AccountRecord
+    ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord)? {
+        guard let view = try? await registry(record),
+            let unlockKey = try? TwoSecretKeyDerivation.accountUnlockKey(
+                password: password, secretKey: secretKey, accountID: record.accountID, parameters: candidate.kdf,
+                salt: candidate.salt, keyID: candidate.unlockKeyID)
+        else { return nil }
+        guard
+            let keyset = try? Keyset.unwrap(
+                candidate.wrappedKeyset, accountID: record.accountID, with: unlockKey,
+                recordVersion: candidate.keysetVersion)
+        else {
+            unlockKey.zeroise()
+            return nil
+        }
+        let rows = try await store.records(in: record.accountID, kind: .deviceRegistry)
+        guard (try? candidate.openBinding(with: unlockKey)) == record.personalVaultID,
+            (try? keyset.publicKeyBundle().signingKey) == view.state.accountSigningKey,
+            let followed = try? Self.evaluateRegistry(
+                rows.map(\.envelope), accountID: record.accountID, accountKey: view.state.accountSigningKey,
+                genesis: view.state.genesis, credential: candidate.credentialID)
+        else {
+            unlockKey.zeroise()
+            keyset.zeroise()
+            return nil
+        }
+        var updated = record
+        updated.kdf = candidate.kdf
+        updated.salt = candidate.salt
+        updated.unlockKeyID = candidate.unlockKeyID
+        updated.wrappedKeyset = candidate.wrappedKeyset
+        updated.keysetVersion = candidate.keysetVersion
+        updated.credentialGeneration = candidate.generation
+        do {
+            let existing = try await store.record(Self.headerKey(record.accountID))
+            let stale = try await store.records(in: record.accountID, kind: .accountHeader)
+                .filter { $0.recordID != record.accountID }.map(\.key)
+            try await store.commit(
+                StoreChange(
+                    account: .update(updated, expectedKeysetVersion: record.keysetVersion),
+                    upserts: [
+                        Self.headerRow(
+                            candidate, recordID: record.accountID, version: (existing?.version ?? 0) + 1)
+                    ], deletions: stale))
+            try await pinRegistry(followed, accountID: record.accountID)
+        } catch {
+            unlockKey.zeroise()
+            keyset.zeroise()
+            throw error
+        }
+        account = updated
+        registryView = nil
+        return (unlockKey, keyset, updated)
     }
 
     /// Quick unlock (PRD F5.3, F5.4): the policy must allow it, then the Keychain must release the Local Unlock Key
@@ -371,6 +552,12 @@ public actor VaultSession {
         let accountID = record.accountID
         guard var state = try await loadQuickUnlockState(accountID: accountID) else {
             throw VaultError.quickUnlockRefused(.notEnabled)
+        }
+        // The password was changed on another device: the key this device would release opens credentials that are
+        // no longer the account's. Destroyed, like any refused enrolment; the new password re-enrols.
+        if !(await candidateHeaders(record)).pending.isEmpty {
+            try await suspendQuickUnlock(accountID: accountID, forget: false)
+            throw VaultError.quickUnlockRefused(.credentialsChanged)
         }
         let now = await clock.now()
         let decision = UnlockPolicy.evaluate(
@@ -442,6 +629,12 @@ public actor VaultSession {
         }
         let newKeys: UnlockedKeys
         do {
+            do {
+                try await refuseRolledBackHeader(record)
+            } catch {
+                keyset.zeroise()
+                throw error
+            }
             newKeys = try await openVaultKeys(unlockKey: unlockKey, keyset: keyset, account: record)
         } catch {
             unlockKey.zeroise()
@@ -455,10 +648,18 @@ public actor VaultSession {
         state.failedAttempts = 0
         try? await saveQuickUnlockState(state, accountID: accountID)
         try? await refreshSigningKey(account: record, keys: newKeys)
+        do {
+            try await reconcileAccountObjects(account: record, keys: newKeys)
+        } catch VaultError.accountHeaderRolledBack {
+            lock()
+            throw VaultError.accountHeaderRolledBack
+        } catch {
+            // As after a password unlock: sync reports a registry it cannot use.
+        }
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).
-    private func deriveUnlockKey(password: String, secretKey: SecretKey, account: AccountRecord) throws
+    func deriveUnlockKey(password: String, secretKey: SecretKey, account: AccountRecord) throws
         -> EncryptionKey
     {
         try TwoSecretKeyDerivation.accountUnlockKey(
@@ -471,27 +672,26 @@ public actor VaultSession {
         )
     }
 
-    /// Unwraps the keyset under `unlockKey`, then every vault key wrap. Identities come from the storage location
-    /// (the account header and each row), never from the wraps (§4).
-    private func openKeys(unlockKey: EncryptionKey, account: AccountRecord) async throws -> UnlockedKeys {
-        let keyset = try unwrapKeyset(unlockKey: unlockKey, account: account)
-        return try await openVaultKeys(unlockKey: unlockKey, keyset: keyset, account: account)
-    }
-
     private func unwrapKeyset(unlockKey: EncryptionKey, account: AccountRecord) throws -> Keyset {
         try Keyset.unwrap(
             account.wrappedKeyset, accountID: account.accountID, with: unlockKey,
             recordVersion: account.keysetVersion)
     }
 
-    /// Only the personal vault's current key is required. Any other wrap that fails to open (a row planted in the
-    /// file) is skipped, so one bad row cannot block every unlock. A failure of the required key is reported as
-    /// `vaultKeyUnreadable`, never as `authenticationFailed`: the password was already proven by the keyset.
+    /// Unwraps the key of every vault in the directory. Identities come from the storage location (each row), never
+    /// from the wraps (§4). Only the personal vault's current key is required. Any other wrap that fails to open (a
+    /// row planted in the file) is skipped, so one bad row cannot block every unlock. A failure of the required key
+    /// is reported as `vaultKeyUnreadable`, never as `authenticationFailed`: the password was already proven by the
+    /// keyset.
     private func openVaultKeys(unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord) async throws
         -> UnlockedKeys
     {
         do {
-            let rows = try await store.records(in: account.personalVaultID, kind: .vaultKeyWrap)
+            var rows = try await store.records(in: account.personalVaultID, kind: .vaultKeyWrap)
+            for index in try await store.records(in: account.accountID, kind: .vaultDirectory)
+            where index.recordID != account.personalVaultID {
+                rows += try await store.records(in: index.recordID, kind: .vaultKeyWrap)
+            }
             var vaultKeys: [UUID: VaultKey] = [:]
             for row in rows {
                 do {
@@ -515,10 +715,11 @@ public actor VaultSession {
         }
     }
 
-    private func install(_ newKeys: UnlockedKeys, at now: Date) {
+    func install(_ newKeys: UnlockedKeys, at now: Date) {
         keys = newKeys
         lastActivity = now
         backgroundedAt = nil
+        startHygiene()
     }
 
     // MARK: - Lock (PRD F5.5)
@@ -529,7 +730,29 @@ public actor VaultSession {
         lockEpoch &+= 1
         keys?.zeroise()
         keys = nil
+        pendingImport = nil
         backgroundedAt = nil
+        // After the keyset is zeroised, never before (§13.8): nothing the engine does can keep the keys resident.
+        stopHygiene()
+        for listener in lockListeners.values { listener.yield() }
+    }
+
+    /// One element for every lock from now on, whatever caused it (`lock()`, auto-lock, a lock during an operation),
+    /// for state outside the session that must go with the keys: a screen's decrypted values, an export's bytes. The
+    /// stream ends when its consumer stops listening; at most one unread lock is kept.
+    public func lockEvents() -> AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let number = nextLockListener
+        nextLockListener += 1
+        lockListeners[number] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.stopListening(number) }
+        }
+        return stream
+    }
+
+    private func stopListening(_ number: Int) {
+        lockListeners[number] = nil
     }
 
     /// Call on user interaction. Resets the idle timer — unless the timeout has already passed, in which case it
@@ -683,8 +906,22 @@ public actor VaultSession {
 
     /// Re-wraps the keyset under a new AUK (new salt, new key ID). Quick unlock enrolled before the change stops
     /// working: the credential generation changes and the old wrapped AUK no longer opens the keyset.
+    ///
+    /// The change is the account's, not this device's (docs/02-architecture.md §7.8): it is recorded in the device
+    /// registry as a new credential generation, signed by this device and by the enrolment key of the generation it
+    /// replaces (which is what proves the current password was known), and the new account header is published at
+    /// the next sync. Every other device then refuses the old password and asks for the new one, and a device can
+    /// only enrol with the new one. The keyset itself does not change: someone who opened it with the old password
+    /// still holds it.
     public func changePassword(current: String, new: String) async throws {
-        guard new.count >= VaultConfiguration.minimumPasswordLength else {
+        try await rotateCredentials(current: current, new: new, revoking: nil)
+    }
+
+    /// A password change, a device revocation, or both as one step: the revocation first, then the credential
+    /// change that names it as its parent, so on every device that follows the new password the revocation is
+    /// behind a checkpoint and final (§7.8).
+    func rotateCredentials(current: String, new: String?, revoking: UUID?) async throws {
+        if let new, new.count < VaultConfiguration.minimumPasswordLength {
             throw VaultError.passwordTooShort(minimum: VaultConfiguration.minimumPasswordLength)
         }
         let epoch = lockEpoch
@@ -699,6 +936,32 @@ public actor VaultSession {
             record.wrappedKeyset, accountID: record.accountID, with: verified, recordVersion: record.keysetVersion
         ).zeroise()
 
+        let view = try await registry(record)
+        guard view.state.standing(of: record.deviceID) == .active else { throw VaultError.deviceRevoked }
+        let previousEnrolment = EnrolmentKey.derive(from: verified, accountID: record.accountID)
+        defer { previousEnrolment.zeroise() }
+        guard view.state.credential.generation == record.credentialGeneration,
+            try previousEnrolment.publicKey() == view.state.credential.enrolmentKey
+        else { throw VaultError.deviceRegistryUnavailable }
+
+        var parents = view.state.heads
+        var rows: [StoredRecord] = []
+        if let revoking {
+            let keys = try requireKeys(since: epoch)
+            let revocation = try await signedRegistryEntry(
+                parents: parents, author: .device(record.deviceID), body: .revoke(revoking), account: record,
+                keyset: keys.keyset)
+            rows.append(Self.registryRow(revocation, account: record))
+            parents = [revocation.id]
+        }
+        guard let new else {
+            _ = try requireKeys(since: epoch)
+            try await store.commit(StoreChange(upserts: rows))
+            registryView = nil
+            try await pinRegistry(try await registry(record), accountID: record.accountID)
+            return
+        }
+
         _ = try requireKeys(since: epoch)
         let kdf = try kdfParameters()
         let salt = randomBytes(kdf.saltLength)
@@ -711,24 +974,58 @@ public actor VaultSession {
         updated.unlockKeyID = newUnlockKey.keyID
         updated.keysetVersion = record.keysetVersion + 1
         updated.credentialGeneration = record.credentialGeneration + 1
+        let credentialID: ObjectDigest
         do {
-            let keys = try requireKeys(since: epoch)
+            var keys = try requireKeys(since: epoch)
             updated.wrappedKeyset = try keys.keyset.wrap(
                 with: newUnlockKey, recordVersion: updated.keysetVersion, using: &random)
+            let newEnrolment = EnrolmentKey.derive(from: newUnlockKey, accountID: record.accountID)
+            defer { newEnrolment.zeroise() }
+            let credential = try await signedRegistryEntry(
+                parents: parents, author: .device(record.deviceID),
+                body: .credential(
+                    generation: updated.credentialGeneration, enrolmentKey: try newEnrolment.publicKey(),
+                    previous: view.state.credential.id),
+                account: record, keyset: keys.keyset, previousCredential: previousEnrolment)
+            credentialID = credential.id
+            keys = try requireKeys(since: epoch)
+            let header = try await makeHeader(
+                account: updated, credentialID: credentialID, genesisID: view.state.genesis,
+                unlockKey: newUnlockKey, keyset: keys.keyset)
+            _ = try requireKeys(since: epoch)
+            let existing = try await store.record(Self.headerKey(record.accountID))
+            // Headers kept for someone else's password change are beside the point now: this change supersedes or
+            // forks them, and the registry says which.
+            let candidates = try await store.records(in: record.accountID, kind: .accountHeader)
+                .filter { $0.recordID != record.accountID }.map(\.key)
+            rows.append(Self.registryRow(credential, account: record))
+            rows.append(
+                Self.headerRow(header, recordID: record.accountID, version: (existing?.version ?? 0) + 1))
             try await store.commit(
-                StoreChange(account: .update(updated, expectedKeysetVersion: record.keysetVersion)))
+                StoreChange(
+                    account: .update(updated, expectedKeysetVersion: record.keysetVersion), upserts: rows,
+                    deletions: candidates))
         } catch {
             newUnlockKey.zeroise()
             throw error
         }
         account = updated
+        registryView = nil
         // The new password is committed: from here on, report success whatever happens to the session. Telling the
-        // person "nothing changed" now would leave them believing the old password still works (F10.2).
-        guard epoch == lockEpoch, keys === oldKeys else {
+        // person "nothing changed" now would leave them believing the old password still works (F10.2). If the
+        // anchor cannot be written now, the next unlock moves it: the header that opens names the credential.
+        try? await writeAnchor(
+            RegistryAnchor(
+                genesis: view.state.genesis, credential: credentialID, generation: updated.credentialGeneration,
+                heads: [credentialID]),
+            accountID: record.accountID)
+        guard epoch == lockEpoch, let currentKeys = keys, currentKeys.keyset.accountID == oldKeys.keyset.accountID
+        else {
             newUnlockKey.zeroise()
             return
         }
-        keys = UnlockedKeys(accountUnlockKey: newUnlockKey, keyset: oldKeys.keyset, vaultKeys: oldKeys.vaultKeys)
+        keys = UnlockedKeys(
+            accountUnlockKey: newUnlockKey, keyset: currentKeys.keyset, vaultKeys: currentKeys.vaultKeys)
         oldKeys.accountUnlockKey.zeroise()
         try? await refreshQuickUnlock(after: await clock.now(), account: updated)
     }
@@ -745,14 +1042,18 @@ public actor VaultSession {
         ).zeroise()
         lock()
         try await writer(for: record).eraseAll()
+        try? await eraseHygieneRecords()
         account = nil
         // Every item is attempted even if one fails, so a Keychain error cannot leave the Secret Key behind just
         // because an earlier deletion threw; anything left over is reported.
+        registryView = nil
         var leftovers: [KeychainItem] = []
-        for item in [
-            KeychainItem.secretKey(accountID: record.accountID), .quickUnlockKey(accountID: record.accountID),
-            .quickUnlockState(accountID: record.accountID), .accountSigningKey(accountID: record.accountID),
-        ] {
+        do {
+            try await deviceKeys.delete(accountID: record.accountID)
+        } catch {
+            leftovers.append(.deviceSigningKey(accountID: record.accountID))
+        }
+        for item in KeychainItem.all(accountID: record.accountID) {
             do {
                 try await keychain.delete(item)
             } catch {
@@ -762,7 +1063,7 @@ public actor VaultSession {
         if !leftovers.isEmpty { throw VaultError.keychainCleanupIncomplete(leftovers.count) }
     }
 
-    private func storedSecretKey(accountID: UUID) async throws -> SecretKey {
+    func storedSecretKey(accountID: UUID) async throws -> SecretKey {
         guard let bytes = try await keychain.read(.secretKey(accountID: accountID), prompt: "") else {
             throw VaultError.secretKeyMissing
         }
@@ -775,23 +1076,13 @@ public actor VaultSession {
         account?.personalVaultID
     }
 
-    /// Every item in every unlocked vault, trashed and archived ones included (the UI filters).
+    /// Every item in every vault of the account, trashed and archived ones included (the UI filters). That includes
+    /// what a vault's deletion left behind: such an item is in the trash, its `vaultID` is not among `vaults()`, and
+    /// it can be moved to another vault or deleted.
     public func items() async throws -> ItemListing {
-        let epoch = lockEpoch
         _ = try requireKeys()
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
-        let rows = try await store.records(in: record.personalVaultID, kind: .item)
-        let keys = try requireKeys(since: epoch)
-        var listing = ItemListing(items: [], unreadable: [])
-        for row in rows {
-            do {
-                listing.items.append(try openItem(row, keys: keys))
-            } catch {
-                listing.unreadable.append(row.recordID)
-            }
-        }
-        listing.items.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        return listing
+        return try await items(inVaults: Array(try await vaultDirectory(record).keys))
     }
 
     public func item(id: UUID) async throws -> Item {
@@ -800,14 +1091,28 @@ public actor VaultSession {
         guard let row = try await store.record(RecordKey(recordID: id, kind: .item)) else {
             throw VaultError.itemNotFound(id)
         }
-        return try openItem(row, keys: try requireKeys(since: epoch))
+        var inDeletedVault = false
+        if let account = try await loadAccount(), row.vaultID != account.personalVaultID {
+            inDeletedVault = try await vaultDirectory(account)[row.vaultID]?.isDeleted ?? false
+        }
+        return Self.presented(try openItem(row, keys: try requireKeys(since: epoch)), inDeletedVault: inDeletedVault)
     }
 
     /// Creates or updates an item. The vault owns `createdAt`, `modifiedAt`, `version`, `history`, `trashedAt` and
     /// `keptAfterDeletion`; whatever the caller put there is replaced. Scopes are checked against the scope policy here, the one place
     /// they can enter the vault from the UI (PRD F11.2).
+    ///
+    /// An update must be made from the stored version: a draft whose `version` is not the stored item's (a sync
+    /// merged another device's edit while the editor was open) is refused with `versionConflict`, and the editor
+    /// reopens the item (Y29).
     @discardableResult
     public func save(_ draft: Item) async throws -> Item {
+        // A draft made from an earlier version than the stored one would be stamped as an edit that had seen
+        // everything since, and replace it (Y29): refused, for the editor to reopen the item.
+        try await save(draft, expecting: .versionIfPresent(draft.version))
+    }
+
+    func save(_ draft: Item, expecting expectation: WriteExpectation) async throws -> Item {
         for scope in draft.scopes {
             do {
                 try ScopePolicy.validate(scope)
@@ -815,7 +1120,8 @@ public actor VaultSession {
                 throw VaultError.scopeRejected(error)
             }
         }
-        return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft) { item, existing, now in
+        return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft, expecting: expectation) {
+            item, existing, now in
             item = draft
             if let existing {
                 item.createdAt = existing.createdAt
@@ -874,9 +1180,12 @@ public actor VaultSession {
         guard item.isTrashed else { throw VaultError.itemNotTrashed(id) }
         _ = try requireKeys()
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
-        // Conditional on the version just read, so a restore that lands in between is not silently undone.
+        // Conditional on the version just read, so a restore that lands in between is not silently undone. The item's
+        // synced scan results go with it (§13.9).
         try await writer(for: record).commit(
-            StoreChange(conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
+            StoreChange(
+                deletions: try await scanStatusKeys(of: [id]),
+                conditionalDeletions: [RecordKey(recordID: id, kind: .item): item.version]))
     }
 
     /// Deletes items that have been in the trash for 30 days (PRD F1.5). Run after every password unlock. Not a
@@ -892,6 +1201,7 @@ public actor VaultSession {
         guard !expired.isEmpty, let record = try await loadAccount() else { return }
         try await writer(for: record).commit(
             StoreChange(
+                deletions: try await scanStatusKeys(of: expired.map(\.id)),
                 conditionalDeletions: Dictionary(
                     uniqueKeysWithValues: expired.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
     }
@@ -901,10 +1211,12 @@ public actor VaultSession {
     /// `ItemCodec.maximumPayloadLength` is refused with `ItemCodecError.payloadTooLarge`, leaving the stored
     /// version as it was.
     @discardableResult
-    private func write(
+    func write(
         id: UUID,
         vaultID: UUID? = nil,
         creating draft: Item? = nil,
+        allowingDeletedVault: Bool = false,
+        expecting expectation: WriteExpectation? = nil,
         _ mutate: (inout Item, Item?, Date) -> Void
     ) async throws -> Item {
         let epoch = lockEpoch
@@ -913,15 +1225,19 @@ public actor VaultSession {
         let now = await clock.now()
         let existingRow = try await store.record(RecordKey(recordID: id, kind: .item))
         let keys = try requireKeys(since: epoch)
+        // Checked against the row this write replaces, and the commit is conditional on that row: together, a
+        // compare-and-swap.
+        try expectation?.check(existingRow, id: id)
 
         let existing = try existingRow.map { try openItem($0, keys: keys) }
         guard var item = existing ?? draft else { throw VaultError.itemNotFound(id) }
         let targetVault = vaultID ?? item.vaultID
         if let existing, existing.vaultID != targetVault { throw VaultError.vaultChangeNotSupported }
-        // Milestone 2 has one vault, the personal one; shared vaults bring a per-vault current key (milestone 4).
-        guard targetVault == record.personalVaultID,
-            let vaultKey = keys.vaultKeys[record.personalVaultKeyID]
-        else { throw VaultError.unknownVault(targetVault) }
+        // The vault must be one of the account's, with a key this device holds, and not deleted. Shared vaults add
+        // the member's role to this check (milestone 4).
+        let vaultKey = try await writableVaultKey(
+            targetVault, keys: keys, account: record, allowingDeleted: allowingDeletedVault)
+        _ = try requireKeys(since: epoch)
 
         mutate(&item, existing, now)
         item.id = id
@@ -956,6 +1272,7 @@ public actor VaultSession {
         change.expectations[sealed.key] = existing.map { .version($0.version) } ?? .absent
         try await writer(for: account).commit(change)
         highestVersionSeen[item.vaultID] = max(highestVersionSeen[item.vaultID] ?? 0, item.version)
+        await noteHygieneWrite(item)
     }
 
     func sealItem(_ item: Item, vaultKey: VaultKey, account: AccountRecord) throws -> StoredRecord {
@@ -987,7 +1304,9 @@ public actor VaultSession {
             throw VaultError.recordMismatch(row.recordID)
         }
         highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, item.version)
-        return item
+        // Sync metadata is a writer's claim (Y30): every reader, the UI included, gets the one reading every device
+        // makes of it, never counts above the row's version or values under a group they do not belong to.
+        return ItemMerge.canonical(item, origin: Self.origin(row))
     }
 
     /// The context an item record must carry, built from its row: where it was found, never what it says.
@@ -1016,7 +1335,7 @@ public actor VaultSession {
         )
     }
 
-    private func kdfParameters() throws -> KDFParameters {
+    func kdfParameters() throws -> KDFParameters {
         let parameters: KDFParameters
         switch configuration.kdf {
         case .calibrate: parameters = try KDFCalibration.calibrate(clock: ContinuousClock())

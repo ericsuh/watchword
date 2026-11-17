@@ -10,12 +10,14 @@ import WatchwordTestSupport
 @testable import WatchwordSync
 
 /// The "sync log" threats again, against the production keyring: `VaultSession` sealing segments and records with
-/// AES-GCM under the vault key and signing them with the account's Ed25519 key (milestone 3's Mac half). The
+/// AES-GCM under the vault key and signing them with the account's Ed25519 key and the device's own key, checked
+/// against the device registry (docs/02-architecture.md §7.6, §7.8). The
 /// "sync log" suite shows the engine checks the right things in the right order over fakes; this one shows the
 /// real primitives are wired to those checks, so a forgery fails because the cryptography says so.
 ///
 /// Adversaries (docs/02-architecture.md §2): **A1**, the sync store, holding no key; **an insider device** of the
-/// account, holding every key; **A8**, the local-file attacker, who cannot reach the Keychain.
+/// account, holding every key; **a revoked or never-registered device**, which may hold the keyset (it knew the
+/// password) but no registered device key; **A8**, the local-file attacker, who cannot reach the Keychain.
 @Suite("Adversarial: sync with real keys", .tags(.adversarial))
 struct AdversarialVaultSyncTests {
     static let deviceB = UUID(uuidString: "D0000000-0000-4000-8000-0000000000B0")!
@@ -204,6 +206,39 @@ struct AdversarialVaultSyncTests {
         #expect(try await f.b.session.items().items.isEmpty, "the person's deletion still reaches B")
     }
 
+    /// Threat: A8, with the local sync state file, plants a stash row (ADR 0009) holding a deletion of a scan result
+    /// (kind 10, an ignorable kind this version reads): no key, an erasure summary, a version within the vault's
+    /// high water. Processed, it would erase the result here, be remembered as an erasure, and go out in this device's
+    /// next snapshot as a tombstone signed with the account key, wiping the result across the household. Naming a
+    /// revoked device as its carrier would take it past a shared vault's judge. The session signs the rows it writes,
+    /// bound to the vault and the device, so a row it did not write — unsigned, signed by another key, or its own row
+    /// of another vault — is refused, and the log is replayed instead; nothing in it is applied.
+    @Test("a stash row planted in the local sync state is never processed")
+    func plantedStashRow() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        let rows = try await f.a.store.records(in: f.vaultID, kind: .item)
+        let row = try #require(rows.first)
+        var stash = SyncStash()
+        stash.insert(
+            .init(
+                entry: UnknownSyncEntry(
+                    recordID: row.recordID, rawKind: EnvelopeKind.scanStatus.rawValue, keyID: SyncPayload.zeroUUID,
+                    version: row.version + 1, device: Self.deviceB, envelope: nil, erasure: [1, 2, 3]),
+                author: Self.deviceB))
+        let key = RecordKey(recordID: row.recordID, kind: .scanStatus)
+        let base = try #require(f.a.sync?.state)
+        let otherVault = UUID(uuidString: "0B0B0B0B-0000-4000-8000-00000000000B")!
+        let genuineElsewhere = try await AuthenticatedSyncState(base: InMemorySyncStateStore(), session: f.a.session)
+            .signedStash(stash.encoded(), vaultID: otherVault)
+        for planted in [stash.encoded(), Array(repeating: 0x5A, count: 64) + stash.encoded(), genuineElsewhere] {
+            try await base.saveStash(planted, vaultID: f.vaultID)
+            let report = try await f.a.session.sync()
+            #expect(report.unknownEntriesProcessed == 0, "a planted row was processed")
+            #expect(await (try? base.loadState(vaultID: f.vaultID))??.erasures[key] == nil)
+        }
+    }
+
     /// Threat: code that kept the sync adapter past a `lock()` (an engine mid-sync, a stray task) tries to use the
     /// keys. Every key operation goes back to the actor, which has zeroised them, and refuses.
     @Test("after lock, the sync adapter refuses every operation that needs a key")
@@ -222,9 +257,9 @@ struct AdversarialVaultSyncTests {
         await #expect(throws: SyncKeyringError.locked) { try await adapter.sign([1, 2, 3], at: location) }
     }
 
-    /// Threat: an insider device signs an object in another device's stream. The account key would verify it, so
-    /// the keyring refuses to sign as anyone but this device (the device registry, review finding D9, will make
-    /// the check cryptographic).
+    /// Threat: an insider device signs an object in another device's stream. The keyring refuses to sign as anyone
+    /// but this device; `insiderCannotWriteAsAnotherDevice` shows a device that signs anyway is refused by the
+    /// others, because each device's signature is checked against its own key in the registry (D9).
     @Test("the keyring signs only as its own device")
     func signsOnlyAsItself() async throws {
         let f = try await Self.fixture()
@@ -232,5 +267,215 @@ struct AdversarialVaultSyncTests {
         await #expect(throws: SyncKeyringError.untrustedAuthor(Self.deviceC)) {
             try await f.b.session.syncSign([1, 2, 3], at: elsewhere)
         }
+    }
+
+    // MARK: - The device registry (review findings D9, Y5, Y6)
+
+    /// An object B's session sealed for `location`, with the message its signatures must cover.
+    static func sealed(_ f: Fixture, at location: SyncObjectLocation, entries: [SyncEntry] = []) async throws
+        -> (envelope: [UInt8], message: [UInt8])
+    {
+        let payload = SyncPayload(
+            kind: location.kind, vaultID: location.vaultID, author: location.author, number: location.number,
+            vector: [:], entries: entries)
+        let envelope = try await f.b.session.syncSeal(payload.encoded(), at: location)
+        return (envelope, VaultSession.syncSignedMessage(envelope, at: location))
+    }
+
+    /// Threat: someone who opened the keyset once — a device since revoked, a thief who knew the password — holds
+    /// the account's Ed25519 key and every vault key, but no registered device key (review findings D9, Y5). They
+    /// write a validly sealed segment in a registered device's stream, signed with the account key alone, or with a
+    /// device key of their own. Every device refuses it at download, locked or unlocked.
+    @Test("the account key alone does not write: a registered device's own signature is needed too")
+    func keysetAloneCannotWrite() async throws {
+        let f = try await Self.fixture()
+        let keys = try #require(await f.b.session.keys)
+        let location = SyncObjectLocation.segment(vaultID: f.vaultID, author: Self.deviceB, sequence: 2)
+        let (envelope, message) = try await Self.sealed(f, at: location)
+        let accountSignature = try keys.keyset.sign(message, domain: .logSegment)
+        var generator = SeededGenerator(seed: 404)
+        let own = SoftwareDeviceKey.generate(using: &generator)
+        let ownSignature = try own.sign(
+            prepared: DeviceSignatures.signedBytes(domain: .logSegment, deviceID: Self.deviceB, message: message))
+        let forgeries = [
+            accountSignature,
+            DualSignature.encode(account: accountSignature, device: ownSignature),
+            DualSignature.encode(account: accountSignature, device: [UInt8](repeating: 0, count: 64)),
+            DualSignature.encode(account: accountSignature, device: accountSignature),
+        ]
+        for locked in [true, false] {
+            let reader = try await f.reader(locked: locked)
+            for forged in forgeries {
+                await f.transport.tamper(
+                    location.name, contents: SignedObject(signature: forged, envelope: envelope).serialized())
+                let report = try await reader.session.sync()
+                #expect(
+                    report.rejected.map(\.name) == [location.name]
+                        && report.rejected.map(\.reason) == [.keyring(.authenticationFailed)], "locked: \(locked)")
+                let staged = try #require(try await reader.sync?.state.staged(vaultID: f.vaultID))
+                #expect(!staged.contains { $0.location == location })
+            }
+        }
+    }
+
+    /// Threat: A2 or A8 with this device's Keychain but not the account password: the device's signing key (held in
+    /// software until the Secure Enclave adapter exists), and no account key. A device signature without the
+    /// account's is refused.
+    @Test("a device key alone does not write either: the account key's signature is needed too")
+    func deviceKeyAloneCannotWrite() async throws {
+        let f = try await Self.fixture()
+        let accountID = try #require(try await f.b.session.status().accountID)
+        let deviceKey = try #require(await f.b.extractedDeviceKey(accountID: accountID))
+        let location = SyncObjectLocation.segment(vaultID: f.vaultID, author: Self.deviceB, sequence: 2)
+        let (envelope, message) = try await Self.sealed(f, at: location)
+        let deviceSignature = try deviceKey.sign(
+            prepared: DeviceSignatures.signedBytes(domain: .logSegment, deviceID: Self.deviceB, message: message))
+        let stranger = Keyset.generate(accountID: accountID)
+        let forgeries = [
+            DualSignature.encode(account: [UInt8](repeating: 0, count: 64), device: deviceSignature),
+            DualSignature.encode(account: try stranger.sign(message, domain: .logSegment), device: deviceSignature),
+            DualSignature.encode(account: deviceSignature, device: deviceSignature),
+        ]
+        let reader = try await f.reader(locked: true)
+        for forged in forgeries {
+            await f.transport.tamper(
+                location.name, contents: SignedObject(signature: forged, envelope: envelope).serialized())
+            #expect(try await reader.session.sync().rejected.map(\.reason) == [.keyring(.authenticationFailed)])
+        }
+    }
+
+    /// Threat: an insider device of the account, registered and holding every key, writes a segment in another
+    /// device's stream, signing with its own device key — as itself, and as the other device. The other device's
+    /// signature is checked against the other device's key.
+    @Test("a registered device cannot write in another device's stream")
+    func insiderCannotWriteAsAnotherDevice() async throws {
+        let f = try await Self.fixture()
+        // C is registered and has said so; it is its stream B writes in.
+        try await f.reader().session.sync()
+        try await f.a.session.sync()
+        let accountID = try #require(try await f.b.session.status().accountID)
+        let keys = try #require(await f.b.session.keys)
+        let deviceKey = try #require(await f.b.extractedDeviceKey(accountID: accountID))
+        let location = SyncObjectLocation.segment(vaultID: f.vaultID, author: Self.deviceC, sequence: 1)
+        let (envelope, message) = try await Self.sealed(f, at: location)
+        let accountSignature = try keys.keyset.sign(message, domain: .logSegment)
+        for signer in [Self.deviceB, Self.deviceC] {
+            let device = try deviceKey.sign(
+                prepared: DeviceSignatures.signedBytes(domain: .logSegment, deviceID: signer, message: message))
+            await f.transport.tamper(
+                location.name,
+                contents: SignedObject(
+                    signature: DualSignature.encode(account: accountSignature, device: device), envelope: envelope
+                ).serialized())
+            let report = try await f.a.session.sync()
+            #expect(report.rejected.map(\.reason) == [.keyring(.authenticationFailed)])
+            #expect(report.waiting[Self.deviceC] == 1)
+        }
+    }
+
+    /// Threat: a device that was revoked — lost, stolen, sold — and still holds every key it ever had, its own
+    /// registered device key included, keeps writing: a segment and a snapshot, both validly sealed and signed. From
+    /// the moment a device knows of the revocation it refuses both, while locked as while unlocked, and what the
+    /// revoked device wrote before reaches a device that lacks it through a snapshot written by a trusted one.
+    @Test("a revoked device's segments and snapshots are refused, locked or unlocked")
+    func revokedDevice() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        try await f.a.session.revokeDevice(Self.deviceB, password: .keepPassword(current: TestVault.password))
+        // B does not know yet, and writes on.
+        try await f.b.session.save(
+            Item(vaultID: f.vaultID, title: "Planted after revocation", scopes: [], fields: []))
+        let snapshot = SyncObjectLocation.snapshot(vaultID: f.vaultID, author: Self.deviceB, lamport: 99)
+        let (envelope, _) = try await Self.sealed(f, at: snapshot)
+        let signature = try await f.b.session.syncSign(envelope, at: snapshot)
+        await f.transport.tamper(
+            snapshot.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+        let segment = SyncObjectLocation.segment(vaultID: f.vaultID, author: Self.deviceB, sequence: 2)
+        let (laterEnvelope, _) = try await Self.sealed(f, at: segment)
+        let laterSignature = try await f.b.session.syncSign(laterEnvelope, at: segment)
+        await f.transport.tamper(
+            segment.name, contents: SignedObject(signature: laterSignature, envelope: laterEnvelope).serialized())
+        // A hands on what it had merged from B before revoking it.
+        #expect(try await f.a.session.sync().snapshotsWritten == 1)
+
+        for locked in [true, false] {
+            let reader = try await f.reader(locked: locked)
+            let report = try await reader.session.sync()
+            #expect(report.retiredObjects == 3, "B's two segments and its snapshot are not read")
+            #expect(report.rejected.isEmpty && report.waiting.isEmpty)
+            // And the keyring itself says no, whoever asks.
+            for (location, object) in [(snapshot, (signature, envelope)), (segment, (laterSignature, laterEnvelope))] {
+                await #expect(throws: SyncKeyringError.untrustedAuthor(Self.deviceB), "locked: \(locked)") {
+                    try await reader.session.syncVerify(object.0, over: object.1, at: location)
+                }
+            }
+            if locked { try await reader.session.unlock(password: TestVault.password) }
+            try await reader.session.sync()
+            #expect(
+                try await reader.session.items().items.map(\.title) == ["Bank"],
+                "what B wrote before it was revoked arrives through A's snapshot; what it wrote after never does")
+        }
+    }
+
+    /// Threat: A1 withholds a device's registration from the others. Its segments are then from a device nobody
+    /// knows: refused, the stream waits, and nothing is lost — when the registration arrives, they are merged.
+    @Test("a device whose registration the store withholds is not trusted until it arrives; then nothing is lost")
+    func withheldRegistration() async throws {
+        let f = try await Self.fixture()
+        let objects = await f.transport.allObjects
+        let registration = try #require(
+            objects.first { name, bytes in
+                guard name.contains("/registry/"), let entry = try? RegistryEntry.parse(bytes),
+                    case .add(let device) = entry.body
+                else { return false }
+                return device.id == Self.deviceB
+            })
+        await f.transport.tamper(registration.key, contents: nil)
+        let withheld = try await f.a.session.sync()
+        #expect(withheld.rejected.map(\.reason) == [.keyring(.untrustedAuthor(Self.deviceB))])
+        #expect(withheld.waiting[Self.deviceB] == 1 && withheld.applied == 0)
+
+        await f.transport.tamper(registration.key, contents: registration.value)
+        #expect(try await f.a.session.sync().applied == 1)
+        #expect(try await f.a.session.items().items.map(\.title) == ["Bank"])
+    }
+
+    /// Threat: an insider device, holding the keys of two of the account's vaults, publishes a validly sealed and
+    /// signed segment in one vault's log that carries the other vault's item and the other vault's description.
+    /// Each record's own authenticated context names its vault, so neither crosses; and A1 copying a whole log
+    /// object from one vault's log to the other's is refused by the signature over the name.
+    @Test("records, and a vault's description, do not cross from one vault to another")
+    func recordsDoNotCrossVaults() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        let work = try await f.b.session.createVault(name: "Work")
+        try await f.b.session.save(Item(vaultID: work.id, title: "Payroll", scopes: [], fields: []))
+        try await f.b.session.sync()
+        let foreign =
+            try await f.b.store.records(in: work.id, kind: .item)
+            + (try await f.b.store.records(in: work.id, kind: .vaultMetadata))
+        #expect(foreign.count == 2)
+
+        for (offset, row) in foreign.enumerated() {
+            let location = SyncObjectLocation.segment(
+                vaultID: f.vaultID, author: Self.deviceB, sequence: UInt64(2 + offset))
+            let (envelope, _) = try await Self.sealed(f, at: location, entries: [SyncEntry(row)])
+            let signature = try await f.b.session.syncSign(envelope, at: location)
+            await f.transport.tamper(
+                location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+        }
+        let report = try await f.a.session.syncAll()
+        #expect(
+            report.vaults[f.vaultID]?.rejected.map(\.reason) == [.recordContextMismatch(foreign[0].recordID)],
+            "the stream stops at the first; the second is never applied over the gap")
+        #expect(try await f.a.session.items(in: f.vaultID).items.map(\.title) == ["Bank"])
+        #expect(try await f.a.session.vaults().map(\.name) == ["Personal", "Work"])
+
+        // A1: a genuine object of the Work vault's log, copied into the Personal vault's.
+        let genuine = SyncObjectLocation.segment(vaultID: work.id, author: Self.deviceB, sequence: 1)
+        let copy = SyncObjectLocation.segment(vaultID: f.vaultID, author: Self.deviceB, sequence: 2)
+        await f.transport.tamper(copy.name, contents: try #require(await f.transport.allObjects[genuine.name]))
+        let moved = try await f.a.session.syncAll()
+        #expect(moved.vaults[f.vaultID]?.rejected.map(\.reason) == [.keyring(.authenticationFailed)])
     }
 }

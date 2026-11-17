@@ -22,7 +22,7 @@ gh = "2.92.0"
 description = "Every package gate in ci.yml: lint, supply-chain and memory-safety audits, the tests"
 # `test` runs the adversarial suite too and checks every area's suite ran, so `test:adversarial` (its own CI job) is
 # not repeated here.
-depends = ["lint", "audit", "test"]
+depends = ["lint", "audit", "test", "test:scripts"]
 
 [tasks."check:all"]
 description = "`check` plus the iOS and macOS app test suites (macOS with Xcode only)"
@@ -39,11 +39,11 @@ run = "swift build"
 [tasks.lint]
 description = "swift-format lint, warnings as errors (read-only; `fmt` fixes what it can)"
 alias = "fmt:check"
-run = "swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests Apps"
+run = "swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests Apps Fuzz/Package.swift Fuzz/Sources"
 
 [tasks.fmt]
 description = "Rewrite Swift sources into canonical swift-format style"
-run = "swift format --in-place --recursive --configuration .swift-format Package.swift Sources Tests Apps"
+run = "swift format --in-place --recursive --configuration .swift-format Package.swift Sources Tests Apps Fuzz/Package.swift Fuzz/Sources"
 
 [tasks.audit]
 description = "Supply-chain and memory-safety tripwires (docs/07-supply-chain.md, ADR 0001)"

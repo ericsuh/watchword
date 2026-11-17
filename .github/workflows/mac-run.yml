@@ -19,36 +19,49 @@ on:
       gate:
         description: The gate to run (a mise task)
         type: choice
-        options: [test, "test:adversarial", build, "build:strict", lint, "app:test", check]
+        options: [test, "test:adversarial", build, "build:strict", lint, "app:test", "app:screenshots", check]
         default: test
       filter:
         description: "test: a swift test --filter regex. app:test (ios/macos): an -only-testing identifier. Empty for all"
         type: string
         default: ""
       platform:
-        description: "app:test only: which app"
+        description: "app:test and app:screenshots only: which app"
         type: choice
         options: [macos, ios, all]
         default: macos
+      appearance:
+        description: "app:screenshots only: dark tours the app in the dark appearance"
+        type: choice
+        options: [light, dark]
+        default: light
+      device:
+        description: "app:screenshots (ios, all) only: ipad tours on an iPad simulator"
+        type: choice
+        options: [iphone, ipad]
+        default: iphone
       xcode:
         description: "27.0: xcode-27 (macOS 27), every gate. 16.4: macos-15, ci.yml's oldest leg, build and test only"
         type: choice
         options: ["27.0", "16.4"]
         default: "27.0"
 
-# The platform is shown for app:test, the one gate that reads it, and the filter when there is one.
+# The platform is shown for the app gates, which are the ones that read it; the filter when there is one; and a
+# screenshot set that is not the default.
 run-name: >-
-  Mac run: ${{ inputs.gate }}${{ inputs.gate == 'app:test' && format(' {0}', inputs.platform) || '' }}${{
+  Mac run: ${{ inputs.gate }}${{ startsWith(inputs.gate, 'app:') && format(' {0}', inputs.platform) || '' }}${{
+  inputs.appearance != 'light' && format(' {0}', inputs.appearance) || '' }}${{
+  inputs.device != 'iphone' && format(' {0}', inputs.device) || '' }}${{
   inputs.filter != '' && format(' --filter={0}', inputs.filter) || '' }} on ${{ github.ref_name }} (Xcode ${{
   inputs.xcode }})
 
-# One group per request (branch, gate, platform, Xcode, filter), so different requests never cancel one another. For
-# repeats of one request GitHub keeps one run going and one pending, and a newer dispatch cancels the pending one: the
-# only cancelling, and what survives is the later dispatch.
+# One group per request (branch, gate, platform, screenshot set, Xcode, filter), so different requests never cancel one
+# another. For repeats of one request GitHub keeps one run going and one pending, and a newer dispatch cancels the
+# pending one: the only cancelling, and what survives is the later dispatch.
 concurrency:
   group: >-
-    ${{ github.workflow }} ${{ github.ref }} ${{ inputs.gate }} ${{ inputs.platform }} ${{ inputs.xcode }}
-    ${{ inputs.filter }}
+    ${{ github.workflow }} ${{ github.ref }} ${{ inputs.gate }} ${{ inputs.platform }} ${{ inputs.appearance }}
+    ${{ inputs.device }} ${{ inputs.xcode }} ${{ inputs.filter }}
   cancel-in-progress: false
 
 permissions:
@@ -65,11 +78,11 @@ defaults:
 jobs:
   gate:
     name: >-
-      ${{ inputs.gate }}${{ inputs.gate == 'app:test' && format(' {0}', inputs.platform) || '' }}${{
+      ${{ inputs.gate }}${{ startsWith(inputs.gate, 'app:') && format(' {0}', inputs.platform) || '' }}${{
       inputs.filter != '' && format(' --filter={0}', inputs.filter) || '' }} (Xcode ${{ inputs.xcode }})
     runs-on: ${{ inputs.xcode == '16.4' && 'macos-15' || 'xcode-27' }}
-    # ci.yml gives each app-tests platform its own 60-minute job; `all` runs both schemes here, one after the other.
-    timeout-minutes: ${{ inputs.gate == 'app:test' && inputs.platform == 'all' && 120 || 60 }}
+    # ci.yml and screenshots.yml give each platform its own 60-minute job; `all` runs both here, one after the other.
+    timeout-minutes: ${{ startsWith(inputs.gate, 'app:') && inputs.platform == 'all' && 120 || 60 }}
     permissions:
       contents: read
     steps:
@@ -88,7 +101,7 @@ jobs:
 
       # As in ci.yml's app-tests job: XcodeGen at the version and SHA-256 in mise.lock.
       - name: Install XcodeGen (mise, locked)
-        if: inputs.gate == 'app:test'
+        if: startsWith(inputs.gate, 'app:')
         run: mise install xcodegen
 
       - name: mise run ci:gate ${{ inputs.gate }}
@@ -96,12 +109,19 @@ jobs:
           GATE: ${{ inputs.gate }}
           FILTER: ${{ inputs.filter }}
           PLATFORM: ${{ inputs.platform }}
+          APPEARANCE: ${{ inputs.appearance }}
+          DEVICE: ${{ inputs.device }}
           XCODE_VERSION: ${{ inputs.xcode }}
         # `--flag=value`, one word each: mise reads a separate value that starts with `-` (`--help`) as an option.
         # An empty filter means none.
-        run: mise run ci:gate "$GATE" "--platform=$PLATFORM" "--xcode=$XCODE_VERSION" "--filter=$FILTER"
+        run: >-
+          mise run ci:gate "$GATE" "--platform=$PLATFORM" "--appearance=$APPEARANCE" "--device=$DEVICE"
+          "--xcode=$XCODE_VERSION" "--filter=$FILTER"
 
-      - name: Upload logs and result bundles
+      # app:screenshots writes Screenshots/<set>/ (the PNGs and their index) and, beside them, every screen of the set
+      # in one PNG; a capture that failed leaves what it has in Screenshots/<set>-incomplete/ instead. They come down in
+      # the same zip as the logs.
+      - name: Upload logs, result bundles and screenshots
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -112,4 +132,5 @@ jobs:
             coverage.txt
             adversarial.log
             TestResults
+            Screenshots
           if-no-files-found: ignore

@@ -1,0 +1,398 @@
+name: Screenshots
+
+# Captures a picture of every major screen of the iOS and macOS apps for a pull request and attaches them to it, so a
+# change to the UI can be audited by eye (docs/04-test-plan.md §5). It runs when a pull request:
+#   - is given the `screenshots` label, and again on each push while it carries the label;
+#   - comes from a branch of this repository and gets a push whose head commit message has a line that is exactly
+#     `[screenshots]` (a fork's pull request captures only through the label, which needs triage access);
+# or when it is dispatched by hand, optionally naming the pull request to attach the result to. It never gates a merge:
+# it is not in ci.yml's `required` job and must not be added to branch protection.
+#
+# Three jobs, split by what they may touch (docs/07-supply-chain.md §3.2):
+#   - `decide` reads the event and, for the commit marker, one commit message through the API. Read-only token, no
+#     checkout.
+#   - `capture` checks out and runs the pull request's code (the screenshot tour, `mise run app:screenshots`), so it
+#     gets what ci.yml's app-tests job gets: `contents: read`, no secrets, no persisted credentials. Its output is
+#     artifacts, a job summary, and a list of screen names.
+#   - `comment` is the only job with `pull-requests: write`. It checks nothing out and runs nothing from the pull
+#     request. All it takes from `capture` is the screen names, each checked against a pattern and a length; the
+#     artifacts it links to it finds itself, by name, among this run's (`actions: read`). It creates or updates one
+#     comment, found by the exact header this job writes and by its author being the Actions bot.
+# A fork's pull request gets the capture and its artifacts but no comment: GitHub makes its token read-only whatever
+# this file asks for. A comment command (`/screenshots`) is deliberately absent; §3.2 says why.
+#
+# The two jobs that check nothing out cannot run a mise task, so their few lines of `gh api` are inline, as in
+# claude-pr.yml's `authorize` job; event text reaches them only through `env:`. `mise run test:scripts` runs both
+# scripts, as they are in this file, against a stand-in `gh` (Tests/ScriptTests), so keep each a single `run:` block
+# under its step name, in bash that macOS's 3.2 also runs. Everything that touches the code is a mise task. GitHub
+# does not serve artifact files inside a comment, and no job here may write to the repository, so the comment links
+# to the artifacts rather than showing the pictures. The one linked file that opens in the browser is a PNG: an
+# HTML page would be the build's own active content behind a link this repository's bot posted.
+
+on:
+  pull_request:
+    types: [labeled, opened, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: "Pull request to attach the result to; its head must be the dispatched commit. Empty: artifacts only"
+        type: string
+        default: ""
+      appearance:
+        description: "dark tours the app in the dark appearance"
+        type: choice
+        options: [light, dark]
+        default: light
+      device:
+        description: "ipad tours the iOS app on an iPad simulator"
+        type: choice
+        options: [iphone, ipad]
+        default: iphone
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Pinned to full commit SHAs, not tags (docs/07-supply-chain.md §3.1).
+#   actions/checkout        v7.0.1 -> 3d3c42e5aac5ba805825da76410c181273ba90b1
+#   actions/upload-artifact v7.0.2 -> cf430e030ddbb5b0abf93d22962f4752f3646cd9
+
+jobs:
+  decide:
+    name: Decide
+    # A label other than `screenshots` starts no runner. (Expressions compare without regard to case.)
+    if: github.event.action != 'labeled' || github.event.label.name == 'screenshots'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      capture: ${{ steps.decide.outputs.capture }}
+      comment: ${{ steps.decide.outputs.comment }}
+      pull_request: ${{ steps.decide.outputs.pull_request }}
+      head: ${{ steps.decide.outputs.head }}
+    steps:
+      - name: Decide whether to capture, and whether a comment can be posted
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          REPO: ${{ github.repository }}
+          LABEL: ${{ github.event.label.name }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'screenshots') }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          capture=false comment=false
+          if [ "$EVENT" = workflow_dispatch ]; then
+            capture=true
+            echo "::notice::Capturing: dispatched by hand."
+            if [ -n "$PR_NUMBER" ]; then
+              if ! [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
+                echo "::error::pull_request must be a pull request number"
+                exit 1
+              fi
+              # The pictures are of the dispatched commit, so they may only be attached to a pull request whose head
+              # is that commit, in this repository.
+              found=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '[.state, .head.sha, .head.repo.full_name] | join(" ")')
+              if [ "$found" != "open $HEAD_SHA $REPO" ]; then
+                echo "::error::#$PR_NUMBER is not an open pull request of this repository with head $HEAD_SHA (it is: $found). Dispatch on its branch."
+                exit 1
+              fi
+              comment=true
+            fi
+          else
+            # GitHub treats label names that differ only in case as one label, and so do the expressions above and
+            # in LABELLED, so `Screenshots` is the label too.
+            label=$(tr '[:upper:]' '[:lower:]' <<<"$LABEL")
+            if [ "$ACTION" = labeled ] && [ "$label" = screenshots ]; then
+              capture=true
+              echo "::notice::Capturing: the screenshots label was added."
+            elif [ "$ACTION" != labeled ] && [ "$LABELLED" = true ]; then
+              capture=true
+              echo "::notice::Capturing: a push to a pull request that carries the screenshots label."
+            elif [ "$ACTION" != labeled ] && [ "$HEAD_REPO" = "$REPO" ]; then
+              # The commit marker is honoured only on a branch of this repository: whoever can push there has write
+              # access, where the label needs triage, so the marker gives nobody a capture they could not already
+              # start. A fork's author can write anything in a commit message, and gets nothing for it here.
+              # The event does not carry the message. It is read here, as data, and only searched: the marker is a
+              # whole line, so prose that mentions it starts nothing.
+              message=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.message)
+              if grep -qxF -- '[screenshots]' <<<"$message"; then
+                capture=true
+                echo "::notice::Capturing: the head commit's message has the line [screenshots]."
+              fi
+            fi
+            # A fork's token cannot comment, whatever the comment job's permissions say.
+            if [ "$HEAD_REPO" = "$REPO" ]; then comment=true; fi
+          fi
+          if [ "$capture" = false ]; then
+            echo "::notice::Not capturing: no screenshots label, and no [screenshots] line in a same-repository head commit."
+          fi
+          {
+            echo "capture=$capture"
+            echo "comment=$comment"
+            echo "pull_request=$PR_NUMBER"
+            echo "head=$HEAD_SHA"
+          } >>"$GITHUB_OUTPUT"
+
+  capture:
+    # Runs the pull request's code, so it holds nothing worth taking: a read-only token and no secrets, as in ci.yml.
+    # The name is fixed, and GitHub adds the platform to each leg's: a name built from the matrix would be shown
+    # unexpanded on every pull request that skips this job, which is most of them.
+    name: Capture
+    needs: decide
+    if: needs.decide.outputs.capture == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # A newer push replaces a capture that is still running for the same pull request (or branch) and platform. Only
+    # runs that got this far are in the group, so an unrelated label or a push that decides not to capture cancels
+    # nothing.
+    concurrency:
+      group: screenshots-capture-${{ github.event.pull_request.number || github.ref }}-${{ matrix.platform }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ios, macos]
+    # Each leg sets only its own platform's output. The names are all `comment` takes from this job.
+    outputs:
+      screens_ios: ${{ steps.capture.outputs.screens_ios }}
+      screens_macos: ${{ steps.capture.outputs.screens_macos }}
+    steps:
+      # The pull request merged with its base, as ci.yml tests it; for a dispatch, the dispatched branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: .github/scripts/select-xcode.sh 27.0
+
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+
+      # As in ci.yml's app-tests job: XcodeGen at the version and SHA-256 in mise.lock.
+      - name: Install XcodeGen (mise, locked)
+        run: mise install xcodegen
+
+      # Runs the tour, writes Screenshots/<set>/ and the one-picture contact sheet, appends the index to the job
+      # summary, and fails if the tour failed, a screen is missing or a picture is blank (mise-tasks/app/screenshots).
+      - name: mise run app:screenshots ${{ matrix.platform }}
+        id: capture
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          APPEARANCE: ${{ inputs.appearance || 'light' }}
+          DEVICE: ${{ matrix.platform == 'ios' && inputs.device || 'iphone' }}
+          SOURCE: >-
+            ${{ github.event_name == 'pull_request'
+            && format('Pull request #{0} at {1}, merged with {2}.', github.event.pull_request.number,
+            github.event.pull_request.head.sha, github.event.pull_request.base.ref)
+            || format('Commit {0} on {1}.', github.sha, github.ref_name) }}
+        # `--flag=value`, one word each, so no value can be read as an option.
+        run: >-
+          mise run app:screenshots "$PLATFORM" "--appearance=$APPEARANCE" "--device=$DEVICE" "--source=$SOURCE"
+
+      - name: mise run app:diagnose
+        if: failure()
+        env:
+          RESULTS: TestResults/Screenshots/${{ steps.capture.outputs.set }}
+        run: mise run app:diagnose "$RESULTS"
+
+      # The set as a directory: every PNG, index.md, and index.html, which shows them all once unzipped. Only a
+      # complete set is at this path. `comment` looks these two artifacts up by these names.
+      - name: Upload the screenshots
+        if: always() && steps.capture.outputs.directory != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots-${{ steps.capture.outputs.set }}
+          path: ${{ steps.capture.outputs.directory }}
+          if-no-files-found: ignore
+
+      # Every screen in one PNG, uploaded as the file itself rather than a zip (`archive: false`, which takes one
+      # file and names the artifact after it), so its link opens the picture in the browser. A picture, not the HTML
+      # sheet: that link is served inline, and a page there could carry script.
+      - name: Upload the contact sheet
+        if: always() && steps.capture.outputs.sheet != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.capture.outputs.sheet }}
+          archive: false
+          if-no-files-found: ignore
+
+      # What a failed capture leaves: the result bundle, and whatever pictures there were, under a name that cannot
+      # be taken for a set.
+      - name: Upload the result bundle and the incomplete set
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots-failed-${{ matrix.platform }}
+          path: |
+            TestResults/Screenshots
+            ${{ steps.capture.outputs.incomplete }}
+          if-no-files-found: ignore
+
+  comment:
+    # The one job that can write, and only comments. No checkout, no artifact download, nothing from the pull request
+    # but the screen names, each checked against a pattern and a length before it is used.
+    name: Comment
+    needs: [decide, capture]
+    if: >-
+      always() && needs.decide.outputs.comment == 'true'
+      && (needs.capture.result == 'success' || needs.capture.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # One at a time per pull request, in order, so two runs cannot both find no comment and each create one.
+    concurrency:
+      group: screenshots-comment-${{ needs.decide.outputs.pull_request }}
+      cancel-in-progress: false
+    # Not even `contents: read`: it reads nothing from the repository. `actions: read` lists this run's artifacts.
+    permissions:
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Create or update the screenshots comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          API: ${{ github.api_url }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          APPEARANCE: ${{ inputs.appearance }}
+          DEVICE: ${{ inputs.device }}
+          PR_NUMBER: ${{ needs.decide.outputs.pull_request }}
+          HEAD_SHA: ${{ needs.decide.outputs.head }}
+          SCREENS_IOS: ${{ needs.capture.outputs.screens_ios }}
+          SCREENS_MACOS: ${{ needs.capture.outputs.screens_macos }}
+        run: |
+          set -euo pipefail
+          marker='<!-- watchword-screenshots -->'
+          if ! [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
+            echo "::error::The pull request number, head commit or run id is not what it should be; not commenting."
+            exit 1
+          fi
+          run="$SERVER/$REPO/actions/runs/$RUN_ID"
+
+          # A screen name is what Screens.capture can produce: NN- and at most 40 characters of lower-case words
+          # joined by single hyphens; a tour has at most 99. Anything else is not a list of screens, whoever sent it.
+          valid_screens() { # valid_screens <comma-separated names>
+            local screens="$1" name='[0-9]{2}-[a-z0-9]+(-[a-z0-9]+)*' each count=0
+            if [ -z "$screens" ] || [ "${#screens}" -gt 4400 ] || [[ "$screens" == *$'\n'* ]]; then return 1; fi
+            [[ "$screens" =~ ^$name(,$name)*$ ]] || return 1
+            while IFS= read -r each; do
+              count=$((count + 1))
+              if [ "${#each}" -gt 43 ] || [ "$count" -gt 99 ]; then return 1; fi
+            done < <(tr ',' '\n' <<<"$screens")
+          }
+
+          # The artifacts are looked up here, among this run's own and by the names the capture job's upload steps
+          # give them, rather than taken as ids from the job that ran the pull request's code: the link then leads
+          # to an artifact of this run with that name, whatever that job reported. `artifact <name>` prints the id
+          # of the newest one so named, or nothing.
+          artifacts=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/artifacts" | jq -r '.artifacts[] | "\(.id) \(.name)"')
+          artifact() {
+            local id
+            id=$(awk -v name="$1" '{ id = $1; sub(/^[^ ]* /, ""); if ($0 == name) print id }' <<<"$artifacts" | sort -n | tail -n 1)
+            if [[ "$id" =~ ^[0-9]{1,20}$ ]]; then echo "$id"; fi
+          }
+
+          # The contact sheet is uploaded unzipped, and GitHub serves such a file inline, as the type its uploader
+          # declared: a name ending in .png does not make it a picture, and the uploader is the job that ran the
+          # pull request's code. `picture <id>` succeeds only if GitHub will serve that artifact as image/png, which
+          # no browser renders as a page. It asks the API where the download is, and reads the type out of that
+          # address (`rsct`) without following it or printing it. If GitHub changes how it says so, the sheet is
+          # left out of the comment rather than linked on trust.
+          picture() {
+            local address served='[?&]rsct=image%2[Ff]png(&|$)'
+            address=$(curl -sS --max-time 30 -o /dev/null -w '%{redirect_url}' -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" "$API/repos/$REPO/actions/artifacts/$1/zip") || return 1
+            [[ "$address" =~ $served ]]
+          }
+
+          platform() { # platform <title> <set> <screen names>
+            local title="$1" set="$2" screens="$3" count noun=screens links="" sheet images
+            if ! valid_screens "$screens"; then
+              echo "- **$title:** the capture failed or is incomplete. The [run]($run) says why."
+              return
+            fi
+            count=$(tr ',' '\n' <<<"$screens" | wc -l | tr -d ' ')
+            if [ "$count" -eq 1 ]; then noun=screen; fi
+            sheet=$(artifact "watchword-screens-$set.png")
+            images=$(artifact "screenshots-$set")
+            if [ -n "$sheet" ] && ! picture "$sheet"; then
+              echo "::warning::The $title contact sheet (artifact $sheet) is not served as image/png; not linking it." >&2
+              sheet=""
+            fi
+            if [ -n "$sheet" ]; then links="[contact sheet]($run/artifacts/$sheet), one PNG of them all"; fi
+            if [ -n "$images" ]; then links+="${links:+; }[every screen]($run/artifacts/$images), full size, zipped"; fi
+            echo "- **$title:** $count $noun. ${links:-No artifact was uploaded.}"
+            echo
+            echo "  <details><summary>The $count $noun, in the order the tour meets them</summary>"
+            echo
+            tr ',' '\n' <<<"$screens" | sed 's/.*/  - `&`/'
+            echo
+            echo "  </details>"
+          }
+
+          # The sets this run captured: screenshots.yml's capture job names them as mise-tasks/app/screenshots does.
+          suffix=""
+          if [ "$APPEARANCE" = dark ]; then suffix=-dark; fi
+          ios=ios
+          if [ "$DEVICE" = ipad ]; then ios=ios-ipad; fi
+
+          {
+            echo "$marker"
+            echo "### Screenshots"
+            echo
+            if [ "$EVENT" = pull_request ]; then
+              echo "Of \`$HEAD_SHA\`, merged with the base branch as CI tests it. Captured by [this run]($run)."
+            else
+              echo "Of \`$HEAD_SHA\`. Captured by [this run]($run), dispatched by hand."
+            fi
+            if [ "$APPEARANCE" = dark ]; then echo "In the dark appearance."; fi
+            if [ "$DEVICE" = ipad ]; then echo "The iOS set is from an iPad simulator."; fi
+            echo
+            platform "iOS simulator" "$ios$suffix" "$SCREENS_IOS"
+            platform "macOS" "macos$suffix" "$SCREENS_MACOS"
+            echo
+            echo "GitHub does not show artifact files inside a comment, so the pictures are behind the links. Both are"
+            echo "files this pull request's build produced, as a test log is: GitHub hands them to a signed-in account"
+            echo "from its artifact storage (a \`blob.core.windows.net\` address, not github.com). The contact sheet"
+            echo "opens as a picture and the other downloads as a zip; neither is a page, and nothing behind them"
+            echo "should ever ask for a password."
+            echo
+            echo "This comment is rewritten on each push while the pull request carries the \`screenshots\` label, and"
+            echo "when a head commit's message has a line that is exactly \`[screenshots]\`."
+          } >body.md
+
+          # Only this workflow's own earlier comment is updated: one written by the Actions bot that begins with the
+          # exact header written above (the marker, the heading, and a first line naming a commit and a run of this
+          # repository). The author alone does not single it out: every workflow that comments with the default
+          # token is that author, claude-pr.yml's reviews among them, and their text is not this job's. If two
+          # comments pass, something else is writing this header, and this job stops rather than pick one.
+          existing=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" | jq -r --arg marker "$marker" \
+            --arg link "Captured by [this run]($SERVER/$REPO/actions/runs/" '
+              .[]
+              | select(.user.login == "github-actions[bot]")
+              | (.body | split("\n")) as $lines
+              | select($lines[0] == $marker and $lines[1] == "### Screenshots" and $lines[2] == "")
+              | select(($lines[3] // "") | test("^Of `[0-9a-f]{40}`[.,] "))
+              | select((($lines[3] | split($link))[1] // "") | test("^[0-9]{1,20}\\)[.,]"))
+              | .id')
+          if [ "$(grep -c . <<<"$existing" || true)" -gt 1 ]; then
+            echo "::error::More than one comment on #$PR_NUMBER has this workflow's header; not choosing between them:" $existing
+            exit 1
+          fi
+          if [[ "$existing" =~ ^[0-9]{1,20}$ ]]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" -F body=@body.md --jq .html_url
+          else
+            gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@body.md --jq .html_url
+          fi

@@ -18,6 +18,11 @@ public struct Revision: Hashable, Codable, Sendable, Comparable {
         if lhs.version != rhs.version { return lhs.version < rhs.version }
         return lhs.device.precedes(rhs.device)
     }
+
+    /// The revision with its version lowered to `limit` if it is above it (see `VersionVector.clamped`).
+    public func clamped(to limit: UInt64) -> Revision {
+        version > limit ? Revision(version: limit, device: device) : self
+    }
 }
 
 /// For each device, the highest of its edits of an item that a copy of the item contains.
@@ -26,6 +31,9 @@ public struct Revision: Hashable, Codable, Sendable, Comparable {
 /// containing edit `n` from a device means containing all of that device's earlier edits too. That is what makes `contains` exact:
 /// a write whose vector contains another write's revision was made by someone who had seen it. Two writes neither of
 /// which contains the other are concurrent — a conflict — and sync keeps both (PRD F7.6).
+///
+/// Vectors under `merging` are a join-semilattice (entry-wise maximum), which is what every other part of the item
+/// merge is built on (docs/10-sync-correctness.md §2).
 public struct VersionVector: Hashable, Sendable, Codable {
     public private(set) var entries: [UUID: UInt64]
 
@@ -51,8 +59,28 @@ public struct VersionVector: Hashable, Sendable, Codable {
         entries[revision.device] = max(entries[revision.device] ?? 0, revision.version)
     }
 
+    /// `merging`, in place.
+    public mutating func formUnion(_ other: VersionVector) {
+        for (device, count) in other.entries where count > (entries[device] ?? 0) { entries[device] = count }
+    }
+
     public var isEmpty: Bool {
         entries.isEmpty
+    }
+
+    /// Whether `other` covers this vector and holds something more: the strict order of the semilattice. Unlike
+    /// `contains`, it is a strict partial order on *any* two vectors, honest or crafted, which is what lets the item
+    /// merge stay a join on hostile input (docs/10-sync-correctness.md §3.2).
+    public func isStrictlyCovered(by other: VersionVector) -> Bool {
+        self != other && isCovered(by: other)
+    }
+
+    /// The vector with every entry above `limit` lowered to it. A record written at version `limit` cannot contain
+    /// an edit newer than itself, so a count above it is a claim about the future and is read as the most it can
+    /// honestly be (docs/10-sync-correctness.md §6).
+    public func clamped(to limit: UInt64) -> VersionVector {
+        guard entries.values.contains(where: { $0 > limit }) else { return self }
+        return VersionVector(entries.mapValues { min($0, limit) })
     }
 
     // Encoded as an object keyed by UUID string, so it reads the same on every platform.
@@ -64,7 +92,9 @@ public struct VersionVector: Hashable, Sendable, Codable {
                 throw DecodingError.dataCorrupted(
                     DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "device ID"))
             }
-            entries[id] = value
+            // Two spellings of one device ID (upper and lower case) are two keys of the object: the higher count
+            // wins, whichever the dictionary yields first, so every device reads the same vector.
+            entries[id] = max(entries[id] ?? 0, value)
         }
         self.init(entries)
     }
@@ -88,9 +118,25 @@ public struct GroupStamp: Hashable, Sendable, Codable {
         self.seen = seen
     }
 
-    /// Whether this write was made knowing about `other` (and is not `other` itself).
+    /// Whether this write was made knowing about `other`: everything `other`'s writer had seen, this writer had
+    /// seen too, and something more.
+    ///
+    /// Between honest writes this is the same as "`seen` contains `other.revision`", because a copy that contains a
+    /// write contains everything that write was made on. It is stated on the vectors because that is a strict partial
+    /// order whatever the stamps hold — transitive, never mutual — so "keep the values nothing supersedes" is a join
+    /// even when a stamp was crafted (docs/10-sync-correctness.md §3.2).
     public func supersedes(_ other: GroupStamp) -> Bool {
-        other.revision != revision && seen.contains(other.revision)
+        other.seen.isStrictlyCovered(by: seen)
+    }
+
+    /// The stamp as read from a record written at version `limit`: no count above it, and `seen` containing the
+    /// write itself. `init` records the revision, but `seen` can be set and a stamp decodes as it was encoded, so a
+    /// record can carry one whose vector omits its own revision; read as written, a resolution made on a copy that
+    /// held the value would not cover it (docs/10-sync-correctness.md §6, review finding Y34).
+    public func clamped(to limit: UInt64) -> GroupStamp {
+        let clamped = seen.clamped(to: limit)
+        if revision.version <= limit, clamped == seen, seen.contains(revision) { return self }
+        return GroupStamp(revision: revision.clamped(to: limit), seen: clamped)
     }
 }
 
@@ -134,6 +180,14 @@ public struct ItemGroup: Hashable, Sendable, Comparable, RawRepresentable, Codab
         return UUID(uuidString: String(rawValue.dropFirst(Self.fieldPrefix.count)))
     }
 
+    /// Whether this is a group this client merges: an item attribute, or a field group spelt exactly as `field(_:)`
+    /// spells it. Anything else in an item's sync metadata — an unknown name, a second spelling of a field's group —
+    /// is not interpreted (docs/10-sync-correctness.md §6).
+    public var isKnown: Bool {
+        if let id = fieldID { return self == .field(id) }
+        return Self.attributes.contains(self)
+    }
+
     public static func < (lhs: ItemGroup, rhs: ItemGroup) -> Bool {
         Array(lhs.rawValue.utf8).lexicographicallyPrecedes(Array(rhs.rawValue.utf8))
     }
@@ -170,6 +224,9 @@ public struct ItemGroup: Hashable, Sendable, Comparable, RawRepresentable, Codab
 }
 
 /// The value of one group, as kept for a conflicting version.
+///
+/// Two values are equal when their bytes are (`ExactEquality.swift`): a title respelt in another normalisation form
+/// is another value, which sync keeps beside the first rather than taking for the same.
 public enum ItemGroupValue: Hashable, Sendable, Codable {
     case title(String)
     case scopes([ServiceScope])
@@ -198,19 +255,48 @@ public struct ConflictingValue: Hashable, Sendable, Codable {
 /// One line of an item's notes, in the line-level sequence CRDT that lets concurrent edits to different parts of the
 /// notes all survive (PRD F7.6; an RGA over lines). A line is never edited in place: changing it removes it and inserts
 /// the new text, so two devices changing the same line concurrently both keep their version.
+///
+/// `text` never contains a line break when an honest device wrote the line. Where two copies give one ID different
+/// texts (only a writer reusing an ID does), the merge keeps both, one per line of `text`, rather than choose.
+///
+/// Two lines are equal when their texts are equal byte for byte (`ExactEquality.swift`).
 public struct NoteLine: Hashable, Sendable, Codable {
+    /// The edit that inserted the line, its place among the lines that edit inserted, and a number drawn at random
+    /// for that edit.
+    ///
+    /// The revision and index are enough to tell honest lines apart. The nonce is there because both can be
+    /// predicted: a device's next revision is one above the highest version it has seen, so without it another writer
+    /// could publish *removed* lines under the IDs a device's next edit will use, and what the person then typed
+    /// would merge with them and vanish (review finding Y21, docs/10-sync-correctness.md §6). With it, naming a line
+    /// takes having seen it. It is zero for the lines of a new item and for lines read from notes written before
+    /// lines were stored, which every device must number alike; those lines exist before anyone could aim at them.
     public struct ID: Hashable, Sendable, Codable, Comparable {
         public var revision: Revision
         public var index: UInt32
+        public var nonce: UInt64
 
-        public init(revision: Revision, index: UInt32) {
+        public init(revision: Revision, index: UInt32, nonce: UInt64 = 0) {
             self.revision = revision
             self.index = index
+            self.nonce = nonce
         }
 
         public static func < (lhs: ID, rhs: ID) -> Bool {
             if lhs.revision != rhs.revision { return lhs.revision < rhs.revision }
-            return lhs.index < rhs.index
+            if lhs.index != rhs.index { return lhs.index < rhs.index }
+            return lhs.nonce < rhs.nonce
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case revision, index, nonce
+        }
+
+        /// Synthesised decoding, except that the nonce may be absent: lines written before it existed still open.
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            revision = try container.decode(Revision.self, forKey: .revision)
+            index = try container.decode(UInt32.self, forKey: .index)
+            nonce = try container.decodeIfPresent(UInt64.self, forKey: .nonce) ?? 0
         }
     }
 
@@ -220,23 +306,71 @@ public struct NoteLine: Hashable, Sendable, Codable {
     /// Empty once removed: the person removed it, so its text is not kept, only its place.
     public var text: String
     public var removed: Bool
+    /// The edits that removed the line, in order: a removal is a write like any other, and names its writer so that
+    /// a shared vault's judge can tell whose it is (docs/02-architecture.md §8.10, review finding S32). Concurrent
+    /// removals of one line are all kept. Empty on a line that is not removed, and on lines removed in a record from
+    /// before removals named a writer, which the merge reads as removed by the record's own write.
+    public var removedBy: [Revision]
 
-    public init(id: ID, after: ID?, text: String, removed: Bool = false) {
+    public init(id: ID, after: ID?, text: String, removed: Bool = false, removedBy: [Revision] = []) {
         self.id = id
         self.after = after
         self.text = text
         self.removed = removed
+        self.removedBy = removedBy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, after, text, removed, removedBy
+    }
+
+    /// Synthesised decoding, except that `removedBy` may be absent: lines written before it existed still open.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(ID.self, forKey: .id)
+        after = try container.decodeIfPresent(ID.self, forKey: .after)
+        text = try container.decode(String.self, forKey: .text)
+        removed = try container.decode(Bool.self, forKey: .removed)
+        removedBy = try container.decodeIfPresent([Revision].self, forKey: .removedBy) ?? []
+    }
+
+    /// Synthesised encoding, except that an empty `removedBy` is left out: a line that is shown carries no more bytes
+    /// than before.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(after, forKey: .after)
+        try container.encode(text, forKey: .text)
+        try container.encode(removed, forKey: .removed)
+        if !removedBy.isEmpty { try container.encode(removedBy, forKey: .removedBy) }
+    }
+}
+
+/// What one resolution discarded of a group's retained values (`ItemMerge.resolve`, PRD F7.7): the values written by a
+/// revision `seen` contains. A discard is a write, and names its writer, so that a shared vault's judge can tell whose
+/// it is (docs/02-architecture.md §8.10, review finding S43).
+public struct ItemDiscard: Hashable, Sendable, Codable {
+    /// The resolution that discarded. `nil` in a record from before discards named a writer: the merge reads it as
+    /// the record's own write.
+    public var revision: Revision?
+    /// What the person had before them when they chose (not the choice itself, which a later edit may yet retain).
+    public var seen: VersionVector
+
+    public init(revision: Revision?, seen: VersionVector) {
+        self.revision = revision
+        self.seen = seen
     }
 }
 
 extension UUID {
     /// Byte-wise order, identical on every platform (unlike anything that goes through a locale).
     public func precedes(_ other: UUID) -> Bool {
-        uuidBytes(self).lexicographicallyPrecedes(uuidBytes(other))
+        byteArray.lexicographicallyPrecedes(other.byteArray)
     }
-}
 
-private func uuidBytes(_ id: UUID) -> [UInt8] {
-    let u = id.uuid
-    return [u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7, u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15]
+    /// The sixteen bytes, in order.
+    public var byteArray: [UInt8] {
+        let u = uuid
+        return [u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7, u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15]
+    }
 }

@@ -65,6 +65,13 @@ public struct SyncState: Sendable, Hashable {
     /// For each stream, the most any merged snapshot covers. The effects of those segments are in the local store,
     /// so a stream whose next segment is missing (collected, or never visible) continues from here.
     public var snapshotCoverage: [UUID: UInt64] = [:]
+    /// The stash (`SyncStash`, ADR 0009) changed in memory during a sync and may not have been saved: set before any
+    /// state that counts a segment as merged is saved, cleared once the stash is. Found set when a sync starts, the
+    /// stash may lack entries of segments counted as merged, so the log is replayed to rebuild it.
+    public var stashUnsaved = false
+    /// The generation of the last stash row saved (`SyncStash.generation`). A row of another generation, or none while
+    /// this is above zero, is not trusted to hold what this state says was merged, and the log is replayed.
+    public var stashGeneration: UInt64 = 0
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID
@@ -139,6 +146,11 @@ public protocol SyncStateStore: Sendable {
     func quarantined(vaultID: UUID) async throws -> [SyncEntry]
     func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async throws
 
+    /// The stash (`SyncStash.encoded()`), written once per sync, apart from the state saved with every segment.
+    /// Rebuildable from the log; the engine parses it as hostile.
+    func stash(vaultID: UUID) async throws -> [UInt8]?
+    func saveStash(_ bytes: [UInt8], vaultID: UUID) async throws
+
     func eraseAll() async throws
 }
 
@@ -147,6 +159,9 @@ public actor InMemorySyncStateStore: SyncStateStore {
     private var stagedObjects: [UUID: [SyncObjectLocation: SignedObject]] = [:]
     private var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
     private var quarantinedEntries: [UUID: [SyncEntry]] = [:]
+    private var stashes: [UUID: [UInt8]] = [:]
+    /// How many times each vault's stash was written: a test seam for what a flood costs.
+    public private(set) var stashWrites: [UUID: Int] = [:]
 
     public init() {}
 
@@ -203,11 +218,21 @@ public actor InMemorySyncStateStore: SyncStateStore {
         quarantinedEntries[vaultID]?.removeAll { entries.contains($0) }
     }
 
+    public func stash(vaultID: UUID) -> [UInt8]? {
+        stashes[vaultID]
+    }
+
+    public func saveStash(_ bytes: [UInt8], vaultID: UUID) {
+        stashes[vaultID] = bytes
+        stashWrites[vaultID, default: 0] += 1
+    }
+
     public func eraseAll() {
         states = [:]
         stagedObjects = [:]
         deletions = [:]
         quarantinedEntries = [:]
+        stashes = [:]
     }
 
     // MARK: - Test seams: what an attacker with the local file (A8) can do.
@@ -215,6 +240,11 @@ public actor InMemorySyncStateStore: SyncStateStore {
     /// Replaces the state without any checks.
     public func tamper(_ state: SyncState) {
         states[state.vaultID] = state
+    }
+
+    /// Replaces the stored stash without any checks.
+    public func tamperStash(_ bytes: [UInt8], vaultID: UUID) {
+        stashes[vaultID] = bytes
     }
 }
 

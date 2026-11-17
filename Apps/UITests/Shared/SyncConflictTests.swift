@@ -7,6 +7,8 @@ import XCTest
 final class SyncConflictTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
+        // A hang fails with a report rather than eating the job (`app:test` turns the allowances on).
+        executionTimeAllowance = 600
     }
 
     @MainActor
@@ -23,7 +25,7 @@ final class SyncConflictTests: XCTestCase {
         app.syncNow()
         app.buttons["debug.peerRename"].click()
         XCTAssertTrue(app.staticTexts["debug.peerStatus"].waitForExistence(timeout: 30), app.debugDescription)
-        app.buttons["settings.done"].click()
+        app.closeSettings()
 
         // Meanwhile it is renamed here too, before this device has seen the other rename.
         let row = app.descendants(matching: .any)["items.row.Library"].firstMatch
@@ -42,7 +44,7 @@ final class SyncConflictTests: XCTestCase {
         app.backToList()
         app.openSettings()
         app.syncNow(expecting: "received")
-        app.buttons["settings.done"].click()
+        app.closeSettings()
         let renamed = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "items.row.Library")
         ).firstMatch
@@ -104,12 +106,18 @@ extension XCUIApplication {
     }
 
     /// Taps Sync Now and waits for a status that mentions `expecting`.
-    func syncNow(expecting: String = "sent") {
-        buttons["settings.syncNow"].click()
+    /// From anywhere: an account screen is closed and Settings opened first, and Settings scrolled back to the top if
+    /// an account row had scrolled it down (its top rows are then out of the hierarchy).
+    func syncNow(expecting: String = "sent", file: StaticString = #filePath, line: UInt = #line) {
+        showSettings(file: file, line: line)
+        reveal("settings.syncNow", at: .top, file: file, line: line).click()
         let status = staticTexts.matching(identifier: "settings.syncStatus").matching(
             NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", expecting, expecting)
         ).firstMatch
-        XCTAssertTrue(status.waitForExistence(timeout: 30), debugDescription)
+        if !status.waitForExistence(timeout: 20) {
+            attachTree("sync expecting \(expecting)", target: "settings.syncStatus")
+            XCTFail("no sync status containing \(expecting)", file: file, line: line)
+        }
     }
 
     /// On iPhone the list and the detail are one navigation stack, and Settings lives on the list. On iPad and the

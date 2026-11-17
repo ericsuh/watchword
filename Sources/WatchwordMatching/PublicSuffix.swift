@@ -14,9 +14,9 @@ import WatchwordModel
 /// a refresh process, which is a supply-chain decision of its own: see
 /// `docs/07-supply-chain.md` and the open question in `docs/02-architecture.md`.
 public enum PublicSuffix {
-    /// Multi-label suffixes under which registrations are public.
-    static let multiLabel: Set<String> = [
-        // Country-code second-level domains.
+    /// Country-code second-level domains: suffixes in the ICANN section of the Public Suffix List, which every
+    /// operating system and browser agrees are not sites.
+    static let countryCodeSecondLevel: Set<String> = [
         "co.uk", "org.uk", "me.uk", "gov.uk", "ac.uk", "net.uk", "sch.uk",
         "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
         "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "lg.jp",
@@ -29,8 +29,11 @@ public enum PublicSuffix {
         "co.kr", "or.kr", "go.kr",
         "co.il", "org.il", "gov.il",
         "com.es", "com.pl", "com.ua", "com.ru", "com.pt", "com.co", "com.pe", "com.ve",
-        // Shared hosting and app platforms: distinct tenants, so one tenant must never be
-        // treated as a subdomain of another.
+    ]
+
+    /// Shared hosting and app platforms: distinct tenants, so one tenant must never be treated as a subdomain of
+    /// another. These are a private party's suffixes; another party's list may or may not carry each of them.
+    static let sharedHosting: Set<String> = [
         "github.io", "gitlab.io", "pages.dev", "workers.dev", "netlify.app", "vercel.app",
         "herokuapp.com", "azurewebsites.net", "cloudfront.net", "s3.amazonaws.com",
         "firebaseapp.com", "web.app", "appspot.com", "run.app", "glitch.me", "repl.co",
@@ -40,6 +43,9 @@ public enum PublicSuffix {
         "duckdns.org", "ddns.net", "no-ip.org", "dynu.net", "serveo.net", "ngrok.io", "ngrok.app",
         "trycloudflare.com", "localhost.run", "loca.lt",
     ]
+
+    /// Multi-label suffixes under which registrations are public.
+    static let multiLabel: Set<String> = countryCodeSecondLevel.union(sharedHosting)
 
     /// Hosts that are a public suffix in their own right, i.e. nothing may be registered at this
     /// exact name, so a scope for it can only be over-broad.
@@ -52,6 +58,26 @@ public enum PublicSuffix {
         if multiLabel.contains(host) { return true }
         // Any single-label host is either a TLD (`com`) or a non-routable name (`localhost`).
         return host.split(separator: ".").count == 1
+    }
+
+    /// The shortest name that anyone's rules could take to be the site `host` belongs to, or `nil` when the host
+    /// cannot belong to one (a single label, an IP address).
+    ///
+    /// For when a decision is made by a party whose public-suffix list is not ours, such as the operating system
+    /// choosing the pages on which to offer a published credential identity (docs/02-architecture.md §9.2): the
+    /// answer must be at least as wide as theirs, so it errs wide. It is the last two labels, or the last three under
+    /// a country-code second-level domain. The shared-hosting suffixes are deliberately *not* honoured here: whether
+    /// another party treats `zendesk.com` as a suffix is unknown, so `acme.zendesk.com` is taken to share a site
+    /// with every other tenant. A country-code suffix missing from the list errs the same way.
+    public static func broadestSite(of host: NormalizedHost) -> String? {
+        let labels = host.labels
+        guard labels.count >= 2, labels.allSatisfy({ !$0.isEmpty }), !host.value.contains(":"),
+            let last = labels.last, !last.allSatisfy(\.isNumber)
+        else { return nil }
+        let lastTwo = labels.suffix(2).joined(separator: ".")
+        guard countryCodeSecondLevel.contains(lastTwo) else { return lastTwo }
+        guard labels.count >= 3 else { return nil }
+        return labels.suffix(3).joined(separator: ".")
     }
 }
 

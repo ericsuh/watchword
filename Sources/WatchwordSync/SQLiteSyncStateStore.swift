@@ -20,7 +20,7 @@
     /// both in one transaction: tombstones are recorded after the deletion commits (`DeletionRecordingStore`) and the
     /// engine's state can always be rebuilt with a reconciling sync.
     public final class SQLiteSyncStateStore: SyncStateStore {
-        public static let schemaVersion = 1
+        public static let schemaVersion = 2
         public static let databaseName = "sync.sqlite"
 
         private let connection: SQLiteConnection
@@ -88,6 +88,14 @@
             ) STRICT
             """
 
+        /// Version 2 (ADR 0009): the stash, one row per vault, written once per sync rather than with the state.
+        static let stashTable = """
+            CREATE TABLE stash (
+                vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 16),
+                stash BLOB NOT NULL
+            ) STRICT
+            """
+
         static let expectedSchema: Set<[SQLiteValue]> = [
             [.text("table"), .text("sync_state"), .text("sync_state"), .text(stateTable)],
             [.text("index"), .text("sqlite_autoindex_sync_state_1"), .text("sync_state"), .null],
@@ -96,6 +104,8 @@
             [.text("table"), .text("pending_deletions"), .text("pending_deletions"), .text(pendingTable)],
             [.text("index"), .text("sqlite_autoindex_pending_deletions_1"), .text("pending_deletions"), .null],
             [.text("table"), .text("quarantine"), .text("quarantine"), .text(quarantineTable)],
+            [.text("table"), .text("stash"), .text("stash"), .text(stashTable)],
+            [.text("index"), .text("sqlite_autoindex_stash_1"), .text("stash"), .null],
         ]
 
         private func migrate() throws {
@@ -111,6 +121,10 @@
                         try connection.execute(table)
                     }
                     try connection.execute("PRAGMA user_version = 1")
+                }
+                if version < 2 {
+                    try connection.execute(Self.stashTable)
+                    try connection.execute("PRAGMA user_version = 2")
                 }
                 // As in `SQLiteRecordStore`: a planted trigger could make deletions or state saves silently do nothing
                 // (review finding S1), so anything but exactly this schema is refused.
@@ -291,12 +305,32 @@
             }
         }
 
+        // MARK: - Stash
+
+        public func stash(vaultID: UUID) throws -> [UInt8]? {
+            let rows = try connection.query(
+                "SELECT stash FROM stash WHERE vault_id = ?", [SQLiteRecordStore.value(vaultID)])
+            guard let row = rows.first else { return nil }
+            // Rebuildable from the log: the engine parses the bytes and replays the log if they do not parse.
+            guard row.count == 1, case .blob(let bytes) = row[0] else { return [] }
+            return bytes
+        }
+
+        public func saveStash(_ bytes: [UInt8], vaultID: UUID) throws {
+            try connection.query(
+                "INSERT OR REPLACE INTO stash (vault_id, stash) VALUES (?, ?)",
+                [SQLiteRecordStore.value(vaultID), .blob(bytes)])
+        }
+
         // MARK: - Erasure
 
         public func eraseAll() throws {
             try connection.transaction {
                 try connection.execute(
-                    "DELETE FROM sync_state; DELETE FROM staged; DELETE FROM pending_deletions; DELETE FROM quarantine;"
+                    """
+                    DELETE FROM sync_state; DELETE FROM staged; DELETE FROM pending_deletions; DELETE FROM quarantine;
+                    DELETE FROM stash;
+                    """
                 )
             }
             // As in `SQLiteRecordStore.eraseAll`: the superseded pages must leave the write-ahead log too.
@@ -340,127 +374,6 @@
         private static func blob(_ value: SQLiteValue) throws -> [UInt8] {
             guard case .blob(let bytes) = value else { throw RecordStoreError.malformedRow("blob") }
             return bytes
-        }
-    }
-
-    /// `SyncState` as JSON. Dictionary keys are UUID strings and record keys are spelled out, so the encoding does not
-    /// depend on how Foundation encodes a dictionary with non-string keys.
-    struct EncodedState: Codable {
-        struct Stamp: Codable {
-            var record: UUID
-            var kind: UInt8
-            var version: UInt64
-            var device: UUID
-            var deleted: Bool
-        }
-
-        struct ErasureEntry: Codable {
-            var stamp: Stamp
-            var summary: Data
-        }
-
-        struct Snapshot: Codable {
-            var name: String
-            var coverage: [String: UInt64]
-        }
-
-        var vaultID: UUID
-        var nextSequence: UInt64
-        var lastPublishedSequence: UInt64
-        var merged: [String: UInt64]
-        var known: [Stamp]
-        var erasures: [ErasureEntry]
-        var published: [Stamp]
-        var acknowledgements: [String: [String: UInt64]]
-        var publishedAcknowledgement: [String: UInt64]
-        var snapshots: [Snapshot]
-        var snapshotCoverage: [String: UInt64]
-
-        init(_ state: SyncState) {
-            func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
-                map.map { Stamp(key: $0.key, stamp: $0.value) }.sorted {
-                    ($0.record.uuidString, $0.kind) < ($1.record.uuidString, $1.kind)
-                }
-            }
-            vaultID = state.vaultID
-            nextSequence = state.nextSequence
-            lastPublishedSequence = state.lastPublishedSequence
-            merged = Self.strings(state.merged)
-            known = stamps(state.known)
-            erasures = state.erasures.map {
-                ErasureEntry(stamp: Stamp(key: $0.key, stamp: $0.value.stamp), summary: Data($0.value.summary))
-            }.sorted { ($0.stamp.record.uuidString, $0.stamp.kind) < ($1.stamp.record.uuidString, $1.stamp.kind) }
-            published = stamps(state.published)
-            acknowledgements = Dictionary(
-                uniqueKeysWithValues: state.acknowledgements.map { ($0.key.uuidString, Self.strings($0.value)) })
-            publishedAcknowledgement = Self.strings(state.publishedAcknowledgement)
-            snapshots = state.snapshots.map { Snapshot(name: $0.key.name, coverage: Self.strings($0.value)) }
-                .sorted { $0.name < $1.name }
-            snapshotCoverage = Self.strings(state.snapshotCoverage)
-        }
-
-        /// The state, or `nil` if anything in it is not what `init(_:)` writes.
-        var state: SyncState? {
-            var state = SyncState(vaultID: vaultID)
-            state.nextSequence = nextSequence
-            state.lastPublishedSequence = lastPublishedSequence
-            guard let merged = Self.uuids(merged), let snapshotCoverage = Self.uuids(snapshotCoverage),
-                let publishedAcknowledgement = Self.uuids(publishedAcknowledgement)
-            else { return nil }
-            state.merged = merged
-            state.snapshotCoverage = snapshotCoverage
-            state.publishedAcknowledgement = publishedAcknowledgement
-            for (key, value) in acknowledgements {
-                guard let id = UUID(uuidString: key), let vector = Self.uuids(value) else { return nil }
-                state.acknowledgements[id] = vector
-            }
-            for stamp in known {
-                guard let (key, value) = stamp.decoded else { return nil }
-                state.known[key] = value
-            }
-            for stamp in published {
-                guard let (key, value) = stamp.decoded else { return nil }
-                state.published[key] = value
-            }
-            for erasure in erasures {
-                guard let (key, value) = erasure.stamp.decoded else { return nil }
-                state.erasures[key] = Erasure(stamp: value, summary: Array(erasure.summary))
-            }
-            for snapshot in snapshots {
-                guard let location = SyncObjectLocation(name: snapshot.name), location.kind == .snapshot,
-                    let coverage = Self.uuids(snapshot.coverage)
-                else { return nil }
-                state.snapshots[location] = coverage
-            }
-            return state
-        }
-
-        static func strings(_ vector: [UUID: UInt64]) -> [String: UInt64] {
-            Dictionary(uniqueKeysWithValues: vector.map { ($0.key.uuidString, $0.value) })
-        }
-
-        static func uuids(_ vector: [String: UInt64]) -> [UUID: UInt64]? {
-            var result: [UUID: UInt64] = [:]
-            for (key, value) in vector {
-                guard let id = UUID(uuidString: key) else { return nil }
-                result[id] = value
-            }
-            return result
-        }
-    }
-
-    extension EncodedState.Stamp {
-        init(key: RecordKey, stamp: RecordStamp) {
-            self.init(
-                record: key.recordID, kind: key.kind.rawValue, version: stamp.version, device: stamp.device,
-                deleted: stamp.deleted)
-        }
-
-        var decoded: (RecordKey, RecordStamp)? {
-            guard let kind = EnvelopeKind(rawValue: kind) else { return nil }
-            return (
-                RecordKey(recordID: record, kind: kind), RecordStamp(version: version, device: device, deleted: deleted)
-            )
         }
     }
 #endif
