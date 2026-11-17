@@ -190,7 +190,7 @@ Ask Claude to run:
 
 That script is the honest subset of `ci.yml`: the four jobs that need no Xcode. Each gate is the same
 `mise run <task>` the matching `ci.yml` step calls — `build`, `test`, `test:adversarial`, then (without
-`--quick`) `build:strict`, `audit:unsafe`, `audit:dependencies`, `audit:actions`, `test:scripts` and `lint` — so it
+`--quick`) `build:strict`, `audit:unsafe`, `audit:dependencies`, `audit:actions`, `audit:mise-pins`, `test:scripts` and `lint` — so it
 cannot drift from CI, and it inherits the tasks' own checks that both test frameworks and every
 adversarial suite actually ran. It prints a pass/FAIL line per gate and a summary naming which runner
 it used and the Xcode-only gates it did not run, so a green result is never mistaken for a green CI.
