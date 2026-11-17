@@ -183,6 +183,14 @@ public struct SyncReport: Sendable, Equatable {
     /// This device owes a snapshot for a fork of its own stream and has not been able to write it yet
     /// (`SyncState.handOnOwed`); until it has, it collects nothing.
     public var handOnOwed = false
+    /// The transport no longer holds what this device published and merged: a segment of its own that it never
+    /// collected is not listed, and it has merged something nothing listed stands for (docs/02-architecture.md
+    /// §7.10). The store was reset, and perhaps started again by another device. Nothing is uploaded again for it:
+    /// this device writes no snapshot and collects nothing until the person has answered
+    /// (`VaultSession.reuploadAfterStoreReset`). New edits are still published.
+    public var storeLacksObjects = false
+    /// The person asked for the upload and this vault's log was not uploaded again, and why.
+    public var reuploadRefused: ReuploadRefusal?
 
     public init() {}
 
@@ -268,9 +276,14 @@ public actor SyncEngine {
     /// `transportStopped` is a failure the caller already met in this sync (another vault's listing was throttled,
     /// the account is signed out): the engine then makes no call to the transport, merges what it downloaded earlier,
     /// publishes nothing and reports that failure, so one sync asks a stopped transport once, not once per vault.
+    ///
+    /// `handingOn` is the person's answer to a reset (docs/02-architecture.md §7.10), passed only by
+    /// `VaultSession.reuploadAfterStoreReset`: if this device holds something the store lacks, it writes one
+    /// snapshot of everything it holds. Without it nothing a reset removed is ever uploaded again. A shared vault
+    /// refuses (`SyncReport.reuploadRefused`).
     public func sync(
         reconcile: Bool = false, deferringDeletions: Bool = false, publishing: Bool = true,
-        transportStopped: SyncTransportError? = nil
+        transportStopped: SyncTransportError? = nil, handingOn: Bool = false
     ) async throws -> SyncReport {
         guard !running else { throw SyncError.syncInProgress }
         running = true
@@ -287,6 +300,21 @@ public actor SyncEngine {
         // What a revoked device carried is not read any more (§7.8): its own versions stay, and hold nothing back.
         let freed = stash.forgetRetired(retired)
         let forgotten = stash
+        // The listing first: whether the store still holds what this device published decides what may be done
+        // with it (§7.10).
+        var listing: Listing?
+        if let transportStopped {
+            report.noteTransportFailure(transportStopped)
+        } else {
+            do {
+                listing = try await list(retired: retired, report: &report)
+            } catch let error as SyncTransportError where error.stopsSync {
+                // Offline (PRD N3), throttled, signed out: still merge what was downloaded earlier, perhaps locked.
+                report.noteTransportFailure(error)
+            }
+        }
+        if let listing { noteCovered(&state, listing: listing) }
+        let storeLacked = listing.map { storeLacks(state, listing: $0, retired: retired) } ?? false
         var reconcile = reconcile
         let carried = carriedRawKinds
         // An earlier version dropped entries of a kind this one carries, the stash being full; the stash was not
@@ -300,6 +328,9 @@ public actor SyncEngine {
         if incomplete {
             if judge == nil { reconcile = true } else { report.replayNeeded = true }
         }
+        // A replay rebuilds this device's state from the log. From a log that is gone it would rebuild nothing, and
+        // the outbox would then publish every row this device ever wrote again, unasked (§7.10): the state is kept.
+        if reconcile, storeLacked { reconcile = false }
         stashIncomplete = incomplete && !reconcile
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
@@ -313,6 +344,10 @@ public actor SyncEngine {
             state.lastPublishedSequence = kept.lastPublishedSequence
             if judge == nil { state.erasures = kept.erasures }
             state.stashGeneration = kept.stashGeneration
+            // What this device owes and what it knows of its own stream on the transport are not in the log either.
+            state.handOnOwed = kept.handOnOwed
+            state.collectedThrough = kept.collectedThrough
+            state.handedOn = kept.handedOn
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
             // so those are kept across it.
             var replayed = SyncStash()
@@ -321,31 +356,43 @@ public actor SyncEngine {
         }
         if stash != loadedStash { state.stashUnsaved = true }
         state.nextSequence = max(state.nextSequence, 1)
-        var listing = Listing()
-        if let transportStopped {
-            report.noteTransportFailure(transportStopped)
-        } else {
+        if let listing {
+            // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
+            // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
+            if let highest = listing.segments[deviceID]?.max() {
+                state.nextSequence = max(state.nextSequence, highest + 1)
+            }
             do {
-                listing = try await pull(state: &state, retired: retired, report: &report)
-                // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
-                // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
-                if let highest = listing.segments[deviceID]?.max() {
-                    state.nextSequence = max(state.nextSequence, highest + 1)
-                }
+                try await fetch(listing, state: &state, report: &report)
             } catch let error as SyncTransportError where error.stopsSync {
-                // Offline (PRD N3), throttled, signed out: still merge what was downloaded earlier, perhaps locked.
                 report.noteTransportFailure(error)
             }
         }
         do {
             try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
+            // With everything listed merged: what this device holds that nothing on the transport stands for.
+            var lacking: Set<UUID> = []
+            if let listing {
+                noteCovered(&state, listing: listing)
+                lacking = lackingStreams(state, listing: listing, retired: retired)
+                report.storeLacksObjects = !lacking.isEmpty && ownSegmentsMissing(state, listing: listing)
+            }
             try await syncState.saveState(state)
-            if !report.transportUnavailable, publishing {
+            if !report.transportUnavailable, publishing, let listing {
                 try await push(
                     state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
-                if report.ownStreamConflict == nil, configuration.maintainsLog {
-                    try await maintain(state: &state, listing: listing, retired: retired, report: &report)
+                if report.ownStreamConflict == nil {
+                    if !configuration.maintainsLog {
+                        // A shared vault writes no snapshot, so it has nothing to hand on with (§7.10).
+                        if handingOn, !lacking.isEmpty { report.reuploadRefused = .sharedVault }
+                    } else if handingOn || !report.storeLacksObjects {
+                        // While the store lacks what this device holds and the person has not answered, no snapshot
+                        // (it would carry the whole vault) and no collection.
+                        try await maintain(
+                            state: &state, listing: listing, retired: retired,
+                            handingOn: handingOn && !lacking.isEmpty, report: &report)
+                    }
                 }
             }
         } catch SyncKeyringError.locked {
@@ -405,8 +452,8 @@ public actor SyncEngine {
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         let examined = state.examinedCopies
         do {
-            _ = try await pull(
-                state: &state, retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
+            let listing = try await list(retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
+            try await fetch(listing, state: &state, report: &report)
         } catch let error as SyncTransportError where error.stopsSync {
             report.noteTransportFailure(error)
         }
@@ -424,7 +471,8 @@ public actor SyncEngine {
         var copies: [SyncObjectLocation: Int] = [:]
     }
 
-    private func pull(state: inout SyncState, retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
+    /// What the transport lists for this vault: metadata only, nothing fetched.
+    private func list(retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
         var listing = Listing()
         let listed = try await transport.listWithCopies(prefix: SyncObjectLocation.vaultPrefix(vaultID))
         // A listing may name an object twice (providers do); each is fetched once.
@@ -449,6 +497,11 @@ public actor SyncEngine {
             }
             if let count = listed.copied[name], count > 0 { listing.copies[location] = count }
         }
+        return listing
+    }
+
+    /// Downloads and checks what a listing holds that this device has not merged, and stages it.
+    private func fetch(_ listing: Listing, state: inout SyncState, report: inout SyncReport) async throws {
         // What was decided about copies is remembered only for names that still have them.
         state.examinedCopies = state.examinedCopies.filter { listing.copies[$0.key] != nil }
 
@@ -515,7 +568,66 @@ public actor SyncEngine {
                 report.rejected.append(SyncRejection(name: location.name, reason: Self.reason(error)))
             }
         }
-        return listing
+    }
+
+    // MARK: - A store that was reset (docs/02-architecture.md §7.10)
+
+    /// For each stream, the most that the listed snapshots this device has merged or written cover, and what the
+    /// snapshot it last handed everything on in holds, while that one is listed.
+    private func listedCoverage(_ state: SyncState, listing: Listing) -> [UUID: UInt64] {
+        var covered: [UUID: UInt64] = [:]
+        for location in listing.snapshots {
+            covered.merge(state.snapshots[location] ?? [:], uniquingKeysWith: max)
+            if let handedOn = state.handedOn, handedOn.snapshot == location {
+                covered.merge(handedOn.holding, uniquingKeysWith: max)
+            }
+        }
+        return covered
+    }
+
+    /// Keeps `collectedThrough` up to date: this device's own segments up to what a listed snapshot covers need not
+    /// be listed (it may have collected them). A state from before this was kept takes the stream as whole at its
+    /// first listing: everything below the lowest segment listed was collected.
+    private func noteCovered(_ state: inout SyncState, listing: Listing) {
+        var through = state.collectedThrough
+        if through == nil {
+            let lowest = listing.segments[deviceID]?.min() ?? (state.lastPublishedSequence &+ 1)
+            through = lowest > 0 ? lowest - 1 : 0
+        }
+        let covered = min(listedCoverage(state, listing: listing)[deviceID] ?? 0, state.lastPublishedSequence)
+        state.collectedThrough = max(through ?? 0, covered)
+    }
+
+    /// Whether a segment this device published, and did not collect, is no longer listed. A device sees its own
+    /// objects at once, keeps its newest segment, and nobody else deletes its objects: an honest store lists them
+    /// all. Linear in the listing.
+    private func ownSegmentsMissing(_ state: SyncState, listing: Listing) -> Bool {
+        let after = state.collectedThrough ?? 0
+        let last = state.lastPublishedSequence
+        guard last > after else { return false }
+        let listed = Set((listing.segments[deviceID] ?? []).filter { $0 > after && $0 <= last })
+        return UInt64(listed.count) < last - after
+    }
+
+    /// The streams of which this device has merged something that nothing listed stands for: a segment past what
+    /// the listed snapshots cover, and up to what it has merged, is not listed. Revoked devices' streams are not
+    /// read and not counted (what was merged from them is owed separately, §7.5).
+    private func lackingStreams(_ state: SyncState, listing: Listing, retired: Set<UUID>) -> Set<UUID> {
+        let covered = listedCoverage(state, listing: listing)
+        var lacking: Set<UUID> = []
+        for (author, merged) in state.merged where !retired.contains(author) {
+            let after = covered[author] ?? 0
+            guard merged > after else { continue }
+            let listed = Set((listing.segments[author] ?? []).filter { $0 > after && $0 <= merged })
+            if UInt64(listed.count) < merged - after { lacking.insert(author) }
+        }
+        return lacking
+    }
+
+    /// The engine's sign of a reset: its own segments are missing *and* it holds what the store lacks. Either alone
+    /// has innocent causes (a state restored from a backup; a provider showing a snapshot's replacement late).
+    private func storeLacks(_ state: SyncState, listing: Listing, retired: Set<UUID>) -> Bool {
+        ownSegmentsMissing(state, listing: listing) && !lackingStreams(state, listing: listing, retired: retired).isEmpty
     }
 
     /// Fetches the copies the transport holds under one name and checks each alone: the container, the envelope's
@@ -1414,9 +1526,9 @@ public actor SyncEngine {
     /// A snapshot's coverage is what this device has merged, whatever else failed in the sync, so a rejected or
     /// missing object elsewhere never stops snapshots (or, through them, garbage collection).
     private func maintain(
-        state: inout SyncState, listing: Listing, retired: Set<UUID>, report: inout SyncReport
+        state: inout SyncState, listing: Listing, retired: Set<UUID>, handingOn: Bool, report: inout SyncReport
     ) async throws {
-        try await writeSnapshotIfElected(state: &state, retired: retired, report: &report)
+        try await writeSnapshotIfElected(state: &state, retired: retired, handingOn: handingOn, report: &report)
         try await collectGarbage(state: &state, listing: listing, retired: retired, report: &report)
     }
 
@@ -1436,10 +1548,11 @@ public actor SyncEngine {
     }
 
     private func writeSnapshotIfElected(
-        state: inout SyncState, retired: Set<UUID>, report: inout SyncReport
+        state: inout SyncState, retired: Set<UUID>, handingOn: Bool, report: inout SyncReport
     ) async throws {
-        // Owed for a revoked device's work, or for a fork of this device's own stream (§7.5, "Conflict copies").
-        let owed = holdsUnsharedRetiredContent(state, retired: retired) || state.handOnOwed
+        // Owed for a revoked device's work, for a fork of this device's own stream (§7.5, "Conflict copies"), or
+        // because the person asked for everything to be uploaded again after a reset (§7.10).
+        let owed = holdsUnsharedRetiredContent(state, retired: retired) || state.handOnOwed || handingOn
         if !owed {
             let uncovered = state.merged.reduce(0) { total, element in
                 total + Int(clamping: element.value &- min(element.value, state.snapshotCoverage[element.key] ?? 0))
@@ -1471,6 +1584,17 @@ public actor SyncEngine {
                 return
             }
             vector = state.merged.filter { retired.contains($0.key) }
+            if handingOn {
+                // After a reset the segments are gone whatever this snapshot covers, and a reader must be able to
+                // pass the gap in this device's own stream, whose segments carried nothing it could not read. It
+                // also covers the streams of devices whose objects carried no kept entry, where the stash can say
+                // whose did; a reader waits at the others until their own devices upload again (§7.10).
+                let known = stash.crowdedOut.isEmpty && !stashIncomplete
+                vector = state.merged.filter {
+                    retired.contains($0.key) || $0.key == deviceID || (known && !holding.contains($0.key))
+                }
+                report.snapshotWithheldBy = holding
+            }
         }
 
         var entries: [SyncEntry] = []
@@ -1493,7 +1617,10 @@ public actor SyncEngine {
             let payload = SyncPayload(
                 kind: .snapshot, vaultID: vaultID, author: deviceID, number: lamport, vector: vector, entries: entries
             ).encoded()
-            guard payload.count < Envelope.maximumLength - 4096 else { return }
+            guard payload.count < Envelope.maximumLength - 4096 else {
+                if handingOn { report.reuploadRefused = .tooLarge }
+                return
+            }
             let envelope = try await keyring.seal(payload, at: location)
             let signature = try await keyring.sign(envelope, at: location)
             do {
@@ -1508,6 +1635,14 @@ public actor SyncEngine {
             // Handed on: what this device merged from revoked devices is now in a snapshot of its own.
             state.snapshots = state.snapshots.filter { !retired.contains($0.key.author) }
             state.handOnOwed = false
+            // Its own segments up to what this snapshot covers need not be listed any more.
+            state.collectedThrough = max(
+                state.collectedThrough ?? 0, min(vector[deviceID] ?? 0, state.lastPublishedSequence))
+            if handingOn {
+                // It holds everything this device had merged, whatever it could claim to cover.
+                state.handedOn = HandedOn(snapshot: location, holding: state.merged)
+                report.storeLacksObjects = false
+            }
             report.snapshotsWritten += 1
             return
         }
@@ -1545,7 +1680,13 @@ public actor SyncEngine {
                 SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence).name)
             report.collected += 1
         }
-        for (location, coverage) in state.snapshots where location.author == deviceID {
+        for (location, written) in state.snapshots where location.author == deviceID {
+            // The snapshot that handed everything on after a reset stands for all it holds (§7.10), so only a
+            // snapshot covering that much supersedes it.
+            var coverage = written
+            if let handedOn = state.handedOn, handedOn.snapshot == location {
+                coverage.merge(handedOn.holding, uniquingKeysWith: max)
+            }
             let superseded = state.snapshots.contains { other, otherCoverage in
                 other != location && !retired.contains(other.author) && Self.covers(otherCoverage, coverage)
                     && (!Self.covers(coverage, otherCoverage) || Self.snapshotOrder(location, other))

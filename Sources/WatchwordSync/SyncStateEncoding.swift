@@ -42,6 +42,9 @@ struct EncodedState: Codable {
     /// Absent in a row written before conflict copies were examined (§7.5).
     var examinedCopies: [String: Int]?
     var handOnOwed: Bool?
+    /// Absent in a row written before a reset could be answered (§7.10).
+    var collectedThrough: UInt64?
+    var handedOn: Snapshot?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -68,6 +71,8 @@ struct EncodedState: Codable {
         stashGeneration = state.stashGeneration
         examinedCopies = Dictionary(uniqueKeysWithValues: state.examinedCopies.map { ($0.key.name, $0.value) })
         handOnOwed = state.handOnOwed
+        collectedThrough = state.collectedThrough
+        handedOn = state.handedOn.map { Snapshot(name: $0.snapshot.name, coverage: Self.strings($0.holding)) }
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -110,6 +115,13 @@ struct EncodedState: Codable {
             state.examinedCopies[location] = count
         }
         state.handOnOwed = handOnOwed ?? false
+        state.collectedThrough = collectedThrough
+        if let handedOn {
+            guard let location = SyncObjectLocation(name: handedOn.name), location.kind == .snapshot,
+                let holding = Self.uuids(handedOn.coverage)
+            else { return nil }
+            state.handedOn = HandedOn(snapshot: location, holding: holding)
+        }
         return state
     }
 

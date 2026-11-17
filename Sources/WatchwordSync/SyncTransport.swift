@@ -23,7 +23,8 @@ public enum SyncTransportError: Error, Equatable, Sendable {
     case notAuthenticated
     /// The store's data was reset: the person deleted it (CloudKit's `userDeletedZone`), or the service discarded the
     /// key that protected it (`userDidResetEncryptedDataKey`). A transport never recreates such a store by itself
-    /// (docs/02-architecture.md §7.2): whether to upload again is the person's decision.
+    /// (docs/02-architecture.md §7.2): whether to upload again is the person's decision, and only
+    /// `SyncTransport.startStoreAgain`, called on that decision, ends it (§7.10).
     case storeReset
     /// More than one copy of one object verifies where the engine cannot merge them: a shared vault, whose write
     /// cuts bind one digest per position (docs/02-architecture.md §7.5, "Conflict copies"). The engine's reason for
@@ -93,6 +94,11 @@ public protocol SyncTransport: Sendable {
     /// fails the call, so a planted copy cannot hide the others. No copies and none omitted means there is no object.
     /// The default is the one `fetch` returns.
     func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) async throws -> SyncObjectCopies
+    /// Starts a store again that was reset (`storeReset`): the one call that may recreate a store this device has
+    /// seen and then found missing. Called only on the person's confirmed decision to upload again
+    /// (`VaultSession.reuploadAfterStoreReset`, docs/02-architecture.md §7.10), never by a sync. It uploads nothing
+    /// itself. The default does nothing: most transports have no store to recreate.
+    func startStoreAgain() async throws
 }
 
 /// What a transport lists under a prefix (`SyncTransport.listWithCopies`).
@@ -123,6 +129,8 @@ public struct SyncObjectCopies: Sendable, Hashable {
 }
 
 extension SyncTransport {
+    public func startStoreAgain() async throws {}
+
     public func listWithCopies(prefix: String) async throws -> SyncListing {
         SyncListing(names: try await list(prefix: prefix))
     }
@@ -207,5 +215,11 @@ public actor InMemorySyncTransport: SyncTransport {
     /// The copies under `name` that are not its current object.
     public func plantedCopies(_ name: String) -> [[UInt8]] {
         otherCopies[name] ?? []
+    }
+
+    /// Removes every object and copy: a store that was reset, or a folder that was emptied.
+    public func removeEverything() {
+        objects = [:]
+        otherCopies = [:]
     }
 }

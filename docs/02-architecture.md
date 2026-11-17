@@ -362,16 +362,16 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   create makes the zone, never a read, and listing or creating it marks it seen in a `SyncStoreMarker` on this device.
   A zone that is missing once seen was deleted (the person's "delete data" in iCloud settings purges it, and CloudKit
   then says only `zoneNotFound`), so it is `SyncTransportError.storeReset` for every operation, as are
-  `userDeletedZone` and a reset encryption key; it is never recreated or read as empty, and only the person's choice to
-  start again (not built) may forget the marker. Errors map to the
+  `userDeletedZone` and a reset encryption key; it is never recreated or read as empty by a sync, and only the
+  person's choice to start again (`startStoreAgain`, §7.10) recreates it. Errors map to the
   transport's typed errors (`CloudKitErrors`): throttling with CloudKit's `retryAfterSeconds` (`rateLimited`, which
   `AutoSyncPolicy` honours within its bounds, §7.9), `quotaExceeded`, `notAuthenticated`, the network
   (`unavailable`); each stops a sync as being offline does, and the report says which (`transportFailure`). The
   transport reaches CloudKit through `CloudKitDatabase`, a seam over `CKDatabase` that `SystemCloudKitDatabase` only
   forwards, so every decision is tested against a fake. Not built: `CKSyncEngine` (pushes reach the app's
-  `AutoSyncDriver` as remote-change hints), per-shared-vault zones and the shared database (milestone 4), the
-  re-upload after a reset the bullet above describes (today a reset stops sync until the person acts, and nothing
-  re-publishes what the zone held), and the manual integration workflow; an opt-in test runs the transport contract
+  `AutoSyncDriver` as remote-change hints), per-shared-vault zones and the shared database (milestone 4), and the
+  manual integration workflow. The re-upload after a reset the bullet above describes is §7.10: it is never
+  automatic (the bullet's "prompts the person" holds for every kind of reset), and its CloudKit half is drafted; an opt-in test runs the transport contract
   against a development container from a signed host (`WATCHWORD_CLOUDKIT_CONTAINER`).
 
 ### 7.3 Transport B: files (iCloud Drive or any Files-app provider)
@@ -426,7 +426,7 @@ VK, so merge is deferred until unlock. The AutoFill extension works from the las
 `WatchwordTestSupport`, so the whole engine — including the N-device partition simulation and the adversarial
 suite "sync log" — runs under `swift test` on Linux. The production keyring, the persistent state store and the
 app's conflict UI are described in §7.6, the account's own objects and enrolment in §7.7, the device registry in
-§7.8 and automatic syncing in §7.9; the CloudKit and iCloud Drive transports are in §7.2 and §7.3, built but not yet
+§7.8, automatic syncing in §7.9 and starting again after a reset in §7.10; the CloudKit and iCloud Drive transports are in §7.2 and §7.3, built but not yet
 run against iCloud or wired into the app (`03-implementation-plan.md`, milestone 3). One engine runs per vault; a vault's log carries its items, its
 description (`vaultMetadata`) and its items' synced breach-check results (`scanStatus`, §13.9), each kind merged by
 its own merger (`KindRoutingMerger`).
@@ -1011,6 +1011,135 @@ and, once the app registers for them, CloudKit pushes. The app does not create o
 
 A clock that moved backwards cannot show that an interval has not passed, so such a wait is treated as over:
 syncing early costs a request, waiting for ever would cost the data.
+
+### 7.10 Starting again after a reset (owner decision, 2026-11-17: re-upload, "but ask the user first")
+
+A store can lose everything it held: the person deletes Watchword's data in their iCloud settings, CloudKit discards
+the key that protected a zone, a folder is emptied. Every device still holds all it had, sealed and signed as before,
+so the store can be filled again from local state. It is filled again only when the person says so, on each device
+that has something to add, because the person on another device may have deleted the data on purpose.
+
+**How a device learns of a reset.** Two signals, and neither is trusted for more than asking the question:
+
+1. *The transport says so* (`SyncTransportError.storeReset`): a CloudKit zone this device has seen
+   (`SyncStoreMarker`) is missing, or CloudKit reports `userDeletedZone` or a reset encryption key (§7.2). The sync
+   stops where it stands, as when offline, and creates nothing.
+2. *The engine sees it* (`SyncReport.storeLacksObjects`): a segment this device published, and that neither it
+   collected nor a listed snapshot stood for (`SyncState.collectedThrough`), is no longer listed — a device sees its
+   own objects at once and nobody else deletes them, so an honest store always lists it — *and* the device has
+   merged something of some stream that nothing listed stands for: a segment past what the listed snapshots it has
+   merged cover is missing. This is what a device that was offline during a reset finds when it returns to a store
+   another device has started again, and what an emptied folder looks like to a file transport. The first half
+   alone is not enough to ask (a device restored from a backup remembers collecting less than its later self did)
+   and the second alone is not either (a provider that lags can show a snapshot's replacement late); together they
+   are what a reset leaves.
+
+`AccountSyncReport.storeNeedsReupload` is either. A store that was never set up is neither: a device that has
+published nothing has no newest segment to miss, and a new store is filled by the ordinary outbox.
+
+**Nothing is uploaded again unasked.** What a device has published is remembered in `SyncState.published`, which a
+reset does not change, so the ordinary outbox never re-sends anything: a reset store is not mistaken for a new one.
+While the engine's signal stands and the person has not answered, the device writes no snapshot (neither elected nor
+owed: either would carry the whole vault) and collects nothing, and a reconciling sync does not forget its state
+(replaying a log that is gone would rebuild nothing and then publish every row again). New edits are still published
+in the device's stream: they are new, not a re-upload, and other devices wait at the gap before them. No timer and no
+policy reaches the call below: `AutoSyncPolicy` knows two modes, a full sync and a download, `AutoSyncDriver` calls
+`syncAll` and nothing else, and a `storeReset` is to it a failed sync that backs off.
+
+**The call** (`VaultSession.reuploadAfterStoreReset(confirming:)`, which only a screen calls, after the person
+confirms). `reuploadPlan()` says what would be uploaded — the account's own vaults and how many records each holds,
+and the shared vaults that cannot be — for the question; the call takes the plan the person was shown and refuses
+(`reuploadNotConfirmed`) if it no longer describes this device, as `deleteVault` does with its count. It needs the
+vault unlocked and this device registered, not revoked and following the current password. Then:
+
+1. `SyncTransport.startStoreAgain()`: the one call that may recreate a store this device has seen and found missing.
+   CloudKit saves the zone again (deleting it first where CloudKit says its key was reset) and keeps the marker; a
+   transport with no notion of a reset does nothing.
+2. One `syncAll`. *The account's objects* need no new code: every sync already publishes what the listing lacks of
+   the registry entries the device retains, its account header, a wrap under its own name of every vault key it has
+   opened, and every vault deletion it has verified (§7.7). With the transport no longer stopping, they are created
+   again, and they are everything enrolment reads: a brand-new device can enrol from one device's re-upload.
+3. *Each of the account's own vaults* runs its engine with `handingOn`. The engine downloads and merges whatever the
+   store already holds again (another device may have re-uploaded first: merges are joins, so this is only more to
+   carry), publishes its outbox and pending deletions as the next segments of its stream, and then, if it holds
+   something the store lacks, writes **one snapshot of everything it holds**: every row, whoever wrote it, and a
+   tombstone for every erasure it remembers, covering what it had merged of each stream. The precedent is the
+   snapshot a device owes for a revoked device's work (§7.5): what this device merged from other devices' streams
+   exists on the transport nowhere else now, so it hands it on. Every reader merges every listed snapshot, entries
+   first, whatever it covers, and continues each stream from the most any snapshot covers.
+
+**Decisions, and why.**
+
+- *Sequence numbers are never restarted.* The device's stream continues at its next number. A number once used was
+  read by other devices under other bytes; using it again is the fork of §7.5. The snapshot's coverage of the
+  device's own stream is what lets every reader, new or old, pass the gap where its segments were.
+- *`published`, `known`, `merged`, the erasures and the acknowledgements are kept as they are.* `published` still
+  says "on the transport in something this device wrote": the snapshot carries every row. Nothing is forgotten, so
+  there is nothing to roll back to: a device that is told of a reset, truthfully or not, is afterwards exactly the
+  device it was, plus what it merged.
+- *The stash is never dropped and never uploaded.* Kept entries of kinds this version cannot read (ADR 0009) stay in
+  the signed stash. A snapshot cannot carry them (one entry per record; the stash may hold several versions of one),
+  so the hand-on snapshot's coverage leaves out the streams of the devices whose objects carried kept entries — or,
+  where the stash cannot say whose (entries crowded out, a stash being rebuilt), covers this device's own stream
+  alone. A reader then waits at those streams until their own devices, which read the kind and hold it as rows,
+  re-upload; `snapshotWithheldBy` names them.
+- *Held-aside and quarantined versions stay where they are.* They were refused as implausible or as work that does
+  not count; uploading them inside a snapshot would launder them into every device's vault. They are neither
+  published nor dropped: only the person discards them (F7.7).
+- *Pending deletions* go out as tombstones in the device's next segments, as always (after every vault's other
+  writes, §7.7), and the snapshot carries a tombstone for every erasure the device has published or merged: a device
+  whose copy predates a deletion does not bring the record back.
+- *A device that was offline during the reset* merges the snapshots it finds on the rebuilt store. If they cover
+  everything it had merged, its own stream included, it has nothing to add, is asked nothing, and continues at its
+  next number. If it holds more — segments of its own that the others had not merged, or more of a third device's
+  stream — the engine's signal asks its person, and its own snapshot hands that on. Until they answer, its new edits
+  are on the transport behind a gap, where other devices wait (`SyncReport.waiting`); nothing is lost on any device.
+- *Two devices re-uploading at once* each write a snapshot under their own name (`<lamport>-<device>`), and each
+  merges the other's at its next sync. The item merge is a join and snapshot coverage is a maximum, so either order
+  gives the same vault; a device asked twice writes once, because its own listed snapshot stands for what it held
+  (`SyncState.handedOn`).
+- *Shared vaults are refused* (`ReuploadRefusal.sharedVault`, reported per vault and worded for the person). A
+  shared vault keeps its whole log and writes no snapshots, because a write cut is a chain of digests of a device's
+  own segments and every version is judged through the segment that carried its values (`SyncWriteCut`,
+  `SharedStreamIndex`, §8.10). One member's device holds the other members' work but not their segments (they are
+  not kept once merged), cannot sign in their names, and a snapshot would hand their work on with no segment for
+  any judge to count it by. So nothing is uploaded for a shared vault: it stays on each device as that device holds
+  it, readable, with nothing dropped, and it does not sync until it is shared again. What a sound rebuild would
+  need: every device keeping the signed objects of the shared log byte for byte — they authenticate themselves, so
+  any member's device could then create each again under its own name, with every cut chain verifying as before —
+  or a membership record that restarts the log under a later format (§8.9). Not designed. While a shared vault's
+  log is missing, a change of head still takes out the versions that no longer count, and the replay that would
+  rebuild the rest of such a record from the log has nothing to read: those versions stay held aside for the person
+  (`06-adversarial-review.md` §S).
+- *A vault too large for one snapshot* (the envelope limit, §5) is refused (`ReuploadRefusal.tooLarge`) and nothing
+  is written for it; snapshots in parts are not designed.
+
+**Threats.**
+
+- *A1 can fake a reset at will* — delete the zone, withhold a device's newest segment, or answer `zoneNotFound`.
+  The device stops or asks; it re-uploads nothing unasked. If the person confirms, the store receives a snapshot of
+  record envelopes it was given before, under the same keys, with the same object names it could already see: it
+  learns nothing new. No device is rolled back: nothing in the path forgets, overwrites or deletes local state (the
+  record store, the sync state, the stash, the quarantine and the pending deletions are written only by the
+  ordinary merge of verified objects), and every other device merges the snapshot as a join, under the same
+  signature, registry, context and version checks as any snapshot. A1 can make the question appear again by
+  deleting again; that is withholding (Y7) with a prompt, and declining costs nothing.
+- *A reset must not look like "never set up".* On CloudKit the marker makes a missing zone `storeReset` for every
+  operation, so nothing is created. Where no transport says so (a file provider's emptied folder; or A8 deleting the
+  marker as well as A1 deleting the zone), the engine's signal still withholds every snapshot, so no vault's
+  contents are uploaded again unasked. **What is still put back unasked there** is the account's own small objects
+  (the header, registry entries, vault-key wraps, §7.7), by the code that has always restored a header the store
+  lost: no item is in them, but it is the one automatic write after such a reset, and whether it should also wait
+  for the person is the owner's to say (`03-implementation-plan.md`).
+- *The person deleted the data on purpose, on another device.* Hence the question, and its wording
+  (`ReuploadQuestion`): it says the data is gone from the sync storage, that this may have been deliberate, what
+  will be uploaded (how many items in how many vaults, and the account's encrypted keys), that uploading undoes a
+  deletion made elsewhere, and what cannot be uploaded (shared vaults). Declining leaves the device as it is.
+
+**Adapters.** `CloudKitTransport.startStoreAgain` is drafted with the rest of that transport (not compiled, not run
+against CloudKit; whether a zone whose key was reset must be deleted before it is saved again follows Apple's
+documentation and is unverified). `CoordinatedFileSyncTransport` needs nothing: its folder is created by the first
+write. A SwiftUI confirmation on the Devices screen is drafted, unbuilt.
 
 ## 8. Sharing protocol
 

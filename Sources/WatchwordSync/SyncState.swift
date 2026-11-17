@@ -81,10 +81,42 @@ public struct SyncState: Sendable, Hashable {
     /// work: its own stream forked (several verifying copies of one of its names, which no other device can be
     /// assumed to have seen both of). Cleared when the snapshot is written; until then it collects nothing.
     public var handOnOwed = false
+    /// The highest sequence number of this device's own stream that it need not find listed: its segments up to here
+    /// were collected, or a listed snapshot stood for them. Every later one it published must be listed (a device
+    /// keeps its newest segment and sees its own objects at once), so one that is missing means the store lost it:
+    /// the engine's sign of a reset (docs/02-architecture.md §7.10). `nil` in a state from before this was kept, and
+    /// set from the first listing.
+    public var collectedThrough: UInt64?
+    /// The snapshot in which this device last handed on everything it held, on the person's decision to upload again
+    /// after a reset, and what it had merged of each stream then. While that snapshot is listed it stands for all of
+    /// that, whatever coverage it could claim.
+    public var handedOn: HandedOn?
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID
     }
+}
+
+/// A snapshot by this device that carries everything it held when it was written (`SyncState.handedOn`).
+public struct HandedOn: Sendable, Hashable {
+    public var snapshot: SyncObjectLocation
+    /// What this device had merged of each stream when it wrote the snapshot: what the snapshot's entries contain.
+    public var holding: [UUID: UInt64]
+
+    public init(snapshot: SyncObjectLocation, holding: [UUID: UInt64]) {
+        self.snapshot = snapshot
+        self.holding = holding
+    }
+}
+
+/// Why a vault's log was not uploaded again after a reset, although the person asked
+/// (docs/02-architecture.md §7.10).
+public enum ReuploadRefusal: Error, Sendable, Hashable {
+    /// A shared vault: its write cuts are chains of digests of each device's own segments, which one member's device
+    /// can neither re-create nor replace with a snapshot. It stays on this device as it is.
+    case sharedVault
+    /// The vault does not fit in one snapshot.
+    case tooLarge
 }
 
 /// A deletion of a record, and what its author had seen of it (`RecordMerger.erasureSummary`).
