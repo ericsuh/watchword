@@ -653,7 +653,13 @@ struct DeviceRegistryTests {
         // there, so what X signs itself may yet count and is kept (as X's own entries are); but nothing that relies
         // on the forged registration ever counts, on any credential, and none of it is kept.
         let behind = try f.evaluate(entries, genesis: genesis)
-        #expect(behind.pendingCredentials.map(\.id) == [change.id])
+        // X's own change is listed there too: listing is by the entry's own signatures (this fixture gives X the
+        // new generation's enrolment key), so that no number of planted changes can crowd out the genuine one (Z2).
+        // Listed is not followable: replayed as a chain, X is revoked by the time it writes.
+        #expect(behind.pendingCredentials.map(\.id) == [change.id, ownChange.id])
+        #expect(throws: DeviceRegistryError.brokenCredentialChain) {
+            try f.evaluate(entries, genesis: genesis, credential: ownChange)
+        }
         let forgedChain =
             [forgedAdd, addZ]
             + planted.filter { entry in

@@ -370,19 +370,26 @@ public enum DeviceRegistry {
         return admitted
     }
 
-    /// Credential changes this device does not follow that are worth evaluating as candidates; any beyond this many
-    /// are ignored (each costs a replay of the registry).
-    public static let maximumCandidates = 16
-
     /// Replays `entries` (as `admit` returned them). `genesis` and `credential` are what this device pinned: the
     /// genesis entry named by the account header it opened with the password, and the credential entry that header
     /// belongs to.
     ///
-    /// Credential changes that are not on that chain are then looked at as candidates. A candidate is judged **as
-    /// if it were followed** — the registry replayed with it as the last checkpoint — and never by where it falls
-    /// among the entries no checkpoint has sealed yet: a revoked device that kept the account key can put a
-    /// back-dated revocation of the very device that changed the password in front of that change, and a device
-    /// that has not been given the new password yet must still see that there is one.
+    /// Credential changes that are not on that chain are then **listed** (`pendingCredentials`,
+    /// `forkedCredentials`), each from its own signatures and its links back to the chain and from nothing else: its
+    /// author's signature under a key an ancestor registers for that device, the signature of the enrolment key of
+    /// the generation it replaces, consecutive generations, and a `previous` that is on the followed chain or is
+    /// itself listed. One signature check per entry and no replay, so there is no budget to exhaust: a revoked
+    /// device that kept the account key can plant any number of credential entries, and the genuine change is
+    /// listed all the same (review finding Z2; a budget of sixteen replays, spent in entry-ID order, let sixteen
+    /// planted entries hide it). An entry that can never count on this chain (`replay`, step 2) is not listed.
+    ///
+    /// Listed is not followed. A device that has not been given a new password must *see* that there is one, and a
+    /// revoked device can put a back-dated revocation of the very device that changed the password in front of that
+    /// change among the entries no checkpoint has sealed (W1), so a change is never judged by where it falls there.
+    /// Whether a listed change is one this device can follow is decided by evaluating with it as `credential`,
+    /// which replays the registry with it as the last checkpoint and throws if it is not a chain the rules allow.
+    /// The list can therefore hold a change that would not replay; making one takes the account key, a device key
+    /// and the enrolment key of the generation it replaces, and whoever holds those can make one that does.
     public static func evaluate(
         _ entries: [ObjectDigest: RegistryEntry],
         accountID: UUID,
@@ -412,37 +419,45 @@ public enum DeviceRegistry {
         let graph = try prepare(
             entries, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis,
             verifications: verifications)
-        var state = try replay(
+        // `neverCounting`: the connected entries that can never count along these credentials, whatever arrives
+        // later (`replay`, step 2). `retainedEntries` may still hold one, when an entry that may count descends from
+        // it; it counts for nothing all the same, and a credential entry among them is not listed below.
+        let replayed = try replay(
             entries, graph: graph, accountID: accountID, accountSigningKey: accountSigningKey, genesis: genesis,
             credential: credential)
-        let followed = Set(state.credentialChain.map(\.id))
+        var state = replayed.state
+        let neverCounting = replayed.neverCounting
+        let followed = Dictionary(uniqueKeysWithValues: state.credentialChain.map { ($0.id, $0) })
         let head = state.credential.id
-        var considered = 0
-        let dead = state.connectedEntries.subtracting(state.retainedEntries)
-        for id in graph.ids.sorted() where !followed.contains(id) && considered < maximumCandidates {
-            // One that can never count here (its author revoked behind a checkpoint, say) is not a candidate.
-            guard !dead.contains(id), case .credential(_, _, let previous)? = entries[id]?.body else { continue }
-            // Where it branches off the chain this device follows: at the last link (a change this device has not
-            // confirmed) or at an earlier one (a fork). One that leads nowhere on the chain is nothing.
-            var cursor = previous
-            var steps = 0
-            while !followed.contains(cursor), steps < maximumEntries,
-                case .credential(_, _, let earlier)? = entries[cursor]?.body
-            {
-                cursor = earlier
-                steps += 1
-            }
-            guard followed.contains(cursor) else { continue }
-            considered += 1
-            guard
-                let alternative = try? replay(
-                    entries, graph: graph, accountID: accountID, accountSigningKey: accountSigningKey,
-                    genesis: genesis, credential: id)
+        // Where each listed change joins the chain this device follows: at its last link (a change this device has
+        // not confirmed) or at an earlier one (a fork). `graph.ids` is a causal order and a change must descend from
+        // the one it replaces, so each is reached after the one it names.
+        var listed: [ObjectDigest: (credential: DeviceRegistryState.Credential, joins: ObjectDigest)] = [:]
+        for (position, id) in graph.ids.enumerated() where followed[id] == nil && !neverCounting.contains(id) {
+            guard let entry = entries[id], case .device(let author) = entry.author,
+                case .credential(let generation, let enrolmentKey, let previous) = entry.body,
+                !graph.unverifiable.contains(position), graph.isAncestor(previous, of: id)
             else { continue }
-            if cursor == head {
-                state.pendingCredentials.append(alternative.credential)
+            let replaced: DeviceRegistryState.Credential
+            let joins: ObjectDigest
+            if let link = followed[previous] {
+                (replaced, joins) = (link, previous)
+            } else if let earlier = listed[previous] {
+                (replaced, joins) = (earlier.credential, earlier.joins)
             } else {
-                state.forkedCredentials.append(alternative.credential)
+                continue
+            }
+            guard replaced.generation < UInt64.max, generation == replaced.generation + 1,
+                (try? Signatures.validateSigningKey(enrolmentKey)) != nil,
+                credentialSigned(entry, by: replaced, graph: graph)
+            else { continue }
+            let change = DeviceRegistryState.Credential(
+                id: id, generation: generation, enrolmentKey: enrolmentKey, author: author, previous: previous)
+            listed[id] = (change, joins)
+            if joins == head {
+                state.pendingCredentials.append(change)
+            } else {
+                state.forkedCredentials.append(change)
             }
         }
         state.pendingCredentials.sort { ($0.generation, $0.id) < ($1.generation, $1.id) }
@@ -477,11 +492,12 @@ public enum DeviceRegistry {
         return Graph(entries, genesis: genesis, verifications: verifications)
     }
 
-    /// Replays the registry along the credential chain that ends at `credential`.
+    /// Replays the registry along the credential chain that ends at `credential`. Returns the state, and the
+    /// connected entries that can never count along that chain (step 2).
     private static func replay(
         _ entries: [ObjectDigest: RegistryEntry], graph: Graph, accountID: UUID, accountSigningKey: [UInt8],
         genesis: ObjectDigest, credential: ObjectDigest
-    ) throws -> DeviceRegistryState {
+    ) throws -> (state: DeviceRegistryState, neverCounting: Set<ObjectDigest>) {
         guard let root = entries[genesis], case .genesis(_, let rootDevice, let rootEnrolmentKey) = root.body else {
             throw DeviceRegistryError.genesisUnavailable
         }
@@ -572,7 +588,7 @@ public enum DeviceRegistry {
         }
         state.heads = state.validEntries.filter { !hasValidChild.contains($0) }.sorted()
         state.retainedEntries = graph.closure(of: (0..<graph.ids.count).filter { !dead.contains($0) })
-        return state
+        return (state, Set(dead.map { graph.ids[$0] }))
     }
 
     /// Applies entries in replay order.
