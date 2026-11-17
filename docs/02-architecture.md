@@ -1071,7 +1071,8 @@ confirms). `reuploadPlan()` says what would be uploaded — the account's own va
 and the shared vaults that cannot be — for the question; the call takes the plan the person was shown and refuses
 (`reuploadNotConfirmed`) if it no longer describes this device, as `deleteVault` does with its count. It needs the
 vault unlocked and this device registered, not revoked and following the current password. It holds the session's
-sync lock from before the first step, so no ordinary sync runs between the two. Then:
+sync lock from before the plan is checked, so no ordinary sync merges anything between the answer and the upload,
+or runs between the two steps. Then:
 
 1. `SyncTransport.startStoreAgain()`: the one call that may recreate a store this device has seen and found missing.
    CloudKit saves the zone again (deleting it first where CloudKit says its key was reset), keeps the marker, and
@@ -1154,8 +1155,10 @@ sync lock from before the first step, so no ordinary sync runs between the two. 
 - *A reset must not look like "never set up".* On CloudKit the marker makes a missing zone `storeReset` for every
   operation. Where no transport says so, the second signal does: the account's objects are not put back, and nothing
   else is published. What tells the two apart is the device's own sync state, which the store cannot write. A8, who
-  can, gains nothing new: erasing the state makes the device a "new" one that publishes its unpublished rows, which
-  A8 could as well read from the same files.
+  can, can erase it: the device is then a "new" one to itself, and publishes the rows it wrote again, unasked, as
+  segments from its first number. The store gains ciphertext it held before, under the same keys; the reused numbers
+  are the fork of SR15. A store emptied of everything but one registry entry is not "emptied" either (SR18): the
+  account's small objects are put back as ever, and no vault's contents are.
 - *The person deleted the data on purpose, on another device.* Hence the question, and its wording
   (`ReuploadQuestion`): it says the data is gone from the sync storage, that this may have been deliberate, what
   will be uploaded (how many items in how many vaults, and the encrypted keys and device list), that uploading

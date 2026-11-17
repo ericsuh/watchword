@@ -102,12 +102,13 @@ extension VaultSession {
         case .unknown: throw VaultError.deviceNotRegistered
         }
         guard view.state.pendingCredentials.isEmpty else { throw VaultError.passwordChangedOnAnotherDevice }
-        guard try await reuploadPlan() == plan else { throw VaultError.reuploadNotConfirmed }
-        _ = try requireKeys(since: epoch)
-        // Held from before the store is started again, so that no ordinary sync runs between the two steps.
+        // Held from before the plan is checked, so that no ordinary sync merges anything between the person's
+        // answer and the upload, or runs between starting the store again and filling it.
         guard !syncInFlight else { throw SyncError.syncInProgress }
         syncInFlight = true
         defer { syncInFlight = false }
+        guard try await reuploadPlan() == plan else { throw VaultError.reuploadNotConfirmed }
+        _ = try requireKeys(since: epoch)
         try await syncSettings.transport.startStoreAgain()
         return try await runSync(reconcile: false, reuploading: true)
     }

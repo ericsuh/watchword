@@ -1007,6 +1007,8 @@ other does, and reported as not required on Linux, where they cannot compile.
   reset is not undone; a shared vault is refused by name and does not keep the question open. *Screens* ("Screen
   models: after the sync storage was reset"): the notice and headline, the question's wording (counts, deleted and
   shared vaults), Not Now, Upload Again, a stale question renewed, a lock dropping the question, the refusals.
+  *Automatic syncing* ("Automatic sync outcome"): at a reset store, of either kind, every sync the policy starts is
+  a failure it backs off from, and no number of them uploads anything or starts the store again.
   *Adversarial*: "sync log" (`AdversarialSyncStoreResetTests`: an emptied store with a replay planted in the state
   file; a device's own objects deleted one by one; resets repeated after every upload; a store rolled back to an
   older copy; a whole-log vault with a judge asked to hand on), "sync with real keys"
