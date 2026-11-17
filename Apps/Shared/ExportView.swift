@@ -99,6 +99,9 @@ struct ExportView: View {
                         }
                     #endif
                 }
+                // A Section is not an accessibility element: without `.contain` its identifier would replace
+                // every child's (on macOS the report's own rows lost theirs), so it becomes a container first.
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(AccessibilityID.Export.report)
             }
             ErrorText(message: model.errorMessage)
