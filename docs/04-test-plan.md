@@ -1001,7 +1001,13 @@ retired password, and A8:
   by a planted directory row, the same with the header row removed, and with the header row replaced by another
   account's, are each refused at a password unlock and at a quick unlock; a key that arrived by grant is never
   the Personal vault's key, on a store with neither header nor anchor.
-- Another member's registry (Z6), as a function over `RegistryFixture`: the member's own change followed when it
+- Another member's registry (Z6), through two sessions sharing a vault (`AdversarialSharedVaultMemberDevicesTests.swift`,
+  suite "shared vaults through the session"): a member's laptop, revoked with a password change, forks the member's
+  registry two generations long and writes into the vault as the member; the owner, who had followed the genuine
+  change, reads the member's phone and not the laptop and reports the disagreement; another member who sees both
+  branches at once reads neither device, keeps what the laptop wrote while it was the member's, reports it, refuses
+  a wrong code, and on the member's code reads the phone and saves a signed, settled anchor. And as a function
+  over `RegistryFixture`: the member's own change followed when it
   is all there is; a forged branch two generations long ignored and reported once the genuine one is anchored;
   both arriving together followed by neither, with only the uncontested device counting; the forged branch alone
   followed and then held to, the genuine one reported, and the member's code naming it; a settled disagreement not
