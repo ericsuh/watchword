@@ -1,8 +1,9 @@
-# @Suite display names of the adversarial areas, one per line. `test` and `test:adversarial` fail unless each appears
-# in the test output, so a renamed or deleted suite cannot pass silently as "fewer tests ran". Renaming a suite breaks
-# CI on purpose: update this list alongside it. A `darwin:` prefix marks a suite only an Apple platform can build; it
-# is required on macOS and skipped, with a note, elsewhere (adversarial-suites.sh). (Data, not a task: mise runs only
-# executable files.)
+# The adversarial areas, one per line: each is the @Suite display name of its suite without the leading
+# "Adversarial: ". `test` and `test:adversarial` fail unless the test output says that suite passed (the whole name, on
+# Swift Testing's own line for it: adversarial-suites.sh), so a renamed, deleted, disabled or skipped suite cannot pass
+# silently as "fewer tests ran". Renaming a suite breaks CI on purpose: update this list alongside it. A `darwin:`
+# prefix marks a suite only an Apple platform can build; it is required on macOS and skipped, with a note, elsewhere.
+# (Data, not a task: mise runs only executable files.)
 envelope and KDF
 AutoFill service matching
 AutoFill request model

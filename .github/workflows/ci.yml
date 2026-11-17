@@ -148,10 +148,18 @@ jobs:
       - name: mise run lint
         run: mise run lint
 
-      # The scripts CI is made of (screenshots.yml's inline steps, app:screenshots and its helper), run against
-      # stand-ins for the tools they call. Here because it is as quick as the lint and needs no build.
+      # The scripts CI is made of (screenshots.yml's inline steps, the app tasks, the audits and cloud-setup.sh), run
+      # against stand-ins for the tools they call. Here because it is as quick as the lint and needs no build.
       - name: mise run test:scripts
         run: mise run test:scripts
+
+      # The two audits that need no build, on every pull request: an unpinned action, or a mise bump that reached CI
+      # but not cloud sessions, turns `Required checks` red here instead of being found by the nightly, or by nobody
+      # (docs/07-supply-chain.md §3.1, §3.3).
+      - name: mise run audit:actions
+        run: mise run audit:actions
+      - name: mise run audit:mise-pins
+        run: mise run audit:mise-pins
 
   app-tests:
     # The Xcode app, unit and UI test suites (milestone 2 in docs/03-implementation-plan.md): AppKit and UIKit, the

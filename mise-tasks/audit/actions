@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 #MISE description="Fail if any workflow references an action by tag or branch instead of a 40-hex commit SHA"
 #
-# A tag can be moved; a SHA cannot (docs/07-supply-chain.md). This is the quiet way a supply-chain foothold gets
-# introduced, so the nightly workflow runs it as well as `check`.
+# A tag can be moved; a SHA cannot (docs/07-supply-chain.md §3.1). This is the quiet way a supply-chain foothold gets
+# introduced, so it runs on every pull request (ci.yml's lint job), in the nightly workflow and in `check`.
+#
+# The workflows are read as YAML, not searched as text: `- {uses: a/b@v1}`, `"uses": a/b@v1`, `uses : a/b@v1` and a
+# value on the line after its key are all the same thing to GitHub and were all invisible to the `grep` this used to
+# be. `.github/scripts/yaml-audit.py` reads the subset of YAML the workflows are written in and refuses the rest, so a
+# spelling it does not understand fails here rather than passing unread (Tests/ScriptTests/test_audit_actions.py).
 set -euo pipefail
 
-bad=$(grep -rhoE '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]]+' .github/workflows \
-  | sed -E 's/.*uses:[[:space:]]*//' \
-  | grep -vE '@[0-9a-f]{40}$' || true)
-if [ -n "$bad" ]; then
-  echo "::error::These actions are not pinned to a commit SHA:"
-  echo "$bad"
-  exit 1
-fi
-echo "All actions pinned to commit SHAs."
+exec python3 -I "$(dirname "${BASH_SOURCE[0]}")/../../.github/scripts/yaml-audit.py" actions .github

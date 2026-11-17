@@ -82,7 +82,7 @@ fi
 #                     filter, only `test --filter=<pattern> --log test-output.log`: no coverage, audit or build step
 #   test:adversarial  adversarial-tests
 #   build:strict      strict-memory-safety: `build:strict --require --verbose`, then audit:unsafe
-#   lint              lint: `lint`, then `test:scripts`
+#   lint              lint: `lint`, then `test:scripts`, `audit:actions` and `audit:mise-pins`
 #   app:test          app-tests: `app:test <platform> --results TestResults`, then `app:diagnose` if it failed, without
 #                     the best-effort AutoFill step. `all` runs both schemes in one job, and ios every iOS UI test in
 #                     one, where ci.yml runs macOS as one leg and the iOS tests as four; a filter of comma-separated
@@ -118,6 +118,8 @@ case "$gate" in
   lint)
     step lint
     step test:scripts
+    step audit:actions
+    step audit:mise-pins
     ;;
   app:test)
     if [ -n "$filter" ]; then
