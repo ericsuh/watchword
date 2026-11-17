@@ -394,7 +394,9 @@ struct AdversarialSharingTests {
         var incoming = try await IncomingInvitation.begin(
             Invitation(vaultID: household.vaultID, ownerAccountID: household.owner.accountID), knownOwner: nil,
             directory: directory, contacts: contacts)
-        try await incoming.confirm(.comparedByEye, contacts: contacts, signedBy: guest.keyset, at: Self.now)
+        try await incoming.confirm(
+            .comparedByEye(shown: household.owner.bundle.fingerprint), contacts: contacts, signedBy: guest.keyset,
+            at: Self.now)
         #expect(throws: SharingError.ownKeySubstituted) {
             _ = try incoming.accept(
                 membership: household.ledger.chain.map(\.encoded),
@@ -415,7 +417,8 @@ struct AdversarialSharingTests {
         var victim = members[0]
         let attacker = try await world.member("attacker", seed: 49)
         _ = try await victim.contacts.verify(
-            attacker.bundle, evidence: .comparedByEye, signedBy: victim.keyset, at: Self.now)
+            attacker.bundle, evidence: .comparedByEye(shown: attacker.bundle.fingerprint), signedBy: victim.keyset,
+            at: Self.now)
 
         let before = try victim.ledger(vault).state
         await #expect(throws: SharingError.vaultOwnerConflict(vaultID: vault)) {
@@ -1469,7 +1472,8 @@ struct AdversarialSharingTests {
         let otherStore = InMemoryVerifiedContactStore()
         let othersContacts = VerifiedContacts(store: otherStore, account: other.bundle)
         _ = try await othersContacts.verify(
-            attacker.bundle, evidence: .comparedByEye, signedBy: other.keyset, at: Self.now)
+            attacker.bundle, evidence: .comparedByEye(shown: attacker.bundle.fingerprint), signedBy: other.keyset,
+            at: Self.now)
         let foreign = try #require(await otherStore.pin(for: target.accountID))
 
         // The same pin re-signed by the attacker, claiming to be mine.
@@ -1485,7 +1489,8 @@ struct AdversarialSharingTests {
         }
 
         // A genuine pin of mine for one contact, copied under another contact's name.
-        let mine = try await contacts.verify(other.bundle, evidence: .comparedByEye, signedBy: me.keyset, at: Self.now)
+        let mine = try await contacts.verify(
+            other.bundle, evidence: .comparedByEye(shown: other.bundle.fingerprint), signedBy: me.keyset, at: Self.now)
         #expect(mine.accountID == other.accountID)
         await store.savePin(try #require(await store.pin(for: other.accountID)), for: target.accountID)
         #expect(try await contacts.pinned(target.accountID) == nil)
@@ -1879,7 +1884,8 @@ struct AdversarialSharingTests {
         #expect(try await afterwards.checkMemberKeys(against: household.contacts).substituted.isEmpty)
         // ... or verify the new keys with the member and replace the pin, explicitly.
         _ = try await household.contacts.verify(
-            impostor.bundle, evidence: .comparedByEye, signedBy: household.owner.keyset, at: Self.now,
+            impostor.bundle, evidence: .comparedByEye(shown: impostor.bundle.fingerprint),
+            signedBy: household.owner.keyset, at: Self.now,
             replacingPin: true)
         let verified = try await ledger.checkMemberKeys(against: household.contacts)
         #expect(verified.substituted.isEmpty)

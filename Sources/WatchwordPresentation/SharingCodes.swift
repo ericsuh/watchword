@@ -104,11 +104,15 @@ public struct OwnFingerprint: Hashable, Sendable {
 public struct ContactSummary: Hashable, Sendable {
     public let accountID: UUID
     public let safetyNumber: String
+    /// The fingerprint `safetyNumber` spells: what a comparison by eye is evidence for
+    /// (`FingerprintConfirmation.evidence(showing:)`), so that the session pins these keys or none.
+    public let fingerprint: Fingerprint
     /// Already pinned: compared before, and the directory's keys are the ones compared.
     public let isVerified: Bool
 
     public init(_ candidate: ContactCandidate) {
         accountID = candidate.accountID
+        fingerprint = candidate.fingerprint
         safetyNumber = candidate.fingerprint.safetyNumber
         if case .verified = candidate.trust {
             isVerified = true
@@ -133,11 +137,13 @@ public struct FingerprintConfirmation: Hashable, Sendable {
 
     public init() {}
 
-    /// The evidence to offer, or `nil` while the person has given none.
-    public func evidence() -> VerificationEvidence? {
+    /// The evidence to offer, or `nil` while the person has given none. `shown` is the fingerprint whose safety number
+    /// the screen displayed while the person compared: their "they match" is evidence for those keys only, and the
+    /// session refuses to pin any other bundle on it (review finding Z40).
+    public func evidence(showing shown: Fingerprint) -> VerificationEvidence? {
         let typed = typedSafetyNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         if !typed.isEmpty { return .safetyNumber(typed) }
-        if comparedByEye { return .comparedByEye }
+        if comparedByEye { return .comparedByEye(shown: shown) }
         return nil
     }
 

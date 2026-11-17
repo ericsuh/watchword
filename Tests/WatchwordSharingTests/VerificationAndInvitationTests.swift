@@ -126,7 +126,7 @@ struct VerificationAndInvitationTests {
             switch method {
             case .safetyNumber: evidence = .safetyNumber(them.bundle.fingerprint.safetyNumber)
             case .scannedCode: evidence = .scannedCode(FingerprintCode(bundle: them.bundle).payload)
-            case .comparedByEye: evidence = .comparedByEye
+            case .comparedByEye: evidence = .comparedByEye(shown: them.bundle.fingerprint)
             }
             let contact = try await contacts.verify(them.bundle, evidence: evidence, signedBy: me.keyset, at: Self.now)
             #expect(contact.bundle == them.bundle)
@@ -158,7 +158,9 @@ struct VerificationAndInvitationTests {
                 them.bundle, evidence: .scannedCode("junk"), signedBy: me.keyset, at: Self.now)
         }
         await #expect(throws: SharingError.notPermitted, "pins are signed by the account they belong to") {
-            _ = try await contacts.verify(them.bundle, evidence: .comparedByEye, signedBy: other.keyset, at: Self.now)
+            _ = try await contacts.verify(
+                them.bundle, evidence: .comparedByEye(shown: them.bundle.fingerprint), signedBy: other.keyset,
+                at: Self.now)
         }
         #expect(await store.pin(for: them.accountID) == nil)
         #expect(try await contacts.trust(of: them.bundle) == .unverified)
@@ -169,7 +171,8 @@ struct VerificationAndInvitationTests {
         let me = try SharingParty(seed: 1)
         let them = try SharingParty(seed: 2)
         let (contacts, _) = Self.book(for: me)
-        _ = try await contacts.verify(them.bundle, evidence: .comparedByEye, signedBy: me.keyset, at: Self.now)
+        _ = try await contacts.verify(
+            them.bundle, evidence: .comparedByEye(shown: them.bundle.fingerprint), signedBy: me.keyset, at: Self.now)
 
         // The same account ID with other keys: what a store substituting a key would publish.
         let replacement = try SharingParty(accountID: them.accountID, seed: 900).bundle
@@ -258,7 +261,8 @@ struct VerificationAndInvitationTests {
         #expect(invitation.fingerprintToConfirm == nil)
         await #expect(throws: SharingError.invitationAlreadyCompleted) {
             try await invitation.confirm(
-                .comparedByEye, contacts: household.contacts, signedBy: owner.keyset, at: Self.now)
+                .comparedByEye(shown: setup.guest.bundle.fingerprint), contacts: household.contacts,
+                signedBy: owner.keyset, at: Self.now)
         }
 
         var generator = SeededGenerator(seed: 5)
@@ -317,7 +321,9 @@ struct VerificationAndInvitationTests {
         var outgoing = try await OutgoingInvitation.begin(
             vaultID: setup.household.vaultID, inviting: setup.guest.accountID, as: role,
             directory: setup.directory, contacts: contacts)
-        try await outgoing.confirm(.comparedByEye, contacts: contacts, signedBy: inviter.keyset, at: now)
+        try await outgoing.confirm(
+            .comparedByEye(shown: setup.guest.bundle.fingerprint), contacts: contacts, signedBy: inviter.keyset,
+            at: now)
         let package = try outgoing.issue(
             ledger: setup.household.ledger, vaultKey: setup.household.vaultKey, signedBy: inviter.keyset)
         try setup.household.adopt(package.record.contents)
@@ -372,7 +378,9 @@ struct VerificationAndInvitationTests {
 
         var incoming = try await IncomingInvitation.begin(
             invitation, knownOwner: nil, directory: setup.directory, contacts: setup.guestContacts)
-        try await incoming.confirm(.comparedByEye, contacts: setup.guestContacts, signedBy: guest.keyset, at: Self.now)
+        try await incoming.confirm(
+            .comparedByEye(shown: setup.household.owner.bundle.fingerprint), contacts: setup.guestContacts,
+            signedBy: guest.keyset, at: Self.now)
         let joined = try incoming.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
         #expect(joined.ledger.state.member(guest.accountID)?.role == .readWrite)
         #expect(
@@ -391,7 +399,8 @@ struct VerificationAndInvitationTests {
                 invitation, knownOwner: nil, directory: setup.directory, contacts: setup.guestContacts)
             if incoming.fingerprintToConfirm != nil {
                 try await incoming.confirm(
-                    .comparedByEye, contacts: setup.guestContacts, signedBy: guest.keyset, at: Self.now)
+                    .comparedByEye(shown: setup.household.owner.bundle.fingerprint), contacts: setup.guestContacts,
+                    signedBy: guest.keyset, at: Self.now)
             }
             return incoming
         }

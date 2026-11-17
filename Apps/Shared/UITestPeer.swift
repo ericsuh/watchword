@@ -118,7 +118,9 @@
         /// The other person accepts `invitation`, having compared the owner's safety number with the app's by eye.
         func acceptInvitation(_ invitation: Invitation) async throws {
             let member = try await householdMember()
-            try await member.acceptInvitation(invitation, ownerEvidence: .comparedByEye)
+            // The number the other person's screen would show: the comparison is evidence for those keys only.
+            let shown = try await member.contactCandidate(invitation.ownerAccountID).fingerprint
+            try await member.acceptInvitation(invitation, ownerEvidence: .comparedByEye(shown: shown))
             try await member.sync()
         }
 

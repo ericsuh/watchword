@@ -141,13 +141,15 @@ struct SharingCodesTests {
     }
 
     @Test("a typed safety number is preferred to the person's own comparison, and nothing else is evidence")
-    func evidenceOrder() {
+    func evidenceOrder() throws {
+        // The fingerprint on the screen: a comparison by eye is evidence for it and for no other (Z40).
+        let shown = try Keyset.generate(accountID: UUID()).publicKeyBundle().fingerprint
         var confirmation = FingerprintConfirmation()
-        #expect(confirmation.evidence() == nil)
+        #expect(confirmation.evidence(showing: shown) == nil)
         confirmation.comparedByEye = true
-        #expect(confirmation.evidence() == .comparedByEye)
+        #expect(confirmation.evidence(showing: shown) == .comparedByEye(shown: shown))
         confirmation.typedSafetyNumber = " 12345 "
-        #expect(confirmation.evidence() == .safetyNumber("12345"))
+        #expect(confirmation.evidence(showing: shown) == .safetyNumber("12345"))
     }
 
     @Test("a safety number shows as twelve groups of five")

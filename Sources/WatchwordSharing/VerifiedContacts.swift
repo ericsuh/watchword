@@ -7,7 +7,9 @@ public enum VerificationMethod: UInt8, Sendable, Hashable {
     case safetyNumber = 1
     /// The person scanned the other person's QR code and it matched.
     case scannedCode = 2
-    /// The person compared the two safety numbers themselves and said they match. The code cannot check this one.
+    /// The person compared the two safety numbers themselves and said they match. The code cannot check the
+    /// comparison; it does check that the bundle pinned is the one whose number was on the screen
+    /// (`VerificationEvidence.comparedByEye(shown:)`).
     case comparedByEye = 3
 }
 
@@ -16,7 +18,11 @@ public enum VerificationEvidence: Sendable, Hashable {
     case safetyNumber(String)
     /// The text of a scanned QR code (`FingerprintCode.payload`).
     case scannedCode(String)
-    case comparedByEye
+    /// The person's own comparison of the number a screen showed with the other person's. It carries the fingerprint
+    /// that screen showed: the key directory is asked again between showing a number and pinning a bundle, and
+    /// whoever serves it (A1) may answer differently, so a comparison is evidence for the bundle that was shown and
+    /// for no other (review finding Z40). Every kind of evidence names the keys it is about; none is a bare "yes".
+    case comparedByEye(shown: Fingerprint)
 }
 
 /// A key bundle whose fingerprint this account's person has confirmed out of band, or the account's own.
@@ -141,8 +147,9 @@ public struct VerifiedContacts: Sendable {
 
     /// Confirms `bundle`'s fingerprint with what the person supplied and pins it.
     ///
-    /// - Throws: `fingerprintMismatch` if a typed number or scanned code is not this bundle's; `keySubstituted` if a
-    ///   different bundle is already pinned for the account and `replacingPin` is false.
+    /// - Throws: `fingerprintMismatch` if a typed number, a scanned code or the fingerprint a comparison was made
+    ///   against is not this bundle's; `keySubstituted` if a different bundle is already pinned for the account and
+    ///   `replacingPin` is false.
     public func verify(
         _ bundle: PublicKeyBundle, evidence: VerificationEvidence, signedBy keyset: Keyset, at now: Date,
         replacingPin: Bool = false
@@ -164,7 +171,10 @@ public struct VerifiedContacts: Sendable {
                 throw SharingError.fingerprintMismatch
             }
             method = .scannedCode
-        case .comparedByEye:
+        case .comparedByEye(let shown):
+            // What the person compared is what the screen showed. A bundle fetched since then with another
+            // fingerprint is one nobody compared (Z40).
+            guard bundle.fingerprint == shown else { throw SharingError.fingerprintMismatch }
             method = .comparedByEye
         }
         if let existing = try await pinned(bundle.accountID) {

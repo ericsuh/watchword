@@ -717,6 +717,17 @@ sceptical verifier. Nothing was run during the audit; a finding called confirmed
 fixes were made afterwards in a remote Linux session, each from a reproduction that failed first where one could be
 written. Severities are the verifier's.
 
+### Shared vaults: verification, membership and the session's sharing paths (Z40 to Z59)
+
+The adversaries are those of architecture §2: the sync store and key directory (**A1**), a current member (**A4**), a
+former member (**A5**) and someone with the device's files (**A8**). Each finding was reproduced by a test that failed
+on the code as audited unless its row says otherwise; *Mac only* marks what was changed under `Apps/` and has not been
+compiled.
+
+| ID | Severity | Finding and threat | Disposition |
+| --- | --- | --- | --- |
+| Z40 | Critical | "Compared by eye" pinned whatever the key directory returned on a second lookup. `contactCandidate` fetched the bundle whose safety number the screen showed and dropped it; `verifyContact` and `acceptInvitation` fetched again, and `VerificationEvidence.comparedByEye` carried nothing to check the second answer against. Whoever serves the directory (A1; with a file-based directory any writer of the shared folder, so A4) showed the real number, then answered with a bundle of its own: on the inviting side the next invitation wrapped the vault key to it; on the accepting side the chain was anchored on it, so a chain it signed, listing the invitee's real keys with a grant of a key it knew, was joined and everything saved there was its to read. The toggle is offered on both screens and is what the UI tests use. Q2 had fixed only the pasted code. | **Fixed.** Every kind of evidence names the keys it is about: `.comparedByEye(shown:)` carries the fingerprint the screen displayed, and `VerifiedContacts.verify` refuses (`fingerprintMismatch`) a bundle with any other, as it already did for a typed number or a scanned code; the screens pass the fingerprint of the step that was shown (`FingerprintConfirmation.evidence(showing:)`). Bound in the module, so every caller of `verify` is held, the two invitation state machines included; `comparedByEye` itself stays until ADR 0010 replaces it. `invite` was already held by the pin (`keySubstituted`). `AdversarialSharedVaultTests` "evidence pins the bundle whose number was shown…", "an invitation never wraps the vault key to a bundle the directory swapped in…", "accepting anchors the chain on the owner whose number was shown…" (with the forged chain; joined before the fix), "the screens' own comparison toggle pins what the screen showed…". *Mac only*: `Apps/Shared/UITestPeer.swift` (the debug peer's own acceptance). |
+
 ### CI, supply chain and documentation claims (Z100 to Z118)
 
 The adversaries are those of `07-supply-chain.md` §1 (**T1** a dependency's author, **T2** an action's, **T3** a build

@@ -184,7 +184,9 @@ for the typed safety number or the person's own "they match", and the pin record
 S16). `scannedCode` is for a code read by the camera from the other person's screen, which the app does not do yet,
 so it never records one. The role step names the account being invited and says how its keys were confirmed, never
 "the numbers match" unless they were compared (finding 2). Accepting an invitation from an owner verified before
-still asks before joining (finding 8).
+still asks before joining (finding 8). The person's "they match" is evidence for the number that was on the screen
+and for nothing else: the screen hands the session the fingerprint it displayed, and a key directory that answers the
+session's next lookup with other keys gets `fingerprintMismatch`, not a pin (review finding Z40; architecture §8.4).
 
 **Ambiguous match.** Both accounts listed with their distinguishing field (username/email) and the
 matched scope. Nothing pre-selected.

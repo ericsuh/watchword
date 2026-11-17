@@ -524,6 +524,10 @@ no honest version held aside. Scenarios S3 and S4 through the session are
 published, planned or left, the owner's device stopped too, a member who may still write merged; and, in this suite
 (`AdversarialSharedVaultLaterFormatTests.swift`), a later record the store shows before the record it follows, offered
 again until it stops the chain, and later records signed by a member or by nobody, which leave the vault writable.
+From the end-to-end audit (`AdversarialSharedVaultShownKeysTests.swift`, Z40): a key directory that changes its answer
+between the safety number shown and the pin, for each kind of evidence and for each entry point (`verifyContact`,
+`invite`, `acceptInvitation` with a chain the store's own bundle signed, and the two screens' comparison toggle);
+nothing is pinned, wrapped or joined.
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

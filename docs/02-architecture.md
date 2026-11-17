@@ -1176,6 +1176,15 @@ fingerprint code pasted from a message only names the account to look up: it is 
 code read by the camera from the other person's screen and is never recorded until the app can scan one (finding 2).
 `VerifiedContact.method` therefore says what the person did (S16).
 
+**Evidence names the keys it is about.** The key directory is untrusted and is asked more than once between a screen
+showing a safety number and a bundle being pinned (`contactCandidate`, then `verifyContact`, `invite` or
+`acceptInvitation`, each with a lookup of its own), and whoever serves it may answer differently each time. So no
+evidence is a bare "yes": a typed number and a scanned code are matched against the bundle about to be pinned, and
+`.comparedByEye(shown:)` carries the fingerprint the screen displayed (`ContactSummary.fingerprint`,
+`FingerprintConfirmation.evidence(showing:)`), which `VerifiedContacts.verify` compares with that bundle's. Any
+difference is `fingerprintMismatch` and nothing is pinned, wrapped to or anchored on (review finding Z40). Once a
+contact is pinned, a later lookup that returns other keys is `keySubstituted`, as before.
+
 **Names of shared vaults.** A vault's name is a record any member who may write can change (§8.7; S37 attributes it
 to its writer), so a member can call a shared vault "Personal". The owner's decision on the review (2026-11-16, made
 here for the owner to confirm): renaming stays a write like any other, because making it the owner's or an

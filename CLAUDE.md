@@ -536,6 +536,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (a rotation, `makeGrant`) takes a `MemberKeyCheck` made on the current head, which only
   `MembershipLedger.checkMemberKeys` makes: a member whose listed keys differ from the pin is refused.
   (`MemberKeyCheck.unchecked` is for `WatchwordTestSupport`; no production target calls it.)
+- **Evidence names the keys it is about** (Z40): the key directory is asked again between a safety number being shown
+  and a bundle being pinned, so `VerificationEvidence.comparedByEye(shown:)` carries the fingerprint the screen
+  displayed and `VerifiedContacts.verify` refuses any other bundle (`fingerprintMismatch`), as for a typed number or a
+  scanned code. Never add evidence that is a bare "yes", and never pin a bundle fetched after the one shown.
 - Bundles are compared with `hasSameKeys`, never `==`: Ed25519 signing is randomised on CryptoKit, so the same keyset
   gives a different self-signature each time. A Linux pass cannot show a mistake here.
 - A grant's vault, key ID and recipient come from its storage location, and its sender must be the one account

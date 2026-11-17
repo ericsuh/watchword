@@ -316,7 +316,7 @@ public final class InvitationModel {
 
     public func confirmFingerprint() async {
         guard case .compareFingerprint(let contact) = step else { return }
-        guard let evidence = confirmation.evidence() else {
+        guard let evidence = confirmation.evidence(showing: contact.fingerprint) else {
             errorMessage = "Type their safety number, or confirm that you compared the two."
             return
         }
@@ -394,8 +394,8 @@ public final class AcceptInvitationModel {
     }
 
     public func accept() async {
-        guard case .compareOwner = step, let invitation else { return }
-        guard let evidence = confirmation.evidence() else {
+        guard case .compareOwner(let owner) = step, let invitation else { return }
+        guard let evidence = confirmation.evidence(showing: owner.fingerprint) else {
             errorMessage = "Type the owner's safety number, or confirm that you compared the two."
             return
         }
