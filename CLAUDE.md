@@ -547,7 +547,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   before it proposes and never publishes a record that is not `awaitingPublication`. **Except an addition its own
   branch went on to undo** (`wasUndoneOnItsBranch`, Z43): that is let go, never replayed alone, and if the key that
   branch wrapped to the member is the accepted head's they are in `exposedKeyHolders`: `recordsToReseal` is empty,
-  `pendingRotation` says so, and an administrator's device rotates. Both are functions of the records held.
+  `pendingRotation` says so, and an administrator's device rotates. Both are functions of the records held, and both
+  believe a branch only as far as accounts with standing on the accepted head signed it, with the key matched by the
+  record that introduced it, on the accepted chain, never by its ID (Z53, as S29 for owed removals).
 - A record's hash covers its signed content, not its signature; candidates sharing a hash are each examined until
   one verifies (S3, S4). Every object *name* ends in a digest of the whole object, signature included, so nobody can
   take a predictable record's name (S20).

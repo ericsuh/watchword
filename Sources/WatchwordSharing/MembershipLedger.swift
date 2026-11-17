@@ -579,26 +579,54 @@ public struct MembershipLedger: Sendable {
         // while they were a member was wrapped to them, and if it is the accepted head's key (the rotation that
         // removed them lost too), someone outside the vault holds its key. Not if the branch went on to add them
         // again: what it last meant is that they are a member, and that addition is its author's to replay.
+        //
+        // The branch is believed only as far as accounts with standing signed it, as for an owed removal (S29,
+        // review finding Z53): the removal by someone who could remove such a member on the accepted head (a
+        // departure needs none: the member's own signature asked for it), and the addition by someone who could
+        // add them there. And the key must be the head's by the record that introduced it, not by its ID: on a
+        // branch anyone who could once sign may name any key ID, the current key's among them. Without both, a
+        // former administrator's dead branch would stop re-sealing in the whole vault and have every
+        // administrator's device rotate, as often as they liked.
+        func administrator(_ accountID: UUID) -> Member? {
+            head.member(accountID).flatMap { $0.role.isAdministrator ? $0 : nil }
+        }
         var exposers: [Int: UUID] = [:]
         for index in nodes.indices where !nodes[index].isOnChain && !head.isDeleted {
             guard let parent = nodes[index].parent else { continue }
+            let record = nodes[index].link.record
             let accountID: UUID
-            switch nodes[index].link.record.operation {
-            case .removeMember(let removed): accountID = removed
-            case .memberLeft(let left, _): accountID = left
+            let isDeparture: Bool
+            switch record.operation {
+            case .removeMember(let removed): (accountID, isDeparture) = (removed, false)
+            case .memberLeft(let left, _): (accountID, isDeparture) = (left, true)
             case .createVault, .addMember, .changeRole, .rotateKey, .deleteVault: continue
             }
             guard head.member(accountID) == nil, let then = nodes[parent].link.state.member(accountID) else {
                 continue
             }
+            if !isDeparture {
+                guard let remover = administrator(record.signer), then.role != .owner,
+                    then.role != .administrator || remover.role == .owner
+                else { continue }
+            }
             // Every state of this path in which they were a member, back to the record that added them.
             var heldHeadKey = false
+            var addition = parent
             var cursor: Int? = parent
-            while let at = cursor, nodes[at].link.state.epoch >= then.since, !heldHeadKey {
-                heldHeadKey = nodes[at].link.state.vaultKeyID == head.vaultKeyID
+            while let at = cursor, nodes[at].link.state.epoch >= then.since {
+                if nodes[at].link.state.vaultKeyID == head.vaultKeyID, nodes[nodes[at].introducer].isOnChain {
+                    heldHeadKey = true
+                }
+                addition = at
                 cursor = nodes[at].parent
             }
             guard heldHeadKey else { continue }
+            if !nodes[addition].isOnChain {
+                let added = nodes[addition].link.record
+                guard let adder = administrator(added.signer),
+                    (try? MembershipRules.authorise(added.operation, by: adder, in: head)) != nil
+                else { continue }
+            }
             var takenBack = false
             var below = nodes[index].children.min(by: preferred)
             while let next = below, !takenBack {

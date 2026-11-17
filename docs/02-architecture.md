@@ -1207,7 +1207,15 @@ the vault holds its key. Until a rotation is adopted, `recordsToReseal` is empty
 `pendingRotation` reports `keyHeldOutsideTheVault`, and any device whose account administers the vault plans a
 routine rotation at its next sync. Like `owedRemovals` this is a function of the records held, the records that show
 it are the last let go when branches are trimmed, and a branch that went on to add the member again exposes nobody:
-what it last meant is that they are a member, and that addition is its author's to replay. Not covered, and tracked:
+what it last meant is that they are a member, and that addition is its author's to replay. And like an owed removal
+(S29) the branch is believed only as far as accounts with standing signed it (Z53): the removal by someone who could
+remove such a member on the accepted head (a departure needs none, the member's own signature asked for it), the
+addition by someone who could add them there, and the key the head's **by the record that introduced it**, which must
+be on the accepted chain. A key's ID proves nothing on a branch: whoever could once sign there can name any ID, the
+current key's included. Without these a former administrator's dead branch (a rotation naming the head's key ID, a
+throwaway account added and removed) stopped re-sealing in the whole vault and had every administrator's device
+rotate, as often as it was repeated; and a removal built by a demoted administrator on an honest one's displaced
+invitation had it quietly dropped. Not covered, and tracked:
 an addition that loses alone and is never replayed (its author's device gone, or no longer an administrator) leaves
 its grant standing in the same way with nothing reported.
 

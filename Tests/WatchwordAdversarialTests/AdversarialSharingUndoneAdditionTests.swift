@@ -79,3 +79,135 @@ extension AdversarialSharingTests {
         #expect(takenBack.wasUndoneOnItsBranch(addition) && !takenBack.wasUndoneOnItsBranch(second))
     }
 }
+
+// Review finding Z53: who is believed about a key handed out on a branch that lost.
+extension AdversarialSharingTests {
+    /// Threat: a former administrator (A5) who can still create objects in the store, or with the store's help. The
+    /// owner removed them, rotating to a key they never held. On the dead branch from before their removal, where
+    /// their signature is still valid, they sign a rotation that names the **ID** of the vault's current key (key IDs
+    /// are public), add a throwaway account and remove it again. Believed, that says someone outside the vault holds
+    /// its key: nothing is sealed again in the whole vault, every device shows the warning, and every
+    /// administrator's device rotates, as often as the former administrator repeats it with the next key's ID. A
+    /// key ID on a branch is the vault's key only if a record of the accepted chain introduced it there; and a branch
+    /// is believed about an addition only if its signer could sign the same on the accepted head, as for an owed
+    /// removal (S29).
+    @Test("a former administrator's dead branch exposes nobody, whatever key ID and members it names")
+    func deadBranchExposesNobody() async throws {
+        let base = try await SharingHousehold.make()
+        let former = base.administrator
+        var winning = base
+        let removal = try winning.rotate(.removal(former.accountID), by: base.owner)
+        let headKey = removal.newKeyID
+        #expect(winning.state.vaultKeyID == headKey && winning.state.member(former.accountID) == nil)
+
+        // The dead branch: a rotation naming the head's key ID, a member added under it, and removed again.
+        var branch = base
+        try branch.adopt(
+            ForgedRecord(after: base.state, signer: former.accountID, operation: .rotateKey, newKeyID: headKey)
+                .signed(by: former.keyset))
+        #expect(branch.state.vaultKeyID == headKey)
+        try await branch.add(base.outsider, as: .readWrite, by: former)
+        let addition = try #require(branch.ledger.chain.last).record
+        let undone = try RotationPlanner.plan(
+            .removal(base.outsider.accountID), ledger: branch.ledger, signedBy: former.keyset)
+        try branch.adopt(undone.record.contents)
+
+        var device = winning.ledger
+        let report = device.ingest(branch.ledger.chain.dropFirst(base.ledger.chain.count).map(\.encoded))
+        #expect(report.rejected.isEmpty && !report.changedHead)
+        #expect(device.exposedKeyHolders.isEmpty, "a former administrator's branch was believed")
+        let stale = SealedRecordReference(recordID: UUID(), kind: .item, keyID: base.state.vaultKeyID, version: 2)
+        #expect(device.recordsToReseal(in: [stale]) == [stale], "re-sealing was stopped for the whole vault")
+        #expect(
+            device.pendingRotation(plan: nil, leaveRequests: [], inventory: [], heldKeyIDs: [headKey]).isEmpty)
+        #expect(!device.wasUndoneOnItsBranch(addition))
+    }
+
+    /// Threat: the same, by someone who is still a member and no longer an administrator: the owner made them an
+    /// ordinary member, which rotates nothing, so the key on their old branch really is the vault's. Their branch
+    /// from before that adds an account and removes it. They can hand the key to anyone, being a member; what they
+    /// can no longer do is have every device act on what their records say. And a removal signed by someone with no
+    /// standing does not stop an honest administrator's own addition from being proposed again.
+    @Test("a demoted administrator's branch is not believed, and cannot stop an honest addition being proposed again")
+    func demotedAdministratorsBranch() async throws {
+        var base = try await SharingHousehold.make()
+        let second = try SharingParty(seed: 5301)
+        try await base.add(second, as: .administrator, by: base.owner)
+        let demoted = base.administrator
+        var winning = base
+        try winning.adopt(
+            winning.ledger.proposeRoleChange(of: demoted.accountID, to: .readWrite, signedBy: base.owner.keyset)
+                .encoded())
+        let headKey = winning.state.vaultKeyID
+        #expect(headKey == base.state.vaultKeyID)
+
+        // Their own pair on the stale head.
+        var theirs = base
+        try await theirs.add(base.outsider, as: .readWrite, by: demoted)
+        try theirs.rotate(.removal(base.outsider.accountID), by: demoted)
+        var device = winning.ledger
+        device.ingest(theirs.ledger.chain.dropFirst(base.ledger.chain.count).map(\.encoded))
+        #expect(device.exposedKeyHolders.isEmpty)
+
+        // An honest administrator's addition on the stale head, and the demoted one's removal built on it.
+        var honest = base
+        try await honest.add(base.outsider, as: .readWrite, by: second)
+        let addition = try #require(honest.ledger.chain.last).record
+        let spoiler = try RotationPlanner.plan(
+            .removal(base.outsider.accountID), ledger: honest.ledger, signedBy: demoted.keyset)
+        var other = winning.ledger
+        other.ingest([addition.encoded(), spoiler.record.contents])
+        #expect(other.status(of: addition) == .superseded)
+        #expect(!other.wasUndoneOnItsBranch(addition), "someone with no standing stopped the invitation")
+        #expect(other.exposedKeyHolders.isEmpty)
+        // Undone by the administrator who made it, it is let go and the key reported, as before (Z43).
+        let own = try RotationPlanner.plan(
+            .removal(base.outsider.accountID), ledger: honest.ledger, signedBy: second.keyset)
+        var third = winning.ledger
+        third.ingest([addition.encoded(), own.record.contents])
+        #expect(third.wasUndoneOnItsBranch(addition))
+        #expect(third.exposedKeyHolders == [base.outsider.accountID])
+    }
+}
+
+extension AdversarialSharingTests {
+    /// Threat: the store (A1) flooding a device with valid records on dead branches (an administrator's, kept from
+    /// an owner's record), hoping the two that show someone outside the vault holds its key are the ones dropped
+    /// when the limit on kept branch records is reached; and the member's own departure in place of a removal. The
+    /// records that show an exposure are the last let go, as an owed removal's are, and a departure counts as a
+    /// removal does, with the member's request for standing.
+    @Test("the records that show a key held outside the vault are kept past the branch limit, and a departure counts")
+    func exposureIsKeptAndDeparturesCount() async throws {
+        let base = try await SharingHousehold.make()
+        let outsider = base.outsider.accountID
+        var branch = base
+        try await branch.add(base.outsider, as: .readWrite, by: base.administrator)
+        let addition = try #require(branch.ledger.chain.last).record
+        let request = try LeaveRequest.make(leaving: branch.state, as: base.outsider.keyset)
+        let departure = try RotationPlanner.plan(
+            .departure(request), ledger: branch.ledger, signedBy: base.administrator.keyset)
+        var winning = base
+        try winning.adopt(
+            winning.ledger.proposeRoleChange(of: base.reader.accountID, to: .readWrite, signedBy: base.owner.keyset)
+                .encoded())
+
+        var device = winning.ledger
+        device.ingest([addition.encoded(), departure.record.contents])
+        #expect(device.exposedKeyHolders == [outsider] && device.wasUndoneOnItsBranch(addition))
+
+        let limit = MembershipLimits.maximumRetainedBranchRecords
+        let flood = try (0..<(limit + 40)).map { _ in
+            try base.forgery(.rotateKey, signer: base.administrator, newKeyID: UUID()).signed(
+                by: base.administrator.keyset)
+        }
+        let report = device.ingest(flood)
+        #expect(report.forgotten == 42 && device.branches.count == limit)
+        #expect(device.holds(addition.hash) && device.holds(departure.recordHash), "dropped to make room for junk")
+        #expect(device.exposedKeyHolders == [outsider])
+        // The same from a device that is shown the flood first.
+        var late = winning.ledger
+        late.ingest(flood)
+        late.ingest([departure.record.contents, addition.encoded()])
+        #expect(late.exposedKeyHolders == [outsider] && late.branches == device.branches)
+    }
+}

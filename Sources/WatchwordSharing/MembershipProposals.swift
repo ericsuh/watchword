@@ -37,18 +37,32 @@ extension MembershipLedger {
     /// it alone would sign them back in and wrap the current key to them with nobody asking (review finding Z43).
     /// Records built on the removal are not looked at: an addition after it is another record, replayed by its own
     /// author.
+    ///
+    /// A removal undoes it only if its signer could remove such a member on the accepted head (Z53): anyone who
+    /// could once sign on that branch, a former or demoted administrator, could otherwise build a removal on an
+    /// honest administrator's displaced invitation and have it quietly dropped. A departure carries the member's own
+    /// request and needs no standing.
     public func wasUndoneOnItsBranch(_ addition: MembershipRecord) -> Bool {
-        guard case .addMember(let accountID, _) = addition.operation else { return false }
+        guard case .addMember(let accountID, _) = addition.operation,
+            let added = branches.first(where: { $0.state.hash == addition.hash })
+        else { return false }
+        let head = state
         // `branches` holds every record after its predecessor, so one pass follows every path from the addition.
-        var descendants: Set<MembershipHash> = [addition.hash]
-        for link in branches where descendants.contains(link.record.previousHash) {
+        var descendants: [MembershipHash: MembershipState] = [addition.hash: added.state]
+        for link in branches {
+            guard let before = descendants[link.record.previousHash] else { continue }
             switch link.record.operation {
             case .removeMember(let removed) where removed == accountID:
-                return true
+                if let remover = head.member(link.record.signer), remover.role.isAdministrator,
+                    let target = before.member(accountID), target.role != .owner,
+                    target.role != .administrator || remover.role == .owner
+                {
+                    return true
+                }
             case .memberLeft(let left, _) where left == accountID:
                 return true
             default:
-                descendants.insert(link.state.hash)
+                descendants[link.state.hash] = link.state
             }
         }
         return false
