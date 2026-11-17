@@ -40,9 +40,10 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
   `WatchwordTestSupport` (seeded and deliberately broken RNGs) linked only into test targets.
   That dump is what the manifest evaluates to on the machine running the check, and a manifest is
   a program, so the script also holds it to being one value everywhere: it may import
-  `PackageDescription` and nothing else, and may not use `#if`, `Context.`, `ProcessInfo` or
-  `getenv`. Without that, a dependency added only where `GITHUB_ACTIONS` is unset shows CI a clean
-  dump (review finding Z104).
+  `PackageDescription` and nothing else, and may not name `#if`, `Context`, `ProcessInfo`,
+  `CommandLine`, `getenv`, `#file` or `random`. Without that, a dependency added only where
+  `GITHUB_ACTIONS` is unset shows CI a clean dump (review finding Z104). The words are a tripwire,
+  not a proof that a Swift program is constant; §2.1's review of `Package.swift` is the backstop.
 - **[enforced; not yet run on a Mac]** The pin reaches the apps only through a second check. The
   committed `Package.resolved` governs `swift build` and `swift test`, where this package is the
   root. The apps are built by xcodebuild from a generated project that names the package by path,

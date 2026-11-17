@@ -70,9 +70,11 @@ if grep -nE 'unsafeFlags|\.binaryTarget|\.plugin\(|packageAccess' Package.swift;
 fi
 
 # A manifest is a program, and the structural checks below read what it evaluates to *here*. One that imports
-# anything but PackageDescription, or branches on the platform or the environment (`#if`, `Context.environment`,
-# `ProcessInfo`, `getenv`), can evaluate to something else on another machine: a dependency or a setting that appears
-# only where this script is not running. So the manifest must be the same value everywhere. Comment lines are ignored.
+# anything but PackageDescription, or branches on the platform, the environment, where it is checked out, how it was
+# invoked or chance (`#if`, `Context`, `ProcessInfo`, `getenv`, `#file`, `CommandLine`, `random`), can evaluate to
+# something else on another machine: a dependency or a setting that appears only where this script is not running. So
+# the manifest must be the same value everywhere. The names are refused as words, so an alias for one is refused where
+# it is made. Comment lines are ignored. A tripwire: Package.swift is reviewed like cryptography (docs/07 §2.1).
 manifest_is_constant() { # manifest_is_constant <Package.swift>
   local found
   found=$(grep -nE '^[[:space:]]*(@[A-Za-z_]+(\([^)]*\))?[[:space:]]+)*import([[:space:]]|$)' "$1" \
@@ -82,11 +84,11 @@ manifest_is_constant() { # manifest_is_constant <Package.swift>
     echo "::error file=$1::A manifest may import PackageDescription and nothing else."
     return 1
   fi
-  found=$(grep -nE '#(if|elseif|else)|Context[[:space:]]*\.|ProcessInfo|getenv|canImport' "$1" \
+  found=$(grep -nE '#(if|elseif|else|file)|(^|[^A-Za-z0-9_])(Context|ProcessInfo|CommandLine|getenv|canImport|random|[A-Za-z]*RandomNumberGenerator)([^A-Za-z0-9_]|$)' "$1" \
     | grep -vE '^[0-9]+:[[:space:]]*//' || true)
   if [ -n "$found" ]; then
     echo "$found"
-    echo "::error file=$1::A manifest must not depend on the platform or the environment it is evaluated in."
+    echo "::error file=$1::A manifest must not depend on the platform or the environment it is evaluated in (or on chance)."
     return 1
   fi
 }

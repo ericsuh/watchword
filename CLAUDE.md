@@ -802,7 +802,8 @@ directions are tested; keep both when adjusting constants.
   `.github/scripts/assert-no-dependencies.sh` fails CI on any other package or product, a version or
   `Package.resolved` commit other than the ones it names, `CryptoExtras` linked on a non-Linux platform,
   `.binaryTarget`, `.plugin(` or `unsafeFlags`, a manifest that imports anything but `PackageDescription` or uses
-  `#if`, `Context.`, `ProcessInfo` or `getenv` (it must evaluate to the same package everywhere), and a language mode
+  `#if`, `Context`, `ProcessInfo`, `CommandLine`, `getenv`, `#file` or `random` (it must evaluate to the same package
+  everywhere), and a language mode
   other than Swift 6. Shipped crypto comes only from CryptoKit, Security.framework and CommonCrypto.
 - **`Apps/project.yml` is held to an allowlist** (`.github/scripts/yaml-audit.py`, run by the same script): every key,
   target type, dependency kind and build setting the spec may hold is named there, source paths stay inside `Apps/`,

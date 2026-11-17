@@ -33,9 +33,9 @@ name: Claude PR
 # The Claude job runs in the `staging` environment, so its secret, ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (from
 # `claude setup-token`), is an environment secret, never a repository secret: no job reads it without naming the
 # environment, and a job that names it waits for staging's required reviewer (docs/08-repository-hardening.md §1.2
-# creates the environment and its rules, and §9 prints them). The repository allows GitHub-owned actions only, so this action and the `oven-sh/setup-bun` it uses are
-# listed in `patterns_allowed` at their SHAs (docs/08-repository-hardening.md §1); without that, every run is a startup
-# failure.
+# creates the environment and its rules, and §9 prints them). The repository allows GitHub-owned actions only, so this
+# action and the `oven-sh/setup-bun` it uses are listed in `patterns_allowed` at their SHAs
+# (docs/08-repository-hardening.md §1); without that, every run is a startup failure.
 
 on:
   pull_request:

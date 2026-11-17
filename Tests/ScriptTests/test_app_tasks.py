@@ -303,8 +303,10 @@ class ReleaseBuildTests(AppTaskTestCase):
         self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
 
     def test_the_markers_are_compiled_for_debug_only(self):
-        """Each marker's every use in the app's sources is inside `#if DEBUG`: what makes its absence the evidence."""
+        """Each marker is a string in the app's code, and its every use there is inside `#if DEBUG`: what makes its
+        absence from a Release build the evidence, and a marker that only a comment still mentions a stale one."""
         directory = os.path.join(support.ROOT, "Apps", "Shared")
+        compiled = set()
         for name in sorted(os.listdir(directory)):
             with open(os.path.join(directory, name), encoding="utf-8") as handle:
                 depth, debug = 0, []
@@ -321,9 +323,12 @@ class ReleaseBuildTests(AppTaskTestCase):
                         if debug and debug[-1] == depth:
                             debug.pop()
                         depth -= 1
-                    elif not stripped.startswith("//") and not debug:
+                    elif not stripped.startswith("//"):
                         for marker in MARKERS:
-                            self.assertNotIn(f'"{marker}', line, f"{name}:{number} is compiled for Release")
+                            if f'"{marker}' in line:
+                                self.assertTrue(debug, f"{name}:{number} is compiled for Release")
+                                compiled.add(marker)
+        self.assertEqual(compiled, set(MARKERS))
 
     def test_the_gate_is_a_required_job(self):
         with open(os.path.join(support.ROOT, ".github", "workflows", "ci.yml"), encoding="utf-8") as handle:
