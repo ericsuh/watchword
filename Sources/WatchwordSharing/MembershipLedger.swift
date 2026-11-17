@@ -191,6 +191,60 @@ public struct MembershipLedger: Sendable {
         }
     }
 
+    /// Which of `accountID`'s descriptions of the vault count (its name: what only the owner and administrators may
+    /// write; docs/02-architecture.md §8.7), as far as this device knows. The question to ask, beside
+    /// `writeStanding(of:)`, before merging a description and again about the one held whenever the head has changed;
+    /// a description counts only if its writer's writes count *and* this says so.
+    ///
+    /// - The owner, and an administrator on the accepted head: every description the account signed. Asked about
+    ///   *now*, like `writeStanding`, and for the same reason: nothing in a write says when it was made that its
+    ///   writer could not have chosen. So a name an account wrote before it was made an administrator counts once it
+    ///   is one. That gives nothing away: the account can write the same name again the moment it holds the role.
+    /// - An account that was an administrator and is not now: exactly the descriptions inside the `WriteCut` of the
+    ///   record that ended the role (the latest such record of the accepted chain). That record is a removal, a
+    ///   departure or a change of role, to read-write as to read-only, and every one of them carries a cut
+    ///   (`MembershipRules.accountLosingAdministratorRole`), so the answer is the same on every device whenever it
+    ///   heard of the record: a former administrator's late rename is taken out again by a device that merged it.
+    /// - An account that never was one, and everyone in a deleted vault: none. A read-write member's rename counts
+    ///   on no device, whatever it claims and whoever's version carries it on.
+    ///
+    /// While the account's removal is owed (`owedRemovals`), what the displaced record's branch said of its writes
+    /// is said of its descriptions too.
+    public func administratorStanding(of accountID: UUID) -> AdministratorStanding {
+        let state = self.state
+        guard !state.isDeleted else { return .neverHeld }
+        if state.member(accountID)?.role.isAdministrator == true {
+            switch owedRemovals.first(where: { $0.accountID == accountID })?.standing {
+            case nil, .mayWrite?: return .holdsRole
+            case .ended(let cut, let author, _)?: return .ended(cut: cut, author: author)
+            case .nothingCounts?: return .neverHeld
+            }
+        }
+        for epoch in chain.indices.dropFirst().reversed() {
+            let before = chain[epoch - 1].state
+            let record = chain[epoch].record
+            if MembershipRules.accountLosingAdministratorRole(by: record.operation, in: before) == accountID,
+                let author = before.member(accountID)
+            {
+                return .ended(cut: record.writeCut, author: author)
+            }
+        }
+        return .neverHeld
+    }
+
+    /// The epoch of the latest record of the accepted chain whose cut settled `accountID`'s work: the one that ended
+    /// its permission to write or its administrator role, whichever came last. `nil` if no record did. A device that
+    /// held a key introduced at or after that epoch held the record, and so judged the account's work by its cut.
+    public func latestCutEpoch(of accountID: UUID) -> UInt64? {
+        for epoch in chain.indices.dropFirst().reversed()
+        where MembershipRules.accountWhoseWorkIsCut(by: chain[epoch].record.operation, in: chain[epoch - 1].state)
+            == accountID
+        {
+            return chain[epoch].state.epoch
+        }
+        return nil
+    }
+
     /// Whether `accountID` could write to the vault as of `epoch` of the accepted chain: for showing history, never
     /// for deciding whether to merge a write (`writeStanding(of:)`). The current epoch gives `writePermission(for:)`.
     public func writePermission(for accountID: UUID, atEpoch epoch: UInt64) -> WritePermission {

@@ -708,31 +708,40 @@ public struct AccountSyncReport: Sendable, Equatable {
     }
 }
 
-/// The merger for a vault's description: a last-writer-wins register on (version, device), which is all a vault's
-/// name needs (docs/02-architecture.md §7.7). Deterministic and commutative: every device ends on the version with
-/// the highest stamp, whatever order the versions arrive in. A description is never erased by sync.
+/// The merger for a vault's description: a last-writer-wins register, which is all a vault's name needs
+/// (docs/02-architecture.md §7.7). The stamp that decides is the description's own, the (version, device) of the
+/// write that chose it (`VaultMetadata.descriptionStamp`), not the stamp of the row that carries it: a row sealed
+/// again (a rotation's re-seal, the merge of two copies below, a device registered again) is a carrier, and a
+/// carrier at a higher version must not bring an older name back over a newer one. In a shared vault that is what
+/// keeps the choice of name with the administrators who wrote the descriptions (§8.7, review finding S54): any
+/// member who may write can seal a carrier, and a description's stamp is part of what the judge checks, while a
+/// carrier's version is whatever its sealer chose. Between two carriers of one description the higher row stamp
+/// stands. Deterministic and commutative: every device ends on the description with the highest stamp, whatever
+/// order the versions arrive in. A description is never erased by sync.
 struct VaultMetadataMerger: RecordMerger {
     let sealer: VaultSyncAdapter
 
     func merge(local: StoredRecord, remote: StoredRecord) async throws -> MergeDecision {
         let incoming = try await sealer.openMetadata(remote)
-        let localOpens: Bool
+        let chosen = incoming.descriptionStamp(carriedBy: remote)
         do {
-            _ = try await sealer.openMetadata(local)
-            localOpens = true
+            let current = try await sealer.openMetadata(local).descriptionStamp(carriedBy: local)
+            // An older description never replaces a newer one, whatever version its row has reached.
+            if chosen < current { return .keepLocal }
+            // One description in two rows: the row with the higher stamp stands.
+            if chosen == current, !(RecordStamp(local) < RecordStamp(remote)) { return .keepLocal }
         } catch SyncKeyringError.locked {
             throw SyncKeyringError.locked
         } catch {
             // A local row that does not open is damage, not a version: the remote one replaces it.
-            localOpens = false
         }
-        guard !localOpens || RecordStamp(local) < RecordStamp(remote) else { return .keepLocal }
         if remote.version > local.version { return .adoptRemote }
-        // The same version from a device that orders later (or over a damaged row): stored again above both, by
-        // this device, so versions still only move forward.
+        // The remote description stands, in a row that is not above the local one (the same version from a device
+        // that orders later, a newer description under a carrier of an older one, or a damaged row): stored again
+        // above both, by this device, so versions still only move forward.
         var copy = incoming
         // Still the remote writer's description: in a shared vault the judge attributes it to them (review S37).
-        copy.writtenBy = incoming.writtenBy ?? Revision(version: remote.version, device: remote.deviceID)
+        copy.writtenBy = chosen
         copy.version = local.version + 1
         return .replace(try await sealer.sealMetadata(copy))
     }

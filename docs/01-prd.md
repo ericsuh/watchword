@@ -158,6 +158,10 @@ Requirement IDs are stable and referenced from the test plan.
   the client; it is **not** cryptographic, and the UI must say so.
 - F4.6 Per-item sharing is expressed as "move to a shared vault" so that the sharing model has one
   mechanism.
+- F4.7 Only a shared vault's owner or an administrator can rename it; a member who may otherwise write
+  cannot. Like read-only, the rule is kept by every member's client (which refuses its own account's
+  rename and counts nobody else's that breaks it), not by cryptography. A vault that is not shared, and
+  the Personal vault, are renamed by their account as before.
 
 ### 5.5 Unlock, lock, and local protection (F5)
 

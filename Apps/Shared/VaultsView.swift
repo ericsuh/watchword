@@ -114,9 +114,14 @@ struct VaultDetailView: View {
                 if row?.isPersonal == true {
                     Text("Your Personal vault is never shared.").foregroundStyle(.secondary)
                 }
-                if model.sharing?.readOnlyReason == nil {
+                // Only a shared vault's owner or an administrator renames it; the session decides and words it
+                // (`VaultSharing.renameRefusal`), and a read-only vault says why in its banner below.
+                if model.sharing?.renameRefusal == nil {
                     Button("Rename…") { renaming = true }
                         .accessibilityIdentifier(AccessibilityID.Vault.rename)
+                } else if model.sharing?.readOnlyReason == nil, let refusal = model.sharing?.renameRefusal {
+                    Text(refusal).foregroundStyle(.secondary)
+                        .accessibilityIdentifier(AccessibilityID.Vault.renameRefused)
                 }
             }
             if let reason = model.sharing?.readOnlyReason {

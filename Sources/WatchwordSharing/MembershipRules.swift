@@ -13,6 +13,11 @@ import WatchwordCrypto
 /// | `addMember` as administrator; `removeMember` and `memberLeft` of an administrator; `changeRole` to or from administrator; `deleteVault` | the owner |
 /// | anything that removes, re-roles or replaces the owner | nobody |
 ///
+/// The roles also decide what a member may write to the vault itself (docs/02-architecture.md §8.7): any member who
+/// is not read-only writes items, and only the owner and administrators write the vault's description (its name).
+/// Neither is cryptography; `MembershipLedger.writeStanding(of:)` and `administratorStanding(of:)` are what every
+/// device judges another account's work by.
+///
 /// Two consequences the rest of the design leans on. The set of accounts that may sign changes only in records the
 /// owner signed, so a former administrator's signature can never outrank the record that ended their authority
 /// (`MembershipLedger`'s fork rule). And the owner can always sign the next record, so no sequence of records, honest
@@ -52,7 +57,8 @@ enum MembershipRules {
     /// Verifies `record` as the successor of `previous` and returns the state it produces.
     ///
     /// Order: the checks that cost nothing (position in the chain, the signer's standing, what the operation is
-    /// allowed to do, the shape of the key change, a write cut only where a permission to write ends), then the
+    /// allowed to do, the shape of the key change, a write cut only where a permission to write or an administrator
+    /// role ends), then the
     /// record's signature, and only then anything that costs work or validates material the record brought with it
     /// (whether its branch used the key before, a new member's key bundle, a leave request). Unsigned junk therefore
     /// costs exactly one signature check and nothing more (review finding S22); `signatureChecks` counts them.
@@ -78,7 +84,7 @@ enum MembershipRules {
         }
         try authorise(record.operation, by: signer, in: previous)
         try checkKeyChange(of: record, after: previous)
-        guard accountLosingWritePermission(by: record.operation, in: previous) != nil || record.writeCut == .nothing
+        guard accountWhoseWorkIsCut(by: record.operation, in: previous) != nil || record.writeCut == .nothing
         else { throw MembershipError.unexpectedWriteCut }
         signatureChecks += 1
         try verifySignature(of: record, signingKey: signer.bundle.signingKey)
@@ -138,8 +144,7 @@ enum MembershipRules {
     }
 
     /// The account whose permission to write ends when `operation` is applied to `previous`, if it ends anyone's: a
-    /// member who could write and is removed, leaves, or is made read-only. That record, and no other, carries a
-    /// `WriteCut` (§8.7).
+    /// member who could write and is removed, leaves, or is made read-only. That record carries a `WriteCut` (§8.7).
     static func accountLosingWritePermission(by operation: MembershipRecord.Operation, in previous: MembershipState)
         -> UUID?
     {
@@ -154,6 +159,36 @@ enum MembershipRules {
             return nil
         }
         return previous.member(account)?.role.mayWrite == true ? account : nil
+    }
+
+    /// The account whose administrator role ends when `operation` is applied to `previous`, if it ends anyone's: an
+    /// administrator who is removed, leaves, or is given another role, read-write included. That record carries a
+    /// `WriteCut` too, because what only an administrator may write (the vault's description) counts, once the role
+    /// has ended, exactly as far as that cut (§8.7). The owner's role never ends.
+    static func accountLosingAdministratorRole(by operation: MembershipRecord.Operation, in previous: MembershipState)
+        -> UUID?
+    {
+        let account: UUID
+        switch operation {
+        case .removeMember(let removed), .memberLeft(let removed, _):
+            account = removed
+        case .changeRole(let changed, let role):
+            guard !role.isAdministrator else { return nil }
+            account = changed
+        case .createVault, .addMember, .rotateKey, .deleteVault:
+            return nil
+        }
+        return previous.member(account)?.role.isAdministrator == true ? account : nil
+    }
+
+    /// The account whose work `operation`'s record settles with a `WriteCut`: the one whose permission to write
+    /// ends, or whose administrator role ends, or both (one account, one cut). Every other record carries none, so
+    /// that a record has one encoding.
+    static func accountWhoseWorkIsCut(by operation: MembershipRecord.Operation, in previous: MembershipState)
+        -> UUID?
+    {
+        accountLosingWritePermission(by: operation, in: previous)
+            ?? accountLosingAdministratorRole(by: operation, in: previous)
     }
 
     /// Principle 5: a removal or departure always introduces a key the departed member never held, and nothing else

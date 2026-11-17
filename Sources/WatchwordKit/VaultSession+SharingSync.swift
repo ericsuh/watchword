@@ -386,6 +386,13 @@ extension VaultSession {
         {
             requestReplay(location.vaultID)
         }
+        // The same for a former administrator who may still write: a segment inside the cut that bounds their
+        // descriptions of the vault can make one that was held aside count.
+        if case .ended(let cut, _) = vault.ledger.administratorStanding(of: signer),
+            let position = SyncWriteCut(cut).positions[location.author], location.number <= position.sequence
+        {
+            requestReplay(location.vaultID)
+        }
         if vault.index.awaiting.contains(location.author) { requestReplay(location.vaultID) }
         // This device's own deletion, made on a copy that held a late write before it was shown the record that ended
         // the writer's permission, and published since: it erased here what the summary claimed, and a replay, which
@@ -463,6 +470,15 @@ extension VaultSession {
     /// Note-line removals, discards and history entries are values like the rest, each naming its writer (S32, S43).
     /// Last, every edit the version's clock says it contains must count (`knowledgeCounts`, S44).
     ///
+    /// **A vault's description is its administrators' to write** (§8.7; owner decision of 2026-11-17). Its one value
+    /// must count as above *and* be an administrator's work: the segment that carried it must be one of an account
+    /// that is the owner or an administrator now, or inside the cut of the record that ended its role
+    /// (`administratorSegmentCounts`); this device's own, not yet published, counts only while its account holds the
+    /// role; and one that no segment held here shows to count is vouched for only by a version that an administrator
+    /// wrote, sealed since the record that ended its author's role if one did (`vouchesForDescription`). So a
+    /// read-write member's rename counts on no device, whoever's row carries it on, and a former administrator's
+    /// late one is taken out again.
+    ///
     /// A version that does not open here cannot be judged and is held aside; receiving its key replays the log.
     func judgeAdmits(_ record: StoredRecord) async throws -> Bool {
         guard sharing.vaults[record.vaultID] != nil else { return true }
@@ -478,15 +494,39 @@ extension VaultSession {
         guard Self.counts(originKey, device: record.deviceID, in: vault, listing: listing) else { return false }
         guard let values = attributedValues(of: record, keys: keys) else { return false }
         var ownCopy: Set<SharedStreamIndex.ValueKey>?
-        let vouched = Self.vouchesForUncarriedValues(record, in: vault, account: account.accountID)
+        // A vault's description counts only as an administrator's work, on top of everything asked of a value.
+        let isDescription = record.kind == .vaultMetadata
+        let vouched =
+            isDescription
+            ? Self.vouchesForDescriptions(originKey, of: record, in: vault, account: account)
+            : Self.vouchesForUncarriedValues(record, in: vault, account: account.accountID)
         var awaited: Set<UUID> = []
         var admitted = true
+        // Whether this version vouches for a value of a device these accounts list that no segment held here shows to
+        // count: the version vouches at all, and every such account could have written the value.
+        let vouchesFor = { (accounts: [UUID]) in
+            vouched && !accounts.isEmpty
+                && accounts.allSatisfy({
+                    isDescription
+                        ? Self.descriptionMayBeVouched(of: $0, sealedUnder: record.keyID, in: vault.ledger)
+                        : Self.mayHaveWritten($0, in: vault.ledger)
+                })
+        }
         // Every value is filed under the device its stamp names (`attributedValues`).
         for value in Set(values.map(\.value)) {
             if let carriers = vault.index.valueCarriers[value] {
-                guard carriers.contains(where: { Self.segmentCounts($0.key, sequence: $0.value, in: vault) }) else {
-                    return false
+                if carriers.contains(where: {
+                    Self.segmentCounts($0.key, sequence: $0.value, in: vault)
+                        && (!isDescription || Self.administratorSegmentCounts($0.key, sequence: $0.value, in: vault))
+                }) {
+                    continue
                 }
+                // A description whose only carrier *here* does not count may still be one its writer made with the
+                // role, in a segment this device passes over: its former author, who holds the current key, can
+                // publish the same bytes again late. For a member who joined after a rotation an administrator's
+                // version sealed since the role ended vouches for it all the same, as it does for one carried
+                // nowhere here; otherwise that author could take the vault's name from every such member (S56).
+                guard isDescription, vouchesFor(listing(value.device)) else { return false }
                 continue
             }
             if value.device == account.deviceID {
@@ -497,12 +537,15 @@ extension VaultSession {
                         })
                 }
                 guard ownCopy?.contains(value) == true else { return false }
+                // A name this device wrote and has not published is inside no cut: it counts only while this account
+                // holds the role, so one written before this device heard that the role had ended is taken out.
+                if isDescription, vault.ledger.administratorStanding(of: account.accountID) != .holdsRole {
+                    return false
+                }
                 continue
             }
             let accounts = listing(value.device)
-            if vouched, !accounts.isEmpty, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) {
-                continue
-            }
+            if vouchesFor(accounts) { continue }
             if !accounts.isEmpty { awaited.insert(value.device) }
             admitted = false
         }
@@ -602,9 +645,68 @@ extension VaultSession {
         return true
     }
 
+    /// Whether a version sealed under `keyID` can vouch for a description as `accountID`'s work: the account is the
+    /// owner or an administrator now (every description it signed counts), or it was one and the key was introduced
+    /// at or after the record that ended its role or its permission to write, whichever came last, so that whoever
+    /// sealed the version held that record and judged the description by its cut. Never while the account's removal
+    /// is owed: the record that says what counts is on a branch no key's epoch speaks for.
+    static func descriptionMayBeVouched(of accountID: UUID, sealedUnder keyID: UUID, in ledger: MembershipLedger)
+        -> Bool
+    {
+        guard mayHaveWritten(accountID, in: ledger) else { return false }
+        switch ledger.administratorStanding(of: accountID) {
+        case .holdsRole:
+            return true
+        case .neverHeld:
+            return false
+        case .ended:
+            guard !ledger.owedRemovals.contains(where: { $0.accountID == accountID }),
+                let sealed = ledger.keyEpoch(of: keyID), let ended = ledger.latestCutEpoch(of: accountID)
+            else { return false }
+            return sealed >= ended
+        }
+    }
+
+    /// Whether the segment of `device`'s stream at `sequence` counts as an administrator's: its signer is the owner
+    /// or an administrator now, or was one and the segment is inside the cut of the record that ended the role
+    /// (`MembershipLedger.administratorStanding`). Asked of the segment that carried a vault's description, beside
+    /// `segmentCounts`; a segment of a member who was never an administrator carries no description that counts.
+    static func administratorSegmentCounts(_ device: UUID, sequence: UInt64, in vault: SharedVault) -> Bool {
+        guard let segment = vault.index.segment(device: device, sequence: sequence) else { return false }
+        switch vault.ledger.administratorStanding(of: segment.account) {
+        case .holdsRole:
+            return true
+        case .ended(let cut, _):
+            return SyncWriteCut(cut).contains(device: device, sequence: sequence, index: vault.index) == true
+        case .neverHeld:
+            return false
+        }
+    }
+
+    /// Whether a version of the vault's description vouches for a description that no segment held here shows to
+    /// count. As for other values, only for an account the chain never entitled to some key, which passes over the
+    /// segments sealed under it (`passesOverSomeKey`). Such a member takes the name on the word of whoever sealed the
+    /// version that carries it on, so that must be an administrator's word: the version's own writer is one (its
+    /// segment counts as an administrator's; or it is this device's own, unpublished, and this account holds the
+    /// role). A member who may not name the vault cannot vouch for a name. When the version was sealed matters
+    /// account by account, for the description's author alone (`descriptionMayBeVouched`), not vault-wide as for
+    /// items: another member's demotion says nothing about this name.
+    static func vouchesForDescriptions(
+        _ key: VersionKey, of record: StoredRecord, in vault: SharedVault, account: AccountRecord
+    ) -> Bool {
+        let ledger = vault.ledger
+        guard ledger.keyEpoch(of: record.keyID) != nil, passesOverSomeKey(in: ledger, account: account.accountID)
+        else { return false }
+        if let sequence = vault.index.firstCarrier[record.deviceID]?[key] {
+            return administratorSegmentCounts(record.deviceID, sequence: sequence, in: vault)
+        }
+        return record.deviceID == account.deviceID && ledger.administratorStanding(of: account.accountID) == .holdsRole
+    }
+
     /// The attributable values of a stored version, as the index files them: an item's (`ItemMerge.attributedValues`),
     /// or a vault's description as one value, attributed to the write that chose it (`VaultMetadata.writtenBy`, kept
-    /// through every re-seal). `nil` if the version does not open here.
+    /// through every re-seal, so that a description is judged as its writer's and never as its sealer's). `nil` if the
+    /// version does not open here.
     func attributedValues(of row: StoredRecord, keys: UnlockedKeys)
         -> [(revision: Revision, value: SharedStreamIndex.ValueKey)]?
     {
@@ -619,7 +721,7 @@ extension VaultSession {
             }
         case .vaultMetadata:
             guard let metadata = try? openMetadata(row, keys: keys) else { return nil }
-            let author = metadata.writtenBy ?? Self.origin(row)
+            let author = metadata.descriptionStamp(carriedBy: row)
             var bytes: [UInt8] = [6] + SharedBytes.bytes(metadata.vaultID)
             bytes += SharedBytes.littleEndian(UInt64(metadata.name.utf8.count)) + Array(metadata.name.utf8)
             bytes += SharedBytes.littleEndian(metadata.createdAt.timeIntervalSince1970.bitPattern)
@@ -673,16 +775,21 @@ extension VaultSession {
     /// carrying a tombstone.
     static func vouchesForUncarriedValues(sealedUnder keyID: UUID, in vault: SharedVault, account: UUID) -> Bool {
         let ledger = vault.ledger
-        guard let sealed = ledger.keyEpoch(of: keyID) else { return false }
-        let keyIDs = Set(ledger.chain.map(\.state.vaultKeyID))
-        let passesOverSome = keyIDs.contains { keyID in
+        guard let sealed = ledger.keyEpoch(of: keyID), passesOverSomeKey(in: ledger, account: account) else {
+            return false
+        }
+        return sealed >= (latestEndingEpoch(in: ledger) ?? 0)
+    }
+
+    /// Whether the chain introduced a key it never entitled `account` to: the account joined after a rotation, and
+    /// passes over what was sealed under the earlier key.
+    static func passesOverSomeKey(in ledger: MembershipLedger, account: UUID) -> Bool {
+        Set(ledger.chain.map(\.state.vaultKeyID)).contains { keyID in
             if case SharingError.notEntitledToKey? = error(of: { try ledger.grantSender(forKey: keyID, to: account) }) {
                 return true
             }
             return false
         }
-        guard passesOverSome else { return false }
-        return sealed >= (latestEndingEpoch(in: ledger) ?? 0)
     }
 
     /// Whether the version written as `key` by `device` counts: the segment of `device`'s own stream that first

@@ -37,6 +37,7 @@ enum AccessibilityID {
         static let rename = "vault.rename"
         static let renameField = "vault.renameField"
         static let renameSave = "vault.renameSave"
+        static let renameRefused = "vault.renameRefused"
         static let readOnly = "vault.readOnly"
         static let share = "vault.share"
         static let invite = "vault.invite"

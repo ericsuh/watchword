@@ -244,12 +244,12 @@ extension SharingScreenTests {
 }
 
 extension SharingScreenTests {
-    /// A member who may write renames the shared vault "Personal" (A4, an editing member): every list must still tell
-    /// it from the account's own Personal vault, by ownership and role rather than by name.
+    /// An administrator renames the shared vault "Personal" (A4 with the role; nobody else may name it): every list
+    /// must still tell it from the account's own Personal vault, by ownership and role rather than by name.
     @Test("a shared vault renamed Personal is labelled apart from the real Personal vault")
     func sharedVaultNamedPersonal() async throws {
         let household = SharedVaultHousehold()
-        let home = try await household.household(roles: [.readWrite], seed: 641)
+        let home = try await household.household(roles: [.administrator], seed: 641)
         let member = home.members[0]
         _ = try await member.session.renameVault(id: home.vaultID, to: "Personal")
         try await member.session.sync()
@@ -262,12 +262,67 @@ extension SharingScreenTests {
         let shared = try #require(named.first { !$0.isPersonal })
         #expect(real.label != shared.label)
         #expect(real.badge == "Your own vault")
-        #expect(shared.badge == "Shared with you · Can edit")
-        #expect(shared.label == "Personal (Shared with you · Can edit)")
+        #expect(shared.badge == "Shared with you · Administrator")
+        #expect(shared.label == "Personal (Shared with you · Administrator)")
 
         let owners = VaultsModel(context: ContextProbe().context(home.owner.session))
         await owners.load()
         #expect(owners.row(home.vaultID)?.badge == "Shared by you")
+    }
+}
+
+extension SharingScreenTests {
+    /// Only a shared vault's owner or an administrator may rename it (docs/02-architecture.md §8.7): the vault list
+    /// says who may, from the session's answer, and words the session's refusal for everyone else.
+    @Test("the vault list says who may rename a shared vault, and words the refusal for a member")
+    func whoMayRename() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.administrator, .readWrite, .readOnly], seed: 661)
+        let (administrator, writer, reader) = (home.members[0], home.members[1], home.members[2])
+
+        let owners = VaultsModel(context: ContextProbe().context(home.owner.session))
+        await owners.load()
+        #expect(owners.row(home.vaultID)?.mayRename == true)
+        #expect(owners.row(home.vaultID)?.renameRefusal == nil)
+        let administrators = VaultsModel(context: ContextProbe().context(administrator.session))
+        await administrators.load()
+        #expect(administrators.row(home.vaultID)?.mayRename == true)
+
+        // A member who may edit items: told why not, and the session refuses if asked anyway.
+        let own = try await writer.session.createVault(name: "Garden").id
+        let writers = VaultsModel(context: ContextProbe().context(writer.session))
+        await writers.load()
+        let shared = try #require(writers.row(home.vaultID))
+        #expect(!shared.mayRename && !shared.isReadOnly)
+        #expect(shared.renameRefusal == ErrorWording.renameRefused)
+        #expect(shared.renameRefusal == "Only this vault's owner or an administrator can rename it.")
+        #expect(await !writers.rename(home.vaultID, to: "Personal"))
+        #expect(writers.errorMessage == ErrorWording.renameRefused)
+        #expect(writers.row(home.vaultID)?.name == "Household")
+        // Their own vaults are theirs to name.
+        #expect(writers.rows.first { $0.isPersonal }?.mayRename == true)
+        #expect(writers.row(own)?.mayRename == true)
+        #expect(await writers.rename(own, to: "Allotment"))
+        #expect(writers.errorMessage == nil)
+
+        // A read-only member is told the vault is read-only, which is the wider reason.
+        let readers = VaultsModel(context: ContextProbe().context(reader.session))
+        await readers.load()
+        #expect(readers.row(home.vaultID)?.mayRename == false)
+        #expect(readers.row(home.vaultID)?.renameRefusal == ErrorWording.readOnly(.readOnly))
+
+        // The one screen of a vault reads the same answer.
+        let detail = SharedVaultModel(vaultID: home.vaultID, context: ContextProbe().context(writer.session))
+        await detail.load()
+        #expect(detail.sharing?.renameRefusal == ErrorWording.renameRefused)
+
+        // Promoted, the member may.
+        try await home.owner.session.changeRole(of: writer.accountID, in: home.vaultID, to: .administrator)
+        try await writer.session.sync()
+        await writers.load()
+        #expect(writers.row(home.vaultID)?.mayRename == true)
+        #expect(await writers.rename(home.vaultID, to: "Home"))
+        #expect(writers.row(home.vaultID)?.name == "Home")
     }
 }
 

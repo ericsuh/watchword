@@ -253,7 +253,8 @@ half delivered** on a Mac; the transports are open.
 - **The account screens, written (not yet built on a Mac):** the remaining UI of this milestone and of milestones 4,
   6 and 7, over portable view models in a new target, `WatchwordPresentation` (`02-architecture.md` §15), whose
   logic `WatchwordPresentationTests` runs on Linux against real sessions. Settings opens each screen in a sheet of
-  its own: **Vaults** (list, create, rename, a vault filter in the item list, and for a shared vault its role and a
+  its own: **Vaults** (list, create, rename, offered for a shared vault only to its owner and administrators, a vault
+  filter in the item list, and for a shared vault its role and a
   read-only banner, including "update Watchword" for one gone on in a later format); **Devices** (the list,
   removal with a new password by default or, with both statements confirmed, keeping it; a sync status with
   `requiresNewerVersion` as "update the app" and `snapshotWithheldBy` naming the devices); a password changed on
@@ -332,7 +333,12 @@ the segment that carried them, descriptions by the write that chose them, and a 
 another vault holds are refused, member registries are anchored per vault, and a replay that is asked for is written
 down. Note-line removals, discards and history entries name the write that made them and are judged like values
 (S32, S43), and a version whose clock holds an edit outside a cut is held aside with it (S44), as is one claiming
-edits a current member has not published (S46) and a tombstone whose erasure summary does either (S45).
+edits a current member has not published (S46) and a tombstone whose erasure summary does either (S45). Only the
+owner or an administrator renames a shared vault (PRD F4.7, owner decision of 2026-11-17; `06-adversarial-review.md`
+§R): the session refuses a member, every record that ends an administrator's role carries a cut, the judge counts a
+description only as an administrator's work, and descriptions merge by the stamp of the write that chose them
+(`02-architecture.md` §8.7, §8.10). The rename control in `VaultsView` follows `VaultRow.mayRename`; that view change
+is not built.
 
 **Still open:**
 

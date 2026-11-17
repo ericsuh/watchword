@@ -376,6 +376,82 @@ struct KeyGrantAndRotationTests {
         #expect(household.ledger.writeStanding(of: writer) == .nothingCounts(.vaultDeleted))
     }
 
+    @Test("which of an account's descriptions count follows the chain: all, the cut that ended the role, or none")
+    func administratorStanding() async throws {
+        var household = try await SharingHousehold.make()
+        let administrator = household.administrator.accountID
+        let writer = household.writer.accountID
+        let listed = try #require(household.state.member(administrator))
+        #expect(household.ledger.administratorStanding(of: household.owner.accountID) == .holdsRole)
+        #expect(household.ledger.administratorStanding(of: administrator) == .holdsRole)
+        #expect(household.ledger.administratorStanding(of: writer) == .neverHeld, "may write items, not the name")
+        #expect(household.ledger.administratorStanding(of: household.reader.accountID) == .neverHeld)
+        #expect(household.ledger.administratorStanding(of: household.outsider.accountID) == .neverHeld)
+        #expect(household.ledger.latestCutEpoch(of: administrator) == nil)
+
+        // Demoted to read-write: the record carries a cut for the descriptions, and the items are untouched.
+        let first = try WriteCut([1, 2, 3])
+        #expect(household.ledger.requiresWriteCut(changingRoleOf: administrator, to: .readWrite))
+        try household.adopt(
+            household.ledger.proposeRoleChange(
+                of: administrator, to: .readWrite, writeCut: first, signedBy: household.owner.keyset
+            ).encoded())
+        let demotion = household.state.epoch
+        #expect(household.ledger.chain.last?.record.writeCut == first)
+        #expect(household.ledger.administratorStanding(of: administrator) == .ended(cut: first, author: listed))
+        #expect(household.ledger.writeStanding(of: administrator) == .mayWrite)
+        #expect(household.ledger.writePermission(for: administrator) == .allowed)
+        #expect(household.ledger.latestCutEpoch(of: administrator) == demotion)
+        #expect(household.ledger.latestCutEpoch(of: writer) == nil)
+        #expect(
+            try Self.restored(household).administratorStanding(of: administrator)
+                == household.ledger.administratorStanding(of: administrator))
+
+        // Made read-only next: that record ends a permission to write and carries its own cut, but no role, so the
+        // descriptions are still judged by the cut of the record that ended the role.
+        let second = try WriteCut([4])
+        try household.adopt(
+            household.ledger.proposeRoleChange(
+                of: administrator, to: .readOnly, writeCut: second, signedBy: household.owner.keyset
+            ).encoded())
+        #expect(household.ledger.administratorStanding(of: administrator) == .ended(cut: first, author: listed))
+        #expect(
+            household.ledger.writeStanding(of: administrator)
+                == .ended(cut: second, author: listed.with(role: .readWrite), refusal: .readOnly))
+        #expect(household.ledger.latestCutEpoch(of: administrator) == household.state.epoch, "the later of the two")
+
+        // An administrator again: everything they signed counts, whatever the cuts said, as for writes.
+        try household.adopt(
+            household.ledger.proposeRoleChange(of: administrator, to: .administrator, signedBy: household.owner.keyset)
+                .encoded())
+        #expect(household.ledger.administratorStanding(of: administrator) == .holdsRole)
+
+        // Promoted: a member who never held the role holds it from now on, for whatever they signed.
+        try household.adopt(
+            household.ledger.proposeRoleChange(of: writer, to: .administrator, signedBy: household.owner.keyset)
+                .encoded())
+        #expect(household.ledger.administratorStanding(of: writer) == .holdsRole)
+
+        // Removed as an administrator: the removal's cut bounds descriptions and writes alike.
+        let third = try WriteCut([9])
+        var generator = SeededGenerator(seed: 14)
+        let plan = try RotationPlanner.plan(
+            .removal(administrator), ledger: household.ledger, memberKeys: .findingNothing(in: household.ledger),
+            writeCut: third, signedBy: household.owner.keyset, using: &generator)
+        try household.adopt(plan.record.contents)
+        let removed = listed
+        #expect(household.ledger.administratorStanding(of: administrator) == .ended(cut: third, author: removed))
+        #expect(
+            household.ledger.writeStanding(of: administrator)
+                == .ended(cut: third, author: removed, refusal: .notAMember))
+        #expect(household.ledger.latestCutEpoch(of: administrator) == household.state.epoch)
+
+        // A deleted vault counts nobody's descriptions.
+        try household.adopt(household.ledger.proposeDeletion(signedBy: household.owner.keyset).encoded())
+        #expect(household.ledger.administratorStanding(of: household.owner.accountID) == .neverHeld)
+        #expect(household.ledger.administratorStanding(of: writer) == .neverHeld)
+    }
+
     static func restored(_ household: SharingHousehold) throws -> MembershipLedger {
         try MembershipLedger.restore(
             household.ledger.persisted(signedBy: household.owner.keyset), vaultID: household.vaultID,
@@ -383,7 +459,7 @@ struct KeyGrantAndRotationTests {
             account: household.owner.bundle)
     }
 
-    @Test("a change that ends a permission to write needs a cut, and no other change may carry one")
+    @Test("a change that ends a permission to write or an administrator's role needs a cut, and no other may carry one")
     func writeCutRequired() async throws {
         let household = try await SharingHousehold.make()
         let ledger = household.ledger
@@ -406,6 +482,18 @@ struct KeyGrantAndRotationTests {
         }
         #expect(try plan(.removal(household.writer.accountID), cut).proposal.writeCut == cut)
         #expect(try plan(.departure(request), .nothing).proposal.writeCut == .nothing, "an empty cut is a cut")
+        // Ends an administrator's role, though not their permission to write: the cut is for their descriptions.
+        #expect(throws: SharingError.writeCutRequired) {
+            _ = try ledger.proposeRoleChange(
+                of: household.administrator.accountID, to: .readWrite, writeCut: nil, signedBy: owner)
+        }
+        #expect(
+            try ledger.proposeRoleChange(
+                of: household.administrator.accountID, to: .readWrite, writeCut: cut, signedBy: owner
+            ).writeCut == cut)
+        #expect(throws: SharingError.writeCutRequired) {
+            _ = try plan(.removal(household.administrator.accountID), nil)
+        }
 
         // Ends none: a routine rotation, a read-only member's removal, a change between roles that may write.
         #expect(throws: SharingError.writeCutNotExpected) { _ = try plan(.routine, cut) }

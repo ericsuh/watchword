@@ -160,7 +160,8 @@ extension AdversarialSharedVaultTests {
     /// remaining member's device then stores the former member's name again as a version of its own, one above both;
     /// a judge that looked only at who wrote the row would count it everywhere. The description is judged by the write
     /// that chose it (`VaultMetadata.writtenBy`), so the late name counts nowhere, on the device that stored it again
-    /// as on the owner's.
+    /// as on the owner's. Both members are administrators: nobody else names a shared vault (§8.7), and
+    /// `lateRenameLaunderedThroughAMember` is the same shape through a member who may not.
     @Test("a removed member's late rename, stored again by a device that merged it, counts on no device")
     func lateRenameStoredAgain() async throws {
         let household = SharedVaultHousehold()
@@ -168,6 +169,10 @@ extension AdversarialSharedVaultTests {
         let (vaultID, owner, removed, member) = (setup.vaultID, setup.owner, setup.removed, setup.member)
         let removedDevice = try #require(await removed.session.deviceIDForTest())
         let memberDevice = try #require(await member.session.deviceIDForTest())
+        for account in [removed, member] {
+            try await owner.session.changeRole(of: account.accountID, in: vaultID, to: .administrator)
+        }
+        try await Fixture.syncAll([owner, removed, member])
         await setup.removedView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
         await setup.memberView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
         #expect(try await owner.session.removeMember(removed.accountID, from: vaultID) == .complete)

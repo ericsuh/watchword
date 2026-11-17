@@ -24,9 +24,9 @@ public struct VaultInfo: Sendable, Hashable, Identifiable {
 /// A vault's own description, sealed under the vault key as a `.vaultMetadata` record whose record ID is the vault's
 /// (docs/02-architecture.md §5, §7.7). A vault's name is as private as an item's title.
 ///
-/// It merges as a last-writer-wins register on (version, device): a name is one short value, and of two renames made
-/// at once one is kept. Nothing else about a vault lives here — which vaults exist, and their keys, are the vault
-/// directory's.
+/// It merges as a last-writer-wins register on the stamp of the write that chose it (`descriptionStamp`): a name is
+/// one short value, and of two renames made at once one is kept. Nothing else about a vault lives here — which vaults
+/// exist, and their keys, are the vault directory's.
 public struct VaultMetadata: Codable, Hashable, Sendable {
     public var vaultID: UUID
     public var name: String
@@ -36,8 +36,17 @@ public struct VaultMetadata: Codable, Hashable, Sendable {
     public var version: UInt64
     /// The write that chose this description, when the row was sealed again rather than written (a rotation's
     /// re-seal, a password change, the merge of two copies at one version); `nil` means the row's own version and
-    /// device. A shared vault's judge attributes the description to it (review finding S37).
+    /// device. A shared vault's judge attributes the description to it (review finding S37), and counts it only as
+    /// the work of an account that was the vault's owner or an administrator (§8.7): every path that stores a
+    /// description again keeps this, so that sealing one again never makes it the sealer's.
     public var writtenBy: Revision? = nil
+
+    /// The stamp of the write that chose this description, read from the row that carries it: `writtenBy`, or the
+    /// row's own version and device. What the description's last-writer-wins merge orders by, and what a shared
+    /// vault's judge attributes it to.
+    public func descriptionStamp(carriedBy row: StoredRecord) -> Revision {
+        writtenBy ?? Revision(version: row.version, device: row.deviceID)
+    }
 }
 
 public enum VaultMetadataCodec {
@@ -277,6 +286,11 @@ extension VaultSession {
         guard metadata.vaultID == row.vaultID, metadata.version == row.version else {
             throw VaultError.recordMismatch(row.recordID)
         }
+        // A row carries a description written at or below its own version: the merge orders descriptions by that
+        // stamp, so one dated above its row would outrank renames the engine's version checks (U5) never saw.
+        if let writtenBy = metadata.writtenBy, writtenBy.version > row.version {
+            throw VaultError.recordMismatch(row.recordID)
+        }
         highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, row.version)
         return metadata
     }
@@ -372,7 +386,10 @@ extension VaultSession {
         return VaultInfo(id: vaultID, name: name, createdAt: now, isPersonal: false, isDeleted: false)
     }
 
-    /// Renames a vault. The Personal vault can be renamed too; it cannot be deleted.
+    /// Renames a vault. The Personal vault can be renamed too; it cannot be deleted. A shared vault is renamed only
+    /// by its owner or an administrator (`SharedVaultError.renameRefused` for a member who may otherwise write;
+    /// docs/02-architecture.md §8.7): checked here before anything is sealed, and by every other device's write
+    /// judge, which is what binds a client that does not ask.
     @discardableResult
     public func renameVault(id: UUID, to name: String) async throws -> VaultInfo {
         let name = try Self.validatedName(name)
@@ -383,6 +400,7 @@ extension VaultSession {
         let existing = try await store.record(RecordKey(recordID: id, kind: .vaultMetadata))
         let keys = try requireKeys(since: epoch)
         let vaultKey = try await writableVaultKey(id, keys: keys, account: account)
+        try checkSharedRename(id, account: account)
         _ = try requireKeys(since: epoch)
         let previous = existing.flatMap { try? openMetadata($0, keys: keys) }
         let revision = try nextRevision(in: id, above: existing, account: account)

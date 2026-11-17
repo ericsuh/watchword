@@ -92,6 +92,10 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     case syncNotConfigured
     /// This account may not write to the vault now (PRD F4.5): `MembershipLedger.writePermission`.
     case writeRefused(WriteRefusal)
+    /// Only a shared vault's owner or an administrator may rename it (docs/02-architecture.md §8.7; owner decision of
+    /// 2026-11-17): this account may write to the vault, but holds neither role on the head this device knows.
+    /// Refused before anything is sealed; another device would hold such a description aside anyway.
+    case renameRefused
     /// The vault was shared by another account: only its owner can delete it (a member leaves instead).
     case notOwner
     /// The current vault key has not been received yet (its grant is not on the transport, or not for this account).

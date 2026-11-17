@@ -10,6 +10,10 @@ public struct VaultSharing: Hashable, Sendable {
     public let memberCount: Int
     /// Why this account cannot write here now, worded; `nil` while it can.
     public let readOnlyReason: String?
+    /// Why this account cannot rename the vault, worded; `nil` while it can. Only the owner and administrators name a
+    /// shared vault (docs/02-architecture.md §8.7): the session decides (`SharedVaultStatus.mayRename`) and refuses
+    /// again in `renameVault`; this is its answer in words, for the control that offers a rename.
+    public let renameRefusal: String?
     /// The vault has gone on in a format this version cannot read: read-only until the app is updated (§8.9).
     public let requiresNewerVersion: Bool
     /// Versions held aside in this vault, for the quarantine screen (review finding S49).
@@ -24,6 +28,7 @@ public struct VaultSharing: Hashable, Sendable {
         case .allowed: readOnlyReason = nil
         case .refused(let refusal): readOnlyReason = ErrorWording.readOnly(refusal)
         }
+        renameRefusal = status.mayRename ? nil : readOnlyReason ?? ErrorWording.renameRefused
         heldAside = status.heldAside
         rotationPending = !status.pendingRotation.isEmpty
     }
@@ -46,9 +51,16 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
 
     public var isReadOnly: Bool { sharing?.readOnlyReason != nil }
 
-    /// Whose vault this is and this account's part in it, from the session's facts rather than the name: a member who
-    /// may write can name a shared vault anything, "Personal" included (review of the account screens, finding 4).
-    /// Shown wherever a vault is named, beside the name.
+    /// Whether this account may rename the vault: always for one that is not shared, and for a shared one only as its
+    /// owner or an administrator (docs/02-architecture.md §8.7). The session's answer, not the screen's.
+    public var mayRename: Bool { renameRefusal == nil }
+
+    /// Why this account cannot rename the vault, worded; `nil` while it can.
+    public var renameRefusal: String? { sharing?.renameRefusal }
+
+    /// Whose vault this is and this account's part in it, from the session's facts rather than the name: an
+    /// administrator can name a shared vault anything, "Personal" included, and a client that does not keep the rule
+    /// can try (review of the account screens, finding 4). Shown wherever a vault is named, beside the name.
     public var badge: String {
         if isPersonal { return "Your own vault" }
         guard let sharing else { return "Only you" }

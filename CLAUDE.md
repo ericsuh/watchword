@@ -184,7 +184,7 @@ Fifteen shipped modules, dependency-ordered, plus test support:
   `WatchwordModel`, `WatchwordEnvelope`, `WatchwordStore`, and `SecureMemory` for `SQLiteConnection` only; no CryptoKit.
 - **`WatchwordSharing`** — milestone 4's protocol core for shared vaults: the signed membership chain
   (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `writePermission`, `writeStanding` and the
-  `WriteCut`, `status(of:)`), fingerprint
+  `WriteCut`, `administratorStanding` for the vault's name, `status(of:)`), fingerprint
   verification (`FingerprintCode`, `VerifiedContacts` and its `VerifiedContact` token, `MemberKeyCheck`), both sides
   of an invitation, key grants (`KeyGrantCodec`, `grantSender`/`openGrant`), `LeaveRequest`, and rotation as data
   (`RotationPlanner`, `RotationPlan`, `PendingRotation`, `recordsToReseal`). Ports: `KeyBundleDirectory`,
@@ -535,6 +535,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   device that had merged it, held aside, and never published on (S28). "Judged when merged, merged for good" is the
   rule this replaced; do not bring it back, and do not judge a version only by who signed its envelope (it may
   carry another account's work). The cut's bytes are the integrator's (§8.8 says what they must bind).
+- **Only the owner and administrators name a shared vault** (PRD F4.7; owner decision of 2026-11-17, §8.7). For a
+  description ask `administratorStanding(of:)` as well as `writeStanding`: every description of an account that holds
+  the role *now* (so one written before a promotion counts once promoted, as S12 for writes; do not try to judge by
+  when a write claims to have been made), of a former administrator exactly those inside the cut of the record that
+  ended the role, of anyone else none. So **every record that ends an administrator's role carries a cut**, the
+  demotion to read-write included (`MembershipRules.accountWhoseWorkIsCut`); that cut bounds descriptions only, and a
+  member who may still write keeps `writeStanding == .mayWrite`. Do not replace the cut with "administrator now":
+  it would undo an administrator's renames on every device the day their role ends. Changing which records may
+  carry a cut is a format change once anything is released (§8.9).
 - While a removal is owed, the displaced record's cut is believed only if that record and the one holding the cut
   were signed by accounts that could sign them on the accepted head; a former administrator's dead branch decides
   nothing about a member's writes (S29).
@@ -594,6 +603,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `AwayWork`) on copied inputs, touching no session state, and the epoch is checked on return (`requireKeys(since:)`).
   IDs drawn there come from a `ForkedGenerator`, never a copy of `random`; key material, salts and nonces only from
   `random`, on the actor. A new long step goes there too, with a test that holds it (`awayWorkHook`) and locks.
+- A vault's description is a last-writer-wins register on **the stamp of the write that chose it**
+  (`VaultMetadata.descriptionStamp`: `writtenBy`, or the row's own), never on the stamp of the row that carries it
+  (`VaultMetadataMerger`, §7.7; review finding S54). Every path that stores a description again (the merger's
+  re-store, `resealSharedVault`, `carriedOver`) keeps `writtenBy`; a new one must too, and must not set it above the
+  row's version (`openMetadata` refuses that). Only `renameVault` and `createVault` write a description of their own.
 - Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
   exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
   signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting
@@ -626,6 +640,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
   (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
+- **A vault's description counts only as an administrator's work** (§8.7, §8.10; `06-adversarial-review.md` §R).
+  `renameVault` refuses a shared vault's member who holds neither role (`SharedVaultError.renameRefused`,
+  `checkSharedRename`, after `writableVaultKey`), but the rule is the judge's: the segment that carried the
+  description must count as a write *and* as an administrator's (`administratorSegmentCounts`: the role now, or inside
+  the cut that ended it), a description this device has not published counts only while its account holds the role,
+  and for a member who joined after a rotation only a version an administrator wrote vouches for a name
+  (`vouchesForDescriptions`, judged for the name's author alone). Only an administrator's device seals the
+  description again in `resealSharedVault`. Never judge a description by who sealed its row, and never let a path
+  that stores one again make it the sealer's. `SharedVaultStatus.mayRename` is what the screens show
+  (`VaultRow.mayRename`, `renameRefusal`); they decide nothing.
 - A chain stopped at a later format (`continuesInLaterFormat`, §8.9) makes the vault read-only in the session and is
   reported (`SharedVaultStatus.requiresNewerVersion`): no proposal published, no plan resumed or made, nothing sealed
   again, no leave request. A later-format object is offered again until the ledger holds it; never add it to

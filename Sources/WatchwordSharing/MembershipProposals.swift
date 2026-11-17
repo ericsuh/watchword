@@ -49,8 +49,8 @@ extension MembershipLedger {
     /// alone ("admin succession", §8.3).
     ///
     /// - Parameter writeCut: which of the member's writes count from now on, when the change makes a member who
-    ///   could write read-only (`requiresWriteCut(changingRoleOf:to:)`): what this device has merged of theirs, taken
-    ///   after one more sync pass. `nil` for every other change of role.
+    ///   could write read-only or ends an administrator's role (`requiresWriteCut(changingRoleOf:to:)`): what this
+    ///   device has merged of theirs, taken after one more sync pass. `nil` for every other change of role.
     /// - Throws: `SharingError.writeCutRequired` or `writeCutNotExpected` if `writeCut` is not what the change needs.
     public func proposeRoleChange(
         of accountID: UUID, to role: MemberRole, writeCut: WriteCut?, signedBy keyset: Keyset
@@ -60,15 +60,17 @@ extension MembershipLedger {
     }
 
     /// Whether the record that gives `accountID` the role `role` must carry a `WriteCut`: it makes a member who can
-    /// write read-only (§8.7).
+    /// write read-only, or it ends an administrator's role, a demotion to read-write included (§8.7). The second is
+    /// what bounds a former administrator's renames of the vault: without a cut in that record, nothing would say
+    /// which of their descriptions were written while they held the role.
     public func requiresWriteCut(changingRoleOf accountID: UUID, to role: MemberRole) -> Bool {
-        MembershipRules.accountLosingWritePermission(by: .changeRole(accountID, to: role), in: state) != nil
+        MembershipRules.accountWhoseWorkIsCut(by: .changeRole(accountID, to: role), in: state) != nil
     }
 
     /// Whether the record that removes `accountID`, or carries out their departure, must carry a `WriteCut`: they
     /// can write now (§8.7). A read-only member's writes were settled when they became read-only, or never counted.
     public func requiresWriteCut(removing accountID: UUID) -> Bool {
-        MembershipRules.accountLosingWritePermission(by: .removeMember(accountID), in: state) != nil
+        MembershipRules.accountWhoseWorkIsCut(by: .removeMember(accountID), in: state) != nil
     }
 
     /// Whether `signer` may remove `accountID`, or carry out their departure, on the current head: an administrator,
@@ -102,9 +104,9 @@ extension MembershipLedger {
         guard epoch <= MembershipLimits.maximumEpoch else { throw SharingFormatError.epochOutOfRange(epoch) }
         // Before signing anything: nothing this account is not allowed to do gets its signature.
         try MembershipRules.authorise(operation, by: signer, in: state)
-        // A cut exactly where a permission to write ends: an integrator that forgot one is told, not given an
-        // empty one that would count nothing of the member's work.
-        let endsPermission = MembershipRules.accountLosingWritePermission(by: operation, in: state) != nil
+        // A cut exactly where a permission to write or an administrator role ends: an integrator that forgot one is
+        // told, not given an empty one that would count nothing of the member's work.
+        let endsPermission = MembershipRules.accountWhoseWorkIsCut(by: operation, in: state) != nil
         guard endsPermission || writeCut == nil else { throw SharingError.writeCutNotExpected }
         guard !endsPermission || writeCut != nil else { throw SharingError.writeCutRequired }
 

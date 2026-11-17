@@ -79,13 +79,17 @@ struct AdversarialAccountScreenTests {
         #expect(merged.scopes.map(\.host).contains(host.host), "the second confirmation is the person's to give")
     }
 
-    /// Threat: a vault member who may write (A4) renames the shared vault "Personal", so a new item meant for the
-    /// person's own vault lands in theirs. Every list labels vaults by ownership and role, not by name alone.
-    @Test("a shared vault a member renamed Personal is labelled apart from the real Personal vault")
+    /// Threat: an administrator of a shared vault (A4 with the role; a member who merely may write is refused, here
+    /// and by every device's judge, §8.7) renames it "Personal", so a new item meant for the person's own vault
+    /// lands in theirs. Every list labels vaults by ownership and role, not by name alone.
+    @Test("a shared vault an administrator renamed Personal is labelled apart from the real Personal vault")
     func sharedVaultNamedPersonal() async throws {
         let household = SharedVaultHousehold()
-        let home = try await household.household(roles: [.readWrite], seed: 711)
+        let home = try await household.household(roles: [.administrator, .readWrite], seed: 711)
         let member = home.members[0]
+        await #expect(throws: SharedVaultError.renameRefused) {
+            _ = try await home.members[1].session.renameVault(id: home.vaultID, to: "Personal")
+        }
         _ = try await member.session.renameVault(id: home.vaultID, to: "Personal")
         try await member.session.sync()
         try await home.owner.session.sync()

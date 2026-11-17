@@ -215,9 +215,11 @@ Field { id, kind, label, value(secret or plain), order, meta }   // kinds listed
 ```
 
 A vault's own description is a record of kind 6 whose record ID is the vault's ID, sealed under the vault key:
-`VaultMetadata { vaultID, name, createdAt, modifiedAt, version }` (`VaultMetadataCodec`: JSON with sorted keys,
-16 KiB at most, a name of at most 256 characters, and the same identity check against the row). A vault's name
-is as private as an item's title. Kinds 7 and 8 are not sealed payloads of their own: they name rows of the
+`VaultMetadata { vaultID, name, createdAt, modifiedAt, version, writtenBy? }` (`VaultMetadataCodec`: JSON with
+sorted keys, 16 KiB at most, a name of at most 256 characters, and the same identity check against the row).
+`writtenBy` is the (version, device) of the write that chose the description, present when a row carries a
+description on rather than writing one (§7.7); it is never above the row's own version, or the row does not open.
+A vault's name is as private as an item's title. Kinds 7 and 8 are not sealed payloads of their own: they name rows of the
 local store that hold a vault's directory entry and a device-registry entry (§6, §7.7, §7.8), and kind 8 is also
 the kind under which a device's name is sealed inside its registry entry.
 
@@ -644,7 +646,13 @@ of the same account in the process, so XCUITest drives a concurrent rename throu
 256-bit key, wrapped under Ksym as a `vaultKeyWrap` record whose identity — vault and key ID — comes from where it
 is stored, and a sealed description (§5). The Personal vault needs no description to exist (its name defaults
 to "Personal"), can be renamed, and can be neither deleted nor shared: the session refuses, and a deletion of it
-is ignored whoever signed it. Every `VaultSession` invariant holds per vault: contexts from the row, identity
+is ignored whoever signed it. The description merges as a last-writer-wins register (`VaultMetadataMerger`) on
+**the stamp of the write that chose it** (`VaultMetadata.descriptionStamp`: `writtenBy`, or the row's own version
+and device), not on the stamp of the row that carries it. A row sealed again (the merge of two rows at one
+version, a rotation's re-seal, a device registered again) is a carrier: it keeps the description's stamp, and a
+carrier at a higher version never brings an older name back over a newer one. Between two carriers of one
+description the higher row stamp stands. In a shared vault this is also what keeps the choice of name with its
+administrators (§8.10). Every `VaultSession` invariant holds per vault: contexts from the row, identity
 checks after decryption, conditional commits, sync metadata owned by the vault. Search (`search`, `ItemSearch`)
 runs over decrypted items in memory — titles, scope hosts, usernames and emails, tags, notes, never a secret
 field — and nothing is indexed on disk.
@@ -931,8 +939,8 @@ A shared vault has **members**, each an account with a role:
 | Role | May |
 | --- | --- |
 | owner | everything an administrator may; and alone: grant or revoke the administrator role, remove an administrator, delete the vault. Exactly one, fixed for the life of the vault: never removed, never re-roled. |
-| administrator | invite and remove members who are not administrators, change them between read-write and read-only, rotate the vault key |
-| read-write | read and write items |
+| administrator | invite and remove members who are not administrators, change them between read-write and read-only, rotate the vault key, rename the vault (§8.7) |
+| read-write | read and write items; not the vault's name |
 | read-only | read items. They hold the vault key like everyone else: this is a rule the clients keep, **not cryptography** (F4.5, §8.7) |
 
 Membership is a **chain of signed records**, one per change, each naming its epoch (the previous one plus one), the
@@ -956,7 +964,7 @@ at most 2,048 bytes; a record is at most 12,090 bytes.
 
 | Object | Magic | Contents | Signed by |
 | --- | --- | --- | --- |
-| Membership record | `WWMR` | vault ID, epoch, previous hash, signer, operation (`createVault`, `addMember`, `removeMember`, `memberLeft`, `changeRole`, `rotateKey`, `deleteVault`) with operands, vault key ID and the epoch that introduced it, a write cut (opaque bytes; empty unless the operation ends an account's permission to write, §8.7), the resulting members (account ID, role, epoch added, X25519 and Ed25519 keys, bundle self-signature) in account order | the signer |
+| Membership record | `WWMR` | vault ID, epoch, previous hash, signer, operation (`createVault`, `addMember`, `removeMember`, `memberLeft`, `changeRole`, `rotateKey`, `deleteVault`) with operands, vault key ID and the epoch that introduced it, a write cut (opaque bytes; empty unless the operation ends an account's permission to write or its administrator role, §8.7), the resulting members (account ID, role, epoch added, X25519 and Ed25519 keys, bundle self-signature) in account order | the signer |
 | Key grant | `WWKG` | a `VaultKeyGrant`: vault, key ID, sender, recipient, recipient's X25519 key, HPKE encapsulated key, ciphertext (§4) | the sender (`.vaultKeyGrant`) |
 | Leave request | `WWLR` | vault, account, the epoch the member was added | the member |
 | Published key bundle | `WWKB` | account ID, X25519 key, Ed25519 key | self-signature (`.publicKeyBundle`) |
@@ -1008,8 +1016,8 @@ device has already seen, which the ledger holds. Everything the store offers is 
 **Verifying a record** against the state before it, cheapest first: the vault, the epoch (exactly the next), the
 previous hash; the signer is a member and an administrator of the previous state; the operation is one that signer
 may perform (§8.1); the shape of the key change (a removal, a departure and `rotateKey` name a new key, nothing else
-changes it); a write cut only where the operation ends an account's permission to write (§8.7), so that a record has
-one encoding; the signature, under the key the *previous state* lists for the signer; and only then what costs work or
+changes it); a write cut only where the operation ends an account's permission to write or its administrator role
+(§8.7), so that a record has one encoding; the signature, under the key the *previous state* lists for the signer; and only then what costs work or
 came with the record: the new key ID must not have been used on this record's own path, a new member's key bundle is
 validated, a departure's embedded leave request is checked, and the member list must be exactly the previous list
 with the operation applied. Unsigned junk costs exactly one signature check; the key-history check walks the
@@ -1164,14 +1172,18 @@ fingerprint code pasted from a message only names the account to look up: it is 
 code read by the camera from the other person's screen and is never recorded until the app can scan one (finding 2).
 `VerifiedContact.method` therefore says what the person did (S16).
 
-**Names of shared vaults.** A vault's name is a record any member who may write can change (§8.7; S37 attributes it
-to its writer), so a member can call a shared vault "Personal". The owner's decision on the review (2026-11-16, made
-here for the owner to confirm): renaming stays a write like any other, because making it the owner's or an
-administrator's would need every device's write judge to refuse a member's rename, a protocol change, and a rule kept
-by the screens alone would not bind a hostile client. The screens instead never let a name stand alone: every list and
-the item editor label a vault by ownership and role (`VaultRow.badge`: "Your own vault", "Shared by you", "Shared
-with you · Can edit"), and the editor says where a new item goes, with "everyone in this vault can see it" for a
-shared one (finding 4).
+**Names of shared vaults.** Only a shared vault's owner or an administrator may rename it (owner decision,
+2026-11-17). The review of the account screens (finding 4) had left renaming with every member who may write, for the
+owner to confirm, and the owner decided the other way: a name is what a person reads before saving into a vault, and a
+member who can call a shared vault "Personal" can have someone's item land where they will read it. A rule kept by the
+screens alone would not bind a client that does not ask, so this is a rule of the protocol: every device's write judge
+refuses a description that is not an administrator's work, the same on every device whenever it heard of the
+membership records. §8.7 says which descriptions count and why the rule is the one it is; §8.10 how the session, the
+merge and the judge apply it. The screens still never let a name stand alone, because an administrator can choose any
+name: every list and the item editor label a vault by ownership and role (`VaultRow.badge`: "Your own vault", "Shared
+by you", "Shared with you · Can edit"), and the editor says where a new item goes, with "everyone in this vault can
+see it" for a shared one (finding 4). A vault's own screen offers a rename only to an account that may
+(`VaultRow.mayRename`, from `SharedVaultStatus.mayRename`), and says why to everyone else (`renameRefusal`).
 
 ### 8.5 Key grants
 
@@ -1260,7 +1272,9 @@ asking, and the transport's own permission where it has one (CloudKit's read-onl
 
 **The write cut.** A record that ends an account's permission to write (the removal or departure of a member who
 could write, a change of role to read-only) carries a `WriteCut`: the signing administrator's device, after one more
-sync pass, commits to what it has merged of that account's work. The verifier refuses a cut on any other record. To
+sync pass, commits to what it has merged of that account's work. So does a record that ends an administrator's role
+without ending their permission to write, a demotion to read-write (below, "Who may name the vault"). The verifier
+refuses a cut on any other record. To
 this module the cut is at most 2,048 opaque bytes, signed with the rest of the record and therefore the same on every
 device; what it must let the integrator do is decide, from the cut and a write alone, whether the write is inside,
 with the same answer everywhere and no way for the account to add to the set afterwards (§8.8 says what that means
@@ -1285,6 +1299,71 @@ wrote that the signing device had not merged when it took the cut. That is the p
 clients keep (S12), and why the device syncs first and, for a removal, takes the member off the transport before
 anything else. An administrator chooses the cut they sign; one who signs less than they hold sets a member's work
 aside for everyone, which is within what an administrator who can remove the member can already do.
+
+**Who may name the vault** (owner decision, 2026-11-17: only the owner or an administrator renames a shared vault;
+§8.4). The vault's description (§5) is the one record a member who may write may not. The session refuses its own
+account (`SharedVaultError.renameRefused`), and for anyone else's description every device asks
+`MembershipLedger.administratorStanding(of:)`, beside `writeStanding(of:)`, before merging it and again about the one
+it holds whenever the head has changed. A description counts only if its writer's writes count *and* this says so:
+
+| Standing | Which of the account's descriptions count |
+| --- | --- |
+| `holdsRole`: the owner, or an administrator on the accepted head | every one the account signed. Judged *now*, like `mayWrite`, and for the same reason: nothing in a write says when it was made that its writer could not have chosen. So a name an account wrote before it was made an administrator counts once it is one. |
+| `ended(cut:author:)`: an administrator once, not now | exactly those inside the write cut of the record that ended the role (the latest such record of the accepted chain; for an owed removal, what the displaced record's branch said, §8.3). That record is a removal, a departure or a change of role, **to read-write as to read-only**. |
+| `neverHeld` | none: the account never was an administrator here, or the vault was deleted |
+
+Like read-only it is **not cryptographic**: every member holds the vault key and can seal a description. What stops
+it counting is every other member's client asking.
+
+Three rules were weighed.
+
+- *By current role alone*: a description counts while its author is the owner or an administrator. The smallest
+  rule, sound, and it needs no cut. What it admits: nothing of a former administrator's, early or late. What it
+  costs: the name an administrator gave the vault lapses on every device the day their role ends, by an act nobody
+  meant as a rename, with the version held aside on each of them, and comes back if they are promoted again.
+  Rejected: "a write inside the cut counts on every device, whenever it meets it" should hold for a name as for an
+  item, and a rename made with the role was a permitted write.
+- *By the role at the time the description claims* (a version, a date, or a membership record it names): a writer
+  chooses what a write claims, so a former administrator would name an epoch at which they held the role. Nothing
+  binds a writer except a commitment made by someone else.
+- *The cut* (chosen): that commitment already exists for writes, and three of the four ways a role ends already
+  carry it (a removal, a departure, a change to read-only: an administrator can always write). The fourth, a
+  demotion to read-write, ended no permission and carried none; it now carries one, taken the same way (§8.8,
+  `requiresWriteCut(changingRoleOf:to:)`), which bounds the former administrator's descriptions and says nothing
+  about their items: their `writeStanding` stays `mayWrite`. Only the owner signs such a record (§8.1).
+
+The record's layout is unchanged: the field was always there, and what changed is which records the verifier lets
+carry a cut, and what an empty one on a demotion to read-write means (none of that account's names count). Nothing
+is released at format 2, so the version byte stays. After a release this would have to be a later format (§8.9): a
+device on the old rule would refuse the new record as invalid, for good, and carry on without it.
+
+What that comes to, case by case:
+
+- **The owner, or an administrator on the head**: their rename counts on every device.
+- **An administrator demoted to read-write**: the names they chose before the owner's device took the cut count for
+  good; one written after it counts on no device, and a device that merged it before it heard of the record takes it
+  out again and holds it aside. Their items are untouched.
+- **Demoted to read-only, removed, or gone by their own leave request**: the same, by the one cut that also bounds
+  their items.
+- **A read-write member whose client does not keep the rule**: never. Not a late one; not one written above an
+  administrator's description (a higher version changes nothing about whose work it is); not one labelled as an
+  administrator's revision (a description is judged by its bytes in the stream of the device its stamp names, S36);
+  and not one that an unaware member's device stored again as a row of its own (it is judged by the write that chose
+  it, `VaultMetadata.writtenBy`, S37).
+- **A member promoted to administrator after writing a name while read-write**: it counts from the promotion on.
+  Deliberately, as a write made while read-only counts once its author may write (S12): the alternative would need
+  to know when a write was made, which only its writer says; and it would bind nobody, because the account can write
+  the same name again the moment it holds the role. Every device changes its answer at the same head.
+- **A demotion displaced by a fork** is not owed (§8.3): until the owner's device proposes it again the account is
+  an administrator and its names count, and the new record's cut, taken then, decides.
+
+**A name is chosen, not only written.** Whoever may write can seal a version that carries a description on (the
+merge of two rows at one version does, on any device), so with descriptions ordered by their *row's* version a
+member could have chosen the vault's name without writing one: by sealing an old description again, genuine to the
+byte, above the current one (review finding S54). The description is therefore a last-writer-wins register on the
+stamp of the write that chose it (§7.7), which the judge checks with the rest of its bytes; a carrier's version
+decides only between carriers of the same description. A description dated above the row that carries it does not
+open at all, or an administrator who expects to lose the role could date a name above every rename to come.
 
 ### 8.8 What integration calls, and what is not solved
 
@@ -1313,10 +1392,12 @@ written out against a hostile store. One sync pass, in this order:
 6. **Rotation.** Continue any saved plan (`RotationPlan.parse(_:account:)`, `steps(in:)`); a superseded removal or
    departure is planned again. Plan each of `owedRemovals` this account may sign. As an administrator, plan a
    rotation for each of `pendingLeaveRequests`. Every plan that removes a member who can write, and every change of
-   role to read-only, needs a write cut (`requiresWriteCut`), taken after step 5 of the same pass. Then, as a member
+   role to read-only or away from administrator, needs a write cut (`requiresWriteCut`), taken after step 5 of the
+   same pass. Then, as a member
    who may write, seal again whatever `recordsToReseal` lists, from an inventory that holds only what counts; a
    re-seal is the same item state at a higher version (`ItemMerge.written`), not an edit, so two devices doing it at
-   once converge, and it keeps every value's own author.
+   once converge, and it keeps every value's own author. The vault's description is sealed again only by an
+   administrator's device (§8.10).
 
 Accepting an invitation passes the ledger the device already holds for that vault ID, if it ever held one
 (`continuing:`), and the owner it knows for it (`knownOwner:`).
@@ -1463,7 +1544,9 @@ A vault key received through a grant is stored like any other, as a `vaultKeyWra
 directory row when the vault is new on the device; a key whose ID the device already holds for another vault is
 refused (`keyIDInUse`, S38), because key IDs are public and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
 chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission` (in
-`writableVaultKey`, so every write path asks: save, move, copy, rename, conflict resolution). Deleting a shared vault
+`writableVaultKey`, so every write path asks: save, move, copy, rename, conflict resolution). A rename also needs the
+owner's or an administrator's role (`checkSharedRename`, `SharedVaultError.renameRefused`; §8.7), asked before
+anything is sealed; vaults that are not shared, and the Personal vault, are renamed as before. Deleting a shared vault
 is the owner's and also proposes `deleteVault`; a member leaves instead.
 
 **The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
@@ -1485,8 +1568,8 @@ account may write (a read-only or former member merges and publishes nothing, `s
 `maintainsLog` off: a shared vault writes no snapshots and collects no segments, because a cut is judged against the
 departing account's own segments (§8.8, "a departed account's log"). After the logs: a saved plan continued, owed
 removals this account may sign planned, leave requests turned into rotations by an administrator, and what
-`recordsToReseal` lists sealed again through `ItemMerge.written`. While locked only membership is ingested and the
-logs download.
+`recordsToReseal` lists sealed again through `ItemMerge.written` (the description only by an administrator's device,
+below). While locked only membership is ingested and the logs download.
 
 **Verifying** (`SyncKeyring.verify`, `sharedVerify`): an object of a shared vault must carry the dual signature of a
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
@@ -1511,7 +1594,8 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   that segment) and every value it holds counts: each group's values, kept and retained values, the field order,
   each note line, each removal of a line, each resolution's discard and each history entry once per write that
   recorded it (S32, S43), read through `ItemMerge.canonical`, and the vault's description, attributed to the write that
-  chose it (`VaultMetadata.writtenBy`, kept by every re-seal, S37). A removal, discard or entry that names no writer is
+  chose it (`VaultMetadata.writtenBy`, kept by every re-seal, S37) and counted only as an administrator's work
+  ("The vault's description", below). A removal, discard or entry that names no writer is
   the work of the row carrying it. And every edit the version's clock says it contains, of any device but its own
   writer's, must have been published in a segment of that device's stream that counts (a version of the record at or
   above that count, `knowledgeCounts`): a version built on a late write holds what that write had seen, and an edit
@@ -1544,6 +1628,36 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   index is saved before anything a recorded segment lets count is merged, so a restart in between still replays (S41).
   An index refused on load is rebuilt by a replay before anything is taken out against it.
 
+**The vault's description** (§8.7, "Who may name the vault"). The judge asks more of a `vaultMetadata` version than of
+an item's, and the three properties above carry over:
+
+- *Whose work.* The description is one value, its bytes the vault, the name, the creation date and the stamp of the
+  write that chose it (`VaultMetadata.descriptionStamp`: `writtenBy`, kept by every path that stores a description
+  again — the merge of two rows, a rotation's re-seal, a device registered again — or else the row's own). It counts
+  through a segment of the stream of the device that stamp names which carried those bytes, if that segment counts
+  as a write (above) **and as an administrator's** (`administratorSegmentCounts`): its signer is the owner or an
+  administrator on the head, or was one and the segment is inside the cut of the record that ended the role. A
+  read-write member's segment therefore carries no description that counts, whatever the description claims; a
+  version of anyone's that carries such a description on is held aside with it; and a description this device wrote
+  and has not published counts only while its own account holds the role, so a rename made before the device heard
+  of its demotion is taken out before it is ever published.
+- *Which one.* Among the descriptions that count, the one with the highest stamp is the vault's (§7.7), whatever
+  version the row carrying it has reached. A member who may write can seal carriers, and so could otherwise choose
+  between names administrators once wrote (S54).
+- *Taken out.* `takeOutWhatNoLongerCounts` judges the description like every other record at each change of head,
+  and the replay rebuilds it from the versions that count: a promotion makes held-aside names count, a demotion
+  takes late ones out, on every device at the same head. A segment at or below a former administrator's cut that
+  arrives later asks for a replay, as one inside a write cut does.
+- *A member who joined after a rotation* cannot open the segment that first carried an older name, and takes it on
+  the word of the version that carries it on. For a description that word must be an administrator's
+  (`vouchesForDescriptions`): the version's own writer is the owner or an administrator (its segment counts as
+  one's), and for each account that could be the name's author, either it holds the role now or the version is
+  sealed under a key introduced at or after the record that ended its role, so that its sealer held that record and
+  judged the name by its cut. A member's version vouches for no name (S55), which is why only an administrator's
+  device seals the description again after a rotation (the device that planned the rotation is one). The same word
+  stands when the only carrier of the name that such a member can read is a late copy its former author published
+  again (S56).
+
 What is held aside is kept in the sync state's quarantine (`quarantinedVersions`, `SyncReport.heldAside`), never
 merged, never published by the device and discarded only by the person; the objects it came from are judged again
 on every replay of the log, so a write made while read-only counts once its author may write. A version that cannot be merged because the join would be
@@ -1562,7 +1676,7 @@ the ledger holds it in `laterFormatRecords` (§8.8 step 1): one that arrives bef
 chain once that record is here. Tests: "Vault session: a shared vault in a later format", and
 `laterFormatBeforeItsParent` and `laterFormatImpostorsThroughTheSession` in "shared vaults through the session".
 
-**Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46):
+**Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46, and §R, S57 and S58):
 
 - A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
   through vouching count only while every listing account's work can count (S33, insider denial of service like S11).
@@ -1575,6 +1689,18 @@ chain once that record is here. Tests: "Vault session: a shared vault in a later
   only: a device that merged a late version and then deleted the item claims what the late writer had seen (S45). A
   late version's vectors can claim edits of a current member that do not exist yet, which a device merging it carries
   on (S46). Both tracked, neither reproduced.
+- A name chosen by an administrator whose role ended after the last rotation cannot be checked by a member who joined
+  after that rotation: the version carrying it on was sealed under a key older than the record, so nothing says its
+  sealer had judged it by the cut. That member's device shows no name for the vault (the row's badge still says whose
+  vault it is) and holds the version aside until the next rotation seals the name again or an administrator renames
+  the vault; every other device shows the name throughout (S57). The same word is missing from a carrier that a
+  read-write member's device stored when two rows met at one version: a member who joined since holds that row aside
+  and keeps the administrator's own row of the same name. Rotate after demoting an administrator, as after any
+  demotion (S42).
+- An administrator's choice of name is bounded only by the role: one who holds it can write any name, date it up to
+  the version jump the engine allows, and seal another's description again; a name written before a promotion counts
+  from the promotion on (§8.7). `modifiedAt` is not part of what the judge attributes, so a carrier can state another
+  time for a name it carries; nothing reads it (S58).
 - A member who joined after a rotation reads records sealed before it only once a device that holds the old key has
   sealed them again (rotation does so for every record a member who may write holds), and a version of a shared vault
   that does not open here is held aside, not merged (S34).

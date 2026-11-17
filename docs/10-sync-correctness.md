@@ -489,3 +489,53 @@ segments again, and a revoked device's kept tombstone, which has no segment left
 consequences are by design and recorded in `06-adversarial-review.md` §O: everything an unaware device wrote
 on an item after merging a late version of it is held aside, including edits of other groups (S49); and a deletion
 built on a late write is held aside, so the item comes back and the person must delete it again.
+
+## 10. The vault's description
+
+A vault's description (its name; `VaultMetadata`, `02-architecture.md` §5) is not an item, and its model is smaller.
+
+**The state** is a set of *descriptions*, each `(name, createdAt, stamp)`, where the stamp is the revision of the
+write that chose it. **The value** of the state is the description with the highest stamp. The join is set union, so
+it is commutative, associative and idempotent, and the value of a join is the higher-stamped of the two values: a
+last-writer-wins register. A device stores only the value, in one row; the rows it has merged are the set.
+
+**A row is a carrier.** A row `(version, device)` holds one description. The row that a rename writes carries its
+own description, stamped with the row's revision (C2 of §1: above every row the device has seen). Other rows carry a
+description on: the row a device stores when two rows meet at one version (the engine replaces a row only by a higher
+version), a rotation's re-seal, a row written again by a device registered under a new ID. A carrier keeps the
+description's stamp (`VaultMetadata.writtenBy`) and takes a version of its own, which says nothing about the
+description. `VaultMetadataMerger` therefore compares descriptions by their stamps and uses row stamps only to choose
+between two carriers of one description; until review finding S54 it compared row stamps alone, so a carrier at a
+higher version won over a newer description (between an account's own devices, a carrier stored at the version of a
+concurrent rename could win over the rename; in a shared vault, anyone who may write could choose among old names by
+sealing one again). A description stamped above the row that carries it is refused when the row is opened: the row's
+version is what the engine bounds (U5), and the stamp must not escape that bound.
+
+**In a shared vault** the judge of §9 decides which descriptions are in the set at all
+(`02-architecture.md` §8.7, "Who may name the vault"). A row counts when (1) its own revision is its writer's, in a
+segment that counts, and (2) its description, judged by its bytes with the stamp, was carried by a segment of the
+stream of the device the stamp names that counts as a write *and* as an administrator's: signed by an account that
+is the owner or an administrator on the accepted head, or that was one, inside the cut of the record that ended the
+role. Call it `J_d`. Like `J` it is a function of the row's bytes, the head and the stream index, so the set of
+descriptions that count, `U_d`, is the same on every device that holds the same segments, and the vault's name is
+the highest-stamped member of `U_d ∩ received`, whichever device learnt of a record first: one that learnt late takes
+out its row if `J_d` is now false and replays its log, exactly as for items. Three things differ from an item, and
+each was a hole until it was said:
+
+- *Authorship is not enough; selection must be bound too.* For an item, which values stand is decided by the stamps'
+  `seen` vectors, which are part of the bytes the judge checks. For a description it was decided by the carrier's
+  version, which is not. Ordering by the description's own stamp puts the selection back inside what is judged (S54).
+- *A carrier's writer need only be allowed to write*, since any device stores carriers; so (1) does not ask for the
+  role, and the role is asked of the description's own carrier in its author's stream.
+- *A device that cannot read that stream's old segments* (it joined after a rotation) takes a description on the word
+  of the row that carries it on, and for a name that word must be an administrator's, given at or after the record
+  that ended the author's role if one did (S55, S56). Where that cannot be shown the device shows no name rather
+  than one it cannot check, until the next rotation or rename (S57): the one place where devices that have received
+  the same versions may, for a while, not show the same name.
+
+`J_d` is false for a read-write member's description whatever row carries it, since no segment of an administrator's
+carried those bytes in the named device's stream; and for a former administrator's late one, whose carrier is outside
+the cut. It is true, on every device and for good, of every description an administrator wrote with the role that
+the device signing the end of that role had merged. The tests are `AdversarialSharedVaultRenameTests.swift`
+(`04-test-plan.md`).
+

@@ -59,6 +59,9 @@ public struct SharedVaultStatus: Sendable, Hashable {
     /// This account's role, `nil` once it was removed or left.
     public let role: MemberRole?
     public let writePermission: WritePermission
+    /// Whether this account may rename the vault: its owner or an administrator, while it may write (§8.7). For the
+    /// screens; `renameVault` checks again, and so does every other device's judge.
+    public let mayRename: Bool
     /// Members whose keys in the chain differ from this device's pins (shown as a warning), and members trusted
     /// through the chain only (shown as unverified).
     public let substitutedMembers: [UUID]
@@ -760,6 +763,11 @@ extension VaultSession {
                 try await commitItem(
                     ItemMerge.written(canonical, as: revision), replacing: row, vaultKey: vaultKey, account: account)
             case .vaultMetadata:
+                // Only an administrator seals the description again. It stays the work of whoever chose it (S37),
+                // but a member who joined after this rotation cannot read the segment that first carried it, and
+                // takes it on the word of the version that carries it on: an administrator's word, never a member's,
+                // who may not name the vault (§8.10). The device that planned the rotation is an administrator's.
+                guard ledger.administratorStanding(of: account.accountID) == .holdsRole else { continue }
                 guard var metadata = try? openMetadata(row, keys: current) else { continue }
                 // Sealed again, not written: the description stays the work of whoever chose it (S37).
                 metadata.writtenBy = metadata.writtenBy ?? Self.origin(row)
@@ -816,6 +824,7 @@ extension VaultSession {
         return SharedVaultStatus(
             vaultID: vaultID, membership: vault.ledger.state, role: vault.ledger.state.member(account.accountID)?.role,
             writePermission: vault.ledger.writePermission(for: account.accountID),
+            mayRename: mayRenameSharedVault(vault, account: account.accountID),
             substitutedMembers: check?.substituted ?? [], unverifiedMembers: check?.unverified ?? [],
             verifiedMembers: check.map { check in
                 vault.ledger.state.members.map(\.accountID).filter {
@@ -843,6 +852,20 @@ extension VaultSession {
         if case .refused(let refusal) = vault.ledger.writePermission(for: account.accountID) {
             throw SharedVaultError.writeRefused(refusal)
         }
+    }
+
+    /// Whether this account may rename `vaultID` now: any vault that is not shared, and a shared one as its owner or
+    /// an administrator on the head this device knows, while it may write at all (docs/02-architecture.md §8.7).
+    func mayRenameSharedVault(_ vault: SharedVault, account: UUID) -> Bool {
+        vault.ledger.writePermission(for: account).isAllowed
+            && vault.ledger.administratorStanding(of: account) == .holdsRole
+    }
+
+    /// The client's half of "only the owner or an administrator renames a shared vault": asked after
+    /// `checkSharedWrite`, which has loaded the shared vaults and refused an account that may not write at all.
+    func checkSharedRename(_ vaultID: UUID, account: AccountRecord) throws {
+        guard let vault = sharing.vaults[vaultID] else { return }
+        guard mayRenameSharedVault(vault, account: account.accountID) else { throw SharedVaultError.renameRefused }
     }
 
     /// A shared vault is deleted through its chain, by its owner (§8.1); a member leaves instead.

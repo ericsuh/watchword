@@ -109,6 +109,8 @@ public enum ErrorWording {
             return "That vault is not shared."
         case .writeRefused(let refusal):
             return readOnly(refusal)
+        case .renameRefused:
+            return renameRefused
         case .notOwner:
             return "Only the vault's owner can delete it. Leave it instead."
         case .awaitingKey:
@@ -117,6 +119,9 @@ public enum ErrorWording {
             return "That invitation conflicts with a vault already on this device, and was refused."
         }
     }
+
+    /// Why a member who may edit a shared vault cannot rename it (docs/02-architecture.md §8.7).
+    public static let renameRefused = "Only this vault's owner or an administrator can rename it."
 
     /// Why a shared vault is read-only for this account (PRD F4.5; docs/02-architecture.md §8.9).
     public static func readOnly(_ refusal: WriteRefusal) -> String {
