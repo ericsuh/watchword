@@ -187,7 +187,8 @@ struct LongRunningVaultSimulationTests {
                     // IDs from the run's own generator, so a seed replays the same run.
                     draft.id = Self.uuid(using: &generator)
                     for index in draft.fields.indices { draft.fields[index].id = Self.uuid(using: &generator) }
-                    let made = try await session.save(draft)
+                    // The simulation's hosts differ by one digit, which is a near miss to the look-alike check.
+                    let made = try await session.save(draft, confirmingHosts: Set(draft.scopes.map(\.host)))
                     note(step, device, "create \(made.id) in \(vault.id)")
                 case 12..<40:
                     guard var item = pick(try await session.items().items.filter { !$0.isTrashed }) else { break }

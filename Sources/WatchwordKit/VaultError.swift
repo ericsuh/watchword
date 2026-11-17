@@ -46,6 +46,11 @@ public enum VaultError: Error, Equatable, Sendable {
     case itemIsTrashed(UUID)
     /// A scope that spans unrelated owners (PRD F11.2).
     case scopeRejected(ScopeValidationError)
+    /// The save would scope the item to hosts that resemble a saved site without being it, or that cannot be verified
+    /// by eye, and the caller did not say the person confirmed them (PRD F11.7; review finding Z61). Nothing was
+    /// written. The UI shows a confirmation naming each host and the item, and saves again with
+    /// `save(_:confirmingHosts:)`.
+    case hostsNeedConfirmation([HostConfirmation])
     /// A decrypted record's own identity disagrees with where it was stored. Authentication already binds the
     /// location, so this means a writer holding the vault key lied in the plaintext.
     case recordMismatch(UUID)
@@ -98,4 +103,18 @@ public enum VaultError: Error, Equatable, Sendable {
     /// Unlock Key, or that binding cannot be checked: the row was edited (A8), or its key is one that reached this
     /// account by another member's grant. Refused at every unlock, before a key is installed (review finding Z5).
     case personalVaultMismatch
+}
+
+/// A host a save would add to an item's scopes that the person has to confirm by name first (PRD F11.7).
+public struct HostConfirmation: Hashable, Sendable {
+    /// The host as the scope stores it: what `save(_:confirmingHosts:)` takes back.
+    public let host: String
+    /// The saved hosts it resembles, sorted. Empty when it resembles none and simply cannot be verified by eye (a
+    /// label outside ASCII, punycode, mixed scripts).
+    public let resembles: [String]
+
+    public init(host: String, resembles: [String]) {
+        self.host = host
+        self.resembles = resembles
+    }
 }

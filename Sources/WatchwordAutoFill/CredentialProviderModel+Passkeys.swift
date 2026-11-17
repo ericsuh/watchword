@@ -489,9 +489,11 @@ extension CredentialProviderModel {
         guard let host = try? HostNormalizer.normalize(relyingParty.serviceIdentifier) else {
             throw Blocked.refused(.passkey(.relyingPartyRejected(.notCanonical(relyingParty.value))))
         }
+        // A relying party nothing is saved for that resembles a saved site: the sheet shows the warning before an
+        // item scoped to it is made, as the save sheet does (PRD F11.3, F11.7).
         return try newItemProposal(
-            title: relyingParty.value, narrow: relyingParty.scope, on: host, userName: userName, warning: nil,
-            in: snapshot)
+            title: relyingParty.value, narrow: relyingParty.scope, on: host, userName: userName,
+            warning: snapshot.offered(on: host).isEmpty ? warning(for: [host], in: snapshot) : nil, in: snapshot)
     }
 
     /// Logins in use with `userName` that are scoped at or under the relying party and are not candidates: the

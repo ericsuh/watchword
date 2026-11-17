@@ -58,7 +58,8 @@ public actor FakeCredentialVault: CredentialVault {
         let ids = Set(items.map(\.vaultID)).union([vaultID]).union(sharedVaults.keys)
         let vaults = ids.sorted { $0.uuidString < $1.uuidString }.map { id in
             CredentialVaultInfo(
-                id: id, name: sharedVaults[id] ?? (id == vaultID ? "Personal" : "Own"), isShared: sharedVaults[id] != nil)
+                id: id, name: sharedVaults[id] ?? (id == vaultID ? "Personal" : "Own"),
+                isShared: sharedVaults[id] != nil)
         }
         return CredentialSnapshot(items: items, vaults: vaults, defaultVaultID: vaultID)
     }

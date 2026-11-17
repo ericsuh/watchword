@@ -33,17 +33,29 @@ extension VaultSession: CredentialVault {
     /// process that was not given the sharing state (`configureSharing`) sees every vault but the Personal one as
     /// shared, or withheld: closed, not open.
     public func credentialSnapshot() async throws -> CredentialSnapshot {
-        try await translatingForAutoFill {
-            let listing = try await items().items
-            let withheld = try await vaultsWithheldFromAutoFill()
-            guard let personal = try await loadAccount()?.personalVaultID else { throw CredentialVaultError.noAccount }
-            let described = try await vaults(includingDeleted: true).filter { !withheld.contains($0.id) }.map {
-                CredentialVaultInfo(id: $0.id, name: $0.name, isShared: $0.isShared)
-            }
-            return CredentialSnapshot(
-                items: withheld.isEmpty ? listing : listing.filter { !withheld.contains($0.vaultID) },
-                vaults: described, defaultVaultID: personal)
+        try await translatingForAutoFill { try await autoFillContents() }
+    }
+
+    private func autoFillContents() async throws -> CredentialSnapshot {
+        let listing = try await items().items
+        let withheld = try await vaultsWithheldFromAutoFill()
+        guard let personal = try await loadAccount()?.personalVaultID else { throw VaultError.noAccount }
+        let described = try await vaults(includingDeleted: true).filter { !withheld.contains($0.id) }.map {
+            CredentialVaultInfo(id: $0.id, name: $0.name, isShared: $0.isShared)
         }
+        return CredentialSnapshot(
+            items: withheld.isEmpty ? listing : listing.filter { !withheld.contains($0.vaultID) },
+            vaults: described, defaultVaultID: personal)
+    }
+
+    /// The saved items as the gate ranks among them, with the session's answer for which vaults are the person's
+    /// own: what AutoFill is given, less the trash and the scopes the policy refuses. The item editor's confirmation
+    /// and the import preview judge hosts against this, so that what they call a look-alike, or an account a new
+    /// item would hide, is what the extension would (review findings Z61, Z62, Z65).
+    public func savedSites() async throws -> SavedSites {
+        let contents = try await autoFillContents()
+        return SavedSites(
+            stored: contents.items, ownVaults: Set(contents.vaults.filter { !$0.isShared }.map(\.id)))
     }
 
     /// The actor's own lock check: the model calls it as its last suspension before it hands a secret back, so a
@@ -74,7 +86,11 @@ extension VaultSession: CredentialVault {
     @discardableResult
     public func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
         try await translatingForAutoFill {
-            try await save(item, expecting: replacingVersion.map(WriteExpectation.version) ?? .absent)
+            // The model's own sheets carry the look-alike warning for a host it would create an item on
+            // (`NewItemProposal.warning`), and it never creates one there without the person.
+            try await save(
+                item, expecting: replacingVersion.map(WriteExpectation.version) ?? .absent,
+                confirmed: .confirmedByCaller)
         }
     }
 

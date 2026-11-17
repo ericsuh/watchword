@@ -120,7 +120,8 @@ struct SessionHygieneTests {
         let (fixture, vaultID) = try await Self.unlocked()
         for (index, password) in ["password", "123456", "hunter2", "qwerty", "letmein"].enumerated() {
             try await fixture.session.save(
-                Fixture.login(vaultID, title: "Item \(index)", host: "site\(index).example", password: password))
+                Fixture.login(vaultID, title: "Item \(index)", host: "site\(index).example", password: password),
+                confirmingHosts: ["site\(index).example"])
         }
         try await fixture.scanUntilIdle()
         // Five ranges, an index and a ledger.

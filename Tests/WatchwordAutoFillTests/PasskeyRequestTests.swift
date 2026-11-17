@@ -422,9 +422,24 @@ struct PasskeyRequestTests {
 
     // MARK: Registration
 
+    @Test("a relying party that resembles a saved site carries the look-alike warning in its new-item proposal")
+    func registerOnLookAlikeRelyingParty() async throws {
+        let harness = AutoFillHarness(items: Fixtures.all)
+        let options = try await harness.model.passkeyRegistrationOptions(for: Self.registrationRequest("amaz0n.com"))
+            .value
+        #expect(options.existingItems.isEmpty)
+        #expect(options.newItem.warning?.impersonating == ["amazon.com"])
+        // A relying party of a saved site carries none.
+        let genuine = try await harness.model.passkeyRegistrationOptions(for: Self.registrationRequest("amazon.com"))
+            .value
+        #expect(genuine.newItem.warning == nil)
+    }
+
     @Test("registering for a new site creates an item titled and scoped by the relying party")
     func registerNewItem() async throws {
-        let harness = AutoFillHarness(items: Fixtures.all)
+        // Without the library card: its host `library.example.org` has "example" as its name, which the reserved
+        // suffix of `shop.example` would be taken to imitate.
+        let harness = AutoFillHarness(items: Fixtures.all.filter { $0.id != Fixtures.library.id })
         let request = Self.registrationRequest(
             extensions: PasskeyRegistrationExtensions(prf: .checkForSupport, largeBlobRequested: true))
         let options = try await harness.model.passkeyRegistrationOptions(for: request).value
@@ -435,7 +450,8 @@ struct PasskeyRequestTests {
         #expect(
             options.newItem
                 == NewItemProposal(
-                    vault: Fixtures.personalVault, title: "shop.example", scopeHost: "shop.example", includesSubdomains: true,
+                    vault: Fixtures.personalVault, title: "shop.example", scopeHost: "shop.example",
+                    includesSubdomains: true,
                     userName: "pat@example.com", warning: nil, hiddenAccounts: 0, besideExisting: nil))
 
         let result = try await harness.model.registerPasskey(request, destination: .newItem, presence: .verified).value

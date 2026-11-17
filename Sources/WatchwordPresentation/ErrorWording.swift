@@ -47,6 +47,9 @@ public enum ErrorWording {
             return "That Secret Key belongs to another account."
         case .scopeRejected:
             return "That website address is too broad. Enter the site's own domain, such as example.com."
+        case .hostsNeedConfirmation(let hosts):
+            return "Check " + hosts.map { HostText.ascii($0.host) }.joined(separator: ", ")
+                + " before adding it: it is not a site this item is saved for."
         case .quickUnlockRefused(let reason):
             switch reason {
             case .enrolmentChanged:

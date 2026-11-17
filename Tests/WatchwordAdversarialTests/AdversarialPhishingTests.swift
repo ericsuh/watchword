@@ -105,7 +105,8 @@ struct AdversarialPhishingTests {
     /// computed (review findings Z60, Z65). A scope recognises a host for its own vault only. The person's own
     /// scope for the host recognises it for everyone, and a shared vault's scope that resembles nothing saved
     /// elsewhere is an ordinary match.
-    @Test("a scope in a shared vault does not make a look-alike of another vault's site recognised",
+    @Test(
+        "a scope in a shared vault does not make a look-alike of another vault's site recognised",
         arguments: impersonatingHosts)
     func sharedVaultScopeDoesNotRecognise(_ value: String) throws {
         let shared = UUID()

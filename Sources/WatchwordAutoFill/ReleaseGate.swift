@@ -16,8 +16,10 @@ struct VaultSnapshot: Sendable {
     /// would match every site under it; here it matches nothing (PRD F11.2). The stored item is not rewritten.
     ///
     /// Never handed to `ItemRanker`, `AutoFillGate` or `PhishingDetector` directly: `candidates(on:)`, `decide`,
-    /// `authorize` and `assess` below pass `sharedVaults` with it, and are the only callers.
-    let rankable: [Item]
+    /// `authorize` and `assess` below pass `sharedVaults` with it, and are the only callers. It is `SavedSites`'
+    /// view, the one the item editor and the import preview judge hosts against too.
+    var rankable: [Item] { sites.items }
+    let sites: SavedSites
     /// IDs more than one readable item carries. No honest client writes two items with one ID, and everything here
     /// names an item by its ID alone (a choice, a record identifier, the ranker's "is this the match"), so with two
     /// candidates the gate could say yes about one and the secret be read from the other. Such items keep ranking,
@@ -29,7 +31,7 @@ struct VaultSnapshot: Sendable {
     /// describe as this account's alone (review finding Z60). An item of one of these says what a member said, so
     /// it never shadows an item of another vault, never vouches for a look-alike of another vault's site, and is
     /// never written to without the person.
-    let sharedVaults: Set<UUID>
+    var sharedVaults: Set<UUID> { sites.sharedVaults }
     /// The vault a new item is created in.
     let defaultVaultID: UUID?
 
@@ -55,11 +57,7 @@ struct VaultSnapshot: Sendable {
 
     private init(items: [Item], vaults: [UUID: CredentialVaultInfo], defaultVaultID: UUID?) {
         all = items
-        rankable = items.filter { !$0.isTrashed }.map { item in
-            var view = item
-            view.scopes = item.scopes.filter(ScopePolicy.isAcceptable)
-            return view
-        }
+        sites = SavedSites(stored: items, ownVaults: Set(vaults.values.filter { !$0.isShared }.map(\.id)))
         var seen = Set<UUID>()
         var duplicated = Set<UUID>()
         for item in items where !seen.insert(item.id).inserted {
@@ -67,7 +65,6 @@ struct VaultSnapshot: Sendable {
         }
         duplicatedIDs = duplicated
         self.vaults = vaults
-        sharedVaults = Set(items.map(\.vaultID).filter { vaults[$0]?.isShared != false })
         self.defaultVaultID = defaultVaultID
     }
 
@@ -95,7 +92,7 @@ struct VaultSnapshot: Sendable {
 
     /// What the gate offers on `host`: the unshadowed matches, or why nothing is offered there.
     func candidates(on host: NormalizedHost) -> Result<ItemRanking, FillRefusal> {
-        AutoFillGate.candidates(on: host, among: rankable, sharedVaults: sharedVaults)
+        sites.candidates(on: host)
     }
 
     /// The matches the gate offers on `host`, none where it refuses the host.
@@ -104,11 +101,11 @@ struct VaultSnapshot: Sendable {
     }
 
     func decide(for identifier: ServiceIdentifier) -> FillDecision {
-        AutoFillGate.decide(for: identifier, among: rankable, sharedVaults: sharedVaults)
+        sites.decide(for: identifier)
     }
 
     func assess(_ host: NormalizedHost) -> PhishingAssessment {
-        PhishingDetector.assess(host: host, againstItemsIn: rankable, sharedVaults: sharedVaults)
+        sites.assess(host)
     }
 
     /// Whether a credential may be released from `item`, or the item written to, by the extension: not in the
@@ -192,15 +189,7 @@ enum ReleaseGate {
 
         var refusals: [FillRefusal] = []
         for identifier in identifiers.prefix(maximumIdentifiers) {
-            let result: Result<NormalizedHost, FillRefusal>
-            switch purpose {
-            case .credential:
-                result = AutoFillGate.authorize(
-                    ranked, for: identifier, among: snapshot.rankable, sharedVaults: snapshot.sharedVaults)
-            case .oneTimeCode:
-                result = AutoFillGate.authorizeOneTimeCode(
-                    ranked, for: identifier, among: snapshot.rankable, sharedVaults: snapshot.sharedVaults)
-            }
+            let result = snapshot.sites.authorize(ranked, for: identifier, oneTimeCode: purpose == .oneTimeCode)
             switch result {
             case .success(let host): return .success(Authorization(item: item, host: host))
             case .failure(let refusal): refusals.append(refusal)

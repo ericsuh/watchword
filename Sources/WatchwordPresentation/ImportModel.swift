@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import WatchwordInterchange
 import WatchwordKit
+import WatchwordMatching
 import WatchwordModel
 
 /// What the person chose for an imported entry that duplicates an existing item.
@@ -72,10 +73,11 @@ public struct MergeReview: Hashable, Sendable {
     public let tags: [String]
     public let addsNotes: Bool
 
-    /// `saved` is what the hosts are compared with for look-alikes: the vault's items, the existing one included.
-    public init(existingID: UUID, additions: MergeAdditions, saved: [Item]) {
+    /// `sites` is what the hosts are compared with for look-alikes: what is saved in every vault, as the gate sees it
+    /// (`VaultSession.savedSites()`), the existing item included.
+    public init(existingID: UUID, additions: MergeAdditions, sites: SavedSites.Prepared, inSharedVault: Bool = false) {
         self.existingID = existingID
-        hosts = additions.scopes.map { MergeHost($0, against: saved) }
+        hosts = additions.scopes.map { MergeHost($0, among: sites, inSharedVault: inSharedVault) }
         func row(_ field: Field) -> AdditionField {
             AdditionField(
                 id: field.id, label: field.label.isEmpty ? field.kind.rawValue : field.label, value: field.value,
@@ -216,8 +218,10 @@ public final class ImportModel: LockSensitive {
                 let additions = try await context.session.importAdditions(
                     preview: previewID, importedID: importedID, existingID: existingID)
                 let existing = try await context.session.item(id: existingID)
-                let saved = (try? await context.session.items().items) ?? [existing]
-                merges[importedID] = MergeReview(existingID: existingID, additions: additions, saved: saved)
+                let sites = try await context.session.savedSites().prepared()
+                merges[importedID] = MergeReview(
+                    existingID: existingID, additions: additions, sites: sites,
+                    inSharedVault: sites.sites.sharedVaults.contains(existing.vaultID))
             } else {
                 merges[importedID] = nil
             }

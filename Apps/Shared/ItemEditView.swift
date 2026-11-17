@@ -4,10 +4,13 @@ import WatchwordModel
 import WatchwordPresentation
 
 /// Create or edit an item. Scopes are checked by the vault when saving (PRD F11.2); an over-broad host is refused
-/// there, not here, so no UI path can skip the check.
+/// there, not here, so no UI path can skip the check. A host that resembles a saved site is refused there too until
+/// the person confirms it by name (PRD F11.7): the question, which names the site and the item, comes from
+/// `ItemEditorModel`.
 struct ItemEditView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var editor: ItemEditorModel?
     @State private var draft: Item
     @State private var hosts: String
     @State private var username: String
@@ -69,10 +72,22 @@ struct ItemEditView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { Task { if await model.save(assembled()) { dismiss() } } }
+                    Button("Save") { Task { await save(confirmed: false) } }
                         .disabled(draft.title.isEmpty || model.isWorking)
                         .accessibilityIdentifier("edit.save")
                 }
+            }
+            // One question per look-alike host, each naming the site as it resolves and this item. Nothing has been
+            // written when it appears, and "Cancel" leaves it so.
+            .confirmationDialog(
+                editor?.prompts.first?.title ?? "", isPresented: confirming, titleVisibility: .visible
+            ) {
+                Button("Add Anyway", role: .destructive) { Task { await save(confirmed: true) } }
+                    .accessibilityIdentifier("edit.host.confirm")
+                Button("Cancel", role: .cancel) { editor?.cancelConfirmation() }
+                    .accessibilityIdentifier("edit.host.cancel")
+            } message: {
+                Text((editor?.prompts ?? []).map(\.message).joined(separator: "\n\n"))
             }
         }
         #if os(macOS)
@@ -80,11 +95,22 @@ struct ItemEditView: View {
         #endif
     }
 
+    private var confirming: Binding<Bool> {
+        Binding(
+            get: { editor?.isAwaitingConfirmation ?? false },
+            set: { if !$0 { editor?.cancelConfirmation() } })
+    }
+
+    private func save(confirmed: Bool) async {
+        guard let context = model.screenContext else { return }
+        let editor = editor ?? ItemEditorModel(context: context)
+        self.editor = editor
+        if await model.save(assembled(), with: editor, confirmed: confirmed) { dismiss() }
+    }
+
     private func assembled() -> Item {
         var item = draft
-        let existing = Dictionary(item.scopes.map { ($0.host, $0) }, uniquingKeysWith: { first, _ in first })
-        item.scopes = hosts.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            .map { existing[ServiceScope.canonicalHost($0)] ?? ServiceScope(host: $0) }
+        item.scopes = ItemEditorModel.scopes(from: hosts, keeping: item.scopes)
         set(.username, label: "Username", value: username, in: &item)
         set(.password, label: "Password", value: password, in: &item)
         return item

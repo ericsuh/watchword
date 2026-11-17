@@ -1247,20 +1247,71 @@ public actor VaultSession: SharesExecutor {
     /// An update must be made from the stored version: a draft whose `version` is not the stored item's (a sync
     /// merged another device's edit while the editor was open) is refused with `versionConflict`, and the editor
     /// reopens the item (Y29).
+    ///
+    /// **A look-alike host is added only by name (PRD F11.7; review finding Z61).** Every host the draft adds to the
+    /// item's scopes (all of them, for a new item) is judged against what is saved, as the gate would judge a page
+    /// (`SavedSites`): one that resembles a saved site without being it, or that cannot be verified by eye, is
+    /// refused with `VaultError.hostsNeedConfirmation` unless it is in `confirmingHosts`. Adding a host is the one
+    /// way a refusal in the extension is ever turned into a fill, so the check is here, below every screen: the
+    /// editor shows the confirmation the error describes (the site as it resolves, what it resembles, the item) and
+    /// saves again naming the hosts the person confirmed.
     @discardableResult
-    public func save(_ draft: Item) async throws -> Item {
+    public func save(_ draft: Item, confirmingHosts: Set<String> = []) async throws -> Item {
         // A draft made from an earlier version than the stored one would be stamped as an edit that had seen
         // everything since, and replace it (Y29): refused, for the editor to reopen the item.
-        try await save(draft, expecting: .versionIfPresent(draft.version))
+        try await save(draft, expecting: .versionIfPresent(draft.version), confirmed: .hosts(confirmingHosts))
     }
 
-    func save(_ draft: Item, expecting expectation: WriteExpectation) async throws -> Item {
+    /// Who answers for the hosts a save adds.
+    enum AddedHosts {
+        /// The person confirmed these by name; any other look-alike refuses the save.
+        case hosts(Set<String>)
+        /// The caller showed its own warning and took the person's confirmation: the AutoFill model, whose save and
+        /// registration sheets carry `NewItemProposal.warning` and never create an item on such a host silently.
+        case confirmedByCaller
+    }
+
+    /// The hosts `draft` would add to its item's scopes that need the person's confirmation by name: empty when the
+    /// save would go through as it is. What `save` refuses with, for an editor that asks before it saves.
+    public func hostsNeedingConfirmation(in draft: Item) async throws -> [HostConfirmation] {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        var held = Set<String>()
+        if let row = try await store.record(RecordKey(recordID: draft.id, kind: .item)) {
+            held = Set(try openItem(row, keys: try requireKeys(since: epoch)).scopes.map(\.host))
+        }
+        let added = draft.scopes.filter { !held.contains($0.host) }
+        guard !added.isEmpty else { return [] }
+        let sites = try await savedSites().prepared()
+        _ = try requireKeys(since: epoch)
+        let inSharedVault = sites.sites.sharedVaults.contains(draft.vaultID)
+        var needed: [HostConfirmation] = []
+        for scope in added {
+            let others = draft.scopes.filter { $0.host != scope.host }
+            if case .needsConfirmation(let resembles) = sites.standing(
+                ofNewHost: scope.host, beside: others, inSharedVault: inSharedVault)
+            {
+                needed.append(HostConfirmation(host: scope.host, resembles: resembles))
+            }
+        }
+        return needed
+    }
+
+    func save(
+        _ draft: Item, expecting expectation: WriteExpectation, confirmed: AddedHosts = .hosts([])
+    ) async throws -> Item {
         for scope in draft.scopes {
             do {
                 try ScopePolicy.validate(scope)
             } catch let error as ScopeValidationError {
                 throw VaultError.scopeRejected(error)
             }
+        }
+        if case .hosts(let confirmedHosts) = confirmed {
+            let unconfirmed = try await hostsNeedingConfirmation(in: draft).filter {
+                !confirmedHosts.contains($0.host)
+            }
+            guard unconfirmed.isEmpty else { throw VaultError.hostsNeedConfirmation(unconfirmed) }
         }
         return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft, expecting: expectation) {
             item, existing, now in

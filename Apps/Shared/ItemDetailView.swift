@@ -17,8 +17,18 @@ struct ItemDetailView: View {
             ConflictSection(item: item)
             Section {
                 Text(item.title).font(.title2.bold()).accessibilityIdentifier("detail.title")
+                // The host as it resolves (a Cyrillic look-alike shows as `xn--…`, never as the name it imitates) and
+                // how far the scope reaches (review finding Z61).
                 ForEach(item.scopes, id: \.host) { scope in
-                    Label(scope.host, systemImage: "globe")
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(HostText.ascii(scope.host))
+                            Text(HostText.reach(of: scope)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "globe")
+                    }
+                    .accessibilityElement(children: .combine)
                 }
             }
             Section("Fields") {

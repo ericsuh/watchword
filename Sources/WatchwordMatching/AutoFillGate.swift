@@ -100,7 +100,8 @@ public enum AutoFillGate {
 
         switch candidates(on: host, among: items, sharedVaults: sharedVaults) {
         case .failure(let refusal): return .refuse(refusal)
-        case .success(let ranking): return ranking.isAmbiguous ? .chooseAmong(ranking.primary) : .fill(ranking.primary[0])
+        case .success(let ranking):
+            return ranking.isAmbiguous ? .chooseAmong(ranking.primary) : .fill(ranking.primary[0])
         }
     }
 

@@ -121,11 +121,15 @@ extension AdversarialAutoFillRequestTests {
         #expect(list.passwords.first?.vault == Fixtures.personalVault)
         #expect(list.suggested == nil, "two vaults meet on this host: the person chooses")
         #expect(
-            try await harness.model.password(for: PasswordChoice(itemID: own.id, userName: "alice@x"), identifiers: [page])
-                .value.password == "real")
+            try await harness.model.password(
+                for: PasswordChoice(itemID: own.id, userName: "alice@x"), identifiers: [page]
+            )
+            .value.password == "real")
 
         let request = SavePasswordRequest(serviceIdentifier: page, userName: "alice@x", password: "changed")
-        guard case .offerUpdate(let candidates, let newItem) = try await harness.model.savePasswordPlan(for: request).value
+        guard
+            case .offerUpdate(let candidates, let newItem) = try await harness.model.savePasswordPlan(for: request)
+                .value
         else {
             Issue.record("the person's own login is not offered for update")
             return
@@ -324,7 +328,9 @@ extension AdversarialAutoFillRequestTests {
             return
         }
         #expect(second.hiddenAccounts == 2)
-        #expect(second.besideExisting == SharedScopeProposal(scopeHost: "shop.example", includesSubdomains: true, accounts: 1))
+        #expect(
+            second.besideExisting
+                == SharedScopeProposal(scopeHost: "shop.example", includesSubdomains: true, accounts: 1))
     }
 }
 

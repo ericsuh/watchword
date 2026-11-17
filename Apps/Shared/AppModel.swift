@@ -302,15 +302,17 @@ final class AppModel {
         return personalVaultID
     }
 
-    func save(_ item: Item) async -> Bool {
-        guard let session else { return false }
-        var saved = false
-        await perform {
-            try await session.save(item)
-            try await self.reload()
-            saved = true
-        }
-        return saved
+    /// Saves through the editor's model, which turns the session's refusal of a look-alike host into the questions
+    /// the editor shows (PRD F11.7; `ItemEditorModel`). `false` when nothing was written: an error is in
+    /// `errorMessage`, or `editor.prompts` is waiting for the person.
+    func save(_ item: Item, with editor: ItemEditorModel, confirmed: Bool = false) async -> Bool {
+        isWorking = true
+        defer { isWorking = false }
+        let stored = confirmed ? await editor.confirmAndSave() : await editor.save(item)
+        errorMessage = editor.errorMessage
+        guard stored != nil else { return false }
+        await perform { try await self.reload() }
+        return true
     }
 
     func trash(_ item: Item) async {

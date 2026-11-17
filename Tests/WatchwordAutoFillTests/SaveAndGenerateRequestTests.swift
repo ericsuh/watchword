@@ -27,7 +27,8 @@ struct SaveAndGenerateRequestTests {
             plan
                 == .createItem(
                     NewItemProposal(
-                        vault: Fixtures.personalVault, title: "shop.example.net", scopeHost: "shop.example.net", includesSubdomains: false,
+                        vault: Fixtures.personalVault, title: "shop.example.net", scopeHost: "shop.example.net",
+                        includesSubdomains: false,
                         userName: "pat@example.com", warning: nil, hiddenAccounts: 0, besideExisting: nil)))
         #expect(await harness.vault.saves.isEmpty)
 

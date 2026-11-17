@@ -142,8 +142,14 @@ struct AdversarialMatchingTests {
             fields: [Field(kind: .password, label: "password", value: "household")])
         let console = ServiceIdentifier("https://signin.aws.amazon.com/", kind: .url)
         let decision = AutoFillGate.decide(for: console, among: [sharedWide, Self.aws], sharedVaults: [shared])
-        #expect(decision == .fill(RankedMatch(item: Self.aws, match: try #require(
-            ScopeMatcher.match(Self.aws.scopes[0], host: try Self.host("signin.aws.amazon.com"))), isShadowed: false)))
+        #expect(
+            decision
+                == .fill(
+                    RankedMatch(
+                        item: Self.aws,
+                        match: try #require(
+                            ScopeMatcher.match(Self.aws.scopes[0], host: try Self.host("signin.aws.amazon.com"))),
+                        isShadowed: false)))
         #expect(throws: FillRefusal.self) {
             try AutoFillGate.authorize(sharedWide, for: console, among: [sharedWide, Self.aws], sharedVaults: [shared])
                 .get()
@@ -165,8 +171,9 @@ struct AdversarialMatchingTests {
         let items = [Self.amazon, planted]
         let page = ServiceIdentifier(lookAlike, kind: .domain)
 
-        guard case .refuse(.resemblesSavedSite(let assessment)) = AutoFillGate.decide(
-            for: page, among: items, sharedVaults: [shared])
+        guard
+            case .refuse(.resemblesSavedSite(let assessment)) = AutoFillGate.decide(
+                for: page, among: items, sharedVaults: [shared])
         else {
             Issue.record("offered on \(lookAlike)")
             return
@@ -177,8 +184,10 @@ struct AdversarialMatchingTests {
                 == .failure(.resemblesSavedSite(assessment)))
         // The person's own item scoped to the host is their word for it.
         let vouched = Item(vaultID: Self.vault, title: "Mine", scopes: [ServiceScope(host: lookAlike)], fields: [])
-        #expect(AutoFillGate.decide(for: page, among: items + [vouched], sharedVaults: [shared]) != .refuse(
-            .resemblesSavedSite(assessment)))
+        #expect(
+            AutoFillGate.decide(for: page, among: items + [vouched], sharedVaults: [shared])
+                != .refuse(
+                    .resemblesSavedSite(assessment)))
         #expect(
             (try? AutoFillGate.authorize(planted, for: page, among: items + [vouched], sharedVaults: [shared]).get())
                 != nil)

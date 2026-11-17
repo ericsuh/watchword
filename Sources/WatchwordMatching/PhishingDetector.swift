@@ -102,74 +102,124 @@ public enum PhishingDetector {
     }
 
     public static func assess(host: NormalizedHost, against scopes: [ServiceScope]) -> PhishingAssessment {
-        // A real match is never phishing, whatever it looks like.
-        for scope in scopes where ScopeMatcher.match(scope, host: host) != nil {
-            return .recognized
+        ScopeIndex(scopes).assess(host)
+    }
+
+    /// Saved scopes prepared for comparison: each one's visual skeleton and recognisable name worked out once, so
+    /// that judging many hosts against one vault (an import's preview) costs a few string comparisons per pair, and
+    /// an edit distance only where two names are close in length. `assess` is the one implementation of the
+    /// look-alike rules; `PhishingDetector.assess(host:against:)` builds an index and asks it.
+    public struct ScopeIndex: Sendable {
+        struct Entry: Sendable {
+            let scope: ServiceScope
+            let skeleton: String
+            /// The recognisable name of the skeleton, and its length in characters.
+            let name: String?
+            let nameLength: Int
+            /// The recognisable name of the host as stored, when it is long enough to look for in another host.
+            let plainName: String?
         }
 
-        var signals = Set<PhishingSignal>()
-        var impersonating = Set<String>()
+        let entries: [Entry]
 
-        let hostValue = host.value
-        let hostSkeleton = skeleton(hostValue)
-        let hostLabels = Set(host.labels.flatMap { $0.split(separator: "-").map(String.init) })
-
-        if !host.isASCII && isMixedScript(hostValue) {
-            signals.insert(.mixedScript)
-        }
-        if let punycodeLabel = host.labels.first(where: { $0.hasPrefix("xn--") }) {
-            signals.insert(.punycode(punycodeLabel))
+        init(entries: [Entry]) {
+            self.entries = entries
         }
 
-        for scope in scopes {
-            let scopeHost = scope.host
-            guard !scopeHost.isEmpty else { continue }
-            let scopeSkeleton = skeleton(scopeHost)
+        public init(_ scopes: [ServiceScope]) {
+            entries = scopes.compactMap { scope in
+                guard !scope.host.isEmpty else { return nil }
+                let skeleton = PhishingDetector.skeleton(scope.host)
+                let name = PhishingDetector.distinctiveLabel(of: skeleton)
+                let plain = PhishingDetector.distinctiveLabel(of: scope.host)
+                return Entry(
+                    scope: scope, skeleton: skeleton, name: name, nameLength: name?.count ?? 0,
+                    plainName: plain.flatMap { $0.count >= 4 ? $0 : nil })
+            }
+        }
 
-            if hostSkeleton == scopeSkeleton {
-                signals.insert(.confusableWithSavedScope(scopeHost))
-                impersonating.insert(scopeHost)
-                continue
+        /// How many saved scopes a host is compared with: the unit of an import preview's work budget.
+        public var count: Int { entries.count }
+
+        /// Whether any saved scope matches `host`.
+        public func matches(_ host: NormalizedHost) -> Bool {
+            entries.contains { ScopeMatcher.match($0.scope, host: host) != nil }
+        }
+
+        public func assess(_ host: NormalizedHost) -> PhishingAssessment {
+            // A real match is never phishing, whatever it looks like.
+            if matches(host) { return .recognized }
+
+            var signals = Set<PhishingSignal>()
+            var impersonating = Set<String>()
+
+            let hostValue = host.value
+            let hostSkeleton = PhishingDetector.skeleton(hostValue)
+            let hostLabels = Set(host.labels.flatMap { $0.split(separator: "-").map(String.init) })
+            let hostName = PhishingDetector.distinctiveLabel(of: hostSkeleton)
+            let hostNameLength = hostName?.count ?? 0
+
+            if !host.isASCII && PhishingDetector.isMixedScript(hostValue) {
+                signals.insert(.mixedScript)
+            }
+            if let punycodeLabel = host.labels.first(where: { $0.hasPrefix("xn--") }) {
+                signals.insert(.punycode(punycodeLabel))
             }
 
-            let hostName = distinctiveLabel(of: hostSkeleton)
-            let scopeName = distinctiveLabel(of: scopeSkeleton)
+            for entry in entries {
+                let scopeHost = entry.scope.host
+                if hostSkeleton == entry.skeleton {
+                    signals.insert(.confusableWithSavedScope(scopeHost))
+                    impersonating.insert(scopeHost)
+                    continue
+                }
 
-            // The same name under a different public suffix (`amazon.de` against a saved
-            // `amazon.com`) is a plausible regional site, not an impersonation. Nothing below
-            // applies in that case.
-            if let hostName, let scopeName, hostName == scopeName {
-                continue
-            }
+                // The same name under a different public suffix (`amazon.de` against a saved
+                // `amazon.com`) is a plausible regional site, not an impersonation. Nothing below
+                // applies in that case.
+                if let hostName, let scopeName = entry.name, hostName == scopeName {
+                    continue
+                }
 
-            // A near-miss on the recognisable name: `amazom.com`, `firstbamk.co.uk`.
-            if let hostName, let scopeName, scopeName.count >= 5, hostName.count >= 5 {
-                let distance = editDistance(hostName, scopeName, limit: 2)
-                if distance > 0 && distance <= 2 {
-                    signals.insert(.nearMiss(savedScope: scopeHost, distance: distance))
+                // A near-miss on the recognisable name: `amazom.com`, `firstbamk.co.uk`.
+                if let hostName, let scopeName = entry.name, entry.nameLength >= 5, hostNameLength >= 5,
+                    abs(entry.nameLength - hostNameLength) <= 2
+                {
+                    let distance = PhishingDetector.editDistance(hostName, scopeName, limit: 2)
+                    if distance > 0 && distance <= 2 {
+                        signals.insert(.nearMiss(savedScope: scopeHost, distance: distance))
+                        impersonating.insert(scopeHost)
+                    }
+                }
+
+                // The saved site's name appears in a label where it carries no authority:
+                // `amazon.com.evil.example`, `secure-amazon.example`.
+                if let plainScopeName = entry.plainName, hostLabels.contains(plainScopeName) {
+                    signals.insert(.savedNameOutOfPosition(savedScope: scopeHost, label: plainScopeName))
                     impersonating.insert(scopeHost)
                 }
             }
 
-            // The saved site's name appears in a label where it carries no authority:
-            // `amazon.com.evil.example`, `secure-amazon.example`.
-            let plainScopeName = distinctiveLabel(of: scopeHost)
-            if let plainScopeName, plainScopeName.count >= 4, hostLabels.contains(plainScopeName) {
-                signals.insert(.savedNameOutOfPosition(savedScope: scopeHost, label: plainScopeName))
-                impersonating.insert(scopeHost)
+            // Any signal is worth surfacing. A punycode or mixed-script host with no resemblance to
+            // anything saved still cannot be visually verified by the person, so it is reported —
+            // with an empty `impersonating` list, which lets the UI phrase a weaker warning.
+            guard signals.isEmpty else {
+                return .suspicious(signals: signals, impersonating: impersonating.sorted())
             }
+            return .unrecognized
         }
-
-        // Any signal is worth surfacing. A punycode or mixed-script host with no resemblance to
-        // anything saved still cannot be visually verified by the person, so it is reported —
-        // with an empty `impersonating` list, which lets the UI phrase a weaker warning.
-        guard signals.isEmpty else {
-            return .suspicious(signals: signals, impersonating: impersonating.sorted())
-        }
-        return .unrecognized
     }
 
     /// The assessment against saved items that come from more than one trust domain (review findings Z60, Z65).
+    /// See `SiteIndex`, which this builds and asks.
+    public static func assess(
+        host: NormalizedHost, againstItemsIn items: [Item], sharedVaults: Set<UUID> = []
+    ) -> PhishingAssessment {
+        guard !sharedVaults.isEmpty else { return assess(host: host, against: items.flatMap(\.scopes)) }
+        return SiteIndex(items: items, sharedVaults: sharedVaults).assess(host)
+    }
+
+    /// Saved items' scopes by trust domain, prepared for comparison.
     ///
     /// A scope says "this host is this account's site" on the word of whoever wrote it. `sharedVaults` names the
     /// vaults accounts other than this one may write; every other item is the person's own. A match among the
@@ -179,36 +229,43 @@ public enum PhishingDetector {
     /// `amaz0n.com` cannot silence the warning about the `amazon.com` the person saved themselves. The signals that
     /// name no saved site (a label that mixes scripts, punycode that did not decode) stand too: such a host cannot
     /// be verified by eye, and only the person's own scope for it says they have looked.
-    public static func assess(
-        host: NormalizedHost, againstItemsIn items: [Item], sharedVaults: Set<UUID> = []
-    ) -> PhishingAssessment {
-        guard !sharedVaults.isEmpty else { return assess(host: host, against: items.flatMap(\.scopes)) }
-        var own: [ServiceScope] = []
-        var shared: [UUID: [ServiceScope]] = [:]
-        for item in items {
-            if sharedVaults.contains(item.vaultID) {
-                shared[item.vaultID, default: []].append(contentsOf: item.scopes)
-            } else {
-                own.append(contentsOf: item.scopes)
+    public struct SiteIndex: Sendable {
+        let own: ScopeIndex
+        /// Each shared vault's scopes, in a fixed order.
+        let shared: [ScopeIndex]
+        let everything: ScopeIndex
+
+        public init(items: [Item], sharedVaults: Set<UUID>) {
+            var ownScopes: [ServiceScope] = []
+            var sharedScopes: [UUID: [ServiceScope]] = [:]
+            for item in items {
+                if sharedVaults.contains(item.vaultID) {
+                    sharedScopes[item.vaultID, default: []].append(contentsOf: item.scopes)
+                } else {
+                    ownScopes.append(contentsOf: item.scopes)
+                }
             }
+            own = ScopeIndex(ownScopes)
+            let order = sharedScopes.keys.sorted { $0.uuidString < $1.uuidString }
+            shared = order.map { ScopeIndex(sharedScopes[$0] ?? []) }
+            everything = ScopeIndex(ownScopes + order.flatMap { sharedScopes[$0] ?? [] })
         }
-        func matches(_ scopes: [ServiceScope]) -> Bool {
-            scopes.contains { ScopeMatcher.match($0, host: host) != nil }
-        }
-        if matches(own) { return .recognized }
-        var others = own
-        var isRecognizedBySharedVault = false
-        for vaultID in shared.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
-            let scopes = shared[vaultID] ?? []
-            if matches(scopes) {
-                isRecognizedBySharedVault = true
-            } else {
-                others.append(contentsOf: scopes)
+
+        /// How many saved scopes one assessment may compare a host with.
+        public var count: Int { everything.count }
+
+        public func assess(_ host: NormalizedHost) -> PhishingAssessment {
+            if own.matches(host) { return .recognized }
+            let recognising = shared.map { $0.matches(host) }
+            guard recognising.contains(true) else { return everything.assess(host) }
+            // Compared with everything outside the vaults that recognise it.
+            var others = own.entries
+            for (index, vault) in shared.enumerated() where !recognising[index] {
+                others.append(contentsOf: vault.entries)
             }
+            let assessment = ScopeIndex(entries: others).assess(host)
+            return assessment.isSuspicious ? assessment : .recognized
         }
-        let assessment = assess(host: host, against: others)
-        guard isRecognizedBySharedVault else { return assessment }
-        return assessment.isSuspicious ? assessment : .recognized
     }
 
     /// `true` when any single label draws letters from more than one writing system.
