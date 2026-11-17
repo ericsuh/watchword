@@ -357,12 +357,45 @@ struct SyncStateStoreContractTests {
         let tombstone = SyncEntry.tombstone(
             StateStoreFixtures.record(2).key, stamp: RecordStamp(version: 1 << 51, device: SyncFixtures.deviceB),
             erasure: [7, 7])
-        try await store.quarantine(live, vaultID: SyncFixtures.vault)
-        try await store.quarantine(tombstone, vaultID: SyncFixtures.vault)
-        try await store.quarantine(live, vaultID: SyncFixtures.vault)
+        #expect(try await store.quarantine(live, vaultID: SyncFixtures.vault))
+        #expect(try await store.quarantine(tombstone, vaultID: SyncFixtures.vault))
+        #expect(try await !store.quarantine(live, vaultID: SyncFixtures.vault), "held already: not added again")
         #expect(try await store.quarantined(vaultID: SyncFixtures.vault) == [live, tombstone])
         try await store.discardQuarantined([tombstone], vaultID: SyncFixtures.vault)
         #expect(try await store.quarantined(vaultID: SyncFixtures.vault) == [live])
+    }
+
+    /// Review finding Z27: an entry is found without reading the quarantine, whole entries are compared (two that
+    /// differ in one byte are two), and what a vault holds is counted per writing device.
+    @Test("the quarantine finds an entry and counts what it holds, per vault and device", arguments: StateStoreKind.available)
+    func quarantineLookupAndUsage(_ kind: StateStoreKind) async throws {
+        let store = try kind.make()
+        let first = SyncFixtures.entry(4, version: 9)
+        var sameStamp = first
+        sameStamp.envelope?[0] ^= 1
+        let other = SyncFixtures.entry(5, version: 9, device: SyncFixtures.deviceB)
+        let tombstone = SyncEntry.tombstone(
+            StateStoreFixtures.record(2).key, stamp: RecordStamp(version: 12, device: SyncFixtures.deviceB),
+            erasure: [7, 7, 7])
+        #expect(try await store.quarantineUsage(vaultID: SyncFixtures.vault) == QuarantineUsage())
+        for entry in [first, sameStamp, other, tombstone] {
+            #expect(try await !store.holdsQuarantined(entry, vaultID: SyncFixtures.vault))
+            #expect(try await store.quarantine(entry, vaultID: SyncFixtures.vault))
+            #expect(try await store.holdsQuarantined(entry, vaultID: SyncFixtures.vault))
+            #expect(try await !store.holdsQuarantined(entry, vaultID: SyncFixtures.otherVault))
+        }
+        let usage = try await store.quarantineUsage(vaultID: SyncFixtures.vault)
+        #expect(
+            usage.devices == [
+                SyncFixtures.deviceA: .init(entries: 2, bytes: 2 * first.storedLength),
+                SyncFixtures.deviceB: .init(entries: 2, bytes: other.storedLength + 3),
+            ])
+        #expect(usage.entries == 4)
+        #expect(try await store.quarantineUsage(vaultID: SyncFixtures.otherVault).entries == 0)
+        try await store.discardQuarantined([sameStamp, tombstone], vaultID: SyncFixtures.vault)
+        #expect(try await store.quarantined(vaultID: SyncFixtures.vault) == [first, other])
+        #expect(try await !store.holdsQuarantined(sameStamp, vaultID: SyncFixtures.vault))
+        #expect(try await store.quarantineUsage(vaultID: SyncFixtures.vault).entries == 2)
     }
 
     @Test("eraseAll removes everything", arguments: StateStoreKind.available)
@@ -433,9 +466,24 @@ struct SyncStateStoreContractTests {
             let raw = try SQLiteConnection(path: path.path)
             for table in [
                 SQLiteSyncStateStore.stateTable, SQLiteSyncStateStore.stagedTable, SQLiteSyncStateStore.pendingTable,
-                SQLiteSyncStateStore.quarantineTable,
+                SQLiteSyncStateStore.legacyQuarantineTable,
             ] {
                 try raw.execute(table)
+            }
+            // What an earlier version had kept aside: a live version and a deletion.
+            let kept = [SyncFixtures.entry(3, version: 1 << 40), SyncFixtures.entry(4, version: 7, deleted: true)]
+            for entry in kept {
+                try raw.query(
+                    """
+                    INSERT INTO quarantine (vault_id, record_id, kind, key_id, version, device_id, envelope, erasure)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        SQLiteRecordStore.value(SyncFixtures.vault), SQLiteRecordStore.value(entry.recordID),
+                        .integer(Int64(entry.kind.rawValue)), SQLiteRecordStore.value(entry.keyID),
+                        .integer(Int64(bitPattern: entry.version)), SQLiteRecordStore.value(entry.device),
+                        entry.envelope.map(SQLiteValue.blob) ?? .null, .blob(entry.erasure),
+                    ])
             }
             try raw.execute("PRAGMA user_version = 1")
             raw.close()
@@ -449,15 +497,22 @@ struct SyncStateStoreContractTests {
             #expect(try reopened.stash(vaultID: SyncFixtures.vault) == bytes)
             #expect(try reopened.loadState(vaultID: SyncFixtures.vault) == StateStoreFixtures.state())
             let version = try SQLiteConnection(path: path.path).query("PRAGMA user_version").first?.first
-            #expect(version == .integer(2))
+            #expect(version == .integer(3))
+            // The quarantine is carried into the indexed table (Z27): nothing kept is lost, and each entry is found.
+            #expect(try reopened.quarantined(vaultID: SyncFixtures.vault) == kept)
+            for entry in kept {
+                #expect(try reopened.holdsQuarantined(entry, vaultID: SyncFixtures.vault))
+                #expect(try !reopened.quarantine(entry, vaultID: SyncFixtures.vault))
+            }
+            #expect(try reopened.quarantineUsage(vaultID: SyncFixtures.vault).entries == 2)
         }
 
         @Test("a database from a newer schema is refused, not misread")
         func newerSchema() throws {
             let url = StateStoreFixtures.temporaryURL()
             _ = try SQLiteSyncStateStore(url: url)
-            try SQLiteConnection(path: SQLiteRecordStore.resolvingSymlinks(url.path)).execute("PRAGMA user_version = 3")
-            #expect(throws: RecordStoreError.unsupportedSchemaVersion(3)) { _ = try SQLiteSyncStateStore(url: url) }
+            try SQLiteConnection(path: SQLiteRecordStore.resolvingSymlinks(url.path)).execute("PRAGMA user_version = 4")
+            #expect(throws: RecordStoreError.unsupportedSchemaVersion(4)) { _ = try SQLiteSyncStateStore(url: url) }
         }
     }
 #endif

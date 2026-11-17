@@ -257,6 +257,111 @@ extension AdversarialSyncTests {
         #expect(try await reader.items()[far.id] == nil)
     }
 
+    // MARK: - The quarantine
+
+    /// An item at a version of the caller's choosing, sealed as `client`'s own and put in its store unpublished.
+    static func plantVersion(_ version: UInt64, title: String, on client: SyncTestClient) async throws -> UUID {
+        var item = Self.login(title, password: "v")
+        item.version = version
+        let device = await client.deviceID
+        item = ItemMerge.stamped(item, previous: nil, revision: Revision(version: version, device: device))
+        try await client.store.commit(StoreChange(upserts: [try await client.keyring.sealItem(item)]))
+        return item.id
+    }
+
+    /// Threat: a writer whose versions a reader keeps aside rather than merges (A4 through implausible versions; A5,
+    /// a former member whose segments beyond their cut are accepted only to be held aside) publishes them without
+    /// end. The quarantine had no cap, kept each for good, and looked for a duplicate by reading every kept entry,
+    /// envelopes included, once per entry offered: disk filled without bound and each sync, and each replay of a
+    /// shared vault's log, reread it all (Z27). It is held to a cap for the vault and for what any one device wrote,
+    /// an entry already kept is found by a lookup, and what is not kept is counted.
+    @Test("the quarantine is capped per vault and per writing device, and keeps each entry once")
+    func quarantineIsCapped() async throws {
+        let f = try await Self.fixture()
+        var configuration = Self.jumpConfiguration()
+        configuration.maximumQuarantinedEntriesPerAuthor = 5
+        configuration.maximumQuarantinedEntries = 8
+        let store = await f.writer.store
+        let a = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: store)
+        await f.keys.trust(device: Self.former)
+        let other = SyncTestClient(
+            deviceID: Self.former, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        for index in 0..<12 {
+            _ = try await Self.plantVersion(1000 + UInt64(index), title: "A \(index)", on: a)
+            _ = try await Self.plantVersion(5000 + UInt64(index), title: "F \(index)", on: other)
+        }
+        try await a.sync()
+        await f.keys.trust(device: Self.b)
+        let reader = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        let first = try await reader.sync()
+        #expect(first.quarantined.count == 12 && first.quarantineFull == 7)
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).count == 5, "one device's share")
+
+        try await other.sync()
+        let second = try await reader.sync()
+        #expect(second.quarantineFull == 9)
+        let kept = await reader.syncState.quarantined(vaultID: Self.vault)
+        #expect(kept.count == 8, "the vault's cap")
+        #expect(kept.filter { $0.device == Self.former }.count == 3, "one device cannot take the whole of it")
+
+        // A replay offers every one of them again: nothing is kept twice, and nothing more is kept.
+        let replayed = try await reader.sync(reconcile: true)
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault) == kept)
+        #expect(replayed.quarantineFull == 16, "the sixteen not kept, counted again")
+        #expect(try await reader.items().isEmpty)
+    }
+
+    /// Threat: none needed (two honest devices whose concurrent edits do not fit in one record, Y37), or an insider's
+    /// implausible version. The device that kept a version aside counted its segment as merged all the same, and
+    /// went on to write ordinary snapshots whose coverage included that segment while their entries did not include
+    /// the version. Once the author collected the segment, a device joining later was never shown it (Z26). A device
+    /// whose quarantine holds a trusted device's version writes no ordinary snapshot, as one holding entries it
+    /// cannot read does not (ADR 0009); it writes again once the person has dealt with what was kept.
+    @Test("a device that kept a version aside writes no snapshot covering it")
+    func quarantineWithholdsSnapshot() async throws {
+        let f = try await Self.fixture()
+        var configuration = Self.jumpConfiguration()
+        configuration.snapshotThreshold = 4
+        let store = await f.writer.store
+        // The lowest device ID, so the one elected to write the snapshot.
+        let elected = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: store)
+        await f.keys.trust(device: Self.b)
+        let author = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        try await elected.save(Self.login("Mine", password: "m"))
+        try await elected.sync()
+        try await author.sync()
+        let far = try await Self.plantVersion(900, title: "Far ahead", on: author)
+        try await author.sync()
+        var withheld = false
+        var written = 0
+        for index in 0..<6 {
+            try await elected.save(Self.login("More \(index)", password: "m"))
+            let report = try await elected.sync()
+            withheld = withheld || report.snapshotWithheldForQuarantine
+            written += report.snapshotsWritten
+            try await author.sync()
+        }
+        #expect(await elected.syncState.quarantined(vaultID: Self.vault).map(\.recordID) == [far])
+        #expect(withheld && written == 0, "a snapshot covered a segment whose version was only kept aside")
+        #expect(await f.transport.allObjects.keys.allSatisfy { !$0.contains("/snapshot/\(Self.a.uuidString)") })
+
+        // The person discards what was kept: snapshots resume.
+        await elected.syncState.discardQuarantined(
+            await elected.syncState.quarantined(vaultID: Self.vault), vaultID: Self.vault)
+        try await elected.save(Self.login("After", password: "m"))
+        let after = try await elected.sync()
+        #expect(after.snapshotsWritten == 1 && !after.snapshotWithheld)
+    }
+
     // MARK: - One key space for every vault
 
     /// Threat: A4, a writer in one shared vault who knows (or can compute, for a moved item) a record ID that will

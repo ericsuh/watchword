@@ -194,6 +194,7 @@ extension VaultSession {
         total.requiresNewerVersion = total.requiresNewerVersion || first.requiresNewerVersion
         total.replayNeeded = total.replayNeeded || first.replayNeeded
         total.ownStreamExhausted = total.ownStreamExhausted || first.ownStreamExhausted
+        total.quarantineFull += first.quarantineFull
         return total
     }
 
@@ -612,8 +613,17 @@ struct AuthenticatedSyncState: SyncStateStore {
         try await base.removePendingDeletions(deletions, vaultID: vaultID)
     }
 
-    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws {
+    @discardableResult
+    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
         try await base.quarantine(entry, vaultID: vaultID)
+    }
+
+    func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
+        try await base.holdsQuarantined(entry, vaultID: vaultID)
+    }
+
+    func quarantineUsage(vaultID: UUID) async throws -> QuarantineUsage {
+        try await base.quarantineUsage(vaultID: vaultID)
     }
 
     func quarantined(vaultID: UUID) async throws -> [SyncEntry] {
@@ -786,6 +796,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.replayNeeded = total.replayNeeded || report.replayNeeded
             total.ownStreamExhausted = total.ownStreamExhausted || report.ownStreamExhausted
             total.ownStreamUnverified = total.ownStreamUnverified ?? report.ownStreamUnverified
+            total.quarantineFull += report.quarantineFull
         }
         return total
     }

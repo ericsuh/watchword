@@ -34,6 +34,16 @@ public struct SyncConfiguration: Sendable {
     public var maximumStashedBytes = 4 << 20
     public var maximumStashedEntriesPerAuthor = 2048
     public var maximumStashedBytesPerAuthor = 2 << 20
+    /// Versions one vault keeps aside for the person (the quarantine), and their bytes, in all and for the versions
+    /// any one device wrote (review finding Z27). Past any of them a version is not kept on this device
+    /// (`SyncReport.quarantineFull`): the object that carried it is still merged or passed as before, and a shared
+    /// vault's log, which is never collected, still holds it. Generous for honest use, where a kept version is rare,
+    /// and small enough that someone whose segments are accepted only to be held aside (a former member, A5) cannot
+    /// fill a device's disk or make each sync reread it all.
+    public var maximumQuarantinedEntries = 2048
+    public var maximumQuarantinedBytes = 64 << 20
+    public var maximumQuarantinedEntriesPerAuthor = 512
+    public var maximumQuarantinedBytesPerAuthor = 16 << 20
 
     public init(schemaVersions: [EnvelopeKind: UInt64]) {
         self.schemaVersions = schemaVersions
@@ -168,6 +178,13 @@ public struct SyncReport: Sendable, Equatable {
     /// The trusted devices whose objects carried those entries: the ones to update, or, if no version reads the kind,
     /// to look at (an insider can hold back snapshots this way for as long as it is trusted).
     public var snapshotWithheldBy: Set<UUID> = []
+    /// This device was due to write a snapshot and did not, because its quarantine holds versions written by devices
+    /// still trusted: a snapshot would cover their segments without carrying them (review finding Z26). Ends when
+    /// the person discards them (they are listed as held aside), or another device steps in.
+    public var snapshotWithheldForQuarantine = false
+    /// Versions that were to be kept aside and were not, the vault's quarantine being full (review finding Z27). The
+    /// same version offered again by a replay is counted again.
+    public var quarantineFull = 0
     /// The stash was incomplete (entries of a kind this version carries dropped past the caps, or a stash not saved
     /// after a sync), or a shared vault holds kept entries this version can now read: the vault's log had to be
     /// replayed. The engine does it itself unless the vault has a judge, whose session replays it in the same sync.
@@ -217,6 +234,9 @@ public actor SyncEngine {
     private var stash = SyncStash()
     /// The stash may lack entries of segments counted as merged, and this vault's log has not been replayed yet.
     private var stashIncomplete = false
+    /// What the vault's quarantine holds, as the sync in progress found it and has added to it; loaded when first
+    /// needed (`keepAside`).
+    private var quarantineUsage: QuarantineUsage?
     /// Entries the merge in progress refused as beyond the version-jump ceiling, to be tried again once everything
     /// else in the pass has been merged (`retryOutOfReach`, review finding Z25).
     private var outOfReach: [SyncEntry] = []
@@ -268,6 +288,7 @@ public actor SyncEngine {
         running = true
         defer { running = false }
         var report = SyncReport()
+        quarantineUsage = nil
         let retired = await keyring.retiredAuthors(vaultID: vaultID)
         guard !retired.contains(deviceID) else {
             report.deviceRevoked = true
@@ -604,7 +625,7 @@ public actor SyncEngine {
                         // A snapshot's tombstone is its author's claim like a segment's, and is judged like one
                         // (review finding Z21): not admitted, it is kept for the person and erases nothing.
                         report.heldAside.append(entry.key)
-                        try await syncState.quarantine(entry, vaultID: vaultID)
+                        try await keepAside(entry, report: &report)
                         continue
                     }
                     try await apply(
@@ -686,7 +707,7 @@ public actor SyncEngine {
                         // its acknowledgements count for nothing (docs/02-architecture.md §8.7).
                         for entry in payload.entries {
                             report.heldAside.append(entry.key)
-                            try await syncState.quarantine(entry, vaultID: vaultID)
+                            try await keepAside(entry, report: &report)
                         }
                         state.merged[author] = sequence
                         next = sequence + 1
@@ -705,7 +726,7 @@ public actor SyncEngine {
                             // What its author had seen does not all count (review finding S45): kept for the person,
                             // never applied, and judged again by a replay.
                             report.heldAside.append(entry.key)
-                            try await syncState.quarantine(entry, vaultID: vaultID)
+                            try await keepAside(entry, report: &report)
                             continue
                         }
                         try await apply(
@@ -799,6 +820,7 @@ public actor SyncEngine {
             if let index = report.quarantined.firstIndex(of: entry.key) { report.quarantined.remove(at: index) }
             if report.quarantined.count + report.heldAside.count + report.collided.count < kept {
                 try await syncState.discardQuarantined([entry], vaultID: vaultID)
+                quarantineUsage = nil
             }
             merged = true
         }
@@ -950,7 +972,7 @@ public actor SyncEngine {
                 // one has no segment left to judge it by: processed here, it is a revoked device's (its other kept
                 // entries wait for the replay). Held aside, as one not admitted would be: the record stays.
                 report.heldAside.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, report: &report)
                 stash.remove(kept)
                 report.unknownEntriesProcessed += 1
                 continue
@@ -974,7 +996,7 @@ public actor SyncEngine {
                 throw error
             } catch {
                 report.quarantined.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, report: &report)
             }
             // Taken out only once it is applied or quarantined: a lock part-way leaves the rest kept.
             stash.remove(kept)
@@ -993,7 +1015,7 @@ public actor SyncEngine {
             // Not merged, but kept: only the person may discard it (PRD F7.7). One refused only as a jump is tried
             // once more when the pass has merged everything else (`retryOutOfReach`).
             report.quarantined.append(entry.key)
-            try await syncState.quarantine(entry, vaultID: vaultID)
+            try await keepAside(entry, report: &report)
             if entry.version <= configuration.maximumVersion, !retrying { outOfReach.append(entry) }
             return
         }
@@ -1029,20 +1051,20 @@ public actor SyncEngine {
                 // the local version stays, the remote one is kept for the person (PRD F7.7), and the stream goes on
                 // to the entries and segments after it instead of waiting here for good.
                 report.quarantined.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, report: &report)
                 return
             } catch is RecordElsewhere {
                 // Another vault's record holds this ID on this device (review finding Z22). Whoever got the ID into
                 // the store first must not decide which vault's stream stops: this entry alone is kept for the
                 // person, the other vault's row stays as it is, and the object and the stream go on.
                 report.collided.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, report: &report)
                 return
             } catch is HeldAside {
                 // Carries work that does not count in this shared vault (docs/02-architecture.md §8.7): kept for the
                 // person, never merged, never published on.
                 report.heldAside.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, report: &report)
                 return
             }
         }
@@ -1128,6 +1150,35 @@ public actor SyncEngine {
             try await store.commit(StoreChange(upserts: [merged], expectations: [key: .version(local.version)]))
         }
         return true
+    }
+
+    /// Keeps an entry aside for the person (PRD F7.7), within the quarantine's caps (review finding Z27): for the
+    /// vault, and for the versions any one device wrote, so that one writer cannot crowd the rest out. An entry
+    /// already held is found by an indexed lookup, never by reading the quarantine. Past a cap the entry is not kept
+    /// here and the report counts it; nothing else about the object changes.
+    private func keepAside(_ entry: SyncEntry, report: inout SyncReport) async throws {
+        var usage: QuarantineUsage
+        if let known = quarantineUsage {
+            usage = known
+        } else {
+            usage = try await syncState.quarantineUsage(vaultID: vaultID)
+        }
+        quarantineUsage = usage
+        let share = usage.devices[entry.device] ?? QuarantineUsage.Share()
+        let length = entry.storedLength
+        let fits =
+            usage.entries < configuration.maximumQuarantinedEntries
+            && usage.bytes + length <= configuration.maximumQuarantinedBytes
+            && share.entries < configuration.maximumQuarantinedEntriesPerAuthor
+            && share.bytes + length <= configuration.maximumQuarantinedBytesPerAuthor
+        guard fits else {
+            if !(try await syncState.holdsQuarantined(entry, vaultID: vaultID)) { report.quarantineFull += 1 }
+            return
+        }
+        if try await syncState.quarantine(entry, vaultID: vaultID) {
+            usage.add(entry)
+            quarantineUsage = usage
+        }
     }
 
     private func resolve(_ erasure: Erasure, of record: StoredRecord) async throws -> ErasureDecision {
@@ -1395,10 +1446,24 @@ public actor SyncEngine {
         // that work on and makes nothing collectable.
         var vector = state.merged
         let holding = stash.authorsHoldingBackSnapshots(retired: retired)
-        if !holding.isEmpty || !stash.crowdedOut.isEmpty || stashIncomplete {
+        // The same holds for a version this device kept aside instead of merging (an implausible jump, a join that
+        // does not fit in one record, a record ID another vault holds): its segment counts as merged, so an ordinary
+        // snapshot would cover it without carrying it, and once the segment was collected a device joining later
+        // would never be shown that version (review finding Z26). While the quarantine holds a version written by a
+        // device still trusted, this device writes only the snapshot it owes.
+        var usage: QuarantineUsage
+        if let known = quarantineUsage {
+            usage = known
+        } else {
+            usage = try await syncState.quarantineUsage(vaultID: vaultID)
+        }
+        quarantineUsage = usage
+        let keptAside = usage.devices.keys.contains { !retired.contains($0) }
+        if !holding.isEmpty || !stash.crowdedOut.isEmpty || stashIncomplete || keptAside {
             guard owed else {
                 report.snapshotWithheld = true
                 report.snapshotWithheldBy = holding
+                report.snapshotWithheldForQuarantine = keptAside
                 return
             }
             vector = state.merged.filter { retired.contains($0.key) }

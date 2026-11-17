@@ -102,4 +102,38 @@ struct SyncAuditRegressionTests {
             #expect((await state.loadState(vaultID: Household.vault)?.erasures[key] == nil) == refuses)
         }
     }
+
+    /// Z27 as its report described it: an account whose permission ended keeps publishing segments beyond its cut,
+    /// which are accepted for judging and then held aside whole. Every entry used to be kept, and every replay of
+    /// the vault's log (one per change of head) offered them all again.
+    @Test("segments held aside whole fill no more than one device's share of the quarantine, at a replay too")
+    func heldAsideSegmentsAreCapped() async throws {
+        let transport = InMemorySyncTransport()
+        let home = await Household.make(1, transport: transport)
+        let former = home.devices[0]
+        let judge = ScriptedJudge()
+        for segment in 1...4 {
+            for index in 0..<50 { try await former.save(Household.login(title: "Late \(segment).\(index)")) }
+            try await former.sync()
+            await judge.holdAside(
+                .segment(vaultID: Household.vault, author: SyncFixtures.deviceA, sequence: UInt64(segment)))
+        }
+        await home.keys.trust(device: SyncFixtures.deviceC)
+        let keyring = FakeSyncKeyring(deviceID: SyncFixtures.deviceC, keys: home.keys)
+        var shared = SyncTestClient.configuration
+        shared.maintainsLog = false
+        shared.maximumQuarantinedEntriesPerAuthor = 60
+        let state = InMemorySyncStateStore()
+        let engine = SyncEngine(
+            vaultID: Household.vault, deviceID: SyncFixtures.deviceC, store: InMemoryRecordStore(),
+            syncState: state, transport: transport, keyring: keyring, merger: FakeItemMerger(keyring: keyring),
+            configuration: shared, judge: judge)
+        let report = try await engine.sync()
+        #expect(report.heldAside.count == 200 && report.quarantineFull == 140)
+        let kept = await state.quarantined(vaultID: Household.vault)
+        #expect(kept.count == 60)
+        let replayed = try await engine.sync(reconcile: true)
+        #expect(replayed.quarantineFull == 140)
+        #expect(await state.quarantined(vaultID: Household.vault) == kept)
+    }
 }

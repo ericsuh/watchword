@@ -148,11 +148,20 @@ public protocol SyncStateStore: Sendable {
     /// Removes each deletion only if it is still the one given (by stamp), so a newer one recorded meanwhile survives.
     func removePendingDeletions(_ deletions: [RecordKey: RecordStamp], vaultID: UUID) async throws
 
-    /// Record versions refused as implausible (U5). Kept, never discarded by sync; only the person, explicitly, may
-    /// discard them (PRD F7.7).
-    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws
+    /// Record versions kept aside rather than merged: refused as implausible (U5), unsealable once merged (Y37),
+    /// held aside in a shared vault, or named like another vault's record (Z22). Never discarded by sync; only the
+    /// person, explicitly, may discard them (PRD F7.7). Each entry is kept once: returns whether it was added, by a
+    /// lookup that does not read what the quarantine already holds (review finding Z27). The engine holds the
+    /// quarantine to its caps before it calls this (`SyncConfiguration.maximumQuarantinedEntries`); the session's own
+    /// use, for a local version it takes out, is not capped.
+    @discardableResult
+    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool
     func quarantined(vaultID: UUID) async throws -> [SyncEntry]
     func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async throws
+    /// Whether the vault's quarantine holds exactly this entry, by the same lookup.
+    func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool
+    /// How many entries and bytes the vault's quarantine holds for each writing device, without reading an envelope.
+    func quarantineUsage(vaultID: UUID) async throws -> QuarantineUsage
 
     /// The stash (`SyncStash.encoded()`), written once per sync, apart from the state saved with every segment.
     /// Rebuildable from the log; the engine parses it as hostile.
@@ -167,6 +176,7 @@ public actor InMemorySyncStateStore: SyncStateStore {
     private var stagedObjects: [UUID: [SyncObjectLocation: SignedObject]] = [:]
     private var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
     private var quarantinedEntries: [UUID: [SyncEntry]] = [:]
+    private var quarantinedIndex: [UUID: Set<SyncEntry>] = [:]
     private var stashes: [UUID: [UInt8]] = [:]
     /// How many times each vault's stash was written: a test seam for what a flood costs.
     public private(set) var stashWrites: [UUID: Int] = [:]
@@ -212,10 +222,11 @@ public actor InMemorySyncStateStore: SyncStateStore {
         }
     }
 
-    public func quarantine(_ entry: SyncEntry, vaultID: UUID) {
-        if !(quarantinedEntries[vaultID] ?? []).contains(entry) {
-            quarantinedEntries[vaultID, default: []].append(entry)
-        }
+    @discardableResult
+    public func quarantine(_ entry: SyncEntry, vaultID: UUID) -> Bool {
+        guard quarantinedIndex[vaultID, default: []].insert(entry).inserted else { return false }
+        quarantinedEntries[vaultID, default: []].append(entry)
+        return true
     }
 
     public func quarantined(vaultID: UUID) -> [SyncEntry] {
@@ -223,7 +234,19 @@ public actor InMemorySyncStateStore: SyncStateStore {
     }
 
     public func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) {
-        quarantinedEntries[vaultID]?.removeAll { entries.contains($0) }
+        let discarded = Set(entries)
+        quarantinedEntries[vaultID]?.removeAll { discarded.contains($0) }
+        quarantinedIndex[vaultID]?.subtract(discarded)
+    }
+
+    public func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) -> Bool {
+        quarantinedIndex[vaultID]?.contains(entry) ?? false
+    }
+
+    public func quarantineUsage(vaultID: UUID) -> QuarantineUsage {
+        var usage = QuarantineUsage()
+        for entry in quarantinedEntries[vaultID] ?? [] { usage.add(entry) }
+        return usage
     }
 
     public func stash(vaultID: UUID) -> [UInt8]? {
@@ -240,6 +263,7 @@ public actor InMemorySyncStateStore: SyncStateStore {
         stagedObjects = [:]
         deletions = [:]
         quarantinedEntries = [:]
+        quarantinedIndex = [:]
         stashes = [:]
     }
 
