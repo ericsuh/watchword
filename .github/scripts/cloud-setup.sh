@@ -30,10 +30,18 @@
 set -uo pipefail
 
 readonly FALLBACK_VERSION="6.4.1"   # used only when .swift-version is missing or unreadable
+# The second way to install a toolchain, and one this script cannot check: the URL names no version, and no checksum or
+# signer is pinned for it here, yet what it serves is run as root. It is fetched and run only when the verified
+# tarball could not be had *and* WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 says the person accepts that
+# (docs/09-cloud-sessions.md §3). It is never the answer to a download that failed verification.
 readonly SWIFTLY_URL="https://download.swift.org/swiftly/linux/swiftly-x86_64.tar.gz"
+readonly ALLOW_UNVERIFIED_SWIFTLY="${WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY:-0}"
 readonly SWIFT_KEYS_URL="https://www.swift.org/keys/all-keys.asc"
-readonly WORK="/tmp/watchword-cloud-setup"
-readonly LOG="/var/log/watchword-cloud-setup.log"
+# Empty except under Tests/ScriptTests, which runs this script against stand-in tools with every path it reads or
+# writes moved below a scratch directory. Nothing else sets it.
+readonly ROOT="${WATCHWORD_SETUP_TEST_ROOT:-}"
+readonly WORK="$ROOT/tmp/watchword-cloud-setup"
+readonly LOG="$ROOT/var/log/watchword-cloud-setup.log"
 
 # mise, pinned. The developer tools themselves are pinned in the checkout's mise.toml (CLAUDE.md, "Commands"); this pins
 # the tool that installs them. Same version and linux-x64 checksum as CI (.github/scripts/install-mise.sh); `mise run
@@ -63,7 +71,7 @@ log "starting; logging to $LOG"
 # locate it rather than hard-code one. A miss is survivable: only the version pin and the warm-up
 # build need it.
 repo=""
-for candidate in . /root/* /workspace/* /home/*/* /root /workspace; do
+for candidate in . "$ROOT"/root/* "$ROOT"/workspace/* "$ROOT"/home/*/* "$ROOT/root" "$ROOT/workspace"; do
     if [ -f "$candidate/Package.swift" ] && grep -q 'name: "Watchword"' "$candidate/Package.swift" 2>/dev/null; then
         repo="$(cd "$candidate" && pwd)"
         break
@@ -81,7 +89,7 @@ if [ -n "$repo" ] && [ -r "$repo/.swift-version" ]; then
 fi
 log "want Swift $version"
 
-# ------------------------------------------------ 2. system dependencies and installer, in parallel
+# ------------------------------------------------------------- 2. system dependencies, in parallel
 # The dependency list is the one swift.org publishes for Ubuntu 24.04. It is spelled out rather
 # than left to the installer so that a change upstream cannot quietly change what gets installed as
 # root on this VM.
@@ -94,9 +102,6 @@ log "want Swift $version"
             pkg-config tzdata zip unzip zlib1g-dev
 ) > "$WORK/apt.log" 2>&1 &
 apt_pid=$!
-
-( curl -fsSL --retry 3 --retry-delay 2 -o "$WORK/swiftly.tar.gz" "$SWIFTLY_URL" ) > "$WORK/curl.log" 2>&1 &
-curl_pid=$!
 
 # mise and the checkout's tools, alongside the Swift install. Small downloads, but they share the five-minute budget, so
 # they run concurrently and are bounded. Not load-bearing for building the package: a failure is logged, never fatal.
@@ -125,7 +130,7 @@ install_mise() {
             return 1
         fi
         tar -xzf "$WORK/$MISE_ARCHIVE" -C "$WORK" mise/bin/mise \
-            && install -m 0755 "$WORK/mise/bin/mise" /usr/local/bin/mise \
+            && install -m 0755 "$WORK/mise/bin/mise" "$ROOT/usr/local/bin/mise" \
             || { log "mise archive did not install"; return 1; }
         rm -f "$WORK/$MISE_ARCHIVE"
     fi
@@ -148,8 +153,7 @@ install_mise &
 mise_pid=$!
 
 wait "$apt_pid" || { log "apt dependencies FAILED; see $WORK/apt.log"; tail -20 "$WORK/apt.log"; }
-wait "$curl_pid" || log "swiftly download FAILED; see $WORK/curl.log"
-log "dependencies installed, installer fetched"
+log "dependencies installed"
 
 # ------------------------------------------------------------------- 3. locate an installed toolchain
 # Both install methods below are judged by this one function, so neither gets to claim success it
@@ -158,13 +162,20 @@ find_toolchain_bin() {
     local found
     found="$(find "$HOME/.local/share/swiftly/toolchains" -maxdepth 3 -type d -path '*/usr/bin' \
         2>/dev/null | sort -V | tail -1)"
-    [ -z "$found" ] && [ -x /opt/swift/usr/bin/swift ] && found="/opt/swift/usr/bin"
+    [ -z "$found" ] && [ -x "$ROOT/opt/swift/usr/bin/swift" ] && found="$ROOT/opt/swift/usr/bin"
     [ -n "$found" ] && [ -x "$found/swift" ] && printf '%s' "$found"
 }
 
 # ------------------------------------------------------------------------- 4. install: tarball first
 # The tarball is tried first because it is a handful of commands against a published URL layout,
 # with no CLI contract to get wrong, and because it is the path that can be signature-checked.
+#
+# It answers in three ways, and the difference between the last two is the point of this section:
+#   0  a verified toolchain was extracted;
+#   1  the tarball could not be had at all (no such URL, a failed download): nothing was learnt about it;
+#   2  a tarball arrived and could not be shown to be the one the pinned key signed (no signature, no key bundle, a
+#      signature by any other key). That is what tampering looks like, so it is where installing stops: section 4b
+#      tries nothing else, and the session is told why.
 #
 # The URL layout is not guessable and was wrong in the first version of this script: the release
 # directory is lower-case (`swift-6.4.1-release`) while the directory and filename inside it are
@@ -224,11 +235,11 @@ install_via_tarball() {
     else
         log "SIGNATURE VERIFICATION FAILED; discarding the download"
         rm -f "$WORK/swift.tar.gz" "$WORK/swift.tar.gz.sig"
-        return 1
+        return 2
     fi
 
-    mkdir -p /opt/swift
-    tar -xzf "$WORK/swift.tar.gz" -C /opt/swift --strip-components=1 || {
+    mkdir -p "$ROOT/opt/swift"
+    tar -xzf "$WORK/swift.tar.gz" -C "$ROOT/opt/swift" --strip-components=1 || {
         log "tarball did not extract"
         return 1
     }
@@ -238,7 +249,9 @@ install_via_tarball() {
 }
 
 # swiftly resolves release URLs itself, so it is the second opinion when the URL layout above has
-# moved. It verifies the toolchain signature on its own ("Verifying toolchain signature..."). Default
+# moved. It verifies the toolchain signature on its own ("Verifying toolchain signature..."), but
+# nothing here verifies swiftly: the archive is whatever SWIFTLY_URL serves today, and it runs as
+# root. So it is fetched here, not up front, and only on the opt-in (section 4b). Default
 # install locations are used deliberately: swiftly's proxy binaries find their home directory from
 # $HOME, and the session runs as the same root user, so /root/.local resolves in both. Overriding
 # SWIFTLY_HOME_DIR here would break those proxies at session time.
@@ -247,6 +260,11 @@ install_via_tarball() {
 # and a setup script has no TTY: without the flag it fails on EOF, which is exactly how this script
 # first shipped a VM with no `swift` on it.
 install_via_swiftly() {
+    rm -f "$WORK/swiftly.tar.gz"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$WORK/swiftly.tar.gz" "$SWIFTLY_URL" || {
+        log "swiftly download FAILED"
+        return 1
+    }
     [ -s "$WORK/swiftly.tar.gz" ] || { log "no swiftly archive to install from"; return 1; }
     tar -xzf "$WORK/swiftly.tar.gz" -C "$WORK" || { log "swiftly archive did not extract"; return 1; }
 
@@ -274,20 +292,43 @@ install_via_swiftly() {
     return 0
 }
 
+# ------------------------------------------------------------ 4b. choose, and know when to stop
+# Each method is still judged by find_toolchain_bin, not by its own exit status. What changed is
+# what follows a failure. A tarball that failed verification ends the attempt: an attacker who can
+# alter what download.swift.org serves fails that check on purpose if the answer to failing it is an
+# installer nobody checks. And a tarball that simply could not be fetched leads to swiftly only when
+# the person has said so, because the same attacker can make a URL fail too. `why_no_toolchain` is
+# what the session is told in section 8.
 toolchain_bin="$(find_toolchain_bin)"
+why_no_toolchain=""
 if [ -n "$toolchain_bin" ]; then
     log "a toolchain is already present at $toolchain_bin"
 else
-    for method in tarball swiftly; do
-        log "installing via $method"
-        "install_via_$method" || log "$method did not complete"
-        toolchain_bin="$(find_toolchain_bin)"
-        if [ -n "$toolchain_bin" ]; then
-            log "$method produced a toolchain at $toolchain_bin"
-            break
+    log "installing via tarball"
+    install_via_tarball
+    tarball_status=$?
+    toolchain_bin="$(find_toolchain_bin)"
+    if [ -n "$toolchain_bin" ]; then
+        log "tarball produced a toolchain at $toolchain_bin"
+    elif [ "$tarball_status" -eq 2 ]; then
+        log "REFUSING to try another install method: the toolchain download did not verify against the pinned key"
+        why_no_toolchain="unverified"
+    else
+        log "tarball produced no usable toolchain"
+        if [ "$ALLOW_UNVERIFIED_SWIFTLY" = 1 ]; then
+            log "installing via swiftly, which this script cannot verify (WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1)"
+            install_via_swiftly || log "swiftly did not complete"
+            toolchain_bin="$(find_toolchain_bin)"
+            if [ -n "$toolchain_bin" ]; then
+                log "swiftly produced a toolchain at $toolchain_bin"
+            else
+                log "swiftly produced no usable toolchain"
+            fi
+        else
+            log "NOT falling back to swiftly: it is unverified, and WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY is not 1"
+            why_no_toolchain="fallback-refused"
         fi
-        log "$method produced no usable toolchain"
-    done
+    fi
 fi
 
 # ----------------------------------------------------------------------------- 5. expose on $PATH
@@ -298,10 +339,10 @@ fi
 # other build on the VM.
 if [ -n "$toolchain_bin" ]; then
     for tool in swift swiftc swift-format sourcekit-lsp; do
-        [ -e "$toolchain_bin/$tool" ] && ln -sf "$toolchain_bin/$tool" "/usr/local/bin/$tool"
+        [ -e "$toolchain_bin/$tool" ] && ln -sf "$toolchain_bin/$tool" "$ROOT/usr/local/bin/$tool"
     done
-    printf 'export PATH="%s:$PATH"\n' "$toolchain_bin" > /etc/profile.d/swift.sh
-    chmod 0644 /etc/profile.d/swift.sh
+    printf 'export PATH="%s:$PATH"\n' "$toolchain_bin" > "$ROOT/etc/profile.d/swift.sh"
+    chmod 0644 "$ROOT/etc/profile.d/swift.sh"
     log "linked drivers into /usr/local/bin from $toolchain_bin"
 fi
 
@@ -340,7 +381,7 @@ fi
 # The note is fenced by begin/end markers so removing it does not depend on its line count. The
 # second sed removes the unfenced seven-line note an earlier version wrote, so a snapshot that
 # still carries one is cleaned up on the next successful run.
-note="/root/.claude/CLAUDE.md"
+note="$ROOT/root/.claude/CLAUDE.md"
 mkdir -p "$(dirname "$note")"
 sed -i -e '/<!-- watchword-cloud-setup:begin -->/,/<!-- watchword-cloud-setup:end -->/d' \
     -e '/^<!-- watchword-cloud-setup -->$/,+6d' "$note" 2>/dev/null || true
@@ -349,14 +390,31 @@ if [ "$ok" -eq 1 ]; then
     log "SUCCESS: swift is on PATH at $(command -v swift)"
 else
     log "FAILURE: no working Swift toolchain. Session will be told via $note"
+    case "$why_no_toolchain" in
+        unverified)
+            detail="The toolchain that download.swift.org served did not verify against the pinned Swift
+signing key (or its signature or the key bundle could not be fetched), so it was discarded and no other
+installer was tried. Treat that as possible tampering with the download, not as a flaky network: tell the
+user exactly this, and do not install a toolchain from any other source in this session unless they ask."
+            ;;
+        fallback-refused)
+            detail="The signed release tarball could not be downloaded. The script's other method, swiftly,
+is an installer it cannot verify and runs as root, so it is used only when the environment sets
+WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 (docs/09-cloud-sessions.md §3). Tell the user; do not set it for them.
+If the download was refused, the environment's network access may not allow \`download.swift.org\` (§4)."
+            ;;
+        *)
+            detail="If a download was refused, the environment's network access may not allow
+\`download.swift.org\` and \`www.swift.org\` (docs/09-cloud-sessions.md §4)."
+            ;;
+    esac
     cat >> "$note" <<EOF
 <!-- watchword-cloud-setup:begin -->
 The cloud environment's setup script could not install a Swift toolchain, so \`swift\`,
 \`swift build\`, \`swift test\` and \`swift format\` are all unavailable in this session. Read
 $LOG for the reason before trying to build anything, and tell the user what it says; the
-log names the step that failed. If a download was refused, the environment's network access may
-not allow \`download.swift.org\` and \`www.swift.org\` (docs/09-cloud-sessions.md §4). To retry
-inside this session, run \`.github/scripts/cloud-setup.sh\`.
+log names the step that failed. $detail
+To retry inside this session, run \`.github/scripts/cloud-setup.sh\`.
 <!-- watchword-cloud-setup:end -->
 EOF
 fi

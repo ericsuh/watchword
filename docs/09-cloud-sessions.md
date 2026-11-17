@@ -71,7 +71,7 @@ Why each host is there, and which ones the default list already covers:
 
 | Host | Used for | On the default list? |
 | --- | --- | --- |
-| `download.swift.org` | The swiftly installer and every Swift toolchain tarball and signature | **No** — must be added |
+| `download.swift.org` | Every Swift toolchain tarball and signature (and the swiftly installer, only on the opt-in of §3) | **No** — must be added |
 | `*.swift.org` (`www.swift.org`) | The Swift signing-key bundle | `swift.org` and `www.swift.org` are; the wildcard keeps future subdomains working |
 | `mise.jdx.dev` | The pinned mise binary (first source tried) | **No** — must be added |
 | `mise-versions.jdx.dev` | mise's version index; with exact pins it is rarely consulted, but without it mise falls back to the GitHub API, which the GitHub proxy can refuse (below) | **No** — must be added |
@@ -79,7 +79,7 @@ Why each host is there, and which ones the default list already covers:
 | `archive.ubuntu.com`, `security.ubuntu.com`, `*.ubuntu.com` | apt dependencies, and the keyserver GPG may consult | Yes |
 
 The default **Trusted** allowlist contains `swift.org` and `www.swift.org` but *not*
-`download.swift.org`, and that host is where both the installer and every toolchain tarball live.
+`download.swift.org`, and that host is where every toolchain tarball lives.
 On Trusted alone, setup fails with network errors that look like a broken script.
 
 GitHub traffic is different: it goes through a separate GitHub proxy whatever the allowlist says, and
@@ -105,6 +105,7 @@ checkout**, and it gets reviewed like `select-xcode.sh` rather than living only 
 | `BASH_MAX_TIMEOUT_MS` | `1800000` | Headroom for `WATCHWORD_LONG_TESTS=1` runs. |
 | `WATCHWORD_TEST_SEED` | *(optional)* | Pin the SplitMix64 `SeededGenerator` when reproducing a nightly failure. |
 | `MISE_DISABLE_TOOLS` | `xcodegen` | XcodeGen publishes macOS builds only, so a `mise install` run inside a session would otherwise fail on it. The setup script sets this for its own run; this makes sessions match. |
+| `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY` | *(unset; `1` only as a deliberate choice)* | Lets the setup script fall back to the swiftly installer, which it runs as root and cannot verify, when the signed tarball cannot be downloaded (§3). Leave it unset unless a session without a toolchain is worse for you than that. |
 
 Do not put secrets here: anyone who can use the environment can read the variables and the setup
 script. Nothing in this repository needs a secret in a session — there are no dependencies to
@@ -116,16 +117,27 @@ authenticate to, and the GitHub proxy handles git.
 
 1. Locates the checkout by looking for a `Package.swift` naming `Watchword`, and reads the version
    pin from [`.swift-version`](../.swift-version) (`6.4.1`).
-2. Installs the apt dependencies swift.org publishes for Ubuntu 24.04 **and** downloads the
-   [swiftly](https://www.swift.org/install/linux/) installer concurrently — the five-minute budget
-   below is the reason for the `&`/`wait`.
-3. Installs the toolchain, trying two methods in order and judging both by whether a `swift` binary
-   actually appears:
+2. Installs the apt dependencies swift.org publishes for Ubuntu 24.04, concurrently with the mise
+   install of step 5 — the five-minute budget below is the reason for the `&`/`wait`.
+3. Installs the toolchain, judging the result by whether a `swift` binary actually appears:
    - **The release tarball**, verified with GPG against the pinned Swift signing key
      `52BB7E3D…B47A981F` before anything is extracted. A toolchain is compile-time code execution on
      every later build, so it is verified rather than trusted (`07-supply-chain.md`, T3).
-   - **swiftly**, as the second opinion if the URL layout has moved. Both subcommands pass
-     `--assume-yes`: a setup script has no TTY, and `swiftly install` prompts.
+   - **A tarball that does not verify ends the attempt.** A signature by any other key, a signature
+     or key bundle that cannot be fetched: the download is discarded, nothing else is tried, and the
+     session starts without a toolchain and is told that the download did not verify. The script
+     used to answer this by running the second method below, which meant the one check it makes
+     could be failed on purpose to reach the path that makes none (review finding Z112).
+   - **[swiftly](https://www.swift.org/install/linux/), only when asked for.** It resolves release
+     URLs itself, so it is the second opinion if the URL layout has moved. But the script downloads
+     it from an unversioned URL and has no checksum or signer pinned for it, and then runs it as
+     root; no published checksum was available to pin when this was written. So it is fetched and
+     run only when the tarball could not be downloaded at all **and** the environment sets
+     `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1`. Without that, a missing tarball also means a session
+     without a toolchain, and a note that says which variable would change it. Both subcommands pass
+     `--assume-yes`: a setup script has no TTY, and `swiftly install` prompts. To use it once without
+     changing the environment, run `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 .github/scripts/cloud-setup.sh`
+     inside a session.
 4. Symlinks `swift`, `swiftc`, `swift-format` and `sourcekit-lsp` into `/usr/local/bin` and writes
    `/etc/profile.d/swift.sh`. The Bash tool does not run a login shell, so the symlinks are what
    actually make the toolchain reachable; only the drivers are linked, because symlinking the whole
@@ -141,7 +153,14 @@ authenticate to, and the GitHub proxy handles git.
    `/var/log/watchword-cloud-setup.log`, and if no toolchain is present at the end the script appends
    a note to root's `CLAUDE.md`, which the session loads as user instructions. A setup script cannot
    fail a session start, so the alternative is an agent discovering `swift: command not found` much
-   later with no idea why — which is precisely what the first version of this script produced.
+   later with no idea why — which is precisely what the first version of this script produced. The
+   note says which of the three it was: a download that did not verify (possible tampering, and no
+   other source to be tried unasked), a tarball that could not be had with the swiftly fallback not
+   opted into, or anything else.
+
+`mise run test:scripts` runs the script itself against stand-ins for `curl`, `gpg`, `apt-get` and
+`mise`, with every path it writes moved under a scratch directory (`WATCHWORD_SETUP_TEST_ROOT`, which
+nothing else sets): each of the cases above is a test in `Tests/ScriptTests/test_cloud_setup.py`.
 
 Two hosting constraints it is written around, and which any edit must preserve:
 
