@@ -81,7 +81,9 @@ struct ImportView: View {
     }
 
     private var contentTypes: [UTType] {
-        if restoring { return [.data] }
+        // Backups only: the type both apps export (`Apps/project.yml`). A backup whose extension was changed is not
+        // offered until it is renamed back to `.watchwordbackup`.
+        if restoring { return [UTType(exportedAs: ExportKind.archiveTypeIdentifier)] }
         switch model.format {
         case .passwordCSV: return [.commaSeparatedText, .plainText]
         case .onePUX: return [UTType(filenameExtension: "1pux") ?? .zip, .zip]

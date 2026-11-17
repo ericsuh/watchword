@@ -24,9 +24,18 @@ public enum ExportKind: String, Hashable, Sendable, CaseIterable, Identifiable {
 
     public var isPlaintext: Bool { self != .archive }
 
+    /// The uniform type identifier of an encrypted archive, which both apps declare as an exported type
+    /// (`Apps/project.yml`, `UTExportedTypeDeclarations`) so that a backup has a name and the restore screen's file
+    /// picker offers backups only. The apps deliberately register no document type for it: nothing outside Watchword
+    /// can hand it a file to open (owner decision, 2026-11-17; docs/02-architecture.md §14.1).
+    public static let archiveTypeIdentifier = "com.ericsuh.watchword.backup"
+
+    /// The archive's file name extension, the one tag of `archiveTypeIdentifier`.
+    public static let archiveFileExtension = "watchwordbackup"
+
     public var fileExtension: String {
         switch self {
-        case .archive: return "wwarchive"
+        case .archive: return Self.archiveFileExtension
         case .applePasswordsCSV: return "csv"
         case .onePUX: return "1pux"
         }

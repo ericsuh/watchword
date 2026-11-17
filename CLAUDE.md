@@ -586,7 +586,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - The archive is sealed under the archive passphrase *and* the Secret Key (ADR 0008); `AccountArchive.parse`
   checks everything, KDF bounds and every envelope's place included, before a key is derived, and every failure
   after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.
-  Entries are opened and decoded one at a time; only `Item.isTrashedByPerson` comes back as trash.
+  Entries are opened and decoded one at a time; only `Item.isTrashedByPerson` comes back as trash. The apps
+  export its type (`.watchwordbackup`, `ExportKind.archiveTypeIdentifier`) and open no documents: never add
+  `CFBundleDocumentTypes`, so a backup reaches the parser only through the restore screen's picker.
 - `lock()` never queues behind interchange work: a plaintext file's parse, an archive's parse, derivation and
   decoding, and an export's password and archive derivations run off the actor (`awayFromSession`, named by
   `AwayWork`) on copied inputs, touching no session state, and the epoch is checked on return (`requireKeys(since:)`).

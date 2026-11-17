@@ -2720,6 +2720,15 @@ Ks    = HKDF-SHA256(ikm: SK, salt: accountID, info: "WW-archive-2SKD-v1")
 AWK   = HKDF-SHA256(ikm: Kp ‖ Ks, salt: archiveID ‖ accountID, info: "WW-archive-key-v1")
 ```
 
+**The file.** A backup is saved as `Watchword Backup <date>.watchwordbackup`. Both apps declare the type
+(`com.ericsuh.watchword.backup`, conforming to `public.data`; `UTExportedTypeDeclarations` in `Apps/project.yml`,
+the identifier and extension being `ExportKind`'s constants, which a test holds to the spec), so the system names
+the file a "Watchword Backup" and the restore screen's picker offers backups only. The type is exported and never
+handled: the apps register no document type (`CFBundleDocumentTypes`), so opening a backup from Files, Finder or a
+message does not start Watchword, and the only way a file reaches `AccountArchive.parse` is the person choosing it
+on the restore screen (owner decision, 2026-11-17: the convenience was not worth an entry point any app, page or
+sender could use). A backup whose extension was changed is not offered until it is renamed.
+
 Why the Secret Key and not the passphrase alone (ADR 0008): the likeliest place for a backup file is the cloud drive
 the vault syncs through, adversary A1's. The account's ciphertext there resists offline guessing because of the
 Secret Key; an archive protected by the passphrase alone would be the one object beside it that A1 could guess at.

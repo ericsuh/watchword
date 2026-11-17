@@ -541,6 +541,7 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   screen for as long as it is open, the password asked for every time, and the `ExportReport` shown before the file
   is saved; the CSV exactly as stored; the restore screen showing `ImportPreview.archiveCreatedAt` first. The file
   is handed to the system's exporter with `completeUnlessOpen` set on iOS (not yet checked on a device).
+  A backup is a `.watchwordbackup` file of a type the apps export and do not open (architecture §14.1).
   `ImportExportTests` covers both. Open: restoring an archive's vaults as vaults (today every archived item goes
   into the one vault the person chooses, naming the vault it came from); the OS Credential Exchange calls and the
   extension's Info.plist keys; the instruction screens; a CXF file export (the format names the exporting app's

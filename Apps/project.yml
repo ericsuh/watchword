@@ -79,6 +79,15 @@ targets:
       properties:
         WatchwordAppGroup: $(WATCHWORD_APP_GROUP_IOS)
         WatchwordKeychainGroup: $(WATCHWORD_KEYCHAIN_GROUP)
+        # The encrypted archive's type, so a backup has a name and the restore picker offers backups only. Exported,
+        # never handled: there is deliberately no CFBundleDocumentTypes entry, so nothing outside the app can hand it
+        # a file to open (owner decision, 2026-11-17). Identifier and extension are ExportKind's constants.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.ericsuh.watchword.backup
+            UTTypeDescription: Watchword Backup
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [watchwordbackup]
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -106,6 +115,15 @@ targets:
       properties:
         WatchwordAppGroup: $(WATCHWORD_APP_GROUP_MACOS)
         WatchwordKeychainGroup: $(WATCHWORD_KEYCHAIN_GROUP)
+        # The encrypted archive's type, so a backup has a name and the restore picker offers backups only. Exported,
+        # never handled: there is deliberately no CFBundleDocumentTypes entry, so nothing outside the app can hand it
+        # a file to open (owner decision, 2026-11-17). Identifier and extension are ExportKind's constants.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.ericsuh.watchword.backup
+            UTTypeDescription: Watchword Backup
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [watchwordbackup]
     entitlements:
       path: macOS/Watchword.entitlements
       properties:

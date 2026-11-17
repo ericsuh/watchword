@@ -214,7 +214,7 @@ struct InterchangeScreenTests {
         export.passphraseConfirmation = "garden shed padlock"
         await export.export()
         let file = try #require(export.file, "\(export.errorMessage ?? "")")
-        #expect(!file.kind.isPlaintext && file.itemCount == 1 && file.filename.hasSuffix(".wwarchive"))
+        #expect(!file.kind.isPlaintext && file.itemCount == 1 && file.filename.hasSuffix(".watchwordbackup"))
         let archive = try #require(export.archiveBytes)
 
         let restore = ImportModel(context: ContextProbe().context(vault.session))
@@ -245,7 +245,23 @@ struct InterchangeScreenTests {
     func kinds() {
         #expect(ExportKind.allCases.first == .archive)
         #expect(ExportKind.allCases.filter { !$0.isPlaintext } == [.archive])
-        #expect(ExportKind.allCases.map(\.fileExtension) == ["wwarchive", "csv", "1pux"])
+        #expect(ExportKind.allCases.map(\.fileExtension) == ["watchwordbackup", "csv", "1pux"])
+    }
+
+    /// The declaration lives in the XcodeGen spec, which no Swift target compiles: this is what keeps it and the
+    /// constants the screens use from drifting apart, and what notices a document type being registered.
+    @Test("both apps export the archive's type under the screens' identifier and extension, and open no documents")
+    func archiveTypeDeclaration() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let spec = try String(contentsOf: root.appendingPathComponent("Apps/project.yml"), encoding: .utf8)
+        let identifier = "UTTypeIdentifier: \(ExportKind.archiveTypeIdentifier)\n"
+        let tag = "public.filename-extension: [\(ExportKind.archiveFileExtension)]\n"
+        #expect(spec.components(separatedBy: identifier).count == 3, "one declaration for iOS, one for macOS")
+        #expect(spec.components(separatedBy: tag).count == 3)
+        #expect(spec.components(separatedBy: "UTExportedTypeDeclarations:").count == 3)
+        #expect(!spec.contains("CFBundleDocumentTypes:") && !spec.contains("UTImportedTypeDeclarations:"))
+        #expect(ExportKind.archiveTypeIdentifier == ExportKind.archiveTypeIdentifier.lowercased())
     }
 }
 
