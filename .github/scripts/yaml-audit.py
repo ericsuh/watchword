@@ -296,9 +296,10 @@ def workflow_files(root):
         for name in sorted(names):
             path = os.path.join(directory, name)
             relative = os.path.relpath(path, root).split(os.sep)
-            if not name.endswith((".yml", ".yaml")):
+            # Any letter case: whether GitHub would load `X.YML` is not this audit's to guess.
+            if not name.lower().endswith((".yml", ".yaml")):
                 continue
-            if relative[0] == "workflows" or name in ("action.yml", "action.yaml"):
+            if relative[0] == "workflows" or name.lower() in ("action.yml", "action.yaml"):
                 found.append(path)
     return found
 

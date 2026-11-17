@@ -139,6 +139,10 @@ class AuditActionsTests(support.ScriptTestCase):
         output = self.assert_refused("      - uses: actions/cache@v4", name="other.yaml")
         self.assertIn("other.yaml", output)
         self.assertNotIn("good.yml", output)
+        os.remove(self.path(".github", "workflows", "other.yaml"))
+        self.assertIn("SHOUT.YML", self.assert_refused("      - uses: actions/cache@v4", name="SHOUT.YML"))
+        os.remove(self.path(".github", "workflows", "SHOUT.YML"))
+        self.assertIn("deep.yml", self.assert_refused("      - uses: actions/cache@v4", name="nested/deep.yml"))
 
     def test_a_composite_action_in_the_repository_is_read(self):
         self.write(os.path.join(".github", "workflows", "good.yml"), WORKFLOW.format(steps=""))
