@@ -27,6 +27,10 @@ public enum SignatureDomain: UInt8, Sendable, CaseIterable {
     /// domain of its own rather than a magic inside `pendingDeletion`'s: those messages begin with a vault ID and
     /// have no magic, so nothing could keep a stash message from being read as one.
     case syncStash = 9
+    /// A vault's sync state as this device saved it (`SyncState.authenticator`, review finding Z20): what it has
+    /// merged, published and erased, which its next snapshot and segments sign for every other device. A row planted
+    /// in the local state store is then no state, and the log is replayed.
+    case syncState = 10
 }
 
 public enum Signatures {

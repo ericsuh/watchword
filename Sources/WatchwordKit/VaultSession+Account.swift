@@ -628,11 +628,13 @@ extension VaultSession {
     func unpublishedRows(of account: AccountRecord) async throws -> (
         rows: [StoredRecord], deletions: [UUID: [RecordKey: PendingDeletion]]
     ) {
-        guard let base = syncSettings?.state, let syncState else { return ([], [:]) }
+        guard let syncState else { return ([], [:]) }
         var rows: [StoredRecord] = []
         var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
         for vaultID in try await vaultDirectory(account).keys {
-            let state = try await base.loadState(vaultID: vaultID)
+            // The state this session signed, or none (Z20): a planted `published` must not keep a row from being
+            // carried over.
+            let state = try await syncState.loadState(vaultID: vaultID)
             let published = state?.published ?? [:]
             // Items merge by what each value's writer had seen, so carrying one over that was published after all
             // changes nothing. A vault's name is last-writer-wins: carried over without knowing it was unpublished,

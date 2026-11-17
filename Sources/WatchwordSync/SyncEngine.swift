@@ -344,7 +344,13 @@ public actor SyncEngine {
             }
         }
         state.stashUnsaved = stashIncomplete || !stashSaved
-        try await syncState.saveState(state)
+        do {
+            try await syncState.saveState(state)
+        } catch SyncKeyringError.locked {
+            // Locked meanwhile: the session cannot sign the state (review finding Z20). The row saved after the last
+            // segment merged or published stands; what this one would have added is worked out again next time.
+            report.deferredUntilUnlock = true
+        }
         return report
     }
 

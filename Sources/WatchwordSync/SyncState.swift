@@ -35,7 +35,8 @@ public struct RecordStamp: Hashable, Sendable, Comparable {
 /// What this device knows about one vault's sync streams (docs/02-architecture.md §6, `sync_state`).
 ///
 /// None of it is secret, and all of it except pending deletions (kept apart, in `SyncStateStore`) can be rebuilt from
-/// the transport by a reconciling sync, which is also what repairs it if it is damaged or rolled back.
+/// the transport by a reconciling sync, which is also what repairs it if it is damaged or rolled back. It is believed
+/// all the same, and what it says goes out signed, so production authenticates the row (`authenticator`).
 public struct SyncState: Sendable, Hashable {
     public var vaultID: UUID
     /// The sequence number of this device's next segment.
@@ -72,6 +73,11 @@ public struct SyncState: Sendable, Hashable {
     /// The generation of the last stash row saved (`SyncStash.generation`). A row of another generation, or none while
     /// this is above zero, is not trusted to hold what this state says was merged, and the log is replayed.
     public var stashGeneration: UInt64 = 0
+    /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
+    /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
+    /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the
+    /// vault and the device), which hands back no state at all for a row that does not verify. Empty in the fakes.
+    public var authenticator: [UInt8] = []
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID
@@ -126,6 +132,8 @@ public struct StagedObject: Sendable, Hashable {
 /// contents are untrusted on read like the rest of the file: staged objects are re-verified before merging, and the
 /// state can be rebuilt with a reconciling sync.
 public protocol SyncStateStore: Sendable {
+    /// The state this device saved for the vault, or `nil`: none yet, or (in production) a row this device's session
+    /// did not sign, which is no state. The engine then starts from nothing and replays the log.
     func loadState(vaultID: UUID) async throws -> SyncState?
     func saveState(_ state: SyncState) async throws
 

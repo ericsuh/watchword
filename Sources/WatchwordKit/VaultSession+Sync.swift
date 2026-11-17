@@ -513,6 +513,43 @@ extension VaultSession {
         return stash
     }
 
+    // MARK: - The state row (review finding Z20)
+
+    /// `"WWSS" ‖ vault ID ‖ device ID ‖ state`: bound to the vault and to this device, under its own domain.
+    static func syncStateMessage(_ state: SyncState, deviceID: UUID) -> [UInt8] {
+        var message = Array("WWSS".utf8)
+        message.append(contentsOf: state.vaultID.byteArray)
+        message.append(contentsOf: deviceID.byteArray)
+        message.append(contentsOf: state.authenticatedBytes)
+        return message
+    }
+
+    /// The state with this session's signature over all of it. Throws `SyncKeyringError.locked` while locked: a state
+    /// is saved only by a sync that merged or published, which needs the keys anyway.
+    func signedSyncState(_ state: SyncState) throws -> SyncState {
+        let (keys, record) = try syncKeys()
+        var signed = state
+        signed.authenticator = try keys.keyset.sign(
+            Self.syncStateMessage(state, deviceID: record.deviceID), domain: .syncState)
+        return signed
+    }
+
+    /// `state` if this session signed it for its vault on this device, or `nil`: a row it did not write is no state.
+    /// Checked with the Keychain's copy of the account key while locked, as downloads are.
+    func verifiedSyncState(_ state: SyncState, vaultID: UUID) async -> SyncState? {
+        var record = account
+        if record == nil { record = try? await loadAccount() }
+        guard state.vaultID == vaultID, let record, let signingKey = await trustedAccountSigningKey(record) else {
+            return nil
+        }
+        let message = Self.syncStateMessage(state, deviceID: record.deviceID)
+        guard
+            (try? Signatures.verify(state.authenticator, for: message, domain: .syncState, signingKey: signingKey))
+                != nil
+        else { return nil }
+        return state
+    }
+
     /// Copies the account's public signing key to the Keychain, for checking downloads while locked.
     func refreshSigningKey(account: AccountRecord, keys: UnlockedKeys) async throws {
         var signingKey = try keys.keyset.publicKeyBundle().signingKey
@@ -521,19 +558,26 @@ extension VaultSession {
     }
 }
 
-/// The sync state store the session and its engine use: everything passes through to `base`, except that pending
-/// deletions are signed by the session as they are recorded and checked as they are read
-/// (`PendingDeletion.authenticator`, review of milestone 3).
+/// The sync state store the session and its engine use. Everything the engine acts on rather than checks again is
+/// signed by the session as it is written and checked as it is read: pending deletions
+/// (`PendingDeletion.authenticator`, review of milestone 3), the stash (N14) and the state row itself (Z20), whose
+/// erasures, merged positions and published stamps go out signed in this device's snapshots and segments. Staged
+/// objects pass through, because the engine verifies each again before merging it, and so does the quarantine, which
+/// is shown to the person and never merged.
 struct AuthenticatedSyncState: SyncStateStore {
     let base: any SyncStateStore
     let session: VaultSession
 
+    /// The state as this session signed it for this vault on this device, or `nil` for any other row: the engine
+    /// then starts from nothing and replays the log, which rebuilds the erasures too.
     func loadState(vaultID: UUID) async throws -> SyncState? {
-        try await base.loadState(vaultID: vaultID)
+        guard let state = try await base.loadState(vaultID: vaultID) else { return nil }
+        return await session.verifiedSyncState(state, vaultID: vaultID)
     }
 
+    /// Signs the state with the account key before it is stored; throws `SyncKeyringError.locked` while locked.
     func saveState(_ state: SyncState) async throws {
-        try await base.saveState(state)
+        try await base.saveState(try await session.signedSyncState(state))
     }
 
     func stage(_ object: StagedObject) async throws {

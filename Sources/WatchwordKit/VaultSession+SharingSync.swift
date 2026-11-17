@@ -835,8 +835,9 @@ extension VaultSession {
     /// streams: the furthest sequence through which it holds every segment, and the chain of their digests (§8.8:
     /// bound to objects, not positions). Take it after a sync, so it holds as much of their work as this device can.
     func takeWriteCut(of accountID: UUID, in vaultID: UUID) async throws -> WriteCut {
-        guard let syncSettings else { throw SharedVaultError.syncNotConfigured }
-        let state = try await syncSettings.state.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
+        // The state this session signed (Z20): the cut is signed, so a planted `merged` must not widen it.
+        guard let syncState else { throw SharedVaultError.syncNotConfigured }
+        let state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         let vault = try sharedVault(vaultID)
         var positions: [UUID: SyncWriteCut.Position] = [:]
         for device in vault.index.devices(signedBy: accountID) {

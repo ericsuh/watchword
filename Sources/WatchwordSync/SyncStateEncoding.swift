@@ -39,6 +39,8 @@ struct EncodedState: Codable {
     /// Absent in a row written before ADR 0009.
     var stashUnsaved: Bool?
     var stashGeneration: UInt64?
+    /// Absent in a row written before the state was signed (review finding Z20): such a row does not verify.
+    var authenticator: Data?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -63,6 +65,7 @@ struct EncodedState: Codable {
         snapshotCoverage = Self.strings(state.snapshotCoverage)
         stashUnsaved = state.stashUnsaved
         stashGeneration = state.stashGeneration
+        authenticator = Data(state.authenticator)
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -100,6 +103,7 @@ struct EncodedState: Codable {
         }
         state.stashUnsaved = stashUnsaved ?? false
         state.stashGeneration = stashGeneration ?? 0
+        state.authenticator = authenticator.map { Array($0) } ?? []
         return state
     }
 

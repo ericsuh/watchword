@@ -73,7 +73,77 @@ enum StateStoreFixtures {
         state.snapshots = [snapshot: [SyncFixtures.deviceA: 5, SyncFixtures.deviceB: 2]]
         state.snapshotCoverage = [SyncFixtures.deviceA: 5, SyncFixtures.deviceB: 2]
         state.stashUnsaved = true
+        state.stashGeneration = 4
+        state.authenticator = [0xA1, 0xA2, 0xA3]
         return state
+    }
+}
+
+/// What the session signs of a state row (review finding Z20): everything in it.
+@Suite("Sync state authentication")
+struct SyncStateAuthenticationTests {
+    /// One state per field, each differing from the fixture in that field alone.
+    static var variants: [(String, SyncState)] {
+        let base = StateStoreFixtures.state()
+        let other = StateStoreFixtures.record(3).key
+        func changed(_ label: String, _ change: (inout SyncState) -> Void) -> (String, SyncState) {
+            var state = base
+            change(&state)
+            return (label, state)
+        }
+        return [
+            changed("vaultID") { $0.vaultID = SyncFixtures.otherVault },
+            changed("nextSequence") { $0.nextSequence += 1 },
+            changed("lastPublishedSequence") { $0.lastPublishedSequence += 1 },
+            changed("merged") { $0.merged[SyncFixtures.deviceB] = 1 << 48 },
+            changed("merged, another stream") { $0.merged[UUID()] = 300 },
+            changed("known") { $0.known[other] = RecordStamp(version: 1, device: SyncFixtures.deviceA) },
+            changed("erasures") {
+                $0.erasures[other] = Erasure(
+                    stamp: RecordStamp(version: 9, device: SyncFixtures.deviceA, deleted: true), summary: [])
+            },
+            changed("an erasure's summary") { $0.erasures[StateStoreFixtures.record(2).key]?.summary = [1, 2, 4] },
+            changed("an erasure's stamp") { $0.erasures[StateStoreFixtures.record(2).key]?.stamp.version = 8 },
+            changed("published") { $0.published[other] = RecordStamp(version: 1, device: SyncFixtures.deviceA) },
+            changed("acknowledgements") { $0.acknowledgements[SyncFixtures.deviceB]?[SyncFixtures.deviceA] = 7 },
+            changed("publishedAcknowledgement") { $0.publishedAcknowledgement[SyncFixtures.deviceB] = 4 },
+            changed("snapshots") { $0.snapshots = [:] },
+            changed("snapshotCoverage") { $0.snapshotCoverage[SyncFixtures.deviceA] = 6 },
+            changed("stashUnsaved") { $0.stashUnsaved = false },
+            changed("stashGeneration") { $0.stashGeneration = 5 },
+        ]
+    }
+
+    @Test("every field of the state changes what is signed, and the authenticator does not")
+    func everyFieldIsCovered() {
+        let base = StateStoreFixtures.state()
+        let signed = base.authenticatedBytes
+        for (label, variant) in Self.variants {
+            #expect(variant.authenticatedBytes != signed, "\(label) is not covered")
+        }
+        var resigned = base
+        resigned.authenticator = [9]
+        #expect(resigned.authenticatedBytes == signed)
+        // A field added to the state must be added to `authenticatedBytes` and to `variants`: this count is the
+        // reminder.
+        #expect(Mirror(reflecting: base).children.count == 14)
+        #expect(Set(Self.variants.map(\.1.authenticatedBytes)).count == Self.variants.count)
+    }
+
+    @Test("what is signed does not depend on the order a dictionary happens to iterate in")
+    func orderIndependent() {
+        var first = SyncState(vaultID: SyncFixtures.vault)
+        var second = SyncState(vaultID: SyncFixtures.vault)
+        let devices = (0..<64).map { _ in UUID() }
+        for (index, device) in devices.enumerated() { first.merged[device] = UInt64(index + 1) }
+        for (index, device) in devices.enumerated().reversed() { second.merged[device] = UInt64(index + 1) }
+        for n in UInt8(1)...40 {
+            first.known[StateStoreFixtures.record(n).key] = RecordStamp(version: UInt64(n), device: devices[0])
+        }
+        for n in (UInt8(1)...40).reversed() {
+            second.known[StateStoreFixtures.record(n).key] = RecordStamp(version: UInt64(n), device: devices[0])
+        }
+        #expect(first.authenticatedBytes == second.authenticatedBytes)
     }
 }
 
