@@ -125,8 +125,14 @@ with password re-entry, import of 1PUX/CSV fixtures.
   Settings). Opening and closing a screen retry a click that did not take, Sync Now and the UI-test hooks work from any
   screen (an open account screen is closed and Settings opened first), waits are bounded (a missing element fails in
   seconds), and every such failure attaches the whole element tree (`attachTree`), kept whether or not the test
-  passes. To keep the iOS job short, `DeviceRevocationTests` is one launch; `ImportExportTests` is two (import with a lock
-  during the review; export, a lock during the report, and a restore), each within its allowance. The long tests
+  passes. To keep the iOS job short, `DeviceRevocationTests` is one launch; `ImportExportTests` is three (import with a
+  lock during the review; export, its report and a lock; a backup and its restore), each within its allowance. The
+  export and the backup were one test until it ran 439 s of its 600 on a good CI run and out of time on a slow one:
+  every query walks the app's whole accessibility tree, one to two seconds on a CI simulator and, while the
+  simulator's own services were crashing, 17 to 28 s four times running; the test made 331 of them. So the helpers
+  count queries: an element in view costs `reveal` two (a snapshot for its frame, then whether it can be hit) where
+  it cost five or six, and `enter` ends its text with Return on iOS, so no keyboard is left over the next field to be
+  found and dismissed (a dozen queries each time). The long tests
   (the tour, import and export, sharing, devices, the quarantine) print `STEP <time> [<test>] <step>` before each step
   (`XCTestCase.step`), which `app:diagnose` gathers at the end of a failed job's log (below). Sheets the account screens open close by clearing
   their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS. The macOS window

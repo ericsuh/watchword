@@ -83,9 +83,9 @@ class DiagnoseSummaryTests(support.ScriptTestCase):
         self.assertNotIn("launch", "\n".join(shown), "another test's step was shown")
 
     def test_a_line_in_both_logs_is_shown_once_in_time_order(self):
-        test = "-[ImportExportTests testExportReportALockAndARestore]"
+        test = "-[ImportExportTests testBackUpAndRestore]"
         late, early = step("05:00", test, "restore"), step("01:00", test, "export")
-        identifier = "ImportExportTests/testExportReportALockAndARestore()"
+        identifier = "ImportExportTests/testBackUpAndRestore()"
         self.bundle(
             "iOS",
             summary(passed=1, failed=1, failures=[(identifier, "first"), (identifier, "second\nline two")]),

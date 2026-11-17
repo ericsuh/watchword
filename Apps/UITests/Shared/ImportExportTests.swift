@@ -1,11 +1,12 @@
 import XCTest
 
-/// Milestone 7 UI tests, run on iOS and macOS (docs/04-test-plan.md §5), in two launches, each within its allowance:
+/// Milestone 7 UI tests, run on iOS and macOS (docs/04-test-plan.md §5), in three launches, each within its allowance:
 /// - an import whose duplicate must be decided first, where a merge names the website it would add, off until
 ///   accepted, with the password hidden (PRD F8.2, F11.2), and a lock with that review open, after which it is gone
 ///   (review of the account screens, finding 6);
-/// - an export that shows the plaintext warning and the report before the file is saved, gone after a lock too, and a
-///   backup restored with its date shown (F8.4, F8.5).
+/// - an export that shows the plaintext warning and the report before the file is saved, gone after a lock too
+///   (F8.4);
+/// - a backup made and restored, with its date shown (F8.5).
 /// The import reads `UITestSamples.importCSV`, and the restore the archive just made, through UI-test buttons rather
 /// than the system's file picker, which XCUITest cannot drive reliably on both platforms; "Lock now" is a Debug-only
 /// stand-in for auto-lock with the screen up. Each step prints a timestamped `STEP` line, so a run that stops (the
@@ -72,7 +73,7 @@ final class ImportExportTests: XCTestCase {
     }
 
     @MainActor
-    func testExportReportALockAndARestore() throws {
+    func testExportReportAndALock() throws {
         step("launch")
         let app = XCUIApplication.launchedWithAccount()
         let password = OnboardingAndUnlockTests.password
@@ -103,7 +104,22 @@ final class ImportExportTests: XCTestCase {
         app.openScreen(AccessibilityID.Settings.export)
         XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 5))
         XCTAssertFalse(app.element(AccessibilityID.Export.count).exists, "the report outlived the lock")
+        step("done")
+    }
 
+    /// The other half of what was one test with the export above: a backup made and then restored. Apart, each is a
+    /// launch and a handful of screens, well inside its allowance on a slow simulator; together they ran 439 s of 600
+    /// on a good CI run and past 600 on a slow one.
+    @MainActor
+    func testBackUpAndRestore() throws {
+        step("launch")
+        let app = XCUIApplication.launchedWithAccount()
+        let password = OnboardingAndUnlockTests.password
+        app.addLogin(title: "Library", host: "citylibrary.org", username: "pat", password: nil)
+
+        step("export: open")
+        app.openScreen(AccessibilityID.Settings.export)
+        XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 5))
         step("export: archive")
         app.tap(AccessibilityID.Export.kind + ".archive")
         app.enter(password, into: AccessibilityID.Export.password)

@@ -29,18 +29,25 @@ extension XCUIApplication {
     /// area scrolls the form back, one below scrolls it on, one not there yet scrolls the way `position` says, and one
     /// on screen but not yet hittable (a sheet still animating in) is waited for, not scrolled past. Bounded: at most
     /// eight scrolls and short waits, then a failure with the tree and a screenshot attached.
+    ///
+    /// Queries are counted here. Each one walks the app's whole accessibility tree (the item list, Settings and the
+    /// account screen over it): one to two seconds on a CI simulator, and now and then half a minute. The common
+    /// case, an element already in view, is two: its frame, then whether it can be hit. It was five or six, and a
+    /// field under the keyboard a dozen more, which made the export test 331 queries and 439 s on a good run.
     @discardableResult
     func reveal(
         _ identifier: String, at position: FormPosition = .anywhere, mayBeDisabled: Bool = false,
         file: StaticString = #filePath, line: UInt = #line
     ) -> XCUIElement {
         let target = element(identifier)
-        // The common case, at the cost of one check: there, on screen and hittable.
-        if target.waitForExistence(timeout: 2), isReachable(target) { return target }
+        var frame = presentFrame(of: target)
+        // Not there yet (the screen it is on is still arriving) is waited for once, before anything is scrolled.
+        if frame == nil, target.waitForExistence(timeout: 2) { frame = presentFrame(of: target) }
+        if let frame, isVisible(frame, of: target), target.isHittable { return target }
         #if os(iOS)
-            // A password field typed into leaves the keyboard up over the foot of the form, which the window's frame
-            // does not show: a row under it passes as on screen and is not hittable.
-            dismissKeyboard(ifCovering: target)
+            // A field typed into outside `enter` leaves the keyboard up over the foot of the form, which the window's
+            // frame does not show: a row under it passes as on screen and is not hittable.
+            dismissKeyboard(ifCovering: frame)
         #endif
         let defaults: [Bool]
         switch position {
@@ -48,21 +55,23 @@ extension XCUIApplication {
         case .below: defaults = Array(repeating: true, count: 8)
         case .anywhere: defaults = [true, true, true, false, false, false, false, false]
         }
-        var scrolls = 0
-        while scrolls < defaults.count, !isReachable(target) {
-            if target.exists, let towardsEnd = direction(toward: target) {
+        for towardsEnd in defaults {
+            guard let frame = presentFrame(of: target) else {
                 scroll(towardsEnd: towardsEnd, to: identifier)
-            } else if target.exists, isOnScreen(target) {
-                #if os(iOS)
-                    dismissKeyboard(ifCovering: target)
-                #endif
-                if waitUntilHittable(target, timeout: 2) || mayBeDisabled { break }
-                scroll(towardsEnd: defaults[scrolls], to: identifier)
-            } else {
-                scroll(towardsEnd: defaults[scrolls], to: identifier)
+                continue
             }
-            scrolls += 1
+            if isVisible(frame, of: target) {
+                if target.isHittable { return target }
+                #if os(iOS)
+                    dismissKeyboard(ifCovering: frame)
+                #endif
+                if waitUntilHittable(target, timeout: 2) || mayBeDisabled { return target }
+                scroll(towardsEnd: towardsEnd, to: identifier)
+            } else {
+                scroll(towardsEnd: direction(toward: target, at: frame) ?? towardsEnd, to: identifier)
+            }
         }
+        if isReachable(target) { return target }
         if !target.waitForExistence(timeout: 2) {
             attachTree("reveal \(identifier)", target: identifier)
             XCTFail("\(identifier) was not found", file: file, line: line)
@@ -72,6 +81,16 @@ extension XCUIApplication {
             XCTFail("\(identifier) is not hittable", file: file, line: line)
         }
         return target
+    }
+
+    /// `element`'s frame if it is in the hierarchy, `nil` if it is not. On iOS in one query, a snapshot, where asking
+    /// whether it exists and then for its frame is two; macOS, where a query costs little, asks as it always has.
+    func presentFrame(of element: XCUIElement) -> CGRect? {
+        #if os(iOS)
+            return (try? element.snapshot())?.frame
+        #else
+            return element.exists ? element.frame : nil
+        #endif
     }
 
     /// The scrolling container holding `element`, innermost last: a form's rows are in one, toolbar items and header
@@ -124,27 +143,34 @@ extension XCUIApplication {
     /// whole tree each time, which made every step of an iOS run several seconds long. On macOS a sheet's toolbar sits
     /// along the foot of its form, so a row is judged against its own container (`visibleFrame(for:)`).
     func isOnScreen(_ element: XCUIElement) -> Bool {
-        guard element.exists else { return false }
-        let frame = element.frame
-        #if os(iOS)
-            let visible = windowFrame.insetBy(dx: 0, dy: Self.edgeMargin)
-        #else
-            let visible = visibleFrame(for: element)
-        #endif
+        guard let frame = presentFrame(of: element) else { return false }
+        return isVisible(frame, of: element)
+    }
+
+    /// Whether the middle of `frame`, `element`'s own, is inside the area where `element` can be seen.
+    private func isVisible(_ frame: CGRect, of element: XCUIElement) -> Bool {
+        let visible = visibleArea(for: element)
         return !frame.isEmpty && !visible.isEmpty && visible.contains(CGPoint(x: frame.midX, y: frame.midY))
     }
 
-    /// Which way to scroll to bring `element` into view: towards the end if it is below, back if it is above, `nil`
-    /// if it is in view, has no frame, or is in no scrolling container (then scrolling would not move it).
-    private func direction(toward element: XCUIElement) -> Bool? {
+    /// The area `isOnScreen` judges by: the window kept clear of its edges on iOS, the element's container on macOS.
+    private func visibleArea(for element: XCUIElement) -> CGRect {
         #if os(iOS)
-            // Off the window's edge is out of the form's view: a toolbar item never is.
-            let visible = windowFrame.insetBy(dx: 0, dy: Self.edgeMargin)
+            return windowFrame.insetBy(dx: 0, dy: Self.edgeMargin)
         #else
-            guard container(of: element) != nil else { return nil }
-            let visible = visibleFrame(for: element)
+            return visibleFrame(for: element)
         #endif
-        let frame = element.frame
+    }
+
+    /// Which way to scroll to bring `element`, whose frame is `frame`, into view: towards the end if it is below, back
+    /// if it is above, `nil` if it is in view, has no frame, or is in no scrolling container (then scrolling would not
+    /// move it).
+    private func direction(toward element: XCUIElement, at frame: CGRect) -> Bool? {
+        #if os(macOS)
+            guard container(of: element) != nil else { return nil }
+        #endif
+        // On iOS, off the window's edge is out of the form's view: a toolbar item never is.
+        let visible = visibleArea(for: element)
         guard !frame.isEmpty, !visible.isEmpty else { return nil }
         if frame.midY > visible.maxY { return true }
         if frame.midY < visible.minY { return false }
@@ -152,18 +178,16 @@ extension XCUIApplication {
     }
 
     #if os(iOS)
-        /// Puts the keyboard away if it is up and `target` is under it, or not there yet (a row below the fold, which
-        /// the form will scroll up into the keyboard's place). Asked only once the quick check has failed, so a step
-        /// with no keyboard pays one query. Return first, which ends editing in a SwiftUI field with no submit action;
-        /// then a downward swipe on the form, which a form that dismisses its keyboard on scrolling honours.
-        func dismissKeyboard(ifCovering target: XCUIElement) {
+        /// Puts the keyboard away if it is up and the target, whose frame is `frame`, is under it or not there yet
+        /// (`nil`: a row below the fold, which the form will scroll up into the keyboard's place). Asked only once the
+        /// quick check has failed, and of the keyboard, whose own small tree answers at once. Return first, which ends
+        /// editing in a SwiftUI field with no submit action; then a downward swipe on the form, which a form that
+        /// dismisses its keyboard on scrolling honours.
+        func dismissKeyboard(ifCovering frame: CGRect?) {
             let keyboard = keyboards.firstMatch
             guard keyboard.exists else { return }
             let covered = keyboard.frame
-            if target.exists {
-                let frame = target.frame
-                guard frame.isEmpty || frame.maxY > covered.minY else { return }
-            }
+            if let frame, !frame.isEmpty, frame.maxY <= covered.minY { return }
             for label in ["Return", "return", "Done", "done", "Go", "go"] {
                 let key = keyboard.buttons[label]
                 if key.exists, key.isHittable {
@@ -175,7 +199,7 @@ extension XCUIApplication {
             // As `scroll` does on iOS: the swipe lands on whatever is on top, the sheet's form included.
             swipeDown()
             if !keyboard.waitForNonExistence(timeout: 2) {
-                print("UI-test note: the keyboard is still up over \(target.identifier)")
+                print("UI-test note: the keyboard is still up")
             }
         }
     #endif
@@ -289,9 +313,8 @@ extension XCUIApplication {
         showSettings(file: file, line: line)
         let done = buttons[AccessibilityID.screenDone].firstMatch
         for _ in 0..<2 {
-            let row = reveal(identifier, at: .below, file: file, line: line)
-            waitUntilHittable(row, timeout: 3)
-            row.click()
+            // `reveal` returns a row that can be hit, or has failed the test.
+            reveal(identifier, at: .below, file: file, line: line).click()
             if done.waitForExistence(timeout: 5) { return }
         }
         attachTree("open \(identifier)", target: identifier)
@@ -334,11 +357,19 @@ extension XCUIApplication {
         target.click()
     }
 
-    /// Types into the text or secure field with `identifier`.
+    /// Types into the single-line text or secure field with `identifier`. On iOS the text ends in Return, which ends
+    /// editing in a field with no submit action and puts the keyboard away with the keystrokes already being sent:
+    /// left up, it covered the next field or button, and finding that out and dismissing it cost a dozen queries each
+    /// time. Not for a field that grows (Return is a line there) or one whose Return submits; on macOS, where Return
+    /// would press a sheet's default button, the text is typed alone.
     func enter(_ text: String, into identifier: String, file: StaticString = #filePath, line: UInt = #line) {
         let field = reveal(identifier, file: file, line: line)
         field.click()
-        field.typeText(text)
+        #if os(iOS)
+            field.typeText(text + "\n")
+        #else
+            field.typeText(text)
+        #endif
     }
 
     /// Clicks a confirmation dialog's button labelled `label`. The button that opened the dialog is labelled
