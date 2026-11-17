@@ -968,6 +968,16 @@ other does, and reported as not required on Linux, where they cannot compile.
   transport once; the longest wait wins; sharing failures count), "Sync transport failures" (`transportStopped`), "Sync
   store marker".
 
+### 6.11 Manual cases (real devices)
+
+What no runner can check is written down as cases a person runs, in `docs/manual-tests/` (one file per area, each
+case a heading and numbered steps whose **Expected** lines are the checks): Face ID and Touch ID with the Secure
+Enclave, what the Keychain keeps on one device and a restored backup does not carry, exported files and the
+`.watchwordbackup` type as the Files app and Finder treat them, the Emergency Kit on paper, and what the app
+switcher shows. A feature that adds something only a person can check adds its cases in the same pull request;
+they are run before a release and after any change to the adapters or screens they name. They are not a gate: no
+CI job reads them.
+
 ## 7. CI implementation
 
 Workflows live in `.github/workflows/` (see `ci.yml` and `security-nightly.yml`). Every step after
