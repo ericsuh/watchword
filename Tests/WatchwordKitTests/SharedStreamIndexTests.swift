@@ -109,10 +109,12 @@ struct SharedStreamIndexTests {
         index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.victim, opened: false))
         index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: Self.victim))
         index.awaiting = [Self.device]
+        index.ownTakenOut = [Self.version(7), Self.version(2)]
         let saved = try index.signed(account: keyset.accountID, vaultID: vaultID, keyset: keyset)
         let parsed = try #require(SharedStreamIndex.parse(saved, account: bundle, vaultID: vaultID))
         #expect(parsed == index)
         #expect(parsed.account(ofStream: Self.device) == Self.victim)
+        #expect(parsed.ownTakenOut == [Self.version(2), Self.version(7)])
         #expect(parsed.segment(device: Self.device, sequence: 2)?.opened == false)
         #expect(parsed.valueCarriers[Self.value(5)] == nil && parsed.valueCarriers[Self.value(3)]?[Self.device] == 3)
         // An index of the earlier format, or one altered, is refused whole and rebuilt from the log.

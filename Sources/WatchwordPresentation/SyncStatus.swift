@@ -19,6 +19,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case snapshotWithheld(by: [String])
     /// Versions kept aside for the person to look at (`quarantined` and `heldAside`).
     case keptAside(Int)
+    /// This device's deletions are not going out, because an item it moved or made has reached nobody else: it is in
+    /// a shared vault this account may not write to now, or one not set up here, or was held aside
+    /// (`AccountSyncReport.deletionsHeldBack`).
+    case deletionsHeldBack
 
     public var id: String {
         switch self {
@@ -29,6 +33,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .registryUnavailable: return "registryUnavailable"
         case .snapshotWithheld: return "snapshotWithheld"
         case .keptAside: return "keptAside"
+        case .deletionsHeldBack: return "deletionsHeldBack"
         }
     }
 
@@ -52,6 +57,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + names.joined(separator: ", ") + "."
         case .keptAside(let count):
             return "\(count) change(s) were held aside for you to review. See Held-Aside Changes."
+        case .deletionsHeldBack:
+            return "Deletions made on this device are waiting. Something it moved or added has not reached your "
+                + "other devices: it is in a shared vault this device cannot write to now, or was held aside. They "
+                + "go out once it has, or once you discard it under Held-Aside Changes."
         }
     }
 }
@@ -88,6 +97,7 @@ public struct SyncSummary: Hashable, Sendable {
         }
         let kept = combined.quarantined.count + combined.heldAside.count + combined.collided.count
         if kept > 0 { notices.append(.keptAside(kept)) }
+        if !report.deletionsHeldBack.isEmpty { notices.append(.deletionsHeldBack) }
         self.notices = notices
     }
 

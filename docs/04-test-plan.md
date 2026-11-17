@@ -594,7 +594,11 @@ the owner's other device taking a vault up by sharing it (`AdversarialSharedVaul
 stream's owner on a device that joined after a rotation, and the replay when an earlier segment changes it
 (`AdversarialSharedVaultStreamOwnerReviewTests.swift`), with "Shared vaults: the stream index"
 (`SharedStreamIndexTests`, `WatchwordKitTests`) for the index itself: order of arrival, refiling, unopened segments
-and their completion, and the saved form.
+and their completion, and the saved form. A key a dead branch says was handed out, a demoted administrator's branch
+that removes and re-adds, and what is kept (`AdversarialSharingUndoneAdditionTests.swift`, Z53). The deletion gate
+(`AdversarialSharedVaultDeletionGateTests.swift`): an entry planted under this device's name that must not stop its
+deletions (Z54), and a second replay in one sync that must not publish the deletion a move's held-aside copy is
+waiting on (Z55).
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

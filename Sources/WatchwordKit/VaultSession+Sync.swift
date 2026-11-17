@@ -119,12 +119,36 @@ extension VaultSession {
             // deletions go out (Z44).
             if restPublished, mayWrite, await holdsUnpublishedWork(in: vaultID, account: record) {
                 restPublished = false
+                report.deletionsHeldBack.insert(vaultID)
             }
             if stopped == nil, let failure = vaultReport.transportFailure, failure.stopsSync { stopped = failure }
             vaultReport.deviceRevoked = standing == .revoked
             vaultReport.deviceNotRegistered = standing == .unknown
             vaultReport.awaitingNewPassword = report.awaitingNewPassword
             report.vaults[vaultID] = vaultReport
+        }
+        // A shared vault's second replay, before any deletion goes out: its take-out can put a move's copy aside,
+        // and a replay defers deletions like any other pass (review finding Z55).
+        if mayWrite, stopped == nil {
+            for vaultID in sharedVaultsNeedingReplay() {
+                guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
+                await prepareSharedReplay(vaultID)
+                let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+                let second = try await engine(vaultID).sync(
+                    reconcile: true, deferringDeletions: true, publishing: shared.publishing)
+                sharedEngineDidRun(vaultID, reconciled: true, report: second)
+                if second.deletionsDeferred > 0, !deferred.contains(vaultID) { deferred.append(vaultID) }
+                if second.transportUnavailable || second.ownStreamConflict != nil || second.ownStreamExhausted
+                    || second.ownStreamUnverified != nil
+                {
+                    restPublished = false
+                }
+                if restPublished, await holdsUnpublishedWork(in: vaultID, account: record) {
+                    restPublished = false
+                    report.deletionsHeldBack.insert(vaultID)
+                }
+                report.vaults[vaultID] = Self.report(first, followedBy: second)
+            }
         }
         if restPublished {
             for vaultID in deferred {
@@ -133,14 +157,6 @@ extension VaultSession {
             }
         }
         if mayWrite, stopped == nil {
-            for vaultID in sharedVaultsNeedingReplay() {
-                guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
-                await prepareSharedReplay(vaultID)
-                let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
-                let second = try await engine(vaultID).sync(reconcile: true, publishing: shared.publishing)
-                sharedEngineDidRun(vaultID, reconciled: true, report: second)
-                report.vaults[vaultID] = Self.report(first, followedBy: second)
-            }
             await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
         }
         report.sharing = sharingReports
@@ -150,22 +166,33 @@ extension VaultSession {
     }
 
     /// Whether `vaultID` holds an item that exists nowhere but on this device: one it created, of which the sync layer
-    /// has neither published nor merged any version, in the vault or held aside from it (a copy made before this
-    /// device was shown the record that ended its account's permission to write is taken out and kept there). The
+    /// has neither published nor merged any version, in the vault, or taken out of it by this device and held aside
+    /// (a copy made before this device was shown the record that ended its account's permission to write). The
     /// other half of such an item may be a deletion in another vault. Not every row this device sealed: the result of
-    /// a merge is its row too, in a vault it only reads, and holds nothing the others lack.
+    /// a merge is its row too, in a vault it only reads, and holds nothing the others lack. And not every held-aside
+    /// entry that names this device: that is its writer's claim, which a member who can have this device hold
+    /// something aside would use to hold its deletions back everywhere (review finding Z54). Only what the take-out
+    /// itself put aside counts (`SharedStreamIndex.ownTakenOut`, signed with the index), for as long as the
+    /// quarantine still keeps it: once the person has discarded it, it is theirs to have discarded.
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
-        guard let base = syncSettings?.state else { return false }
-        let known = (try? await base.loadState(vaultID: vaultID))?.known ?? [:]
+        guard let syncState, let base = syncSettings?.state else { return false }
+        let known = (try? await syncState.loadState(vaultID: vaultID))?.known ?? [:]
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? []
         where row.deviceID == account.deviceID && known[row.key] == nil {
             return true
         }
+        guard let takenOut = sharing.vaults[vaultID]?.index.ownTakenOut, !takenOut.isEmpty else { return false }
+        var kept: Set<VersionKey> = []
         for entry in (try? await base.quarantined(vaultID: vaultID)) ?? []
-        where entry.kind == .item && !entry.isDeletion && entry.device == account.deviceID && known[entry.key] == nil {
-            return true
+        where entry.kind == .item && !entry.isDeletion && entry.device == account.deviceID {
+            let version = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
+            if takenOut.contains(version) { kept.insert(version) }
         }
-        return false
+        if kept != takenOut {
+            sharing.vaults[vaultID]?.index.ownTakenOut = kept
+            sharing.vaults[vaultID]?.indexChanged = true
+        }
+        return !kept.isEmpty
     }
 
     /// One vault's report for two engine runs in one sync: counts added up, state as the second left it.
@@ -767,6 +794,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     public var transportFailure: SyncTransportError?
     /// What the sharing pass did for each shared vault (docs/02-architecture.md §8.8).
     public var sharing: [UUID: SharedVaultSyncReport] = [:]
+    /// A vault that holds an item of this device's that exists nowhere else (a move's copy that could not be
+    /// published, or was held aside): while there is one, no vault's deletions are published, so that an original is
+    /// never erased ahead of its copy (PRD F7.6; review findings Z44, Z54). The first such vault found.
+    public var deletionsHeldBack: Set<UUID> = []
 
     public init() {}
 

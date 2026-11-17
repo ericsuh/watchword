@@ -1523,6 +1523,12 @@ Not solved here, and to be decided with integration:
   read-only there before the device synced) or whose copy was taken out and held aside as a write after the cut holds
   an item that exists nowhere else; while any vault does, no vault's deletions are published (Z44,
   `holdsUnpublishedWork`). What releases them is the copy going out, or the person discarding the held-aside copy.
+  "Held aside" here means what this device's own take-out put aside, which it notes under the stream index's
+  signature (`SharedStreamIndex.ownTakenOut`): an entry in the quarantine names the device its writer claims, and
+  counting any entry that named this device let a member who can have it hold something aside (a segment signed
+  into the stream named after it, Z46) stop its deletions in every vault, the Personal one included (Z54). A shared
+  vault's second replay in a sync defers deletions like every other pass, and deletions go out after the replays
+  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so.
 - **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
   departed account's segments must not be collected while a device may still need them to judge a cut, or the cut
   must carry what is needed to judge without them.

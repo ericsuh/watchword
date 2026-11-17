@@ -1,0 +1,97 @@
+import Foundation
+import Testing
+import WatchwordCrypto
+import WatchwordModel
+import WatchwordSharing
+import WatchwordStore
+import WatchwordSync
+import WatchwordTestSupport
+
+@testable import WatchwordKit
+
+// Review findings Z54 and Z55 (docs/06-adversarial-review.md): the gate that holds deletions back for a move's copy.
+extension AdversarialSharedVaultTests {
+    /// Threat: a current member who may write (A4). Z44 holds every vault's deletions back while some vault holds an
+    /// item of this device's that exists nowhere else, and it counted every held-aside entry that *names* this
+    /// device. An entry's device is its writer's claim. The insider signs a segment into the stream named after the
+    /// victim's device (S33, Z46), carrying a new item; the victim's device rightly holds it aside, and from then on
+    /// it published no deletion in any vault, the Personal one included, for as long as the entry was kept or the
+    /// insider cared to plant another. Only what this device's own take-out put aside is its own unpublished work.
+    @Test("an entry planted under this device's name does not stop its deletions going out")
+    func plantedEntryDoesNotHoldDeletionsBack() async throws {
+        let setting = try await SquattedStream.make(seed: 5410)
+        let (victim, rogue) = (setting.victim, setting.rogue)
+        let personal = try #require(await victim.session.personalVaultID)
+        let syncState = try #require(victim.vault.sync?.state)
+        var own = Self.bank(in: personal)
+        own.title = "The victim's own"
+        own = try await victim.session.save(own)
+        try await victim.session.sync()
+
+        var planted = Self.bank(in: setting.vaultID)
+        planted.title = "Planted under the victim's device ID"
+        _ = try await rogue.session.save(planted)
+        try await rogue.session.sync()
+        try await victim.session.sync()
+        #expect(try await victim.session.sharedVaultStatus(setting.vaultID).heldAside > 0)
+
+        try await victim.session.trash(id: own.id)
+        try await victim.session.deletePermanently(id: own.id)
+        try await victim.session.sync()
+        #expect(
+            try await syncState.pendingDeletions(vaultID: personal).isEmpty,
+            "the victim's own deletion is held back by an entry someone else wrote")
+    }
+
+    /// Threat: none; the order of one sync. A member moves an item from one shared vault into another and is made
+    /// read-only in the second before the device syncs: the copy is a write after the cut, taken out and held aside,
+    /// and the first vault's deletion waits for it (Z44). But a shared vault whose log has to be replayed a second
+    /// time in the same sync (here its saved stream index was lost, so the index is rebuilt and then judged against)
+    /// went through a pass that published its pending deletions without asking: the original was erased for
+    /// everyone while its only copy sat in one device's quarantine. A replay defers deletions like any other pass,
+    /// and they go out last, after every replay, if nothing holds them back then.
+    @Test("a replay does not publish the deletions that are waiting for a move's copy")
+    func replayDoesNotPublishHeldDeletions() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 5510)
+        let member = try await household.account(seed: 5511)
+        let first = try await owner.session.createVault(name: "First").id
+        let second = try await owner.session.createVault(name: "Second").id
+        for vaultID in [first, second] {
+            try await owner.session.shareVault(vaultID)
+            try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        }
+        let item = try await owner.session.save(Self.bank(in: first))
+        try await Self.syncAll([owner, member])
+        let syncState = try #require(member.vault.sync?.state)
+
+        let moved = try await member.session.move(itemID: item.id, to: second)
+        // Before the member's device syncs: read-only where the copy went.
+        try await owner.session.changeRole(of: member.accountID, in: second, to: .readOnly)
+        // And the device starts again without its saved index of the vault the item came from.
+        await member.session.lock()
+        await member.state.tamper(.streamIndex, vaultID: first, value: nil)
+        let relaunched = member.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+
+        let report = try await relaunched.session.syncAll()
+        #expect(report.deletionsHeldBack == [second], "nothing tells the person why their deletion is waiting")
+        try await owner.session.sync()
+        #expect(try await owner.session.items(in: second).items.isEmpty, "the copy was published after all")
+        #expect(
+            try await owner.session.items(in: first).items.map(\.id) == [item.id],
+            "the original was erased with its copy held aside on one device")
+        #expect(try await syncState.pendingDeletions(vaultID: first).count == 1)
+        let heldAside = try await relaunched.session.quarantine().filter { $0.entry.recordID == moved.id }
+        #expect(heldAside.count == 1)
+
+        // The person discards the copy that was held aside: then, and only then, the deletion goes.
+        try await relaunched.session.discardQuarantined(heldAside)
+        try await relaunched.session.sync()
+        try await owner.session.sync()
+        #expect(try await syncState.pendingDeletions(vaultID: first).isEmpty)
+        #expect(try await owner.session.items(in: first).items.isEmpty)
+    }
+}

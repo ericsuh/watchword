@@ -655,7 +655,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the purge, a vault's deletion) asks `checkSharedWrite` or `checkSharedDeletion` first (Z44). A new path that
   commits through `writer(for:)` asks too.
 - A sync publishes no vault's deletions while any vault holds an item that exists nowhere else
-  (`holdsUnpublishedWork`): the copy half of a move that was not published, or was held aside (Z44, PRD F7.6).
+  (`holdsUnpublishedWork`): the copy half of a move that was not published, or was held aside (Z44, PRD F7.6). Held
+  aside means what this device's own take-out noted in `SharedStreamIndex.ownTakenOut`, never an entry's `device`
+  field, which is its writer's claim (Z54). Every engine pass in `syncAll`, replays included, defers deletions; they
+  go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
 
