@@ -28,7 +28,22 @@ struct ExportView: View {
         _model = State(initialValue: ExportModel(context: context))
     }
 
+    /// The row of the Save button, which the form scrolls to when the report appears.
+    private static let saveRow = "export.saveRow"
+
     var body: some View {
+        ScrollViewReader { proxy in
+            form
+                .onChange(of: model.file != nil) { _, shown in
+                    // The report and its Save button are added at the foot of a form that may already fill the
+                    // screen: brought into view, so nobody has to find them by scrolling.
+                    guard shown else { return }
+                    withAnimation { proxy.scrollTo(Self.saveRow, anchor: .bottom) }
+                }
+        }
+    }
+
+    private var form: some View {
         Form {
             Section {
                 Label(ExportModel.plaintextWarning, systemImage: "exclamationmark.triangle")
@@ -101,8 +116,19 @@ struct ExportView: View {
                     ForEach(Array(file.lines.enumerated()), id: \.offset) { _, line in
                         Text(line).font(.footnote)
                     }
+                }
+                // A Section is not an accessibility element: without `.contain` its identifier would replace
+                // every child's (on macOS the report's own rows lost theirs), so it becomes a container first.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(AccessibilityID.Export.report)
+                // The buttons in a section of their own, outside that container. Inside it, on iOS, the Save button
+                // was never hittable: in full view, enabled, with no keyboard up, while the Export button above,
+                // in a section with no container, was (a row's own `.contain`, as in the import's duplicates, does
+                // not do this).
+                Section {
                     Button("Save File…") { stageAndMove() }
                         .accessibilityIdentifier(AccessibilityID.Export.save)
+                        .id(Self.saveRow)
                     #if DEBUG
                         if app.uiTestPeer != nil {
                             Button("Lock now (UI test)") { Task { await app.lock() } }
@@ -110,10 +136,6 @@ struct ExportView: View {
                         }
                     #endif
                 }
-                // A Section is not an accessibility element: without `.contain` its identifier would replace
-                // every child's (on macOS the report's own rows lost theirs), so it becomes a container first.
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier(AccessibilityID.Export.report)
             }
             ErrorText(message: model.errorMessage)
         }

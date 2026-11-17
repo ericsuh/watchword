@@ -148,7 +148,10 @@ with password re-entry, import of 1PUX/CSV fixtures.
   screen and was not hittable (the export report's Save File… after the password was typed): once the quick check
   fails, `reveal` puts away a keyboard that covers the target or that a row below the fold would scroll under
   (Return, else a downward swipe), and the password screens (export, restore, a device's removal) end editing when
-  they run and dismiss the keyboard on scrolling, as people need too. Every test sets an `executionTimeAllowance` (600 s, the tour 1800 s), which
+  they run and dismiss the keyboard on scrolling, as people need too. A button inside a section made an accessibility container
+  (`.accessibilityElement(children: .contain)` on a `Section`, which keeps the report rows' own identifiers) was never
+  hittable on iOS, though in full view and enabled, so the export report's Save File… and Lock buttons sit in a
+  section of their own, and the form scrolls to them when the report appears. Every test sets an `executionTimeAllowance` (600 s, the tour 1800 s), which
   `app:test` turns on (`-test-timeouts-enabled YES`, a default of 600 s and a ceiling of 2400 s), so a hang fails that
   test with a report. A text expected below the fold (an
   export's report) is scrolled to as well.
