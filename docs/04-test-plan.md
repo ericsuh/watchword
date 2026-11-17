@@ -996,7 +996,8 @@ retired password, and A8:
   first.
 - A pending change outlives the file (Z3): with the candidate header's row deleted, that and the credential
   entry, a registry row the anchor names, or the header withheld on the transport, the retired password and quick
-  unlock are refused; a sync restores what was taken and the new password is followed.
+  unlock are refused; a sync restores what was taken and the new password is followed. The anchor's encoding
+  round-trips its pending changes, reads the form from before it recorded any, and refuses anything else.
 - Which vault is the Personal one (Z5): the account row redirected to another vault with the real one kept in view
   by a planted directory row, the same with the header row removed, and with the header row replaced by another
   account's, are each refused at a password unlock and at a quick unlock; a key that arrived by grant is never

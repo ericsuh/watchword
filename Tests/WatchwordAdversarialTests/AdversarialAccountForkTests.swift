@@ -434,6 +434,33 @@ extension AdversarialAccountTests {
         }
     }
 
+    /// The anchor's encoding (Z3): what it records of pending changes survives a round trip, an anchor written
+    /// before it recorded any is read as having seen none, and anything else is no anchor at all, which leaves the
+    /// registry unavailable rather than trusted.
+    @Test("the Keychain anchor round-trips its pending changes, reads its earlier form, and refuses anything else")
+    func anchorEncoding() throws {
+        let digests = (1...20).map { ObjectDigest(hashing: [UInt8($0)]) }
+        let anchor = RegistryAnchor(
+            genesis: digests[0], credential: digests[1], generation: 7, heads: [digests[3], digests[2]],
+            pending: Array(digests[4...]))
+        #expect(anchor.pending.count == RegistryAnchor.maximumPending, "bounded, and still not empty")
+        let encoded = anchor.encoded()
+        #expect(RegistryAnchor(bytes: encoded) == anchor)
+        #expect(RegistryAnchor(bytes: encoded + [0]) == nil)
+        #expect(RegistryAnchor(bytes: Array(encoded.dropLast())) == nil)
+        #expect(RegistryAnchor(bytes: []) == nil)
+
+        // The form before pending changes were recorded: the same fields, another magic, nothing after the heads.
+        var earlier = Array("WWRA1".utf8) + digests[0].bytes + digests[1].bytes
+        earlier += (0..<8).map { UInt8(truncatingIfNeeded: UInt64(7) >> (8 * $0)) }
+        earlier += [2, 0] + digests[2].bytes + digests[3].bytes
+        let read = try #require(RegistryAnchor(bytes: earlier))
+        #expect(read.pending.isEmpty && read.generation == 7 && Set(read.heads) == [digests[2], digests[3]])
+        #expect(read.genesis == digests[0] && read.credential == digests[1])
+        #expect(RegistryAnchor(bytes: earlier + [0]) == nil, "an earlier anchor with anything after its heads")
+        #expect(RegistryAnchor(bytes: Array("WWRA3".utf8) + Array(earlier.dropFirst(5))) == nil)
+    }
+
     // MARK: - Which vault is the Personal one (Z5)
 
     /// Threat: A8 (or an altered backup that is restored), acting for someone who can read another of the account's
