@@ -217,6 +217,9 @@ public actor SyncEngine {
     private var stash = SyncStash()
     /// The stash may lack entries of segments counted as merged, and this vault's log has not been replayed yet.
     private var stashIncomplete = false
+    /// Entries the merge in progress refused as beyond the version-jump ceiling, to be tried again once everything
+    /// else in the pass has been merged (`retryOutOfReach`, review finding Z25).
+    private var outOfReach: [SyncEntry] = []
 
     /// `store` is the underlying record store; the session writes through a `DeletionRecordingStore` around the same
     /// store, so the engine's own deletions (applying remote tombstones) are not re-published as local ones.
@@ -551,6 +554,13 @@ public actor SyncEngine {
         }
         guard !staged.isEmpty || !ready.isEmpty else { return }
         var highWater = try await vaultHighWater(state)
+        outOfReach = []
+        // A device that holds nothing of the vault has no history to measure a jump against: the snapshots it starts
+        // from are its baseline, held to `maximumVersion` alone (review finding Z25). Each is the state of a device
+        // of this account that accepted every version in it; without this, a jump every earlier device accepted, or
+        // a million honest writes, cut every later device off from all that was written since. Not in a vault with a
+        // judge, whose log is whole and replayed from its first segment.
+        let takesBaseline = highWater == 0 && judge == nil
         // A deletion made here but not yet published is as much an erasure as a published one: without it, a
         // snapshot or segment written before the deletion would put the record back on this device only.
         let pending = try await syncState.pendingDeletions(vaultID: vaultID)
@@ -598,8 +608,8 @@ public actor SyncEngine {
                         continue
                     }
                     try await apply(
-                        entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
-                        highWater: &highWater, report: &report)
+                        entry, pending: pending[entry.key], reconciling: reconciling, exemptFromJump: takesBaseline,
+                        state: &state, highWater: &highWater, report: &report)
                 }
                 keep(payload.unknownEntries, from: snapshot.location, state: &state, report: &report)
                 state.snapshots[snapshot.location] = payload.vector
@@ -755,6 +765,44 @@ public actor SyncEngine {
                 try await syncState.unstage([object.location])
             }
         }
+        try await retryOutOfReach(
+            pending: pending, reconciling: reconciling, state: &state, highWater: &highWater, report: &report)
+    }
+
+    /// Tries again, lowest version first, what this pass refused as beyond the version-jump ceiling, now that the
+    /// rest of the pass is merged (review finding Z25). A log is read one stream after another and a segment in
+    /// record-ID order, so a version can be met before the ones written between it and the last this device knew;
+    /// measured where the device stood then, it looked like a jump. Each entry was kept in the quarantine when it
+    /// was refused, so a lock or a crash before this point loses nothing; one that is merged now is taken out of it
+    /// again, and one still out of reach stays for the person. Only entries of this pass, which came from objects
+    /// whose signatures were just checked: the quarantine itself is a local file and is never merged from.
+    private func retryOutOfReach(
+        pending: [RecordKey: PendingDeletion], reconciling: Bool, state: inout SyncState, highWater: inout UInt64,
+        report: inout SyncReport
+    ) async throws {
+        guard !outOfReach.isEmpty else { return }
+        let waiting = outOfReach.sorted {
+            ($0.version, $0.device.uuidString, $0.recordID.uuidString, $0.kind.rawValue)
+                < ($1.version, $1.device.uuidString, $1.recordID.uuidString, $1.kind.rawValue)
+        }
+        outOfReach = []
+        var merged = false
+        for entry in waiting {
+            let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
+            // Ascending: once one is out of reach, so is every one after it.
+            guard overflow || entry.version <= ceiling else { break }
+            let kept = report.quarantined.count + report.heldAside.count + report.collided.count
+            try await apply(
+                entry, pending: pending[entry.key], reconciling: reconciling, retrying: true, state: &state,
+                highWater: &highWater, report: &report)
+            // No longer refused as a jump: reported as whatever became of it now.
+            if let index = report.quarantined.firstIndex(of: entry.key) { report.quarantined.remove(at: index) }
+            if report.quarantined.count + report.heldAside.count + report.collided.count < kept {
+                try await syncState.discardQuarantined([entry], vaultID: vaultID)
+            }
+            merged = true
+        }
+        if merged { try await syncState.saveState(state) }
     }
 
     /// Checks and opens a staged object: kind and context before decryption, the signature again (staged objects sit
@@ -936,14 +984,17 @@ public actor SyncEngine {
     }
 
     private func apply(
-        _ entry: SyncEntry, pending: PendingDeletion?, reconciling: Bool, state: inout SyncState,
-        highWater: inout UInt64, report: inout SyncReport
+        _ entry: SyncEntry, pending: PendingDeletion?, reconciling: Bool, exemptFromJump: Bool = false,
+        retrying: Bool = false, state: inout SyncState, highWater: inout UInt64, report: inout SyncReport
     ) async throws {
         let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
-        guard entry.version <= configuration.maximumVersion, overflow || entry.version <= ceiling else {
-            // Not merged, but kept: only the person may discard it (PRD F7.7).
+        guard entry.version <= configuration.maximumVersion, exemptFromJump || overflow || entry.version <= ceiling
+        else {
+            // Not merged, but kept: only the person may discard it (PRD F7.7). One refused only as a jump is tried
+            // once more when the pass has merged everything else (`retryOutOfReach`).
             report.quarantined.append(entry.key)
             try await syncState.quarantine(entry, vaultID: vaultID)
+            if entry.version <= configuration.maximumVersion, !retrying { outOfReach.append(entry) }
             return
         }
         highWater = max(highWater, entry.version)

@@ -159,6 +159,104 @@ extension AdversarialSyncTests {
         #expect(await f.transport.allObjects[f.segmentName(4)] != nil)
     }
 
+    // MARK: - The version-jump ceiling
+
+    static func jumpConfiguration() -> SyncConfiguration {
+        var configuration = SyncTestClient.configuration
+        configuration.maximumVersionJump = 16
+        return configuration
+    }
+
+    /// Threat: a device of the account (or simply years of use: versions are a vault-wide clock that every save, merge
+    /// and weekly check advances). One version is written exactly at the ceiling above the vault's highest, and the
+    /// row that held that highest is saved again, so no stored row lies below the jump any more. Every current device
+    /// accepted each step. A device that joins later starts from a snapshot with nothing to measure against, and
+    /// quarantined every row above the gap, for good: no sync or replay merged them, and its own low versions were
+    /// accepted by everyone, so the split was one-way and unannounced (Z25). A device that holds nothing of a vault
+    /// takes the snapshots it starts from as its baseline.
+    @Test("a device that joins from a snapshot is not cut off by a jump every earlier device accepted")
+    func lateJoinerAcrossAJump() async throws {
+        let f = try await Self.fixture()
+        let configuration = Self.jumpConfiguration()
+        let store = await f.writer.store
+        let writer = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: store)
+        var ids: [UUID] = []
+        for index in 0..<3 { ids.append(try await writer.save(Self.login("Old \(index)", password: "o")).id) }
+        // The jump: exactly at the ceiling above version 3, and then the row that held 3 written again.
+        var jump = Self.login("Jump", password: "j")
+        jump.version = 19
+        jump = ItemMerge.stamped(jump, previous: nil, revision: Revision(version: 19, device: Self.a))
+        try await store.commit(StoreChange(upserts: [try await writer.keyring.sealItem(jump)]))
+        ids.append(jump.id)
+        try await writer.edit(ids[2]) { $0.notes = "written again above the jump" }
+        for index in 0..<3 { ids.append(try await writer.save(Self.login("New \(index)", password: "n")).id) }
+        // What a later device finds: a snapshot of all of it, and the segments collected.
+        let rows = await store.records(in: Self.vault, kind: .item)
+        #expect(rows.map(\.version).sorted() == [1, 2, 19, 20, 21, 22, 23])
+        try await f.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: Self.vault, author: Self.a, number: 23, vector: [:],
+                entries: rows.map(SyncEntry.init).sorted(by: SyncPayload.entryOrder)),
+            signedBy: writer.keyring)
+
+        await f.keys.trust(device: Self.b)
+        let joiner = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        let report = try await joiner.sync()
+        #expect(report.quarantined.isEmpty)
+        #expect(Set(try await joiner.items().keys) == Set(ids))
+        #expect(await joiner.syncState.quarantined(vaultID: Self.vault).isEmpty)
+    }
+
+    /// Threat: none needed; the order in which a log is read. A device replaying a whole log merges one stream after
+    /// another, and a segment's entries in record-ID order, so it meets a version before the ones written between it
+    /// and the last it knows: measured where it stood, an honest version looked like a jump, was quarantined, and
+    /// nothing ever merged it. Whatever a pass refuses as out of reach is tried again, lowest first, once the rest
+    /// of the pass has been merged, and only what is still out of reach stays in the quarantine.
+    @Test("a version met before the ones below it is merged once they have been")
+    func jumpThatIsOnlyAnOrderOfReading() async throws {
+        let f = try await Self.fixture()
+        let configuration = Self.jumpConfiguration()
+        let store = await f.writer.store
+        let a = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: store)
+        await f.keys.trust(device: Self.b)
+        let b = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        var ids: [UUID] = [try await a.save(Self.login("First", password: "1")).id]
+        try await a.sync()
+        try await b.sync()
+        for index in 0..<29 { ids.append(try await b.save(Self.login("B \(index)", password: "b")).id) }
+        try await b.sync()
+        try await a.sync()
+        ids.append(try await a.save(Self.login("Last", password: "31")).id)
+        try await a.sync()
+
+        let reader = SyncTestClient(
+            deviceID: UUID(uuidString: "D0000000-0000-4000-8000-0000000000C0")!, vaultID: Self.vault, keys: f.keys,
+            transport: f.transport, configuration: configuration)
+        await f.keys.trust(device: reader.deviceID)
+        let report = try await reader.sync()
+        #expect(report.quarantined.isEmpty)
+        #expect(Set(try await reader.items().keys) == Set(ids))
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).isEmpty)
+
+        // What is out of reach of everything else still is: kept, not merged.
+        var far = Self.login("Far", password: "f")
+        far.version = 500
+        far = ItemMerge.stamped(far, previous: nil, revision: Revision(version: 500, device: Self.a))
+        try await store.commit(StoreChange(upserts: [try await a.keyring.sealItem(far)]))
+        try await a.sync()
+        let later = try await reader.sync()
+        #expect(later.quarantined == [RecordKey(recordID: far.id, kind: .item)])
+        #expect(try await reader.items()[far.id] == nil)
+    }
+
     // MARK: - One key space for every vault
 
     /// Threat: A4, a writer in one shared vault who knows (or can compute, for a moved item) a record ID that will
