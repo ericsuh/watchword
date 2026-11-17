@@ -1566,7 +1566,9 @@ shared with no ledger here, where membership cannot be told), the vault stays in
 of it, labelled as one this account is no longer in, and the person removes what the device holds with
 `removeLocalCopies(ofSharedVault:)`: the rows, their synced scan results and what was held aside, taken out of the
 store directly, so nothing is recorded to publish and nobody else's copy is touched. It is refused while the account is
-still a member. The key wraps and the ledger stay (S26). What the leaver's device already copied elsewhere, and what a
+still a member. The key wraps and the ledger stay (S26). One consequence for the AutoFill extension, whose adapter is
+not built: its session must be given the sharing state (`configureSharing` over the App Group's `sharing.sqlite`)
+like the app's, or every shared vault is one with no ledger there and none of its items is offered. What the leaver's device already copied elsewhere, and what a
 removed member's device holds, cannot be taken back, which the removal dialog says (F4.3); "read-only" is worded as a
 rule the apps keep, not encryption (F4.5).
 
