@@ -284,11 +284,12 @@ half delivered** on a Mac; the transports are open.
   the author signs and readers honour, for an unsigned object squatting at a device's next sequence number (Z24);
   refusing at download a segment that an ended account's cut cannot admit (Z27); an intent row in the record store's
   own transaction, for a crash between a deletion and its tombstone (Z28).
-- **Still open (screens, after the audit of 2026-11-17):** choosing between pending password changes
-  (`pendingPasswordChanges`, `followPasswordChange`; the lock screen reports `tooManyPasswordChangesPending` and
-  `passwordChangeRevokesThisDevice` in words, and nothing calls the two functions yet, Z1 and Z8); showing a
-  member their devices code and taking another member's (`memberDevicesCode`, `verifyMemberDevices`,
-  `SharedVaultModel.verifyDevices`; the member list words the warning, Z6). Whether that code should instead be
+- **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
+  screen (`DevicesModel.passwordChanges` and `follow`, over `pendingPasswordChanges` and `followPasswordChange`; the
+  lock screen reports `tooManyPasswordChangesPending` and `passwordChangeRevokesThisDevice` in words, Z1 and Z8);
+  showing a member their devices code and taking another member's (`DevicesModel.devicesCode`,
+  `SharedVaultModel.verifyDevices`, over `memberDevicesCode` and `verifyMemberDevices`; the member list words the
+  warning, Z6). The models are written and tested; no SwiftUI view uses them. Whether that code should instead be
   part of the safety number is ADR 0010's question.
 
 ## Milestone 4 — Sharing (protocol core and session integration done; transports and UI open)
