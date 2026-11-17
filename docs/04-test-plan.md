@@ -446,6 +446,31 @@ one per sync, with one stash write for the pass (`flood`); an entry kept from a 
 snapshots or the hand-on of its work (`revokedAuthorsStashDoesNotStopSnapshots`), nor does a trusted insider's
 (`handOnDespiteStash`); A8 planting a stash row with an item deletion, or one over the caps, erases nothing and the
 stash is rebuilt (`plantedStash`). With real keys ("sync with real keys"): a stash row planted in the local state — unsigned, garbage-signed, or another vault's genuine row — is never processed (`plantedStashRow`).
+The end-to-end audit of 2026-11-17 (`06-adversarial-review.md` §Z, Z20 to Z29; `AdversarialSyncAuditTests.swift` in
+"sync log" unless another suite is named). The state row (A8, "sync with real keys"): a planted erasure signs no
+tombstone and erases nothing, and the replay puts the row back (`plantedErasure`); a planted merged vector mutes no
+other device (`plantedMergedVector`); a row signed for another vault, or edited after signing, is no state
+(`stateRowOfAnotherVault`); every field of the state is in what is signed (`SyncStateAuthenticationTests`). Snapshots
+("shared vaults through the session"): a member's snapshot claiming every stream at 2^48 is refused and mutes no device
+(`memberSnapshotCoverage`), its tombstone erases nothing (`memberSnapshotTombstone`), and the owner's snapshot's
+tombstone is judged like a segment's (`ownerSnapshotTombstoneIsJudged`, `snapshotTombstonesAreJudged`); a vault with a
+judge still crosses the gap collection left before it was shared, at a replay too
+(`snapshotsBridgeWhatWasCollectedBeforeSharing`); in any vault a snapshot's coverage of the reader's own stream does
+not move its numbering (`coverageOfOwnStream`), and a number no reader lists is never published at
+(`exhaustedStream`). A device's own stream: an unsigned object named far ahead, or just ahead, in it moves nothing and
+loses no edit (`junkFarAheadInOwnStream`, `junkJustAheadInOwnStream`); an own segment that cannot be read yet holds
+publishing back and no collected number is reused (`unreadableOwnSegment`); a planted version in the device's own
+name does not mark its unpublished edit as sent (`plantedOwnVersionDoesNotSuppressPublishing`). One key space: a record
+ID another vault holds costs one entry, in a segment and in a snapshot (`collisionCostsOneEntry`,
+`collisionInSnapshot`, `crossVaultRecordID`). The jump ceiling: a device joining from a snapshot is not cut off by a
+jump every earlier device accepted (`lateJoinerAcrossAJump`), and a version met before the ones below it is merged
+once they have been (`jumpThatIsOnlyAnOrderOfReading`). The quarantine: capped per vault and per writing device, each
+entry kept once, at a replay too (`quarantineIsCapped`, `heldAsideSegmentsAreCapped`, and `quarantineLookupAndUsage`
+for both stores, the SQLite one on a Mac); a device that kept a version aside writes no snapshot covering it
+(`quarantineWithholdsSnapshot`). Version columns at their last value (A8; "account enrolment and device registry" and
+"sync with real keys"): typed errors, never a trap (`headerRowAtTheLastVersion`, `directoryRowAtTheLastVersion`,
+`fetchedDeletionOverTheLastVersion`, `metadataRowAtTheLastVersion`). Not an adversary's: a lock as a deletion commits
+loses no tombstone, and one before it deletes nothing (`DeletionLockRaceTests`).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

@@ -414,11 +414,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   context, AEAD, then payload, in that order. A stream is merged strictly in sequence: never skip a gap.
 - A segment carries only its author's versions, and each record envelope's own context must match its entry
   before anything is applied. Record versions above `maximumVersion` or jumps beyond `maximumVersionJump` are
-  quarantined (U5).
+  quarantined (U5); a jump is measured against what the pass has merged (`retryOutOfReach` tries again, lowest first,
+  what was refused on the way), and a device that holds nothing of a vault with no judge takes the snapshots it
+  starts from as its baseline (Z25). Never merge from the quarantine itself: it is a local file.
 - **Never lose data (PRD F7.6, F7.7).** `ItemMerge` is a multi-value register per group: a value is replaced only
   by one written *knowing about it* (its `GroupStamp.seen` vector contains it); concurrent values all stay, in
   `Item.conflicts`, until the person edits the group or calls `ItemMerge.resolve`. Notes merge line by line
-  (`NoteText`). Merges never shorten a history; quarantined versions are kept. A permanent deletion carries an
+  (`NoteText`). Merges never shorten a history; quarantined versions are kept, up to a cap per vault and per writing
+  device, past which a version is not kept on this device and the report counts it (`quarantineFull`, Z27: the
+  quarantine is found by lookup and never reread). A permanent deletion carries an
   erasure summary and removes only what its author had seen; anything else is kept, trashed
   (`Item.keptAfterDeletion`). Every discard is the person's: a permanent deletion, `ItemMerge.resolve`, and the 30-day
   trash purge (F1.5). Sync can leave an item in the trash that nobody chose to discard, so the purge removes only
@@ -456,7 +460,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   on the copy in question: the merger believes no summary naming a later row (Y28) and writes a kept version above
   that stamp and the row, through `ItemMerge.written`.
 - Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
-  counts as an erasure while merging. The outbox compares rows with `SyncState.published`, not `known`.
+  counts as an erasure while merging. Its tombstone is signed *before* the deletion commits and recorded after
+  (`SyncStateStore.prepared`, Z28): never add a step that needs keys between the commit and the record. The outbox
+  compares rows with `SyncState.published`, not `known`, and a version found in the log under this device's name
+  counts as published only if it is the row the device holds (Z29).
 - A record can be erased more than once. A device remembers the join of every erasure of a record
   (`RecordMerger.joinErasureSummaries`; for items the union of `ItemErasures`, stamped with the later stamp) and
   judges versions against that, so arrival order decides nothing. A pending
@@ -492,7 +499,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   entry from being kept again. A
   device holding entries carried by a trusted device writes no ordinary snapshot, only the one it owes a revoked
   device's work, covering revoked streams alone; what a revoked device carried is forgotten except its own versions,
-  which hold nothing back and survive a replay. `stashUnsaved` makes a sync after a crash replay the log. A critical
+  which hold nothing back and survive a replay. The same goes for the quarantine: while it holds a version a trusted
+  device wrote, no ordinary snapshot (`snapshotWithheldForQuarantine`, Z26). `stashUnsaved` makes a sync after a crash replay the log. A critical
   kind stops the stream at the object, skips nothing and sets `requiresNewerVersion`. Never let a stashed entry reach
   the store or a merger except through `processStashed`, which drops any critical kind (only A8 can plant one). In a
   shared vault nothing a held-aside segment carried is kept, a trusted device's kept entries are judged by the replay

@@ -253,8 +253,10 @@ milestone 2 stores full item records only.
   state, staged downloads, pending deletions and quarantine (`WatchwordSync.SyncStateStore`) are in a second
   database beside it, `sync.sqlite` (`SQLiteSyncStateStore`, milestone 3), opened and schema-checked the
   same way; a separate file keeps `WatchwordStore` ignorant of sync, and nothing needs both in one
-  transaction (tombstones are recorded after the deletion commits, and the engine's state can be rebuilt by a
-  reconciling sync, so a state row that does not decode is read as no state). Still to come: the breach-check
+  transaction (tombstones are signed before the deletion commits and recorded after it, so a lock in between loses
+  none and a crash loses the tombstone rather than publish a deletion that did not happen; and the engine's state
+  can be rebuilt by a reconciling sync, so a state row that does not decode, or that the session did not sign, is
+  read as no state). Still to come: the breach-check
   prefix cache and scan ledger, as sealed local records rather than a plaintext `hibp_cache` table (§13.2,
   §13.3; milestone 6). The schema version is `PRAGMA user_version`; a newer one is refused, not
   misread. A commit may name the version it read of each record (`StoreChange.expectations`), so a writer
@@ -445,7 +447,12 @@ Lamport times to the transport; nothing else.
 
 **Download** (no keys, §7.4). List the vault, fetch every snapshot not yet merged and every segment past what has been
 merged, check each signature against the author named in the location, stage what verifies. A forged, moved or
-damaged object is reported and skipped; it never stops other streams.
+damaged object is reported and skipped; it never stops other streams. An object in the device's *own* stream is
+looked at more closely, because where its next segment goes follows from it: one that carries this device's signatures
+raises its next sequence number, one shown not to be its own (not a signed object, other signatures, over the size cap)
+changes nothing, and one that cannot be told (listed and not there, unreadable, no key to check with) holds publishing
+back for that sync (`SyncReport.ownStreamUnverified`). A name alone never moves the number: anyone who can create a
+file under the vault's prefix can list one (review finding Z24).
 
 **Merge** (needs the vault key). Staged objects are verified again (the staging area is in the local file, which
 A8 can edit), then checked and opened in the order kind, context, AEAD, payload. Each stream is merged strictly in
@@ -516,7 +523,20 @@ validly signed segment), and acknowledgement and coverage values must be plausib
   whose version vector holds an edit the trash's `GroupStamp.seen` does not (`Item.isTrashedByPerson`, F7.7). Those
   stay in the trash until the person restores or deletes them; moving one to the trash again makes it theirs.
 - Versions above 2^62, or more than 2^20 above the vault's highest, are quarantined rather than merged (review
-  finding U5) — and kept in the sync state store until the person discards them (F7.7).
+  finding U5) — and kept in the sync state store until the person discards them (F7.7). The jump is measured against
+  what the pass has merged, not against where the device stood when it met the version: what a pass refuses as out
+  of reach is tried again, lowest first, once everything else in it is merged, since a log is read one stream after
+  another and a segment in record-ID order. A device that holds nothing of the vault (and has no judge) takes the
+  snapshots it starts from as its baseline, held to 2^62 alone: it has no history to measure against, and each is
+  the state of a device of the account that accepted every version in it (Z25).
+- A record whose ID a record of another vault holds on this device is kept aside alone (`SyncReport.collided`); the
+  other vault's row is not touched and the object and its stream are merged (Z22). The local store keys records by
+  (record ID, kind) across vaults; keying them by vault as well is tracked.
+- The quarantine is capped: 2,048 entries and 64 MiB per vault, 512 and 16 MiB of them for the versions any one
+  device wrote. Past a cap a version is not kept on this device and the report counts it
+  (`SyncReport.quarantineFull`, Z27); an entry already kept is found by lookup, never by reading the quarantine.
+- A version found in the log under this device's own name counts as published only if it is the row the device
+  holds; otherwise the row is published again (Z29).
 
 This is the monotonic check of §5: an older version, replayed by the store or found in an old snapshot, can never
 displace newer values, because a value is only ever replaced by one written knowing about it.
@@ -526,8 +546,13 @@ goes into the next segment of its stream. Deletions exist only when the session 
 (`DeletionRecordingStore` records them as it commits them, with the row deleted, so the erasure summary can be made);
 a row that has merely gone missing from the database is damage, repaired by a reconciling sync, and is never
 propagated as a deletion. A row that came back while its deletion was being made is settled against the deletion
-before publishing. Objects are created, never overwritten, and the next sequence number is never below anything the
-stream has on the transport, so a device whose state was rolled back never reuses a collected number.
+before publishing. Objects are created, never overwritten, and the next sequence number is never below the highest
+object of this stream on the transport that carries this device's signatures, so a device whose state was rolled back
+never reuses a collected number. It comes from nothing else: not from a listed name (Z24), and not from a snapshot's
+coverage of this device's own stream beyond what the stream can have got (Z21). A number beyond 2^48, which no reader
+lists, is never written at (`SyncReport.ownStreamExhausted`). An unsigned object squatting at exactly the next number
+stops this vault's publishing while it is there, reported at every sync (`ownStreamConflict`) with nothing marked as
+sent; passing it needs a skip the author signs and readers honour, which is open.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
 value (`EnvelopeKind.criticality(ofRawValue:)`: 10 to 127 ignorable, everything else critical; `scanStatus` is the first
@@ -561,7 +586,11 @@ are trusted only as far as their signature: existing devices never delete anythi
 Only a device that read everything a trusted device carried to it writes an ordinary one (`SyncReport.snapshotWithheld`
 and `snapshotWithheldBy` otherwise, ADR 0009): a snapshot from one that kept entries aside would cover their segments
 without being able to carry concurrent versions of one record, and once those segments were collected a device that
-reads the kind would never see what it left out. The snapshot a device owes for a revoked device's work is written
+reads the kind would never see what it left out. The same holds for a version kept in the quarantine instead of
+merged (an implausible jump, a join that does not fit in one record, a colliding record ID): its segment counts as
+merged, so while the quarantine holds a version a trusted device wrote, the device writes no ordinary snapshot either
+(`snapshotWithheldForQuarantine`, Z26), until the person has discarded what was kept. A snapshot's coverage of the
+reader's own stream is believed no further than that stream can have got (Z21). The snapshot a device owes for a revoked device's work is written
 all the same, with coverage only of revoked devices' streams, which nobody reads or collects, so it hands that work on
 and makes nothing collectable.
 
@@ -628,16 +657,26 @@ the actor is re-entrant, so a merge can store a newer version while a save waits
 (`conflictValueNotHeld` otherwise), and checks a chosen scope with `ScopePolicy` like any save.
 
 **State.** `SQLiteSyncStateStore` (§6). Deleting the account erases it with the record store, and the Keychain copy
-of the signing key with the other Keychain items. A pending deletion is the one thing in that file sync acts on rather
-than rebuilds — it becomes a tombstone that erases the record everywhere — so the session reaches the store through
-`AuthenticatedSyncState`: each deletion it commits is signed with the account key (`SignatureDomain.pendingDeletion`,
-over every field and the deleted row's envelope), and a pending deletion that is not this device's, or does not verify,
-is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing. The stash of entries an
+of the signing key with the other Keychain items. Three things in that file are acted on rather than checked again,
+and the session reaches the store through `AuthenticatedSyncState`, which signs each as it is written and verifies it
+as it is read. A pending deletion becomes a tombstone that erases the record everywhere: each deletion the session
+commits is signed with the account key (`SignatureDomain.pendingDeletion`,
+over every field and the deleted row's envelope), before the deletion commits and recorded after it (Z28), and a
+pending deletion that is not this device's, or does not verify,
+is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing. The state row itself
+(Z20): the erasures it remembers become the tombstones of this device's next snapshot, its merged positions the
+coverage and acknowledgements of everything the device signs, and its published stamps decide which rows are never
+sent again, so the whole row is signed (`SignatureDomain.syncState`, over `"WWSS" ‖ vault ID ‖ device ID ‖` every
+field in one fixed encoding) and a row that does not verify is no state: the engine starts from nothing and replays
+the log, which rebuilds the erasures. A state is saved only while unlocked. Signatures stop planting, not rollback: an
+older row of this device's own costs a replay of what it had merged since. The stash of entries an
 earlier version cannot read (ADR 0009) is signed the same way (`SignatureDomain.syncStash`, bound to the vault, the
 device and the state's stash generation), because a kept deletion processed after an update would otherwise erase a
 record here and go out in this device's next snapshot; a row that does not verify is refused and the log replayed.
-The file is at schema version 2 (the stash's table, migrated from version 1 when it is opened); an older app finds
-version 2, throws `unsupportedSchemaVersion` rather than misread it, deletes nothing and syncs nothing until it is
+The file is at schema version 3 (the stash's table from version 2, and the quarantine in a table with an indexed
+digest and a stored size from version 3, each migrated when the file is opened, the quarantine's rows carried over;
+version 3 has not yet been compiled or run on a Mac); an older app finds
+a later version, throws `unsupportedSchemaVersion` rather than misread it, deletes nothing and syncs nothing until it is
 updated again. Downgrading is not supported, and the file is never thrown away to allow it: it holds pending deletions
 and the quarantine, which no replay rebuilds. This holds per
 vault: a pending deletion counts only for the vault it is filed under.
@@ -1616,8 +1655,11 @@ logs download.
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
 whose permission ended, the key in the record that ended it), and that account's standing must not be
 `nothingCounts`, nor that account one whose chain keys differ from this device's pin (`MemberKeyCheck.substituted`).
-A snapshot needs an account that may write now. Devices revoked from a member's account, as the vault's chain anchors
-it, are not read.
+A snapshot needs the owner's account: a shared vault writes none, so an honest one is from before the vault was
+shared, when the owner's devices were its only writers, and it is read for one thing, the gap in a stream whose first
+segments were collected then (refusing it would stop that stream at a new member and at every replay). A member's
+snapshot would have its coverage vector believed unjudged, and is refused (Z21). Devices revoked from a member's
+account, as the vault's chain anchors it, are not read.
 
 **A stream is one account's** (review finding Z46). An object's name carries a device ID and no account, device IDs
 are chosen by devices, and a member can list another member's device ID in their own registry (S33) and sign segments

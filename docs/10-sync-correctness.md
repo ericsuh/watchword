@@ -380,14 +380,19 @@ failed each time.
   it. `ItemRecordMerger` then throws `ItemMergeError.resultNotSealable`, and the engine treats it like a U5
   quarantine: the local version stays, the remote entry is kept for the person (PRD F7.7), and the stream carries on,
   so unrelated items keep arriving (`mergeOverThePayloadLimit`). On that device the item no longer converges with
-  the others until a person resolves it: the price of a bound on record size.
+  the others until a person resolves it: the price of a bound on record size. A device holding such a version in
+  its quarantine (or one refused as an implausible jump, or one whose record ID another vault holds) counts the
+  segment that carried it as merged without having merged it, so, like a device holding entries it cannot read
+  (below), it writes no ordinary snapshot while the quarantine holds a version a trusted device wrote
+  (`06-adversarial-review.md` Z26): the collection rule below would otherwise let that segment go while no snapshot
+  carried the version.
 - **Kinds a device does not know** (ADR 0009, N7). The argument above is about items, on devices that read every kind
   in the log. A device of an earlier version keeps the entries of an ignorable kind it cannot read aside, unmerged,
   and merges everything else, so its items converge with everyone's; its state of that kind is simply behind, and
   catches up when it is updated and processes what it kept (or replays the log, if it had to drop some, or its stash
   was not saved after a crash). What makes that safe for the *other* devices is that it writes no ordinary snapshot
-  while it holds entries a trusted device carried: every ordinary snapshot is then the state of a device that merged
-  everything it covers, which is all §7.5's collection rule relies on. The one snapshot it still writes, for a revoked
+  while it holds entries a trusted device carried, or a version of one in its quarantine: every ordinary snapshot is
+  then the state of a device that merged everything it covers, which is all §7.5's collection rule relies on. The one snapshot it still writes, for a revoked
   device's work, covers only revoked streams, which nobody collects, so it changes nothing that rule relies on; and
   what a revoked device carried is forgotten (except its own versions, which nothing else carries), so a device
   revoked after planting an unreadable entry cannot hold snapshots back for good. A critical

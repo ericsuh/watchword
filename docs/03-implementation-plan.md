@@ -275,6 +275,13 @@ half delivered** on a Mac; the transports are open.
 - **Still open (design):** an account re-key — new keyset and Secret Key, vault keys rotated — which is what ends a
   revoked device's reading if it held the keyset (architecture §7.8, §16); it belongs with vault-key rotation in
   milestone 4. Collecting a deleted vault's objects from the transport.
+- **Still open, from the audit of 2026-11-17 (`06-adversarial-review.md` §Z, Z20 to Z29):** a Mac run of
+  `SQLiteSyncStateStore` at schema version 3 (the indexed quarantine and its migration, Z27) and of the signed state
+  row over real files (Z20); keying the record store by (vault, record, kind), with its migration, so that a record
+  ID in one vault cannot collide with another's (Z22; the engine now confines a collision to the one entry); a skip
+  the author signs and readers honour, for an unsigned object squatting at a device's next sequence number (Z24);
+  refusing at download a segment that an ended account's cut cannot admit (Z27); an intent row in the record store's
+  own transaction, for a crash between a deletion and its tombstone (Z28).
 
 ## Milestone 4 — Sharing (protocol core and session integration done; transports and UI open)
 
