@@ -88,7 +88,12 @@ enum AppEnvironment {
                     keychain: keychain,
                     biometrics: UnavailableBiometricGate(),
                     configuration: VaultConfiguration(
-                        appVersion: appVersion, kdf: .fixed(.baseline), deviceName: UITestPeer.appDeviceName,
+                        appVersion: appVersion, kdf: .fixed(.baseline),
+                        // No auto-lock a UI test does not ask for: a slow simulator run must not lock part way. The
+                        // tests lock through the Lock button and the screens' Debug-only "Lock now".
+                        autoLock: AutoLockSettings(
+                            idleTimeout: 24 * 60 * 60, backgroundGracePeriod: 24 * 60 * 60, lockOnSleep: false),
+                        deviceName: UITestPeer.appDeviceName,
                         hygiene: HygieneSettings(
                             http: UITestPwnedPasswords(), userAgent: HygieneUserAgent(version: "uitest")!,
                             localStore: InMemoryDeviceLocalStore())),

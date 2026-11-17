@@ -7,6 +7,8 @@ import XCTest
 final class VaultSharingTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
+        // A hang fails with a report rather than eating the job (`app:test` turns the allowances on).
+        executionTimeAllowance = 300
     }
 
     @MainActor

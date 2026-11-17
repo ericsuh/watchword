@@ -35,7 +35,8 @@ extension XCUIApplication {
         file: StaticString = #filePath, line: UInt = #line
     ) -> XCUIElement {
         let target = element(identifier)
-        _ = target.waitForExistence(timeout: 2)
+        // The common case, at the cost of one check: there, on screen and hittable.
+        if target.waitForExistence(timeout: 2), isReachable(target) { return target }
         let defaults: [Bool]
         switch position {
         case .top: defaults = Array(repeating: false, count: 8)
@@ -105,19 +106,33 @@ extension XCUIApplication {
     private static let edgeMargin: CGFloat = 36
 
     /// Whether `element`'s middle is inside the area where it can be seen. Asks nothing of an element not there.
+    ///
+    /// On iOS that area is the window, kept clear of its edges: a form row out of view has a frame outside it, a sheet
+    /// has no toolbar along its foot, and asking which scrolling container holds an element costs a query over the
+    /// whole tree each time, which made every step of an iOS run several seconds long. On macOS a sheet's toolbar sits
+    /// along the foot of its form, so a row is judged against its own container (`visibleFrame(for:)`).
     func isOnScreen(_ element: XCUIElement) -> Bool {
         guard element.exists else { return false }
         let frame = element.frame
-        let visible = visibleFrame(for: element)
+        #if os(iOS)
+            let visible = windowFrame.insetBy(dx: 0, dy: Self.edgeMargin)
+        #else
+            let visible = visibleFrame(for: element)
+        #endif
         return !frame.isEmpty && !visible.isEmpty && visible.contains(CGPoint(x: frame.midX, y: frame.midY))
     }
 
     /// Which way to scroll to bring `element` into view: towards the end if it is below, back if it is above, `nil`
     /// if it is in view, has no frame, or is in no scrolling container (then scrolling would not move it).
     private func direction(toward element: XCUIElement) -> Bool? {
-        guard container(of: element) != nil else { return nil }
+        #if os(iOS)
+            // Off the window's edge is out of the form's view: a toolbar item never is.
+            let visible = windowFrame.insetBy(dx: 0, dy: Self.edgeMargin)
+        #else
+            guard container(of: element) != nil else { return nil }
+            let visible = visibleFrame(for: element)
+        #endif
         let frame = element.frame
-        let visible = visibleFrame(for: element)
         guard !frame.isEmpty, !visible.isEmpty else { return nil }
         if frame.midY > visible.maxY { return true }
         if frame.midY < visible.minY { return false }

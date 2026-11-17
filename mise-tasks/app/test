@@ -34,6 +34,9 @@ run_tests() { # run_tests <action> <scheme> <destination> <result bundle name> <
   if [ -n "${usage_only_testing:-}" ]; then
     args+=("-only-testing:$usage_only_testing")
   fi
+  # Per-test time limits, so a hang fails that test with a report instead of running into the job's limit: each test
+  # sets its own `executionTimeAllowance` (300 s, the tour 1200 s), and these are the default and the ceiling.
+  args+=(-test-timeouts-enabled YES -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 1500)
   xcodebuild "$action" "${args[@]}" "$@"
 }
 

@@ -113,7 +113,8 @@ with password re-entry, import of 1PUX/CSV fixtures.
   which neither is there).
   `--uitest` gives them what a release build lacks: sync and sharing over in-memory ports shared with `UITestPeer`
   (another device of the account and another person's account, in the app's process), a version-jump ceiling of 16
-  so the peer can produce a quarantined version through the real sync path, breach checks answered by
+  so the peer can produce a quarantined version through the real sync path, no auto-lock (a slow simulator run
+  locked part way; the tests lock through Lock and a Debug-only "Lock now"), breach checks answered by
   `UITestPwnedPasswords` (only SHA-1("password") is breached; nothing reaches the network), a sample CSV and the
   last exported archive in place of the system's file picker, and Settings' Debug-only section to drive the peer.
   Elements are found by `AccessibilityID` (`Apps/Shared/AccessibilityID.swift`), compiled into the UI-test bundles
@@ -138,7 +139,10 @@ with password re-entry, import of 1PUX/CSV fixtures.
   helper failure also prints a compact account to the log (the target's frame and state, the window's and sheets'
   frames, the area judged by, the buttons on screen, the start of the tree), and `mise run app:diagnose` prints the
   failed tests' text attachments (`xcresulttool export attachments --only-failures`, capped), so a failure can be
-  read from the job log alone. A text expected below the fold (an
+  read from the job log alone. On iOS a row is judged against the window alone, with no query for its container:
+  those queries, made on every check, made each step of an iOS run several seconds long. Every test sets an
+  `executionTimeAllowance` (300 s, the tour 1200 s), which `app:test` turns on (`-test-timeouts-enabled YES`, a
+  default of 300 s and a ceiling of 1500 s), so a hang fails that test with a report. A text expected below the fold (an
   export's report) is scrolled to as well.
 - Their logic is tested on Linux without a simulator: every account screen's state and decisions are a model in
   `WatchwordPresentation` (`02-architecture.md` §15), and `WatchwordPresentationTests` drives those models over real

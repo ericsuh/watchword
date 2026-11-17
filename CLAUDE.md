@@ -58,31 +58,30 @@ mise run clean                                         # .build, generated proje
 mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs (app:screenshots too)
 ```
 
-UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and
-syncs over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only
-Settings section: a second device of the same account (it enrols with `WATCHWORD_UITEST_PASSWORD` from the launch
-environment, and can rename items, change the password and write an implausible version) and another person's account
-that accepts invitations. A `--uitest` launch also has sharing over an in-memory key directory, a version-jump ceiling
-of 16 (so the peer's version lands in the quarantine), breach checks answered in process by `UITestPwnedPasswords`,
-and buttons that stand in for the system file picker (a sample CSV, the last exported archive). Account screens open
-from Settings in sheets of their own, each with a Done button (`screen.done`). UI tests find elements by
-`AccessibilityID` (`Apps/Shared/AccessibilityID.swift`, compiled into the UI-test bundles too); the identifiers are
-stable, so rename one only with every test that names it.
-`ScreenshotTourTests` is the screenshot tour: one pass through every flow that attaches a picture of each major
-screen (`Screens.capture("name", in: app)`, numbered in capture order, the app's window on macOS and the screen on
-iOS). A new screen is one `Screens.capture` line where the tour reaches it; capture after a tap or keystroke, or after
-waiting for the element that proves the screen is complete, never after a sleep. `app:test` runs the tour as an
-ordinary end-to-end test; `app:screenshots` runs it alone and writes `Screenshots/<set>/<NN-name>.png`, `index.md`,
-`index.html` and `Screenshots/watchword-screens-<set>.png` (every screen in one picture), failing on a missing or blank
-picture or a set in the wrong appearance. Only a complete set is written there: anything less goes to
-`Screenshots/<set>-incomplete/`, whose index says first what is wrong, with XCUITest's own failure screenshots.
-`--uitest-appearance=light` or `=dark` (Debug only, with `--uitest`) draws the app in that appearance whatever the
-machine's is; the task passes one for every set, so `Screenshots/macos` is light on a Mac in Dark Mode.
-macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
+UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and syncs
+over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only Settings
+section: a second device of the same account (it enrols with `WATCHWORD_UITEST_PASSWORD` from the launch environment,
+and can rename items, change the password and write an implausible version) and another person's account that accepts
+invitations. A `--uitest` launch also has sharing over an in-memory key directory, no auto-lock, a version-jump ceiling
+of 16 (so the peer's version lands in the quarantine), breach checks answered in process by `UITestPwnedPasswords`, and
+buttons that stand in for the system file picker (a sample CSV, the last exported archive). Account screens open from
+Settings in sheets of their own, each with a Done button (`screen.done`). UI tests find elements by `AccessibilityID`
+(`Apps/Shared/AccessibilityID.swift`, compiled into the UI-test bundles too); the identifiers are stable, so rename one
+only with every test that names it. `ScreenshotTourTests` is the screenshot tour: one pass through every flow that
+attaches a picture of each major screen (`Screens.capture("name", in: app)`, numbered in capture order, the app's window
+on macOS and the screen on iOS). A new screen is one `Screens.capture` line where the tour reaches it; capture after a
+tap or keystroke, or after waiting for the element that proves the screen is complete, never after a sleep. `app:test`
+runs the tour as an ordinary end-to-end test; `app:screenshots` runs it alone and writes
+`Screenshots/<set>/<NN-name>.png`, `index.md`, `index.html` and `Screenshots/watchword-screens-<set>.png` (every screen
+in one picture), failing on a missing or blank picture or a set in the wrong appearance. Only a complete set is written
+there: anything less goes to `Screenshots/<set>-incomplete/`, whose index says first what is wrong, with XCUITest's own
+failure screenshots. `--uitest-appearance=light` or `=dark` (Debug only, with `--uitest`) draws the app in that
+appearance whatever the machine's is; the task passes one for every set, so `Screenshots/macos` is light on a Mac in
+Dark Mode. macOS UI tests also need "automation mode" enabled on the machine, which needs an administrator; CI runners
 have it. Real Keychain round trips need a signed, entitled process, so `swift test` and CI skip them.
-`app:test-keychain` runs `SystemKeychainStoreTests` in the `WatchwordKeychainTests` bundle, hosted by a do-nothing
-app whose only entitlement is its own Keychain access group, so a free Personal Team can sign it; the team ID goes
-on the command line (`--team` or `DEVELOPMENT_TEAM`), never in `Apps/project.yml`, and xcodebuild runs with
+`app:test-keychain` runs `SystemKeychainStoreTests` in the `WatchwordKeychainTests` bundle, hosted by a do-nothing app
+whose only entitlement is its own Keychain access group, so a free Personal Team can sign it; the team ID goes on the
+command line (`--team` or `DEVELOPMENT_TEAM`), never in `Apps/project.yml`, and xcodebuild runs with
 `-allowProvisioningUpdates`. It sets `WATCHWORD_REQUIRE_KEYCHAIN`, so a missing entitlement fails instead of skipping.
 
 Requires Xcode 16.4+ (Xcode 26 for strict memory safety). Other developer tools come from the project-level

@@ -17,6 +17,9 @@ import XCTest
 final class ScreenshotTourTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
+        // A hang fails with a report rather than eating the job (`app:test` turns the allowances on). The tour
+        // is every flow at once.
+        executionTimeAllowance = 1200
     }
 
     @MainActor
