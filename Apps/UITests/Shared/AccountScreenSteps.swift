@@ -42,8 +42,8 @@ extension XCUIApplication {
         let target = element(identifier)
         var frame = presentFrame(of: target)
         // Not there yet (the screen it is on is still arriving) is waited for once, before anything is scrolled.
-        if frame == nil, target.waitForExistence(timeout: 2) { frame = presentFrame(of: target) }
-        if let frame, isVisible(frame, of: target), target.isHittable { return target }
+        if frame == nil, target.appears(within: 2) { frame = presentFrame(of: target) }
+        if let frame, isVisible(frame, of: target), target.canBeHit { return target }
         #if os(iOS)
             // A field typed into outside `enter` leaves the keyboard up over the foot of the form, which the window's
             // frame does not show: a row under it passes as on screen and is not hittable.
@@ -61,7 +61,7 @@ extension XCUIApplication {
                 continue
             }
             if isVisible(frame, of: target) {
-                if target.isHittable { return target }
+                if target.canBeHit { return target }
                 #if os(iOS)
                     dismissKeyboard(ifCovering: frame)
                 #endif
@@ -72,7 +72,7 @@ extension XCUIApplication {
             }
         }
         if isReachable(target) { return target }
-        if !target.waitForExistence(timeout: 2) {
+        if !target.appears(within: 2) {
             attachTree("reveal \(identifier)", target: identifier)
             XCTFail("\(identifier) was not found", file: file, line: line)
         } else if !mayBeDisabled, !waitUntilHittable(target, timeout: 2) {
@@ -83,14 +83,36 @@ extension XCUIApplication {
         return target
     }
 
-    /// `element`'s frame if it is in the hierarchy, `nil` if it is not. On iOS in one query, a snapshot, where asking
-    /// whether it exists and then for its frame is two; macOS, where a query costs little, asks as it always has.
+    /// `element`'s frame if it is in the hierarchy, `nil` if it is not. Whether it is there is asked first: that is
+    /// the cheapest query there is, and a snapshot of an element that is not there is looked for three times over
+    /// before it gives up. On iOS the frame then comes from a snapshot, which throws where reading `frame` would
+    /// record a failure; one that cannot be had of an element that is there (a stalled query) is asked for again,
+    /// at most `UIQuery.retries` times.
     func presentFrame(of element: XCUIElement) -> CGRect? {
+        guard element.isPresent else { return nil }
         #if os(iOS)
-            return (try? element.snapshot())?.frame
+            return details(of: element)?.frame
         #else
-            return element.exists ? element.frame : nil
+            return element.frameNow
         #endif
+    }
+
+    /// The frame and state of `element`, from one snapshot; `nil` if it has gone. For an element just seen to be
+    /// there, a snapshot that cannot be had is a stalled query or a screen on its way out, so it is asked for again
+    /// while the element is still there, with a note in the log each time, and fails the test if it never comes.
+    func details(of element: XCUIElement) -> (frame: CGRect, isEnabled: Bool)? {
+        for attempt in 0...UIQuery.retries {
+            if let snapshot = try? element.snapshot() { return (snapshot.frame, snapshot.isEnabled) }
+            guard element.isPresent else { return nil }
+            if attempt < UIQuery.retries {
+                print(
+                    "UI-test note: no snapshot of an element that is there; retry \(attempt + 1) of \(UIQuery.retries)")
+            }
+        }
+        XCTFail(
+            "an element that is there gave no snapshot \(UIQuery.retries + 1) times running; the app or the "
+                + "simulator's accessibility service is not answering")
+        return nil
     }
 
     /// The scrolling container holding `element`, innermost last: a form's rows are in one, toolbar items and header
@@ -116,7 +138,7 @@ extension XCUIApplication {
     /// check and a frame): this is asked before every click, and each query is a snapshot of the whole tree.
     private var windowFrame: CGRect {
         #if os(iOS)
-            return frame
+            return frameNow
         #else
             var frame = windows.firstMatch.exists ? windows.firstMatch.frame : .zero
             if let sheet = sheets.allElementsBoundByIndex.last, sheet.exists { frame = frame.union(sheet.frame) }
@@ -185,20 +207,20 @@ extension XCUIApplication {
         /// dismisses its keyboard on scrolling honours.
         func dismissKeyboard(ifCovering frame: CGRect?) {
             let keyboard = keyboards.firstMatch
-            guard keyboard.exists else { return }
-            let covered = keyboard.frame
+            guard keyboard.isPresent else { return }
+            let covered = keyboard.frameNow
             if let frame, !frame.isEmpty, frame.maxY <= covered.minY { return }
             for label in ["Return", "return", "Done", "done", "Go", "go"] {
                 let key = keyboard.buttons[label]
-                if key.exists, key.isHittable {
-                    key.tap()
-                    if keyboard.waitForNonExistence(timeout: 2) { return }
+                if key.isPresent, key.canBeHit {
+                    key.click()
+                    if keyboard.disappears(within: 2) { return }
                     break
                 }
             }
             // As `scroll` does on iOS: the swipe lands on whatever is on top, the sheet's form included.
             swipeDown()
-            if !keyboard.waitForNonExistence(timeout: 2) {
+            if !keyboard.disappears(within: 2) {
                 print("UI-test note: the keyboard is still up")
             }
         }
@@ -206,7 +228,7 @@ extension XCUIApplication {
 
     /// On screen and hittable; `isHittable` is asked only of an element on screen.
     func isReachable(_ element: XCUIElement) -> Bool {
-        isOnScreen(element) && element.isHittable
+        isOnScreen(element) && element.canBeHit
     }
 
     /// One step of scrolling the frontmost form. On iOS a swipe, which lands on whatever is on top (a sheet included).
@@ -297,11 +319,26 @@ extension XCUIApplication {
         return false
     }
 
+    /// Waits until `element` is enabled. Polls as `waitUntilHittable` does, reading the state from a snapshot on iOS:
+    /// a predicate on `isEnabled` reads the property, which records a failure of its own when a query stalls.
+    func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            #if os(iOS)
+                if details(of: element)?.isEnabled == true { return true }
+            #else
+                if element.isPresent, UIQuery.tolerating("isEnabled", { element.isEnabled }) { return true }
+            #endif
+            _ = XCTWaiter().wait(for: [XCTestExpectation(description: "a quarter of a second")], timeout: 0.25)
+        } while Date() < deadline
+        return false
+    }
+
     /// Settings, from wherever the test is: an account screen's sheet is closed first, and Settings opened if it is
     /// not open.
     func showSettings(file: StaticString = #filePath, line: UInt = #line) {
-        if buttons[AccessibilityID.screenDone].firstMatch.exists { closeScreen(file: file, line: line) }
-        if !buttons["settings.done"].exists {
+        if buttons[AccessibilityID.screenDone].firstMatch.isPresent { closeScreen(file: file, line: line) }
+        if !buttons["settings.done"].isPresent {
             backToList()
             openSettings()
         }
@@ -315,7 +352,7 @@ extension XCUIApplication {
         for _ in 0..<2 {
             // `reveal` returns a row that can be hit, or has failed the test.
             reveal(identifier, at: .below, file: file, line: line).click()
-            if done.waitForExistence(timeout: 5) { return }
+            if done.appears(within: 5) { return }
         }
         attachTree("open \(identifier)", target: identifier)
         XCTFail("\(identifier) did not open its screen", file: file, line: line)
@@ -325,7 +362,7 @@ extension XCUIApplication {
     /// (a sheet of its own closing) to have gone first, and clicks again if the first click did not take.
     func closeScreen(file: StaticString = #filePath, line: UInt = #line) {
         let done = buttons[AccessibilityID.screenDone].firstMatch
-        guard done.waitForExistence(timeout: 5) else {
+        guard done.appears(within: 5) else {
             attachTree("close the screen", target: AccessibilityID.screenDone)
             XCTFail("no screen is open", file: file, line: line)
             return
@@ -333,7 +370,7 @@ extension XCUIApplication {
         for _ in 0..<2 {
             waitUntilHittable(done, timeout: 3)
             done.click()
-            if done.waitForNonExistence(timeout: 5) { return }
+            if done.disappears(within: 5) { return }
         }
         attachTree("close the screen", target: AccessibilityID.screenDone)
         XCTFail("the screen is still open", file: file, line: line)
@@ -348,8 +385,7 @@ extension XCUIApplication {
     func tapWhenEnabled(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
         // A disabled control may not count as hittable, so it is only required to be there until it is enabled.
         let target = reveal(identifier, mayBeDisabled: true, file: file, line: line)
-        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: target)
-        XCTAssertEqual(XCTWaiter().wait(for: [enabled], timeout: 15), .completed, "\(identifier) stayed disabled")
+        XCTAssertTrue(waitUntilEnabled(target, timeout: 15), "\(identifier) stayed disabled", file: file, line: line)
         if !waitUntilHittable(target, timeout: 3) {
             attachTree("tap \(identifier)", target: identifier)
             XCTFail("\(identifier) is not hittable", file: file, line: line)
@@ -366,9 +402,9 @@ extension XCUIApplication {
         let field = reveal(identifier, file: file, line: line)
         field.click()
         #if os(iOS)
-            field.typeText(text + "\n")
+            field.enterText(text + "\n")
         #else
-            field.typeText(text)
+            field.enterText(text)
         #endif
     }
 
@@ -376,7 +412,7 @@ extension XCUIApplication {
     /// differently ("Share This Vault…", "Discard…"), so the label alone finds the dialog's.
     func confirm(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
         let button = buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch
-        XCTAssertTrue(button.waitForExistence(timeout: 10), debugDescription, file: file, line: line)
+        XCTAssertTrue(button.appears(within: 10), debugDescription, file: file, line: line)
         button.click()
     }
 
@@ -390,11 +426,11 @@ extension XCUIApplication {
         ).firstMatch
         // A text that appears below the fold of a form (an export's report) is not in the hierarchy until shown: if
         // nothing with the identifier is there after a moment, the form is scrolled on, at most four times.
-        if !match.waitForExistence(timeout: min(3, timeout)) {
-            for _ in 0..<4 where !element(identifier).exists {
+        if !match.appears(within: min(3, timeout)) {
+            for _ in 0..<4 where !element(identifier).isPresent {
                 scroll(towardsEnd: true, to: identifier)
             }
-            if !match.waitForExistence(timeout: max(1, timeout - 3)) {
+            if !match.appears(within: max(1, timeout - 3)) {
                 attachTree("text \(text) in \(identifier)", target: identifier)
                 XCTFail("no \(identifier) containing \(text)", file: file, line: line)
             }
@@ -412,38 +448,38 @@ extension XCUIApplication {
     /// An item with a website, a user name and a password typed in (or generated when `password` is nil).
     func addLogin(title: String, host: String, username: String, password: String?) {
         let add = buttons["items.add"]
-        XCTAssertTrue(add.waitForExistence(timeout: 10), debugDescription)
+        XCTAssertTrue(add.appears(within: 10), debugDescription)
         add.click()
         let field = textFields["edit.title"]
-        XCTAssertTrue(field.waitForExistence(timeout: 10), debugDescription)
+        XCTAssertTrue(field.appears(within: 10), debugDescription)
         field.click()
-        field.typeText(title)
+        field.enterText(title)
         textFields["edit.host"].click()
-        textFields["edit.host"].typeText(host)
+        textFields["edit.host"].enterText(host)
         textFields["edit.username"].click()
-        textFields["edit.username"].typeText(username)
+        textFields["edit.username"].enterText(username)
         if let password {
             secureTextFields["edit.password"].click()
-            secureTextFields["edit.password"].typeText(password)
+            secureTextFields["edit.password"].enterText(password)
         } else {
             buttons["edit.generate"].click()
         }
         buttons["edit.save"].click()
-        XCTAssertTrue(itemRow(title).waitForExistence(timeout: 10), debugDescription)
-        XCTAssertTrue(field.waitForNonExistence(timeout: 10), "the editor is still open")
+        XCTAssertTrue(itemRow(title).appears(within: 10), debugDescription)
+        XCTAssertTrue(field.disappears(within: 10), "the editor is still open")
     }
 
     /// Locks from the item list and unlocks with `password`, expecting the vault.
     func lockAndUnlock(password: String) {
         backToList()
         let lock = buttons["items.lock"].firstMatch
-        XCTAssertTrue(lock.waitForExistence(timeout: 10), debugDescription)
+        XCTAssertTrue(lock.appears(within: 10), debugDescription)
         lock.click()
         let unlock = secureTextFields["unlock.password"]
-        XCTAssertTrue(unlock.waitForExistence(timeout: 10), debugDescription)
+        XCTAssertTrue(unlock.appears(within: 10), debugDescription)
         unlock.click()
-        unlock.typeText(password + "\n")
-        XCTAssertTrue(buttons["items.add"].waitForExistence(timeout: 15), debugDescription)
+        unlock.enterText(password + "\n")
+        XCTAssertTrue(buttons["items.add"].appears(within: 15), debugDescription)
     }
 
     /// Launches a `--uitest` app for the account-screen tests and creates the account.

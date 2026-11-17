@@ -132,7 +132,15 @@ with password re-entry, import of 1PUX/CSV fixtures.
   simulator's own services were crashing, 17 to 28 s four times running; the test made 331 of them. So the helpers
   count queries: an element in view costs `reveal` two (a snapshot for its frame, then whether it can be hit) where
   it cost five or six, and `enter` ends its text with Return on iOS, so no keyboard is left over the next field to be
-  found and dismissed (a dozen queries each time). The long tests
+  found and dismissed (a dozen queries each time). A stalled query is also an error of its own: after three
+  30-second attempts XCUITest records "Failed to get matching snapshots: Timed out while evaluating UI query." as a
+  failure of the test (the tour failed that way looking for a Settings row, the app idle, nothing it checks wrong).
+  So every read the helpers make, and the lookup that begins a tap or typing, goes through `UIQuery.tolerating`
+  (`Apps/UITests/Shared/UIQuery.swift`: `isPresent`, `canBeHit`, `appears(within:)`, `disappears(within:)`,
+  `enterText`, and `click` on iOS): that one message is taken as expected and the read made again, at most twice,
+  with a `UI-test note:` line each time; any other failure is recorded as ever, and a query still unanswered after
+  the retries fails the test saying so. `app:diagnose` prints the 150 lines of the session log before a query's
+  timeout, which is where XCUITest says what it saw while it waited. The long tests
   (the tour, import and export, sharing, devices, the quarantine) print `STEP <time> [<test>] <step>` before each step
   (`XCTestCase.step`), which `app:diagnose` gathers at the end of a failed job's log (below). Sheets the account screens open close by clearing
   their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS. The macOS window
