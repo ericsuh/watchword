@@ -1527,6 +1527,22 @@ from the file and no sync has run since) still takes the vault for its own until
 key it seals under is then the right one, and what it wrote is not published once the marker is there. And the ledger
 itself is still not synced between an account's devices (S35): each accepts the invitation.
 
+**Sharing a vault that already holds work** (review finding Z42). A vault can be shared after months of use from
+several devices. At the genesis record its stream index is empty, and the judge attributes a value through the segment
+of its writer's stream that carried it, so `shareVault` asks for the index to be built from the log before any row is
+judged (`indexRebuilding`, as for an index refused on load); judged against the empty index, every item holding a
+value the owner's other device wrote was taken out and held aside. That is enough while the log is whole. It is not
+once the log has been **compacted**: a private vault writes snapshots and collects segments (§7.5), and a value that
+survives only in a snapshot is carried by no stream's segment, so every device that replays the log, an invitee's
+first of all, would hold those items aside for good. Nothing attributes such values yet, so a vault with a snapshot on
+the transport, or one this device merged a stream through, is not shared: `shareVault` throws
+`SharedVaultError.historyCompacted`, and the person shares a new vault and moves the items into it (a move is a write
+by this device after the genesis, which everything attributes). The rule that would lift this is the owner's to
+choose (`06-adversarial-review.md` Z42): values in a snapshot the owner's account signed counting as that account's
+where the stamp names one of its devices, or the sharing device writing every record again in its own stream with the
+owner account vouching for its other devices' values. Either widens S36's "a value is its device's work only where
+that device's own stream carried it" for the owner's account, and wants the same review that rule had.
+
 **The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
 own safety number), `contactCandidate` and `verifyContact` (fingerprint by typed number, scanned code or comparison;
 a different pinned bundle is `keySubstituted` unless the person replaces the pin), `shareVault` (the genesis

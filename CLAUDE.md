@@ -650,6 +650,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
   (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
+- A vault is shared with `indexRebuilding` set, so its index is built from the log before any row it already holds is
+  judged, and one whose log was compacted (a snapshot listed, or merged) is not shared at all (`historyCompacted`,
+  Z42): a value that survives only in a snapshot has no attribution. Do not lift that without a rule for such values.
 - A chain stopped at a later format (`continuesInLaterFormat`, §8.9) makes the vault read-only in the session and is
   reported (`SharedVaultStatus.requiresNewerVersion`): no proposal published, no plan resumed or made, nothing sealed
   again, no leave request. A later-format object is offered again until the ledger holds it; never add it to

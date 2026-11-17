@@ -105,4 +105,9 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// sealed, published or deleted there until this device accepts the vault's invitation itself (review finding
     /// Z41): a shared vault is never run as one of the account's own.
     case ledgerUnavailable(UUID)
+    /// The vault's sync log was compacted before it was shared (segments collected, their work surviving only in a
+    /// snapshot). A shared vault attributes every value through the segment that carried it, and nothing attributes
+    /// those: shared as it is, the vault's older items would be held aside on every device (review finding Z42).
+    /// Refused until there is a rule for them; a new vault can be shared and the items moved into it.
+    case historyCompacted(UUID)
 }

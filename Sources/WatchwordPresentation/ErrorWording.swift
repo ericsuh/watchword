@@ -115,6 +115,9 @@ public enum ErrorWording {
             return "This device has not received the vault's current key yet. Sync, then try again."
         case .keyIDInUse:
             return "That invitation conflicts with a vault already on this device, and was refused."
+        case .historyCompacted:
+            return "This vault has been in use too long to be shared as it is: its sync history was compacted. "
+                + "Create a new vault, share that one, and move the items you want to share into it."
         case .ledgerUnavailable:
             return "This shared vault is not set up on this device yet, so it cannot be changed from here. "
                 + "Accept its invitation on this device first."

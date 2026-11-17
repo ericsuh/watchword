@@ -344,6 +344,9 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   tell it the vault is shared). Syncing the ledger and pins between an account's devices, signed by the account, is
   not built; nor is a screen flow of its own for "set up this shared vault here" (the vault's screen shows the
   invitation to paste into the accept screen).
+- Sharing a vault whose log was compacted is refused (`historyCompacted`, Z42): values that survive only in a
+  snapshot have no attribution in a shared vault. A rule for them (the owner account vouching for its own devices'
+  pre-sharing values) is open, and is the owner's decision.
 - An erasure summary claims what a late writer had seen when the deleting device had merged its version (S45), and a
   late version's claims about current members' future edits are carried on (S46).
 - A member invited after a demotion with no rotation since holds aside what only vouching could attribute (S42):

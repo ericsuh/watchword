@@ -38,9 +38,14 @@ public struct SharingAccount: Sendable {
 
     public static func make(
         over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory, seed: UInt64,
-        hygiene: HygieneSettings? = nil
+        hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil
     ) async throws -> SharingAccount {
-        let vault = TestVault.syncing(over: transport, seed: seed, hygiene: hygiene)
+        let vault =
+            configuration.map {
+                TestVault(
+                    sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport, configuration: $0),
+                    seed: seed, hygiene: hygiene)
+            } ?? TestVault.syncing(over: transport, seed: seed, hygiene: hygiene)
         try await vault.createAccount()
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
@@ -93,8 +98,11 @@ public struct SharedVaultHousehold: Sendable {
 
     public init() {}
 
-    public func account(seed: UInt64, hygiene: HygieneSettings? = nil) async throws -> SharingAccount {
-        try await SharingAccount.make(over: transport, directory: directory, seed: seed, hygiene: hygiene)
+    public func account(seed: UInt64, hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil)
+        async throws -> SharingAccount
+    {
+        try await SharingAccount.make(
+            over: transport, directory: directory, seed: seed, hygiene: hygiene, configuration: configuration)
     }
 
     /// An owner with a new shared vault called `name`, and one member per role, each invited and joined.

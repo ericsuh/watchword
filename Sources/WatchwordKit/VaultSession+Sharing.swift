@@ -544,14 +544,34 @@ extension VaultSession {
         // Refused for a vault that is already shared and has no ledger here (`ledgerUnavailable`): a second genesis
         // from the account's other device, or from a member's, is never signed (Z41).
         let vaultKey = try await writableVaultKey(vaultID, keys: keys, account: account)
+        try await requireWholeLog(vaultID)
         let current = try requireKeys(since: epoch)
         let ledger = try MembershipLedger.create(vaultKey: vaultKey, owner: current.keyset)
         // The marker first: from here on every device of the account that syncs learns the vault is shared, whether
         // or not it ever sees the chain. If it cannot be signed and stored, the vault is not shared.
         try await markShared(vaultID, owner: account.accountID, account: account, epoch: epoch)
-        sharing.vaults[vaultID] = SharedVault(ledger: ledger)
+        // The vault may hold work already, this device's and the account's other devices'. Its stream index is
+        // empty, and a row judged against it would be taken out for every value another device wrote (Z42): the
+        // index is built from the log first, by a replay, as for an index refused on load.
+        var vault = SharedVault(ledger: ledger)
+        vault.needsReconcile = true
+        vault.indexRebuilding = true
+        sharing.vaults[vaultID] = vault
         try await saveSharedVault(vaultID)
         try await publishSharingObject(SharingObject(ledger.chain[0].record))
+    }
+
+    /// Refuses a vault whose sync log has been compacted (`historyCompacted`, review finding Z42). A shared vault
+    /// attributes every value through the segment of its writer's stream that carried it. Once segments have been
+    /// collected, what they carried survives only in a snapshot, which attributes nothing: an invitee would hold those
+    /// items aside for good, and so would any device that replays the log. Asked of the transport (a snapshot listed
+    /// there) and of this device's own sync state (a stream it merged through one).
+    private func requireWholeLog(_ vaultID: UUID) async throws {
+        let names = try await sharingTransport().list(prefix: SyncObjectLocation.vaultPrefix(vaultID))
+        let state = try await syncSettings?.state.loadState(vaultID: vaultID)
+        guard !names.contains(where: { SyncObjectLocation(name: $0)?.kind == .snapshot }),
+            state?.snapshots.isEmpty ?? true, state?.snapshotCoverage.isEmpty ?? true
+        else { throw SharedVaultError.historyCompacted(vaultID) }
     }
 
     /// Invites a verified contact (`verifyContact` first; PRD F4.1): wraps the current key to the bundle that was

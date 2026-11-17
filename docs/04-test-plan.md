@@ -535,7 +535,9 @@ directory gave it; a read-only member's device whose ledger, owner row or owner'
 withholding the marker while serving the granted key; a marker row deleted from the file and one planted; a sharing
 state that cannot be read at unlock; and an invitation naming another owner refused on a second device. In "crypto
 core", that the class of a vault key's wrap is authenticated (`grantedKeyWrapClass`). "Screen models: sharing" has the
-vault's label and the accept screen setting it up.
+vault's label and the accept screen setting it up. Sharing a vault that already holds work
+(`AdversarialSharedVaultExistingVaultTests.swift`, Z42): one that two devices of the owner wrote to, where nothing is
+held aside on the owner's device or an invitee's; and one whose log was compacted, which is refused.
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):
