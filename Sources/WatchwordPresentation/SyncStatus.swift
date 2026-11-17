@@ -66,7 +66,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .storageNeedsUpload:
             return "Your sync storage was emptied or reset, and no longer holds everything this device does. "
                 + "Nothing on this device has been lost, and nothing has been uploaded again. Until you decide, "
-                + "changes made here may not reach your other devices."
+                + "changes made here may not reach your other devices. Open Devices to decide."
         case .sharedVaultsNotUploaded(let count):
             return "\(count) shared vault(s) cannot be uploaded again from this device after the reset. They stay "
                 + "on this device, readable and unchanged, and do not sync."

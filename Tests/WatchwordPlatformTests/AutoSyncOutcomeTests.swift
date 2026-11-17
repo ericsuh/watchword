@@ -81,4 +81,41 @@ struct AutoSyncOutcomeTests {
         report.vaults[UUID()] = offline
         #expect(AutoSyncOutcome(report) == .failed)
     }
+
+    /// Automatic syncing reaches `syncAll` and nothing else (docs/02-architecture.md §7.9, §7.10). After a reset,
+    /// whether the transport says so or the store merely lists nothing, every automatic sync is a failure the policy
+    /// backs off from; however many it starts, nothing is uploaded and the store is not started again.
+    @Test(
+        "a reset store is a failed sync that backs off; no number of automatic syncs uploads again",
+        arguments: [true, false])
+    func resetStore(_ transportSaysSo: Bool) async throws {
+        let store = ResettableSyncTransport()
+        let vault = TestVault.syncing(over: store)
+        try await vault.createAccount()
+        _ = try await vault.session.createVault(name: "Second")
+        try await vault.session.syncAll()
+        if transportSaysSo { await store.reset() } else { await store.base.removeEverything() }
+        await store.forgetCreates()
+
+        var state = AutoSyncState()
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        AutoSyncPolicy.record(.unlocked, at: now, in: &state)
+        var started = 0
+        for _ in 0..<200 {
+            guard case .sync(let mode, _) = AutoSyncPolicy.decide(now: now, state: state) else {
+                now.addTimeInterval(60)
+                continue
+            }
+            AutoSyncPolicy.record(.syncStarted, at: now, in: &state)
+            started += 1
+            // What the driver's closure does for either mode: one `syncAll`.
+            #expect(mode == .full)
+            let report = try await vault.session.syncAll()
+            #expect(AutoSyncOutcome(report) == .failed && report.storeNeedsReupload)
+            AutoSyncPolicy.record(.syncFailed, at: now, in: &state)
+        }
+        #expect(started >= 3 && state.consecutiveFailures == started)
+        #expect(await store.created.isEmpty)
+        #expect(await store.startsAgain == 0)
+    }
 }

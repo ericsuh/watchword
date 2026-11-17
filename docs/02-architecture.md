@@ -343,7 +343,7 @@ do not travel in log segments: they are a signed chain of their own, beside the 
 - Failure handling: `CKErrorUserDidResetEncryptedDataKey` / `zoneNotFound` means CloudKit lost its
   own key material; because our envelope is independently decryptable, the client re-uploads from
   local state (the behaviour Apple prescribes) with no data loss. `userDeletedZone` prompts the
-  person.
+  person. As decided on 2026-11-17, every one of these prompts the person first (§7.10).
 - Observed cost: encrypted fields cannot be queried, which is fine because the change-log model
   only needs ordered fetches by zone.
 - **As built** (`WatchwordPlatform.CloudKitTransport`, milestone 3; not yet run against CloudKit, and not wired into
@@ -370,9 +370,10 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   transport reaches CloudKit through `CloudKitDatabase`, a seam over `CKDatabase` that `SystemCloudKitDatabase` only
   forwards, so every decision is tested against a fake. Not built: `CKSyncEngine` (pushes reach the app's
   `AutoSyncDriver` as remote-change hints), per-shared-vault zones and the shared database (milestone 4), and the
-  manual integration workflow. The re-upload after a reset the bullet above describes is §7.10: it is never
-  automatic (the bullet's "prompts the person" holds for every kind of reset), and its CloudKit half is drafted; an opt-in test runs the transport contract
-  against a development container from a signed host (`WATCHWORD_CLOUDKIT_CONTAINER`).
+  manual integration workflow; an opt-in test runs the transport contract against a development container from a
+  signed host (`WATCHWORD_CLOUDKIT_CONTAINER`). The re-upload after a reset that the failure-handling point above
+  describes is §7.10: it is never automatic (that point's "prompts the person" holds for every kind of reset, a
+  reset encryption key included), and its CloudKit half, `startStoreAgain`, is drafted with the rest.
 
 ### 7.3 Transport B: files (iCloud Drive or any Files-app provider)
 

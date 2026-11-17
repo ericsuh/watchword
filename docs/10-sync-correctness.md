@@ -369,6 +369,16 @@ failed each time.
   which adds nothing to the above: each copy's entries go through the same join, so the copies in any order give one
   item, and the two writes under one revision are the case just described. Merging them is what keeps both; choosing
   one copy would lose the other's edits outright.
+  After the sync store has been reset (`02-architecture.md` §7.10) the store no longer shows a rolled-back device how
+  far its stream had gone, so it can reuse a sequence number whose first object is gone; devices that merged the first
+  do not read the second, and get its versions from that device's next snapshot instead. Nothing is lost and the
+  join is the same, but convergence then waits for a snapshot (`06-adversarial-review.md` §S, SR15).
+- **Uploading again after a reset adds no new merge.** The snapshot a device writes when its person says so
+  (`02-architecture.md` §7.10) is an ordinary snapshot written early: every row it holds and a tombstone for every
+  erasure it remembers, covering what it had merged. Every device applies its entries through the same per-entry
+  join as any snapshot's, so several devices uploading in any order, at once or days apart, give one vault; coverage
+  is a maximum and never makes a device skip an entry. What is new is only *when* nothing is written: no snapshot
+  and no collection while a reset is suspected and unanswered, and no replay in front of a log that is gone.
 - **The engine did not tell the merger the tombstone's version** (Y28, fixed when the sync-core work merged). The
   engine now passes the joined erasure's stamp, and `ItemRecordMerger` believes no summary naming a row above it.
   Within that bound an insider can still name a *lower* row, or another device, in its summary; the write that
