@@ -1773,16 +1773,23 @@ claim to have seen that device's unpublished edits was not asked of the device (
 writer), and the victim's unpublished value was superseded with no conflict. Two rules now. A device knows what it
 wrote: a segment in its own stream that its own account's keys did not sign is held aside and not recorded (a snapshot
 named as its own is refused). And for every other device, a stream belongs to the account that signed its
-lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`; a shared vault keeps its whole log, so devices that
-hold the same segments agree): a segment in it that another account signed is recorded, since a cut's chain runs over
-every object of the stream, but nothing is filed or attributed through it, `segmentCounts` is false for it, and the
-judge holds it aside, so the stream carries on past it instead of waiting. A cut covers the streams that are the
+lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`): a segment in it that another account signed is
+recorded, since a cut's chain runs over every object of the stream, but nothing is filed or attributed through it,
+`segmentCounts` is false for it, and the judge holds it aside, so the stream carries on past it instead of waiting.
+**Every device records every segment**, whether or not it opens there (Z51): who signed a segment and which object
+it is need no vault key, so one sealed under a key the device does not hold (it joined after a rotation, or the key is
+a losing branch's) is recorded by digest and signer, marked unopened, and completed if it opens later. A shared vault
+keeps its whole log, so the lowest-numbered segment, and with it the stream's account, is the same on every device;
+recorded only where they opened, a member who joined after a rotation took the first segment sealed under the new key
+for the stream's first, and an insider who wrote one there had the stream on that device and nowhere else. The same
+recording keeps a cut's chain whole across segments the cutting device could not open (Z52). And when an
+earlier segment arrives after a later one and shows the stream to be another account's, the index files it again and
+the log is replayed, so nothing judged under the wrong account stays merged. A cut covers the streams that are the
 departing account's. And a version is exempt from the question about its own writer's edits only where it is known
 to be that device's work: its own stream carried it, or it is this device's own; one that merely names a device, in a
 snapshot say, is held to that device's stream like anyone's claim. What is left is denial of service by an insider, as
 S33 and S11: a member who writes into a stream **before** its device's first segment in that vault takes the stream,
-and that device's later segments are then held aside by everyone else (visibly), its own device excepted. A device
-that cannot open a stream's first segments (it joined after a rotation) names the owner from the first one it can.
+and that device's later segments are then held aside by everyone else (visibly), its own device excepted.
 
 **The write cut over sync's objects** (S28). The cut a removal, departure or demotion carries is, for each device
 whose segments the departing account's keys signed, the furthest sequence through which the signing device holds every
@@ -1827,7 +1834,8 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   segments sealed under a key that only a record on a losing branch introduced (a rotation signed on a stale head):
   the accepted chain never names that key, no grant of it is fetched, and the stream of whoever sealed under it would
   otherwise wait there for good with everything written after (Z47). What they carried arrives sealed again under the
-  vault's key; if that branch comes to win, receiving its key replays the log. A tombstone's
+  vault's key; if that branch comes to win, receiving its key replays the log. A segment passed over is still
+  recorded, unopened (Z51). A tombstone's
   segment carries what applying it writes (`ItemMerge.attributedSettlement`), so a version kept after a deletion is
   judged like any other.
 - *Taken out.* When the head changes, every local version of the vault that no longer counts is held aside and taken

@@ -36,6 +36,13 @@ public protocol WriteJudge: Sendable {
         segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8], entries: [SyncEntry]
     ) async throws
 
+    /// Called instead of `record` with a segment of the pass that carries its signatures and does not open here,
+    /// because it is sealed under a key this device does not hold: its name, its bytes and its signer are known
+    /// without the key. A judge that names a stream's account by its first segment, or binds a write cut to the
+    /// run of a stream's objects, needs them from every device alike, whichever keys each holds (review finding
+    /// Z51). The same segment may be given to `record` later, once it opens.
+    func recordUnopened(segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async throws
+
     /// Whether the entries of this segment count. Asked in stream order, after `record` has seen every segment of
     /// the pass.
     func admitsSegment(_ location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async throws
@@ -64,6 +71,12 @@ public protocol WriteJudge: Sendable {
 }
 
 extension WriteJudge {
+    /// A judge that keeps nothing by stream has nothing to note of a segment it cannot open.
+    public func recordUnopened(segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8])
+        async throws
+    {
+    }
+
     /// A judge that has nothing to say about erasures admits every one.
     public func admitsErasure(_ entry: SyncEntry, in location: SyncObjectLocation, sealedUnder keyID: UUID)
         async throws -> Bool

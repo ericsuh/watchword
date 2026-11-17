@@ -662,8 +662,22 @@ public actor SyncEngine {
         // version decides whose work it is, and a write cut binds a run of segments (docs/02-architecture.md §8.8).
         if let judge {
             for object in segments.values.joined().sorted(by: { $0.location.name < $1.location.name }) {
-                guard let payload = try? await open(object), (try? validate(payload, at: object.location)) != nil
-                else { continue }
+                let payload: SyncPayload
+                do {
+                    payload = try await open(object)
+                } catch SyncKeyringError.unknownKey {
+                    // Signed by a device the vault's members list (`open` checks that before it asks for the key)
+                    // and sealed under a key this device does not hold. Which object it is and whose keys signed it
+                    // need no key, and every device must agree on both: a stream's first segment says whose the
+                    // stream is, and a write cut's chain runs over every object of it (review finding Z51).
+                    try await judge.recordUnopened(
+                        segment: object.location, signature: object.object.signature,
+                        envelope: object.object.envelope)
+                    continue
+                } catch {
+                    continue
+                }
+                guard (try? validate(payload, at: object.location)) != nil else { continue }
                 try await judge.record(
                     segment: object.location, signature: object.object.signature,
                     envelope: object.object.envelope, entries: payload.entries)

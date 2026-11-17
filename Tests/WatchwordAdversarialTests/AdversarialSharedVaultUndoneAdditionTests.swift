@@ -93,5 +93,21 @@ extension AdversarialSharedVaultTests {
         #expect(try await owner.session.item(id: bank.id).field(.password)?.value == "after-the-removal")
         #expect(try await witness.session.item(id: bank.id).field(.password)?.value == "after-the-removal")
         #expect(try await owner.session.sharedVaultStatus(vaultID).heldAside == 0)
+
+        // Later the administrator is made read-only. The cut the owner's device signs must reach past the segments
+        // it could not open: it recorded them by digest and signer (Z51), so its chain over the administrator's
+        // stream has no gap, and what that device wrote afterwards is inside the cut and still counts everywhere.
+        // Recorded only where they opened, the cut ended before the episode and all of it was held aside (Z52).
+        var later = Self.bank(in: vaultID)
+        later.title = "Written after the fork was settled"
+        later = try await administrator.session.save(later)
+        try await Self.syncAll([administrator, owner, witness])
+        try await owner.session.changeRole(of: administrator.accountID, in: vaultID, to: .readOnly)
+        try await Self.syncAll([owner, witness, administrator], rounds: 3)
+        for account in [owner, witness] {
+            #expect(try await account.session.item(id: later.id).title == later.title)
+            #expect(try await account.session.item(id: bank.id).field(.password)?.value == "after-the-removal")
+            #expect(try await account.session.sharedVaultStatus(vaultID).heldAside == 0, "held aside by the cut")
+        }
     }
 }

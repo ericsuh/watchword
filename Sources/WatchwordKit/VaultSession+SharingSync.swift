@@ -629,18 +629,21 @@ extension VaultSession {
     // MARK: - The judge (`WriteJudge`)
 
     func judgeRecord(
-        segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8], entries: [SyncEntry]
+        segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8], entries: [SyncEntry],
+        opened: Bool = true
     ) async {
         guard location.kind == .segment, sharing.vaults[location.vaultID] != nil,
             let account = try? await loadAccount()
         else { return }
         let ownView = try? await registry(account)
         // Not recorded while locked: a segment is recorded once, so it must be recorded with its values. A lock that
-        // landed during the suspensions above stops the merge too, and the next sync records it.
+        // landed during the suspensions above stops the merge too, and the next sync records it. One recorded
+        // unopened (it was sealed under a key not held then) is recorded again when it opens.
         guard let keys,
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account),
             var vault = sharing.vaults[location.vaultID],
-            vault.index.segment(device: location.author, sequence: location.number) == nil,
+            vault.index.segment(device: location.author, sequence: location.number).map({ !$0.opened && opened })
+                ?? true,
             // Another account's object in this device's own stream is no part of what it wrote. It is recorded,
             // unfiled, for the cut's chain that runs over it, as in anyone's stream, but only behind a segment of this
             // device's own: the stream's lowest segment names its account, and here that is never anyone else's (Z46).
@@ -661,14 +664,20 @@ extension VaultSession {
                 values.append(value)
             }
         }
+        let streamWas = vault.index.account(ofStream: location.author)
         vault.index.record(
             device: location.author, sequence: location.number,
             segment: SharedStreamIndex.Segment(
                 digest: SharedStreamIndex.digest(name: location.name, envelope: envelope), account: signer,
                 entries: entries.map { VersionKey(recordID: $0.recordID, kind: $0.kind.rawValue, version: $0.version) },
-                values: values))
+                values: values, opened: opened))
         vault.indexChanged = true
         sharing.vaults[location.vaultID] = vault
+        // An earlier segment of the stream arrived after a later one, and another account signed it: the stream is
+        // that account's, and whatever was judged while it looked like someone else's is judged again (Z51).
+        if let streamWas, streamWas != vault.index.account(ofStream: location.author) {
+            requestReplay(location.vaultID)
+        }
         // A segment inside a cut that this device was waiting for, or a new segment of a device a version was held
         // aside for, can make versions held aside count: judge again (written down, S41).
         if case .ended(let cut, _, _) = vault.ledger.writeStanding(of: signer),
@@ -846,7 +855,8 @@ extension VaultSession {
             }
             if carriers.contains(where: { Self.segmentCounts(device, sequence: $0.value, in: vault) }) { continue }
             if accounts.allSatisfy({ vault.ledger.writeStanding(of: $0) == .mayWrite }) {
-                if vouched || vault.index.segment(device: device, sequence: 1) == nil { continue }
+                // "Cannot read from its first segment": not here at all, or here and sealed under a key not held.
+                if vouched || vault.index.segment(device: device, sequence: 1)?.opened != true { continue }
                 if device != me { awaited.insert(device) }
                 return false
             }
@@ -1096,6 +1106,11 @@ extension VaultSyncAdapter: WriteJudge {
         segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8], entries: [SyncEntry]
     ) async throws {
         await session.judgeRecord(segment: location, signature: signature, envelope: envelope, entries: entries)
+    }
+
+    func recordUnopened(segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async throws {
+        await session.judgeRecord(
+            segment: location, signature: signature, envelope: envelope, entries: [], opened: false)
     }
 
     func admitsSegment(_ location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async throws

@@ -711,7 +711,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   genesis, and move an anchor sideways only in `verifyMemberDevices`.
 - **A stream is one account's** (Z46): this device's own stream takes only this account's signature, and any other
   belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`). Another
-  account's segment in it is recorded for the cut's chain, filed nowhere, and held aside. Never attribute through a
+  account's segment in it is recorded for the cut's chain, filed nowhere, and held aside. Every device records
+  every signed segment, opened or not (`WriteJudge.recordUnopened`, Z51), so the lowest segment and a cut's chain are
+  the same everywhere; a change of a stream's account asks for a replay. Never attribute through a
   segment without `isOwnersSegment`, and never exempt a version's writer from `knowledgeCounts` unless its own stream
   carried the version or this device wrote it.
 - A segment sealed under a key that only a losing branch introduced is passed over, not waited for (Z47).

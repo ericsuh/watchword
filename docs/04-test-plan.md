@@ -585,6 +585,16 @@ published; and a vault with no ledger not given to AutoFill. A stream's owner
 (`AdversarialSharedVaultStreamOwnerTests.swift`, Z46): a member's device enrolled under the owner's device ID writing
 into the owner's stream over an unpublished edit, held aside on the owner's device and everyone's, the stream carrying
 on. "Screen models: sharing" has the texts (`sharingStatementsAreTrue`) and the left vault on screen.
+From the review of those fixes (Z48 to Z59; each failed first unless its row in `06-adversarial-review.md` says
+otherwise): a second device that cannot name a vault's owner and is offered an invitation naming someone else, the
+held key that stands in for a grant only in one's own vault, and markers that disagree
+(`AdversarialSharedVaultOwnerUnknownTests.swift`, which also records Z49's owner's-other-device residual as a known
+issue); a share cut short after the marker, a genesis record the store lost, rows planted in the sharing state, and
+the owner's other device taking a vault up by sharing it (`AdversarialSharedVaultInterruptedShareTests.swift`); a
+stream's owner on a device that joined after a rotation, and the replay when an earlier segment changes it
+(`AdversarialSharedVaultStreamOwnerReviewTests.swift`), with "Shared vaults: the stream index"
+(`SharedStreamIndexTests`, `WatchwordKitTests`) for the index itself: order of arrival, refiling, unopened segments
+and their completion, and the saved form.
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

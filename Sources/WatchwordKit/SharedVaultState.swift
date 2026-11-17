@@ -34,6 +34,10 @@ struct SharedStreamIndex: Sendable, Hashable {
         /// The values this segment carried that an earlier segment of the same stream had not (review finding S36):
         /// each the digest of an `AttributedValue`, filed under the device its stamp names.
         var values: [ValueKey] = []
+        /// Whether this device opened the segment. One sealed under a key it does not hold is recorded all the same,
+        /// by its digest and signer, which need no key: it names the stream's account like any other and a cut's
+        /// chain runs over it, but nothing is known of what it carried (review finding Z51).
+        var opened = true
     }
 
     /// A value as the index files it: the device its stamp names, and SHA-256 of its encoding with the whole stamp.
@@ -45,8 +49,10 @@ struct SharedStreamIndex: Sendable, Hashable {
     static let magic: [UInt8] = Array("WWSI".utf8)
     /// 3 since note-line removals, discards and history entries became attributable values (review findings S32,
     /// S43): an index of an earlier format filed none of them, so it is refused on load and rebuilt from the log by a
-    /// replay, which files them, before anything is judged against it.
-    static let formatVersion: UInt8 = 3
+    /// replay, which files them, before anything is judged against it. 4 since segments that do not open here are
+    /// recorded too, each segment saying whether it was opened (Z51): an earlier index lacks them, and names a
+    /// stream's account by the first segment that happened to open.
+    static let formatVersion: UInt8 = 4
     static let maximumLength = 64 << 20
 
     /// By device, then sequence number.
@@ -96,8 +102,18 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// is what tells which one its signer held. What a segment carried is filed only if the account the stream
     /// belongs to signed it (Z46); if a lower-numbered segment arrives later and is another account's, the stream is
     /// that account's after all and what was filed through it is filed again.
+    ///
+    /// A segment recorded unopened is completed by the same object once it opens (a key arrived, and the log is
+    /// replayed): the same digest, now with what it carried.
     mutating func record(device: UUID, sequence: UInt64, segment: Segment) {
-        guard streams[device]?[sequence] == nil else { return }
+        if let held = streams[device]?[sequence] {
+            guard !held.opened, segment.opened, held.digest == segment.digest, held.account == segment.account else {
+                return
+            }
+            streams[device]?[sequence] = segment
+            if segment.account == account(ofStream: device) { file(segment, device: device, sequence: sequence) }
+            return
+        }
         let before = account(ofStream: device)
         streams[device, default: [:]][sequence] = segment
         lowest[device] = min(lowest[device] ?? .max, sequence)
@@ -187,6 +203,7 @@ struct SharedStreamIndex: Sendable, Hashable {
             for sequence in stream.keys.sorted() {
                 let segment = stream[sequence]!
                 out += SharedBytes.littleEndian(sequence) + segment.digest + SharedBytes.bytes(segment.account)
+                out += [segment.opened ? 1 : 0]
                 out += SharedBytes.littleEndian32(UInt32(segment.entries.count))
                 for entry in segment.entries {
                     out += SharedBytes.bytes(entry.recordID) + [entry.kind] + SharedBytes.littleEndian(entry.version)
@@ -227,14 +244,14 @@ struct SharedStreamIndex: Sendable, Hashable {
         var previousDevice: UUID?
         for _ in 0..<deviceCount {
             guard let device = reader.uuid(), previousDevice.map({ $0.precedes(device) }) ?? true,
-                let count = reader.uint32(), Int(count) <= reader.remaining / 60
+                let count = reader.uint32(), Int(count) <= reader.remaining / 61
             else { return nil }
             previousDevice = device
             var previousSequence: UInt64 = 0
             for _ in 0..<count {
                 guard let sequence = reader.uint64(), sequence > previousSequence, let digest = reader.read(32),
-                    let signer = reader.uuid(), let entryCount = reader.uint32(),
-                    Int(entryCount) <= reader.remaining / 25
+                    let signer = reader.uuid(), let openedFlag = reader.read(1), openedFlag[0] <= 1,
+                    let entryCount = reader.uint32(), Int(entryCount) <= reader.remaining / 25
                 else { return nil }
                 previousSequence = sequence
                 var entries: [VersionKey] = []
@@ -254,7 +271,9 @@ struct SharedStreamIndex: Sendable, Hashable {
                 }
                 index.record(
                     device: device, sequence: sequence,
-                    segment: Segment(digest: digest, account: signer, entries: entries, values: values))
+                    segment: Segment(
+                        digest: digest, account: signer, entries: entries, values: values,
+                        opened: openedFlag[0] == 1))
             }
         }
         guard let waitingCount = reader.uint32(), Int(waitingCount) <= reader.remaining / 16 else { return nil }
