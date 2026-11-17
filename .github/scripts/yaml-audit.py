@@ -364,7 +364,8 @@ TARGET_SETTING_PREFIXES = ("INFOPLIST_KEY_",)
 SCHEME_KEYS = {"build", "run", "test"}
 BUILD_ACTIONS = {"run", "test", "profile", "analyze", "archive"}
 CONFIGURATIONS = {"Debug", "Release"}
-PATH = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+# A relative path of ordinary names: no `..`, no `.`, nothing hidden, not absolute, no `~` or variable.
+PATH = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*")
 NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 
@@ -411,7 +412,7 @@ class SpecAudit:
             self.problem(f"{where}: `${{…}}` is expanded from the environment when the project is generated")
 
     def inside_apps(self, value, where):
-        if not isinstance(value, str) or not PATH.fullmatch(value) or ".." in value.split("/"):
+        if not isinstance(value, str) or not PATH.fullmatch(value):
             self.problem(f"{where}: `{value}` must be a path inside Apps/ (no `..`, not absolute)")
 
     def settings(self, node, where, exact, prefixes, required=None):
