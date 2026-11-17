@@ -89,7 +89,7 @@ enum Screens {
 
         #if os(macOS)
             let window = app.windows.firstMatch
-            guard window.waitForExistence(timeout: 10) else {
+            guard window.appears(within: 10) else {
                 XCTFail("no window to capture for \(label)", file: file, line: line)
                 return
             }

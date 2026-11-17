@@ -194,6 +194,28 @@ class DiagnoseTaskTests(support.ScriptTestCase):
         self.assertEqual([line.split("] ")[-1] for line in tail if line.startswith("  STEP ")],
                          ["launch", "tourVaultsAndSharing"])  # fmt: skip
 
+    def test_the_session_log_before_a_query_timeout_is_shown(self):
+        """A stalled query is reported minutes after it began, and the session log runs on for thousands of lines
+        after: what XCUITest saw while it waited must be printed from where it is, not from the file's end."""
+        self.install("xcrun", FAKE_XCRUN)
+        os.makedirs(self.path("TestResults", "iOS.xcresult"))
+        self.write("summary.json", json.dumps(summary(failed=1, failures=[("ATests/testA()", "timed out")])))
+        lines = [f"line {number}" for number in range(1, 1001)]
+        lines[399] = "10:54:36 Failed to get matching snapshots: Timed out while evaluating UI query."
+        self.write(os.path.join("diagnostics", "Runner", "Session-WatchwordUITests-1.log"), "\n".join(lines) + "\n")
+        result = self.run_process(
+            ["bash", DIAGNOSE], usage_results="TestResults", STUB_SUMMARY=self.path("summary.json"),
+            STUB_DIAGNOSTICS=self.path("diagnostics"),
+        )  # fmt: skip
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shown = result.stdout.splitlines()
+        heading = "::group::iOS: Runner/Session-WatchwordUITests-1.log, lines 250 to 400, before a UI query timed out"
+        start = shown.index(heading)
+        self.assertEqual(shown[start + 1], "line 250")
+        self.assertEqual(shown[start + 151], lines[399])
+        self.assertEqual(shown[start + 152], "::endgroup::")
+        self.assertTrue(shown[-1].startswith("UI-test summary: 0 passed, 1 failed"))
+
     def test_no_bundles_still_ends_in_the_summary(self):
         os.makedirs(self.path("TestResults"))
         result = self.run_process(["bash", DIAGNOSE], usage_results="TestResults")
