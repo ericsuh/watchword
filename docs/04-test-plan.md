@@ -126,8 +126,9 @@ with password re-entry, import of 1PUX/CSV fixtures.
   screen (an open account screen is closed and Settings opened first), waits are bounded (a missing element fails in
   seconds), and every such failure attaches the whole element tree (`attachTree`), kept whether or not the test
   passes. To keep the iOS job short, `DeviceRevocationTests` is one launch; `ImportExportTests` is two (import with a lock
-  during the review; export, a lock during the report, and a restore), each within its allowance, and prints a
-  timestamped `STEP` line before each step. Sheets the account screens open close by clearing
+  during the review; export, a lock during the report, and a restore), each within its allowance. The long tests
+  (the tour, import and export, sharing, devices, the quarantine) print `STEP <time> [<test>] <step>` before each step
+  (`XCTestCase.step`), which `app:diagnose` gathers at the end of a failed job's log (below). Sheets the account screens open close by clearing
   their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS. The macOS window
   (820×600) and every sheet fit a 1024×768 screen with the menu bar, as the CI runners have: content scrolls, and
   Done, Cancel and confirm buttons are toolbar items, always in view (a 780-point window put Settings' Done below the
@@ -142,9 +143,10 @@ with password re-entry, import of 1PUX/CSV fixtures.
   frames, the area judged by, the buttons on screen, the start of the tree), and `mise run app:diagnose` prints the
   failed tests' text attachments (`xcresulttool export attachments --only-failures`, capped), so a failure can be
   read from the job log alone. On iOS a row is judged against the window alone, with no query for its container:
-  those queries, made on every check, made each step of an iOS run several seconds long. Every test sets an
-  `executionTimeAllowance` (300 s, the tour 1200 s), which `app:test` turns on (`-test-timeouts-enabled YES`, a
-  default of 300 s and a ceiling of 1500 s), so a hang fails that test with a report. A text expected below the fold (an
+  those queries, made on every check, made each step of an iOS run several seconds long, and the window is the app's
+  own frame there (one query, not two). Every test sets an `executionTimeAllowance` (600 s, the tour 1800 s), which
+  `app:test` turns on (`-test-timeouts-enabled YES`, a default of 600 s and a ceiling of 2400 s), so a hang fails that
+  test with a report. A text expected below the fold (an
   export's report) is scrolled to as well.
 - Their logic is tested on Linux without a simulator: every account screen's state and decisions are a model in
   `WatchwordPresentation` (`02-architecture.md` §15), and `WatchwordPresentationTests` drives those models over real
@@ -969,11 +971,18 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   and `sips` (what it writes, announces and summarises when a capture fails), and the two inline scripts of
   `screenshots.yml`, read out of the file and run against a stand-in `gh` and `curl` (who can start a capture, what
   the comment job will and will not post or link, and which comment it will overwrite) [`lint`, `test:scripts`].
-- `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator, one matrix leg each on
-  `xcode-27`, with the AutoFill Settings attempt marked `continue-on-error`. The iOS leg boots its
+- `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator on `xcode-27`: one leg for macOS, and the
+  iOS UI tests split over four legs that run side by side, because one simulator running them all took longer than a
+  job may: the tour; `ImportExportTests`; `VaultSharingTests` and `DeviceRevocationTests`; and the rest (the other
+  three groups skipped, so a new class lands there), each passed to `app:test` as comma-separated `--only-testing` or
+  `--skip-testing` identifiers, each with a job limit of its tests' allowances, a build and headroom. The last leg
+  also makes the AutoFill Settings attempt, marked `continue-on-error`. An iOS leg boots its
   simulator and waits for the boot to finish (`simctl bootstatus -b`) before testing, because a UI-test runner
   started on a half-booted device dies before any test runs. When a leg fails, `app:diagnose` prints its
-  result bundle's summary, runner logs and crash reports into the job log. It no longer skips: a
+  result bundle's summary, runner logs and crash reports into the job log, and last of all each failed test's
+  failure messages and last 30 `STEP` lines (from `app:test`'s copy of xcodebuild's output and the runner's own) and
+  one line, `UI-test summary: N passed, N failed: <names>` (`diagnose-summary.py`, tested by `test:scripts` over
+  made-up summaries and logs). It no longer skips: a
   missing `Apps/project.yml` fails `app:generate` [`app:test macos`, `app:test ios`]. The macOS scheme includes the app-hosted
   `WatchwordKeychainTests` bundle, unentitled, so it compiles and its round trip skips; the signed
   run is local only (`app:test-keychain`, §6.2), because CI has no provisioning profile.
@@ -982,8 +991,8 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
 
 - `required` (`Required checks`): needs every job above and fails unless each succeeded. Branch
   protection requires this one check (`08-repository-hardening.md` §5), so every job above blocks a
-  merge, including both app-test legs, and a runner bump that renames a matrix leg needs no
-  protection change.
+  merge, including every app-test leg (a matrix job's result is all its legs'), and a runner bump or a regrouping
+  that renames a matrix leg needs no protection change.
 
 - `screenshots.yml`: not a gate. On the `screenshots` label (and each push while a pull request carries it), a
   same-repository head commit whose message has a line that is exactly `[screenshots]`, or a dispatch, it runs the

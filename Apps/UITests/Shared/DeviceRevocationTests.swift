@@ -11,23 +11,27 @@ final class DeviceRevocationTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         // A hang fails with a report rather than eating the job (`app:test` turns the allowances on).
-        executionTimeAllowance = 300
+        executionTimeAllowance = 600
     }
 
     @MainActor
     func testPasswordChangedElsewhereThenRevokeThatDevice() throws {
+        step("launch")
         let app = XCUIApplication.launchedWithAccount()
         let password = OnboardingAndUnlockTests.password
         app.openSettings()
         // With nothing to send yet, the first sync's line may say only "Up to date."; every line ends in a full stop.
         app.syncNow(expecting: ".")
+        step("the other device joins")
         app.runPeerHook(AccessibilityID.Debug.peerJoin, expecting: "joined")
+        step("the password changed elsewhere")
         app.runPeerHook(AccessibilityID.Debug.peerPassword, expecting: "password was changed")
         app.syncNow(expecting: "new account password")
         app.waitForText("changed on another device", in: AccessibilityID.Settings.syncNotice, timeout: 5)
         app.closeSettings()
 
         // The old password is refused with the way out; this device's password, through that way, opens it.
+        step("lock and unlock")
         app.backToList()
         app.buttons["items.lock"].firstMatch.click()
         let unlock = app.secureTextFields["unlock.password"]
@@ -41,6 +45,7 @@ final class DeviceRevocationTests: XCTestCase {
         XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 15), app.debugDescription)
 
         // The device that changed it is removed, with a new password.
+        step("devices: revoke")
         app.openScreen(AccessibilityID.Settings.devices)
         let other = UITestNames.otherDevice
         XCTAssertTrue(
@@ -56,6 +61,7 @@ final class DeviceRevocationTests: XCTestCase {
         XCTAssertFalse(app.element(AccessibilityID.Devices.revoke(other)).exists, "a removed device offered again")
         app.closeScreen()
         app.closeSettings()
+        step("the new password")
         app.lockAndUnlock(password: Self.newPassword)
     }
 }

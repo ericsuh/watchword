@@ -3,7 +3,7 @@
 #USAGE arg "<gate>" help="The gate to run, as its mise task name" {
 #USAGE   choices "build" "test" "test:adversarial" "build:strict" "lint" "app:test" "app:screenshots" "check"
 #USAGE }
-#USAGE flag "--filter <pattern>" help="For `test`: a `swift test --filter` regex. For `app:test` (with ios or macos): an xcodebuild `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Other gates take none. It must match at least one test and must not start with `-`; write it as `--filter=<pattern>`"
+#USAGE flag "--filter <pattern>" help="For `test`: a `swift test --filter` regex. For `app:test` (with ios or macos): xcodebuild `-only-testing` identifiers, comma-separated, such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Other gates take none. It must match at least one test and must not start with `-`; write it as `--filter=<pattern>`"
 #USAGE flag "--platform <platform>" default="macos" help="For `app:test` and `app:screenshots`: which app's scheme to test or tour" {
 #USAGE   choices "macos" "ios" "all"
 #USAGE }
@@ -83,8 +83,10 @@ fi
 #   test:adversarial  adversarial-tests
 #   build:strict      strict-memory-safety: `build:strict --require --verbose`, then audit:unsafe
 #   lint              lint: `lint`, then `test:scripts`
-#   app:test          app-tests: `app:test <platform> --results TestResults`, without the iOS leg's best-effort AutoFill
-#                     step. `all` runs both schemes in one job, where ci.yml runs one job per platform
+#   app:test          app-tests: `app:test <platform> --results TestResults`, then `app:diagnose` if it failed, without
+#                     the best-effort AutoFill step. `all` runs both schemes in one job, and ios every iOS UI test in
+#                     one, where ci.yml runs macOS as one leg and the iOS tests as four; a filter of comma-separated
+#                     identifiers runs one of those groups
 #   app:screenshots   screenshots.yml's capture job: `app:screenshots <platform>`, with text previews of each screen in
 #                     the log, and `app:diagnose` on each result bundle if the tour fails. `all` runs both in one job
 #   check             no ci.yml job: mise.toml's local aggregate of lint, audit and test
@@ -123,6 +125,10 @@ case "$gate" in
     else
       step app:test "$platform" --results TestResults
     fi
+    if [ -n "$failed" ]; then
+      # What ci.yml's diagnose step prints, ending in each failed test's last STEP lines and the "UI-test summary" line.
+      mise run app:diagnose TestResults 2>&1 | tee -a "$log" || true
+    fi
     ;;
   app:screenshots)
     step app:screenshots "$platform" "--appearance=$appearance" "--device=$device" --results TestResults/Screenshots \
@@ -158,6 +164,6 @@ fi
 if [ -n "$failed" ]; then
   echo
   echo "=== Failure summary: $failed ==="
-  grep -E "error:|✘|FAILED|Failing tests|failed after|\*\* TEST FAILED|^[[:space:]]+[A-Za-z]+Tests[./]" "$log" | tail -n 80 || true
+  grep -E "error:|✘|FAILED|Failing tests|failed after|\*\* TEST FAILED|^UI-test summary:|^[[:space:]]+[A-Za-z]+Tests[./]" "$log" | tail -n 80 || true
 fi
 exit "$status"

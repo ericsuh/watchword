@@ -8,11 +8,12 @@ final class VaultSharingTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         // A hang fails with a report rather than eating the job (`app:test` turns the allowances on).
-        executionTimeAllowance = 300
+        executionTimeAllowance = 600
     }
 
     @MainActor
     func testCreateRenameShareAndInvite() throws {
+        step("launch")
         let app = XCUIApplication.launchedWithAccount()
         // The household member checks the owner's signatures against its registry, which the first sync publishes.
         app.openSettings()
@@ -20,6 +21,7 @@ final class VaultSharingTests: XCTestCase {
         app.syncNow(expecting: ".")
 
         // Create and rename.
+        step("vaults: create and rename")
         app.openScreen(AccessibilityID.Settings.vaults)
         XCTAssertTrue(app.element(AccessibilityID.Vaults.row("Personal")).waitForExistence(timeout: 10))
         app.tap(AccessibilityID.Vaults.add)
@@ -34,9 +36,11 @@ final class VaultSharingTests: XCTestCase {
         app.waitForText("Family", in: AccessibilityID.Vault.name, timeout: 10)
 
         // Share, then invite: the safety number is shown and must be confirmed before a role can be chosen.
+        step("share")
         app.tap(AccessibilityID.Vault.share)
         app.confirm("Share")
         XCTAssertTrue(app.element(AccessibilityID.Vault.member("You")).waitForExistence(timeout: 10))
+        step("invite")
         app.tap(AccessibilityID.Vault.invite)
         app.tap(AccessibilityID.Invite.uiTestFill)
         app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
@@ -53,6 +57,7 @@ final class VaultSharingTests: XCTestCase {
         app.closeScreen()
 
         // The other person accepts; after a sync the owner lists them, verified, with the role they were given.
+        step("the other person accepts")
         app.runPeerHook(AccessibilityID.Debug.householdAccept, expecting: "accepted the invitation")
         app.syncNow(expecting: ".")
         app.openScreen(AccessibilityID.Settings.vaults)

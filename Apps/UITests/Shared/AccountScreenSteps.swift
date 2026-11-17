@@ -84,13 +84,17 @@ extension XCUIApplication {
         return nil
     }
 
-    /// The window's frame, joined with the frontmost sheet's on macOS (a sheet may reach past its window's edge).
+    /// The window's frame, joined with the frontmost sheet's on macOS (a sheet may reach past its window's edge). On
+    /// iOS the app fills the screen, so its own frame is the window's, at one query rather than two (an existence
+    /// check and a frame): this is asked before every click, and each query is a snapshot of the whole tree.
     private var windowFrame: CGRect {
-        var frame = windows.firstMatch.exists ? windows.firstMatch.frame : .zero
-        #if os(macOS)
+        #if os(iOS)
+            return frame
+        #else
+            var frame = windows.firstMatch.exists ? windows.firstMatch.frame : .zero
             if let sheet = sheets.allElementsBoundByIndex.last, sheet.exists { frame = frame.union(sheet.frame) }
+            return frame
         #endif
-        return frame
     }
 
     /// Where `element` can be seen and clicked: inside its scrolling container, kept clear of the bars along that
@@ -382,5 +386,14 @@ extension XCUIApplication {
         app.launch()
         app.createAccount(password: OnboardingAndUnlockTests.password)
         return app
+    }
+}
+
+extension XCTestCase {
+    /// Prints `STEP <time> [<test>] <name>` before a step of a long UI test. `app:diagnose` prints the last of these
+    /// for every failed test at the end of the job log, so a test that stopped, even one whose app could not be
+    /// queried any more, says where it was.
+    func step(_ name: String) {
+        print("STEP \(Date().ISO8601Format()) [\(self.name)] \(name)")
     }
 }

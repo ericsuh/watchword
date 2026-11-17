@@ -50,8 +50,8 @@ mise run build:strict                                  # -strict-memory-safety, 
 # Apps (macOS only; mirrors the app-tests CI job). Each regenerates the project from Apps/project.yml first.
 mise run app:generate                                  # xcodegen; refuses an XcodeGen other than mise.toml's
 mise run app:build [ios|macos]                         # both by default; --configuration Release
-mise run app:test [ios|macos]                          # both by default; --only-testing <id> (needs a platform), --results, --simulator
-mise run app:diagnose [TestResults]                    # print a failed run's summary, runner logs and crash reports
+mise run app:test [ios|macos]                          # both by default; --only-testing/--skip-testing <ids,…> (need a platform), --results, --simulator
+mise run app:diagnose [TestResults]                    # a failed run's summary, runner logs, crash reports; ends in STEP lines and "UI-test summary"
 mise run app:screenshots [ios|macos]                   # the screenshot tour: Screenshots/<set>/*.png, index and a one-PNG contact sheet; --appearance dark, --device ipad
 mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
@@ -851,7 +851,8 @@ directions are tested; keep both when adjusting constants.
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 
 - **Script tests** (`Tests/ScriptTests`, Python `unittest`, `mise run test:scripts`) cover the scripts Swift tests
-  cannot reach: `screenshots-index.py`, the `app:screenshots` task, and the inline steps of `screenshots.yml`, each run
+  cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, and the inline steps of
+  `screenshots.yml`, each run
   as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun` and `sips`. Standard library only, Python 3.9 syntax
   (Xcode's `python3`), and bash that macOS's 3.2 runs.
 
@@ -861,7 +862,8 @@ claiming a layer is covered.
 ## CI
 
 `.github/workflows/ci.yml` — `package-tests` (2-runner matrix), `adversarial-tests`,
-`strict-memory-safety`, `lint`, `app-tests` (macOS and iOS-simulator legs), and `required` (`Required checks`), which
+`strict-memory-safety`, `lint`, `app-tests` (a macOS leg and four iOS-simulator legs, each a group of UI-test classes
+passed to `app:test` as `--only-testing`/`--skip-testing`), and `required` (`Required checks`), which
 fails unless every other job succeeded and is the one check branch protection names, so renaming a matrix leg for a
 runner bump never strands `main` waiting on a check that no longer reports. Everything Xcode-, AppKit- or
 screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is

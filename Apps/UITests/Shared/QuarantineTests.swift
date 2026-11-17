@@ -8,18 +8,21 @@ final class QuarantineTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         // A hang fails with a report rather than eating the job (`app:test` turns the allowances on).
-        executionTimeAllowance = 300
+        executionTimeAllowance = 600
     }
 
     @MainActor
     func testDiscardAHeldAsideVersion() throws {
+        step("launch")
         let app = XCUIApplication.launchedWithAccount()
         app.addItem(title: "Library")
         app.openSettings()
         app.syncNow()
+        step("the implausible edit")
         app.runPeerHook(AccessibilityID.Debug.peerImplausible, expecting: "implausible edit")
         app.syncNow(expecting: "held for review")
 
+        step("quarantine: discard")
         app.openScreen(AccessibilityID.Settings.quarantine)
         let row = app.element(AccessibilityID.Quarantine.row(0))
         XCTAssertTrue(row.waitForExistence(timeout: 15), app.debugDescription)

@@ -19,7 +19,7 @@ final class ScreenshotTourTests: XCTestCase {
         continueAfterFailure = false
         // A hang fails with a report rather than eating the job (`app:test` turns the allowances on). The tour
         // is every flow at once.
-        executionTimeAllowance = 1200
+        executionTimeAllowance = 1800
     }
 
     @MainActor
@@ -28,6 +28,7 @@ final class ScreenshotTourTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = Screens.launchArguments
         app.launchEnvironment["WATCHWORD_UITEST_PASSWORD"] = password
+        step("launch")
         app.launch()
         Screens.prepareDevice()
 
@@ -125,6 +126,7 @@ final class ScreenshotTourTests: XCTestCase {
         unlock.typeText(password + "\n")
         XCTAssertTrue(app.itemRow("Library").waitForExistence(timeout: 15), app.debugDescription)
 
+        step("settings and the conflict")
         // Settings. A --uitest launch adds the section that drives the other device; a release build has none.
         app.openSettings()
         Screens.capture("settings", in: app, showing: "Settings, with the UI-test section that drives the other device")
@@ -167,10 +169,15 @@ final class ScreenshotTourTests: XCTestCase {
 
         // The quarantine before sharing, as in QuarantineTests: the other device then writes into the Personal vault
         // alone.
+        step("tourQuarantine")
         tourQuarantine(app)
+        step("tourVaultsAndSharing")
         tourVaultsAndSharing(app)
+        step("tourSecurityReport")
         tourSecurityReport(app)
+        step("tourImportExportAndRestore")
         tourImportExportAndRestore(app)
+        step("tourPasswordChangeAndDevices")
         tourPasswordChangeAndDevices(app, password: password)
 
         Screens.attachIndex()

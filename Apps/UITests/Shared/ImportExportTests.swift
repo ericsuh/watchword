@@ -14,11 +14,7 @@ final class ImportExportTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         // A hang fails with a report rather than eating the job (`app:test` turns the allowances on).
-        executionTimeAllowance = 300
-    }
-
-    func step(_ name: String) {
-        print("STEP \(Date().ISO8601Format()) \(name)")
+        executionTimeAllowance = 600
     }
 
     @MainActor
