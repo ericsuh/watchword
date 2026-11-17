@@ -12,9 +12,13 @@
 # The app-tests CI job. UI tests launch the app with `--uitest`, which (Debug only) swaps in in-memory ports, so no
 # App Group or Keychain access is needed. Signing settings are in signing.sh, shared with `app:build`.
 # macOS UI tests also need automation mode enabled on the machine, which needs an administrator; CI runners have it.
+# The package commits Xcode resolves are checked before anything is built and again after the tests (packages.sh): the
+# task fails unless they are the pinned ones, whatever the tests said.
 set -euo pipefail
 # shellcheck source=signing.sh
 source "$(dirname "${BASH_SOURCE[0]}")/signing.sh"
+# shellcheck source=packages.sh
+source "$(dirname "${BASH_SOURCE[0]}")/packages.sh"
 
 platform="$usage_platform"
 if { [ -n "${usage_only_testing:-}" ] || [ -n "${usage_skip_testing:-}" ]; } && [ "$platform" = all ]; then
@@ -53,6 +57,8 @@ run_tests() { # run_tests <action> <scheme> <destination> <result bundle name> <
   fi
 }
 
+resolve_packages
+
 # Each platform runs even if the other failed (a Mac without automation mode fails the macOS UI tests), and the task
 # fails if either did.
 failed=""
@@ -81,6 +87,8 @@ if [ "$platform" = ios ] || [ "$platform" = all ]; then
     failed="$failed iOS(build)"
   fi
 fi
+
+check_resolved_packages "After testing" || failed="$failed packages(not the pinned commits)"
 
 if [ -n "$failed" ]; then
   echo "::error::App tests failed:$failed"
