@@ -112,6 +112,19 @@ public struct SyncSummary: Hashable, Sendable {
         if !report.heldAside.isEmpty {
             parts.append("\(report.heldAside.count) change(s) in a shared vault held aside")
         }
+        if !report.collided.isEmpty {
+            parts.append("\(report.collided.count) change(s) held for review, named like a record of another vault")
+        }
+        if report.quarantineFull > 0 {
+            parts.append("\(report.quarantineFull) more could not be kept for review: the held-aside list is full")
+        }
+        // This device's own stream (review findings Z21, Z24): its changes are not going out. Worded without the two
+        // words the UI tests wait for.
+        if report.ownStreamExhausted {
+            parts.append("this device's own changes cannot go out in one of its vaults")
+        } else if report.ownStreamUnverified != nil {
+            parts.append("this device's own changes are held back until its place in the sync storage is clear")
+        }
         if report.awaitingNewPassword { parts.append("waiting for the new account password") }
         return parts.isEmpty ? "Up to date." : sentence(parts)
     }

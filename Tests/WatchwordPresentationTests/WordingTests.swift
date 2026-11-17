@@ -21,6 +21,25 @@ struct WordingTests {
         #expect(SyncSummary.describe(report).contains("could not be reached"))
     }
 
+    @Test("a device whose own changes are not going out is told so, without the words the UI tests wait for")
+    func ownStreamHeldBack() {
+        var report = SyncReport()
+        report.ownStreamUnverified = 7
+        let held = SyncSummary.describe(report)
+        #expect(held.contains("held back"))
+        report.ownStreamExhausted = true
+        let exhausted = SyncSummary.describe(report)
+        #expect(exhausted.contains("cannot go out"))
+        report = SyncReport()
+        report.quarantineFull = 3
+        report.collided = [RecordKey(recordID: UUID(), kind: .item)]
+        let full = SyncSummary.describe(report)
+        #expect(full.contains("3 more could not be kept") && full.contains("another vault"))
+        for line in [held, exhausted, full] {
+            #expect(!line.contains("sent") && !line.contains("received"))
+        }
+    }
+
     @Test("a sync stopped by a newer format says to update the app (ADR 0009)")
     func updateRequired() {
         var vault = SyncReport()

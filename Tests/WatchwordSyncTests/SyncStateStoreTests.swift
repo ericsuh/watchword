@@ -367,7 +367,9 @@ struct SyncStateStoreContractTests {
 
     /// Review finding Z27: an entry is found without reading the quarantine, whole entries are compared (two that
     /// differ in one byte are two), and what a vault holds is counted per writing device.
-    @Test("the quarantine finds an entry and counts what it holds, per vault and device", arguments: StateStoreKind.available)
+    @Test(
+        "the quarantine finds an entry and counts what it holds, per vault and device",
+        arguments: StateStoreKind.available)
     func quarantineLookupAndUsage(_ kind: StateStoreKind) async throws {
         let store = try kind.make()
         let first = SyncFixtures.entry(4, version: 9)

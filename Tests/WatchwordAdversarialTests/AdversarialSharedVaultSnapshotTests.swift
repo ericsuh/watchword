@@ -53,7 +53,10 @@ extension AdversarialSharedVaultTests {
             vector: [ownerDevice: 1 << 48, thirdDevice: 1 << 48])
 
         let report = try await owner.session.syncAll()
-        #expect(report.vaults[vaultID]?.rejected.map(\.reason) == [.keyring(.untrustedAuthor(try await Self.deviceID(of: hostile)))])
+        #expect(
+            report.vaults[vaultID]?.rejected.map(\.reason) == [
+                .keyring(.untrustedAuthor(try await Self.deviceID(of: hostile)))
+            ])
         try await third.session.sync()
         let later = try await owner.session.save(Item(vaultID: vaultID, title: "Later", scopes: [], fields: []))
         let published = try await owner.session.syncAll()

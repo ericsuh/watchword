@@ -1704,7 +1704,7 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   claim to have seen a current member's edits that their stream has not published is a claim about edits that do not
   exist yet, which would supersede them when they are made, so the version waits for that stream (S46; one about this
   device's own edits is refused). A current member's device whose stream this device cannot read from its first
-  segment is not checked. A tombstone is judged the same way before it is applied or remembered
+  segment is not checked. A tombstone, from a segment or from a snapshot (Z21), is judged the same way before it is applied or remembered
   (`WriteJudge.admitsErasure`): its erasure summary is its author's clock, and one built on a late write would erase
   what its author was shown only through it, so it is held aside and the item stays (S45; `10-sync-correctness.md`
   §9). A value is judged by its **bytes, stamp included**
