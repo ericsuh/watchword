@@ -463,8 +463,13 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   deletion is done only when this device published a deletion at or after its stamp *and* the join already holds
   what it had seen; never skip one because another device's erasure, or this device's own earlier one, is stamped
   later (W13, W18).
-- The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;
-  a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
+- The next sequence number is never below the highest object of this device's own stream that verifies, and comes
+  from nothing else: never from a listed name (anyone can create one, Z24) and never from a snapshot's coverage
+  beyond what the stream can have got (Z21). An own-stream object that cannot be told from this device's own holds
+  publishing back (`ownStreamUnverified`); `push` never writes beyond `maximumSequence`. Every listed snapshot is
+  merged; a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
+- A record ID that a record of another vault holds on this device costs that entry alone (`SyncReport.collided`,
+  kept in the quarantine): never reject an object, or stop a stream, for it (Z22).
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
 - Every object carries two signatures over `name ‖ 0x00 ‖ envelope` under `SignatureDomain.logSegment`: the
   account key's and the writing device's own (`DualSignature`). `verify` accepts only a device the registry holds
@@ -495,6 +500,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   segment to judge it by).
 - Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
   `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
+- The state row is signed too (`SyncState.authenticator`, `SignatureDomain.syncState`, bound to the vault and the
+  device, Z20): its erasures become this device's signed tombstones and its merged vector signed coverage, so a row
+  the session did not sign is no state and the log is replayed. A field added to `SyncState` goes into
+  `authenticatedBytes`; read the row through the session's `syncState`, never `syncSettings.state`, wherever what
+  it says is acted on.
 
 ### `WatchwordSharing` invariants
 
@@ -679,7 +689,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   not remove them, and no screen may say it does; read-only is worded as a client rule, never as encryption (F4.5).
 - A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
   `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
-  judge a cut.
+  judge a cut. The only snapshots a shared vault reads are its owner's account's, from before it was shared, for
+  the gap collection left; their tombstones are judged like a segment's (Z21). Do not refuse them outright: a
+  stream whose first segments were collected would stop at every replay.
 - Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`) or re-verified on load; the owner's pin
   anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from (S26).
 
