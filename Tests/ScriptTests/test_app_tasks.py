@@ -14,6 +14,7 @@ leaves it is from its documented behaviour."""
 import json
 import os
 import re
+import shutil
 import sys
 import unittest
 
@@ -182,6 +183,160 @@ class ResolvedPackagesTests(AppTaskTestCase):
                     self.assertIn('source "$(dirname "${BASH_SOURCE[0]}")/packages.sh"', text)
                     self.assertIn("resolve_packages\n", text)
                     self.assertIn("check_resolved_packages ", text)
+
+
+MARKERS = ["--uitest", "WATCHWORD_UITEST_PASSWORD", "UI test: another device", "Lock now (UI test)"]
+MACOS_APP = "Release/Watchword.app/Contents/MacOS/Watchword"
+MACOS_EXTENSION = "Release/Watchword.app/Contents/PlugIns/AutoFillExtension-macOS.appex/Contents/MacOS/AutoFillExtension-macOS"
+IOS_APP = "Release-iphonesimulator/Watchword.app/Watchword"
+IOS_EXTENSION = "Release-iphonesimulator/Watchword.app/PlugIns/AutoFillExtension-iOS.appex/AutoFillExtension-iOS"
+# What a binary looks like to a search for text: strings between runs of other bytes.
+CLEAN = "\xcf\xfa\xed\xfe\x00\x00Account password\x00Unlock\x00\x01\x02"
+
+
+class ReleaseBuildTests(AppTaskTestCase):
+    def setUp(self):
+        super().setUp()
+        # The markers are checked against the sources, so the task reads the repository's own.
+        shutil.copytree(os.path.join(support.ROOT, "Apps", "Shared"), self.path("Apps", "Shared"))
+
+    def products(self, **changes):
+        files = {"macos": {MACOS_APP: CLEAN, MACOS_EXTENSION: CLEAN}, "ios": {IOS_APP: CLEAN, IOS_EXTENSION: CLEAN}}
+        for platform, platform_changes in changes.items():
+            for path, contents in platform_changes.items():
+                if contents is None:
+                    del files[platform][path]
+                else:
+                    files[platform][path] = contents
+        return json.dumps(files)
+
+    def release(self, platform="macos", products=None, **environment):
+        environment.setdefault("STUB_PRODUCTS", products or self.products())
+        return self.task("release", usage_platform=platform, usage_derived_data="derived", **environment)
+
+    def test_a_release_build_without_the_markers_passes(self):
+        result = self.release()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.actions(), ["-resolvePackageDependencies", "build"])
+        build = self.calls()[1]
+        self.assertEqual(build[build.index("-configuration") + 1], "Release")
+        self.assertEqual(build[build.index("-derivedDataPath") + 1], "derived/macos")
+        self.assertEqual(build[build.index("-scheme") + 1], "Watchword-macOS")
+        self.assertIn("Release build of macOS: none of the 4 Debug-only markers", result.stdout)
+
+    def test_both_apps_are_built_and_read(self):
+        result = self.release(platform="all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.actions(), ["-resolvePackageDependencies", "build", "build"])
+        self.assertIn("Release build of iOS: none of", result.stdout)
+        self.assertIn("Release build of macOS: none of", result.stdout)
+
+    def test_the_markers_the_task_reads_for_are_the_finding_s(self):
+        with open(os.path.join(TASKS, "release"), encoding="utf-8") as handle:
+            text = handle.read()
+        for marker in MARKERS:
+            self.assertIn(f'  "{marker}"\n', text)
+
+    def test_a_debug_only_string_in_the_app_fails(self):
+        """Finding: nothing would have noticed a Release build that carried the `--uitest` switch."""
+        for marker in MARKERS + ["--uitest-appearance="]:
+            with self.subTest(marker=marker):
+                binary = CLEAN + marker + "\x00\x07"
+                result = self.release(products=self.products(macos={MACOS_APP: binary}))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("::error::The Release build of macOS contains", result.stdout)
+                self.assertIn("derived/macos/Build/Products/" + MACOS_APP, result.stdout)
+                self.assertIn("::error::Release builds failed inspection: macOS", result.stdout)
+
+    def test_the_embedded_extension_is_read_too(self):
+        binary = CLEAN + "WATCHWORD_UITEST_PASSWORD\x00"
+        result = self.release(platform="ios", products=self.products(ios={IOS_EXTENSION: binary}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("derived/ios/Build/Products/" + IOS_EXTENSION, result.stdout)
+
+    def test_one_platform_s_failure_does_not_hide_the_other_s(self):
+        binary = CLEAN + "UI test: another device\x00"
+        products = self.products(ios={IOS_APP: binary}, macos={MACOS_APP: binary})
+        result = self.release(platform="all", products=products)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::Release builds failed inspection: iOS macOS", result.stdout)
+
+    def test_a_product_that_is_not_there_is_a_failure(self):
+        for name, products in (
+            ("no app", self.products(macos={MACOS_APP: None, MACOS_EXTENSION: None})),
+            ("no extension in it", self.products(macos={MACOS_EXTENSION: None})),
+            ("two apps", self.products(macos={"Debug/Watchword.app/Contents/MacOS/Watchword": CLEAN})),
+        ):
+            with self.subTest(case=name):
+                result = self.release(products=products)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("::error::", result.stdout)
+                self.assertNotIn("none of the 4 Debug-only markers", result.stdout)
+
+    def test_an_earlier_product_is_not_what_is_read(self):
+        stale = self.path("derived", "macos", "Build", "Products", "Release", "Watchword.app", "Contents", "MacOS")
+        os.makedirs(stale)
+        with open(os.path.join(stale, "Leftover"), "w", encoding="utf-8") as handle:
+            handle.write("--uitest")
+        result = self.release()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_marker_that_left_the_sources_makes_the_list_stale(self):
+        """Renaming the Settings section must not turn the search for its old name into a pass."""
+        path = self.path("Apps", "Shared", "SettingsView.swift")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn('Section("UI test: another device")', text)
+        self.write(os.path.join("Apps", "Shared", "SettingsView.swift"), text.replace("UI test: another device", "Peer"))
+        result = self.release()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('"UI test: another device" is no longer in Apps/Shared', result.stdout)
+        self.assertEqual(self.actions(), [])
+
+    def test_a_release_only_build_error_fails_the_task(self):
+        result = self.release(STUB_EXIT="65")
+        self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+
+    def test_release_is_built_from_the_pinned_commits_only(self):
+        result = self.release(STUB_RESOLVED=self.pins(moved_tag))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.actions(), ["-resolvePackageDependencies"])
+
+    def test_the_markers_are_compiled_for_debug_only(self):
+        """Each marker's every use in the app's sources is inside `#if DEBUG`: what makes its absence the evidence."""
+        directory = os.path.join(support.ROOT, "Apps", "Shared")
+        for name in sorted(os.listdir(directory)):
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                depth, debug = 0, []
+                for number, line in enumerate(handle.read().splitlines(), 1):
+                    stripped = line.strip()
+                    if stripped.startswith("#if"):
+                        depth += 1
+                        if stripped == "#if DEBUG":
+                            debug.append(depth)
+                    elif stripped.startswith("#else") or stripped.startswith("#elseif"):
+                        if debug and debug[-1] == depth:
+                            debug.pop()
+                    elif stripped.startswith("#endif"):
+                        if debug and debug[-1] == depth:
+                            debug.pop()
+                        depth -= 1
+                    elif not stripped.startswith("//") and not debug:
+                        for marker in MARKERS:
+                            self.assertNotIn(f'"{marker}', line, f"{name}:{number} is compiled for Release")
+
+    def test_the_gate_is_a_required_job(self):
+        with open(os.path.join(support.ROOT, ".github", "workflows", "ci.yml"), encoding="utf-8") as handle:
+            workflow = handle.read()
+        job = workflow[workflow.index("\n  release-build:\n") : workflow.index("\n  required:\n")]
+        self.assertIn('run: mise run app:release "$PLATFORM"', job)
+        self.assertIn("      contents: read\n", job)
+        self.assertIn("          persist-credentials: false\n", job)
+        self.assertNotIn("continue-on-error", job)
+        for platform in ("macos", "ios"):
+            self.assertIn(f"            platform: {platform}\n", job)
+        needs = next(line for line in workflow.splitlines() if line.strip().startswith("needs: [package-tests"))
+        self.assertIn("release-build", needs)
 
 
 if __name__ == "__main__":

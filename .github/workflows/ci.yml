@@ -255,6 +255,44 @@ jobs:
           path: TestResults
           if-no-files-found: ignore
 
+  release-build:
+    # The Release configuration of both apps, which no other job compiles: every scheme and every test leg builds
+    # Debug. It finds a Release-only build error before a release does, and the task then reads the built app and its
+    # AutoFill extension for the text of the Debug-only UI-test facilities (the `--uitest` switch with its in-memory
+    # ports, KDF floor and no auto-lock; `UITestPeer`), failing if any is there. Unsigned on the simulator and ad hoc on
+    # macOS, as the test legs are; nothing is uploaded or shipped from here.
+    name: Release build (${{ matrix.name }})
+    runs-on: xcode-27
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            platform: macos
+          - name: iOS simulator
+            platform: ios
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        run: .github/scripts/select-xcode.sh 27.0
+
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+
+      # As in app-tests: XcodeGen at the version and SHA-256 in mise.lock; the task regenerates the project first.
+      - name: Install XcodeGen (mise, locked)
+        run: mise install xcodegen
+
+      - name: mise run app:release ${{ matrix.platform }}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: mise run app:release "$PLATFORM"
+
   required:
     # The one check branch protection on `main` requires (docs/08-repository-hardening.md §5). Matrix legs are named
     # after their runner and Xcode, or (app-tests) their group of tests, so a runner bump or a regrouping renames them,
@@ -264,7 +302,7 @@ jobs:
     # skipped required check counts as passing.
     name: Required checks
     if: always()
-    needs: [package-tests, adversarial-tests, strict-memory-safety, lint, app-tests]
+    needs: [package-tests, adversarial-tests, strict-memory-safety, lint, app-tests, release-build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
