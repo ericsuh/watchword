@@ -59,6 +59,22 @@
             #expect(violations == [])
         }
 
+        /// The renamed half of conflict copies (docs/02-architecture.md §7.5): `N 2.wwe` beside `N.wwe`. iCloud's own
+        /// conflict versions (`NSFileVersion`) exist only in a real ubiquity container and are not exercised here.
+        @Test("renamed duplicates are counted, handed over and deleted with their object under coordination")
+        func renamedCopies() async throws {
+            let transport = CoordinatedFixtures.transport(CoordinatedFixtures.temporaryRoot())
+            var next = 2
+            let violations = try await SyncTransportContract.heldCopies(transport) { name, bytes in
+                let url = try transport.base.fileURL(for: name)
+                let stem = url.deletingPathExtension().lastPathComponent
+                try Data(bytes).write(
+                    to: url.deletingLastPathComponent().appendingPathComponent("\(stem) \(next).wwe"))
+                next += 1
+            }
+            #expect(violations == [])
+        }
+
         @Test("an object not downloaded yet is listed, fetched as absent, blocks a create, and can be deleted")
         func placeholder() async throws {
             let root = CoordinatedFixtures.temporaryRoot()
@@ -155,6 +171,34 @@
             #expect(try await a.sync().segmentsWritten == 1)
             let report = try await b.sync()
             #expect(report.applied == 1)
+            #expect(try await b.item(item.id) == item)
+        }
+
+        @Test("an engine reads the genuine object from among renamed copies in the coordinated folder")
+        func engineAmongCopies() async throws {
+            let transport = CoordinatedFixtures.transport(CoordinatedFixtures.temporaryRoot())
+            let keys = FakeAccountKeys(seed: 12)
+            let vault = SyncTransportContract.vault
+            await keys.addVaultKey(vaultID: vault)
+            await keys.trust(device: SyncTransportContract.deviceA)
+            await keys.trust(device: SyncTransportContract.deviceB)
+            let a = SyncTestClient(
+                deviceID: SyncTransportContract.deviceA, vaultID: vault, keys: keys, transport: transport)
+            let b = SyncTestClient(
+                deviceID: SyncTransportContract.deviceB, vaultID: vault, keys: keys, transport: transport)
+            let item = try await a.save(
+                Item(
+                    id: UUID(), vaultID: vault, title: "Bank", scopes: [ServiceScope(host: "firstbank.co.uk")],
+                    fields: [Field(id: UUID(), kind: .password, label: "Password", value: "hunter22")]))
+            try await a.sync()
+            // The genuine object becomes the renamed copy, and junk takes its name.
+            let url = try transport.base.fileURL(for: SyncTransportContract.name)
+            let renamed = url.deletingLastPathComponent().appendingPathComponent(
+                url.deletingPathExtension().lastPathComponent + " 2.wwe")
+            try FileManager.default.moveItem(at: url, to: renamed)
+            try Data([0xBA, 0xD0]).write(to: url)
+            let report = try await b.sync()
+            #expect(report.applied == 1 && report.rejected.isEmpty && report.copiesRefused == 1)
             #expect(try await b.item(item.id) == item)
         }
     }
