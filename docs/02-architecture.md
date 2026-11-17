@@ -1942,6 +1942,24 @@ item has a strictly higher score. Shadowed items are never offered, listed, pre-
 on that host by the extension; they are reachable in the app only (F6.6; the extension's "other
 accounts on this site" list was removed by owner decision, 2026-11-16).
 
+**A vault is a trust domain (review finding Z60).** Shadowing is a statement by whoever wrote the more
+specific scope: "on this host, that other account is not the one". In a vault only this account writes, the
+person made it. In a shared vault any member who may write made it (adversary A4), and a member who saved
+an item one label below another member's own login used to take that login out of AutoFill there and stand
+as the destination of the next saved password or passkey. So the ranker is told which vaults other accounts
+write (`sharedVaults`, the session's answer and never an item's claim), and an item is shadowed only by a
+more specific match **in its own vault, or in a vault only this account writes**. The person's own more
+specific item still shadows a shared vault's (their AWS login keeps the household's Amazon login off the
+console); a shared vault's item never shadows an item of another vault. Where the two meet on a host both
+are offered, which is `chooseAmong`: nothing is suggested, filled or written without the person choosing
+between entries that name their vaults. `AutoFillGate.candidates(on:among:sharedVaults:)` is the one place
+`decide` and `authorize` rank, and it adds the second half of the rule: where the only items scoped to a
+host are in shared vaults, the host is still compared with what every *other* vault holds
+(`PhishingDetector.assess(host:againstItemsIn:sharedVaults:)`), and one that resembles a site saved there,
+or that cannot be verified by eye (a label mixing scripts, punycode that did not decode), is refused as
+`FillRefusal.resemblesSavedSite`. A scope recognises a host for its own vault and no further; the person's
+own scope for the host is what ends the refusal.
+
 Scenario S1: retail item scoped `amazon.com` (subdomains on); AWS item scoped
 `signin.aws.amazon.com` and `console.aws.amazon.com`. On `www.amazon.com`, only retail matches. On
 `signin.aws.amazon.com`, both match but AWS scores higher and retail is shadowed. The person can add
@@ -2090,16 +2108,17 @@ mirrors `ASCredentialServiceIdentifier`. It reaches the vault through one port:
 
 ```
 protocol CredentialVault            (VaultSession conforms; FakeCredentialVault in tests)
-  credentialItems()                 every readable item, archived and trashed included
+  credentialSnapshot()              every readable item, archived and trashed included; each vault's
+                                    name and whether other accounts write it; where a new item goes
   confirmUnlocked()                 throws `locked` unless unlocked now; the last call before a release
-  defaultVaultID()                  where a new item goes
   isBackedUp()                      whether items reach the sync store (the BS flag)
   saveCredentialItem(_:replacingVersion:)   create, or compare-and-swap on the version read
 ```
 
 Every method throws `CredentialVaultError`, and `locked` whenever there are no keys. The vault
-keeps owning versions, timestamps, history, sync metadata and the scope policy check. Item IDs
-should be unique in what `credentialItems()` returns, and the model does not rely on it: an ID two
+keeps owning versions, timestamps, history, sync metadata and the scope policy check. A vault the
+snapshot does not describe is taken to be shared. Item IDs
+should be unique in what `credentialSnapshot()` returns, and the model does not rely on it: an ID two
 items share (a member of a shared vault choosing a record ID, an item mid-move between vaults)
 names neither, so both keep ranking and neither is listed, released, written or published.
 
@@ -2139,6 +2158,27 @@ What holds across all of them:
   decides it (§9 above); the lists read the page through `AutoFillGate.page`, as a release does. Domain
   identifiers and passkeys are unchanged, and a QuickType fill on an `http` page cannot be refused,
   since the tap does not name the page.
+- **A vault is a trust domain (Z60).** The model reads, with the items, which vaults other accounts
+  write, and treats an item of such a vault as what a member said. It never shadows an item of
+  another vault (§9), so the person's own login stays listed and released beside it and the two are a
+  choice (`suggested` is `nil`); the person's own entries and candidates come first. Its scope does not
+  vouch for a look-alike: a host only shared vaults are scoped to that resembles a site in another
+  vault gets the `LookAlikeWarning` in place of a list, releases nothing, publishes nothing and is
+  never saved to silently. Nothing writes to it without UI: a conditional registration upgrades only
+  a login in a vault this account alone reads, and a silent save creates only in a default vault of
+  that kind. It is never the destination picked for the person
+  (`PasskeyRegistrationOptions.suggested`), and a new item never takes its scope
+  (`NewItemProposal.besideExisting` is built from the person's own items). Every `PasswordEntry`,
+  `PasskeyEntry`, `OneTimeCodeEntry`, `InsertableItem`, `SaveCandidate`,
+  `PasskeyRegistrationCandidate` and `NewItemProposal` carries an `EntryVault` (ID, name, `isShared`):
+  two rows a member made alike in title, user name and host differ there, and
+  `everyMemberSeesWhatIsSaved` is what a sheet states before a password or passkey is written to a
+  shared vault's item. The vault's name is a member's to choose, so the adapter shows `isShared`
+  wherever it shows the name. Published identities are unchanged in rule (§9.1: "no other item"
+  means of any vault), so a member can take a keyboard suggestion away by saving something below
+  it and can never direct one. Not covered: a relying party's reports and a `largeBlob` write still
+  reach a shared vault's item without extension UI; neither carries a secret of the person's into
+  the vault.
 - **Shadowed accounts are neither listed nor released.** An item that matches the host less
   specifically than another (F6.6) is not in the list (there is no "other accounts" part: listing
   what cannot be used served nothing; owner decision, 2026-11-16), and the gate refuses it even
@@ -2183,17 +2223,17 @@ What holds across all of them:
   would outrank them, and the gate would then refuse them there even when chosen: right for a
   different service under the same domain (S1), wrong for a second account on the same one, and
   the request cannot say which. So `NewItemProposal` reports `hiddenAccounts` and offers
-  `besideExisting`, the scope of the accounts already there (one the person gave an item), and the
-  person picks `newItem` or `newItemBesideExisting`. The passkey sheet's suggestion never hides
-  an account.
+  `besideExisting`, the scope of the person's own accounts already there (one the person gave an
+  item; a shared vault's item lends none), and the person picks `newItem` or
+  `newItemBesideExisting`. The passkey sheet's suggestion never hides an account.
 - **A registration never adds a scope.** A passkey joins an existing item only if the gate
   already authorises that item for the relying party, and an item holds at most eight. A login
   saved for `www.shop.example` is not for the relying party `shop.example`; the sheet names it
   under `relatedLogins`, the passkey goes to an item of its own, and joining the two means adding
   `shop.example` to the login in the app (F11.7). A conditional registration only ever adds a
-  passkey to the one saved password login for that relying party and user, and only to an item
-  that holds no passkey yet: every field of that request, the user handle included, is the
-  page's, so "one per account" would be no bound at all.
+  passkey to the one saved password login for that relying party and user, in a vault only this
+  account reads, and only to an item that holds no passkey yet: every field of that request, the
+  user handle included, is the page's, so "one per account" would be no bound at all.
 - **A remote party never deletes.** A report sets or clears a flag in `Field.meta`
   (`reportedUnusedAt`, `reportedUnknownAt`) or changes a passkey's account name, only on items the
   gate would release to the reporter, and at most once per field per day, because every change is
@@ -2212,8 +2252,14 @@ for the page's `passwordrules` and its mapping to `RandomPasswordPolicy`; the ge
 is checked against the parsed rules before it is returned), and `CredentialIdentityPublishing`.
 
 **`VaultSession` is the `CredentialVault`** (`VaultSession+AutoFill.swift`; `WatchwordKit` depends on
-`WatchwordAutoFill`, never the reverse). `credentialItems()` is every vault's items as `items()`
-presents them (read through their rows, canonical, what a vault's deletion left shown trashed). The
+`WatchwordAutoFill`, never the reverse). `credentialSnapshot()` is every vault's items as `items()`
+presents them (read through their rows, canonical, what a vault's deletion left shown trashed), less
+the vaults withheld from AutoFill (§8.10, Z45), with each vault described by `VaultInfo`: its name and
+`isShared`, which is `isMarkedShared` (§8.10: a ledger loaded, the account's signed marker, a key that
+arrived by grant, a sharing state that names the vault, or markers not read yet) and so the same fact
+every other sharing rule asks. The vaults are described after the items are read, and a vault is
+marked shared before another member's item can be merged into it. An extension process that was not
+given the sharing state sees every vault but the Personal one as withheld or shared. The
 store keeps one row per item ID whatever its vault and sync refuses a record naming an ID another
 vault holds, so an ID occurs once; a move is a copy under a derived ID and the original trashed in
 one commit, so the original is never fillable beside its copy. `saveCredentialItem` is a

@@ -639,9 +639,16 @@ struct AdversarialAutoFillRequestTests {
     /// the stores do today, and so cannot hold the state this adversary creates.
     struct LooseVault: CredentialVault {
         let items: [Item]
-        func credentialItems() async throws -> [Item] { items }
+        /// Vaults other accounts write. Every other vault an item names is the person's own.
+        var sharedVaults: Set<UUID> = []
+        func credentialSnapshot() async throws -> CredentialSnapshot {
+            CredentialSnapshot(
+                items: items,
+                vaults: Set(items.map(\.vaultID)).union([AutoFillFixtures.vaultID]).map {
+                    CredentialVaultInfo(id: $0, name: "", isShared: sharedVaults.contains($0))
+                }, defaultVaultID: AutoFillFixtures.vaultID)
+        }
         func confirmUnlocked() async throws {}
-        func defaultVaultID() async throws -> UUID { AutoFillFixtures.vaultID }
         func isBackedUp() async throws -> Bool { true }
         func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
             throw CredentialVaultError.failed("read-only")

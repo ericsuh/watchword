@@ -100,6 +100,76 @@ struct AdversarialPhishingTests {
 
     /// Punycode cannot be decoded without an IDNA table, so it gets the weaker warning rather
     /// than a claim about which site it imitates.
+    /// Threat: A4, a member of a shared vault, or A7 through an item a member imported: a scope for the look-alike
+    /// itself, in a vault other accounts write, used to make the host `recognized` before any resemblance was
+    /// computed (review findings Z60, Z65). A scope recognises a host for its own vault only. The person's own
+    /// scope for the host recognises it for everyone, and a shared vault's scope that resembles nothing saved
+    /// elsewhere is an ordinary match.
+    @Test("a scope in a shared vault does not make a look-alike of another vault's site recognised",
+        arguments: impersonatingHosts)
+    func sharedVaultScopeDoesNotRecognise(_ value: String) throws {
+        let shared = UUID()
+        let host = try Self.host(value)
+        let planted = Item(vaultID: shared, title: "Planted", scopes: [ServiceScope(host: host.value)], fields: [])
+        let assessment = PhishingDetector.assess(
+            host: host, againstItemsIn: Self.items + [planted], sharedVaults: [shared])
+        #expect(assessment.isSuspicious, "\(value)")
+        // Wherever the look-alike can be read (everything but punycode Foundation left encoded), the site is named.
+        #expect(assessment.impersonatesSavedSite || host.value.contains("xn--"), "\(value)")
+        // Taken as one pool, as it was: recognised.
+        #expect(PhishingDetector.assess(host: host, againstItemsIn: Self.items + [planted]) == .recognized)
+
+        let vouched = Item(vaultID: Self.vault, title: "Mine", scopes: [ServiceScope(host: host.value)], fields: [])
+        #expect(
+            PhishingDetector.assess(
+                host: host, againstItemsIn: Self.items + [planted, vouched], sharedVaults: [shared]) == .recognized)
+        // A second shared vault that holds the real site is protected from the first in the same way.
+        let other = UUID()
+        let theirs = Self.items.map { item -> Item in
+            var copy = item
+            copy.vaultID = other
+            return copy
+        }
+        #expect(
+            PhishingDetector.assess(host: host, againstItemsIn: theirs + [planted], sharedVaults: [shared, other])
+                .isSuspicious)
+        // In one shared vault alone, a member who can add the host could as well edit the item it resembles: only
+        // a host that cannot be read at all is still refused there.
+        let sameVault = Self.items.map { item -> Item in
+            var copy = item
+            copy.vaultID = shared
+            return copy
+        }
+        let within = PhishingDetector.assess(host: host, againstItemsIn: sameVault + [planted], sharedVaults: [shared])
+        #expect(!within.impersonatesSavedSite)
+    }
+
+    /// Threat: the same member, with a homograph of a site that only the shared vault holds, so no other vault's
+    /// scope names it. A label that mixes scripts cannot be verified by eye whoever saved it; a member's scope for
+    /// it is not the person's word. An ordinary host in a shared vault is an ordinary match.
+    @Test("a shared vault's scope is an ordinary match unless the host cannot be read")
+    func sharedVaultScopeForAnUnrelatedHost() throws {
+        let shared = UUID()
+        let streaming = Item(
+            vaultID: shared, title: "Streaming",
+            scopes: [ServiceScope(host: "streaming.example"), ServiceScope(host: "\u{0430}pple-tv.example")],
+            fields: [])
+        for value in ["streaming.example", "tv.streaming.example"] {
+            #expect(
+                PhishingDetector.assess(
+                    host: try Self.host(value), againstItemsIn: Self.items + [streaming], sharedVaults: [shared])
+                    == .recognized, "\(value)")
+        }
+        #expect(
+            PhishingDetector.assess(
+                host: try Self.host("\u{0430}pple-tv.example"), againstItemsIn: Self.items + [streaming],
+                sharedVaults: [shared]) == .suspicious(signals: [.mixedScript], impersonating: []))
+        #expect(
+            PhishingDetector.assess(
+                host: try Self.host("unrelated.example"), againstItemsIn: Self.items + [streaming],
+                sharedVaults: [shared]) == .unrecognized)
+    }
+
     @Test("a punycode host is flagged even without a named target")
     func punycodeIsFlagged() throws {
         let assessment = PhishingDetector.assess(host: try Self.host("xn--mazon-1nf.com"), against: Self.scopes)

@@ -785,6 +785,17 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   items do neither. The gate ranks among items with only the scopes `ScopePolicy` accepts, so a stored `com` scope
   matches nothing; the stored item is not rewritten. An item ID two readable items share names neither
   (`VaultSnapshot.duplicatedIDs`): both rank, neither is released. Use `snapshot.itemInUse(_:)`, not `all.first`.
+- **A vault is a trust domain** (Z60). `CredentialVault.credentialSnapshot()` returns the items *and* whose each
+  vault is (`CredentialVaultInfo.isShared`, the session's `isMarkedShared` through `VaultInfo.isShared`; a vault it
+  does not describe counts as shared). An item of a shared vault says what a member said (A4), so: it never shadows
+  an item of another vault (`ItemRanker`; the person's own items still shadow it, and each other); where the two
+  classes meet the answer is `chooseAmong`, never a suggestion or a silent fill; its scope does not vouch for a host
+  that resembles another vault's site, or that cannot be read (`FillRefusal.resemblesSavedSite`, the warning in place
+  of a list, until the person scopes an item of their own to the host); nothing writes to it without UI (the
+  conditional passkey upgrade, silent saves); it is never the pre-selected destination of a new passkey; a new item
+  never copies its scope; and every entry, candidate and proposal carries its `EntryVault`. In `WatchwordAutoFill`
+  never hand `snapshot.rankable` to `ItemRanker`, `AutoFillGate` or `PhishingDetector` yourself: use
+  `VaultSnapshot.candidates(on:)`, `offered(on:)`, `decide(for:)` and `assess(_:)`, which pass `sharedVaults`.
 - **The page, or nothing.** The gate is asked about a host only when the system named it for this request (list
   identifiers, a passkey's relying party, a save's identifier). A QuickType tap hands back the identity Watchword
   published and *not the page*, and the system chooses where to offer an identity (assume: anywhere under the
@@ -793,8 +804,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   never pass a page URL there, and build test inputs with `handedBack`. A passkey needs only the gate.
 - `CredentialIdentityPlanner` is a whole-vault function: a password or code identity exists only for a scope that
   covers its whole site (host equal to `PublicSuffix.broadestSite`, subdomains on, nothing excluded), with no other
-  item scoped below that host and none at that host sharing the suggested name; a passkey identity only when the
-  gate would release it. One item's change is published as the difference between the whole sets before and after.
+  item (of any vault) scoped below that host and none at that host sharing the suggested name; a passkey identity
+  only when the gate would release it. So a member of a shared vault can take a suggestion out of the keyboard and
+  never direct one. One item's change is published as the difference between the whole sets before and after.
 - No host, no secret. With no service identifier every gated request is refused (`noServiceIdentifier`), text
   included. The system's host-less text insertion is `textInsertionListWithoutHost()` /
   `textToInsertWithoutHost(for:)`, through `ManualChoice`, which gives only fields whose kind is not a secret. Do not
@@ -810,7 +822,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   offers their scope instead (`newItemBesideExisting`); the model never picks between the two unasked. No
   registration adds a scope to an item (F11.7); a login scoped under the relying party is only named
   (`relatedLogins`). A conditional registration adds a passkey to the one saved password login for that relying
-  party and user, and only if the item holds no passkey yet; an item holds at most `maximumPasskeysPerItem`.
+  party and user, in a vault only this account reads, and only if the item holds no passkey yet; an item holds at
+  most `maximumPasskeysPerItem`.
 - A remote party never deletes: reports set or clear `Field.meta` flags or rename a passkey's account, only on items
   the gate would release to the reporter, at most once per field per `reportInterval` (history is never pruned).
 - Locked is a state the model reports (`vaultLocked`, `requiresInteraction(.vaultLocked)`). Each request reads the
@@ -834,16 +847,23 @@ ServiceIdentifier (OS-supplied, attacker-influenced)
   → AutoFillGate.page          a URL whose scheme is http → .insecurePage (F6.9); domains pass
   → ScopeMatcher.match         exclusions first; exact = 2·labels+1, subdomain = 2·labels
   → ItemRanker.rank            top specificity wins; less specific matches are *shadowed*
-                               (keeps Amazon retail off the AWS console), ties are ambiguous
+                               (keeps Amazon retail off the AWS console), ties are ambiguous;
+                               an item of a shared vault shadows only within its own vault
+  → AutoFillGate.candidates    refuses a host only shared vaults are scoped to that resembles
+                               another vault's site (.resemblesSavedSite)
   → AutoFillGate.decide        .fill / .chooseAmong / .refuse(FillRefusal)
   → AutoFillGate.authorize     re-checks scope even for an explicit user choice (SEC6)
 ```
 
-Three invariants to preserve when touching this module:
+Four invariants to preserve when touching this module:
 
 - Comparison functions take `NormalizedHost`, never `String`, so an un-normalised identifier cannot
   reach a match. Keep that typing.
 - Normalisation may never *invent* a match. If an input is not unambiguously a hostname, throw.
+- A vault is a trust domain (Z60). `rank`, `candidates`, `decide`, `authorize` and `PhishingDetector.assess` take
+  `sharedVaults`, the vaults accounts other than this one may write: a scope there is a member's statement, so it
+  shadows nothing outside its vault and recognises a host for its own vault only. The default (`[]`) is for one
+  vault's items and for tests; anything that holds several vaults' items passes the session's answer.
 - Only `https` pages are filled (PRD F6.9, owner decision 2026-11-16). `decide` and `authorize` both start with
   `AutoFillGate.page`, which refuses an `http` URL as `FillRefusal.insecurePage` before matching, so no choice gets
   past it; anything in `WatchwordAutoFill` that lists, saves or generates for a page reads it through `page` too.

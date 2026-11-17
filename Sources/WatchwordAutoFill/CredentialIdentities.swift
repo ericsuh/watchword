@@ -160,17 +160,30 @@ public enum CredentialIdentityPlanner {
     /// A hostile or careless item (a thousand scopes, a hundred usernames) must not flood the store.
     public static let maximumIdentitiesPerItem = 64
 
-    /// The identities to publish for a vault holding exactly `items`.
+    /// The identities to publish for a vault holding exactly `items`, every one of them taken to be in a vault only
+    /// this account writes. For a caller with one private vault's items, and tests; what a session returns is
+    /// published through `identities(for: CredentialSnapshot)`, which knows which vaults are shared.
     public static func identities(for items: [Item]) -> [CredentialIdentity] {
-        let snapshot = VaultSnapshot(items)
+        let snapshot = VaultSnapshot(ownItems: items)
         return snapshot.all.flatMap { identities(for: $0, in: snapshot) }
     }
 
+    /// The identities to publish for what the vault returned.
+    public static func identities(for contents: CredentialSnapshot) -> [CredentialIdentity] {
+        identities(in: VaultSnapshot(contents))
+    }
+
+    static func identities(in snapshot: VaultSnapshot) -> [CredentialIdentity] {
+        snapshot.all.flatMap { identities(for: $0, in: snapshot) }
+    }
+
     /// What changes in the store when the vault's items go from `old` to `new`. Removals and additions are
-    /// disjoint.
+    /// disjoint. As `identities(for: [Item])`: the items are taken to be the person's own.
     public static func difference(from old: [Item], to new: [Item]) -> IdentityDifference {
-        let before = identities(for: old)
-        let after = identities(for: new)
+        difference(from: identities(for: old), to: identities(for: new))
+    }
+
+    static func difference(from before: [CredentialIdentity], to after: [CredentialIdentity]) -> IdentityDifference {
         let beforeSet = Set(before)
         let afterSet = Set(after)
         return IdentityDifference(
@@ -243,6 +256,11 @@ public enum CredentialIdentityPlanner {
         var takenNames: Set<String>
     }
 
+    /// "No other item" means no item of any vault. An item of a shared vault never shadows the person's own on a
+    /// page (`ItemRanker`), but it does stand beside it there, and that is a choice for the person, which a tap that
+    /// names no page cannot be: so a member of a shared vault can take a site's suggestion out of the keyboard by
+    /// saving something below it, and can never direct one. An item of a shared vault must also pass the gate for
+    /// its own host, which refuses one that resembles a site saved in another vault.
     private static func wholeSites(of item: Item, in snapshot: VaultSnapshot) -> [WholeSite] {
         var sites: [WholeSite] = []
         let others = snapshot.rankable.filter { $0.id != item.id }
@@ -252,6 +270,9 @@ public enum CredentialIdentityPlanner {
                 host.value == scope.host, PublicSuffix.broadestSite(of: host) == host.value,
                 !sites.contains(where: { $0.host == host })
             else { continue }
+            if snapshot.isShared(item) {
+                guard case .success = snapshot.candidates(on: host) else { continue }
+            }
             let below = "." + host.value
             var takenNames = Set<String>()
             var isOutranked = false
@@ -309,21 +330,54 @@ public protocol CredentialIdentityPublisher: Sendable {
 /// Publishing itself: the planner's output through the port.
 public enum CredentialIdentityPublishing {
     /// Publishes exactly the identities of `items`, replacing whatever was there. Run after every unlock, and after
-    /// sync changes items. Does nothing while the provider is not enabled.
+    /// sync changes items. Does nothing while the provider is not enabled. The items are taken to be the person's
+    /// own (`CredentialIdentityPlanner.identities(for: [Item])`); what a session returns goes through
+    /// `publishAll(_: CredentialSnapshot, to:)`.
     @discardableResult
     public static func publishAll(
         _ items: [Item], to publisher: any CredentialIdentityPublisher
     ) async throws -> [CredentialIdentity] {
+        try await publish(VaultSnapshot(ownItems: items), to: publisher)
+    }
+
+    /// Publishes exactly the identities of what the vault returned, replacing whatever was there.
+    @discardableResult
+    public static func publishAll(
+        _ contents: CredentialSnapshot, to publisher: any CredentialIdentityPublisher
+    ) async throws -> [CredentialIdentity] {
+        try await publish(VaultSnapshot(contents), to: publisher)
+    }
+
+    @discardableResult
+    static func publish(
+        _ snapshot: VaultSnapshot, to publisher: any CredentialIdentityPublisher
+    ) async throws -> [CredentialIdentity] {
         guard await publisher.state().isEnabled else { return [] }
-        let identities = CredentialIdentityPlanner.identities(for: items)
+        let identities = CredentialIdentityPlanner.identities(in: snapshot)
         try await publisher.replaceAll(with: identities)
         return identities
     }
 
     /// Publishes one item's change: `old` became `new`, where `nil` stands for an item that does not exist (created
-    /// or deleted). `all` supplies every item as it is after the change. One item's change can add or remove
-    /// another item's identities (a new, more specific account takes a less specific one out of the keyboard), so
-    /// the difference is taken between the whole sets before and after.
+    /// or deleted). `all` supplies every item as it is after the change, with its vaults. One item's change can add
+    /// or remove another item's identities (a new, more specific account takes a less specific one out of the
+    /// keyboard), so the difference is taken between the whole sets before and after.
+    @discardableResult
+    public static func publishChange(
+        from old: Item?, to new: Item?, all: @Sendable () async throws -> CredentialSnapshot,
+        to publisher: any CredentialIdentityPublisher
+    ) async throws -> IdentityDifference {
+        let state = await publisher.state()
+        guard state.isEnabled else { return IdentityDifference(removals: [], additions: []) }
+        let contents = try await all()
+        return try await publishChange(from: old, to: new, among: contents.items, state: state, to: publisher) {
+            var changed = contents
+            changed.items = $0
+            return VaultSnapshot(changed)
+        }
+    }
+
+    /// As above, for items that are all the person's own (tests, a single private vault).
     @discardableResult
     public static func publishChange(
         from old: Item?, to new: Item?, all: @Sendable () async throws -> [Item],
@@ -331,18 +385,28 @@ public enum CredentialIdentityPublishing {
     ) async throws -> IdentityDifference {
         let state = await publisher.state()
         guard state.isEnabled else { return IdentityDifference(removals: [], additions: []) }
-        let after = try await all()
+        return try await publishChange(from: old, to: new, among: try await all(), state: state, to: publisher) {
+            VaultSnapshot(ownItems: $0)
+        }
+    }
+
+    private static func publishChange(
+        from old: Item?, to new: Item?, among after: [Item], state: CredentialIdentityStoreState,
+        to publisher: any CredentialIdentityPublisher, snapshot: ([Item]) -> VaultSnapshot
+    ) async throws -> IdentityDifference {
         var before = after
         if let changed = new?.id ?? old?.id {
             before.removeAll { $0.id == changed }
         }
         if let old { before.append(old) }
-        let difference = CredentialIdentityPlanner.difference(from: before, to: after)
+        let published = CredentialIdentityPlanner.identities(in: snapshot(after))
+        let difference = CredentialIdentityPlanner.difference(
+            from: CredentialIdentityPlanner.identities(in: snapshot(before)), to: published)
         guard !difference.isEmpty else { return difference }
         if state.supportsIncrementalUpdates {
             try await publisher.apply(difference)
         } else {
-            try await publisher.replaceAll(with: CredentialIdentityPlanner.identities(for: after))
+            try await publisher.replaceAll(with: published)
         }
         return difference
     }

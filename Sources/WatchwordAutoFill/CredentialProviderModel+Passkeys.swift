@@ -168,7 +168,9 @@ extension CredentialProviderModel {
             let named = candidates.filter(\.matchesUserName)
             let newItem = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot).proposal
             let suggested: PasskeyDestination
-            if named.count == 1 {
+            // An item of a shared vault is never the destination picked for the person: every member of that vault
+            // could use the passkey, and a member can have put the item there for this (review finding Z60).
+            if named.count == 1, !named[0].vault.isShared {
                 suggested = .existingItem(named[0].itemID)
             } else {
                 suggested = newItem.besideExisting == nil ? .newItem : .newItemBesideExisting
@@ -217,8 +219,14 @@ extension CredentialProviderModel {
     /// (every field of the request, the user handle included, is the page's to vary, and each passkey added is a
     /// version in a history that is never pruned): it can turn the password login the person already keeps for
     /// that very site into a login with one passkey. Nor does it ever add a scope, so a login saved for
-    /// `www.shop.example` is not upgraded by a relying party `shop.example`. Anything else is
-    /// `refused(.noItemToUpgrade)`, and the site is free to ask again with UI.
+    /// `www.shop.example` is not upgraded by a relying party `shop.example`.
+    ///
+    /// And the item must be in a vault only this account reads (review finding Z60). A member of a shared vault who
+    /// may write (adversary A4) can put a login there with the person's user name, scoped to the relying party: it
+    /// would be the one match where the person's own login is saved for `www.` alone, and the new passkey's private
+    /// key would be sealed under a key the member holds, with nobody asked. An item of a shared vault is upgraded
+    /// only from the registration sheet, which names the vault. Anything else is `refused(.noItemToUpgrade)`, and
+    /// the site is free to ask again with UI.
     public func registerPasskeyWithoutInteraction(
         _ request: PasskeyRegistrationRequest, presence: PersonPresence = .absent
     ) async -> SilentOutcome<PasskeyRegistrationResult> {
@@ -229,15 +237,15 @@ extension CredentialProviderModel {
             }
             let snapshot = try await self.load()
             guard !request.user.name.isEmpty,
-                case .fill(let match) = AutoFillGate.decide(
-                    for: relyingParty.serviceIdentifier, among: snapshot.rankable),
-                snapshot.isInUse(match.item), match.item.field(.password) != nil,
+                case .fill(let match) = snapshot.decide(for: relyingParty.serviceIdentifier),
+                snapshot.isInUse(match.item), !snapshot.isShared(match.item), match.item.field(.password) != nil,
                 match.item.loginNames.contains(request.user.name),
                 // Any passkey field counts, whatever it decodes to and whoever it is for.
                 !match.item.fields.contains(where: { $0.kind == .passkey })
             else { throw Blocked.refused(.noItemToUpgrade) }
             return .success(
-                try await self.register(request, destination: .existingItem(match.item.id), presence: presence))
+                try await self.register(
+                    request, destination: .existingItem(match.item.id), presence: presence, withoutInteraction: true))
         }
         do {
             return try await run()
@@ -247,7 +255,8 @@ extension CredentialProviderModel {
     }
 
     private func register(
-        _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence
+        _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence,
+        withoutInteraction: Bool = false
     ) async throws -> PasskeyRegistrationResult {
         let relyingParty = try Self.validate(request)
         guard request.userVerification != .required || presence == .verified else {
@@ -265,8 +274,12 @@ extension CredentialProviderModel {
             guard item.fields.filter({ $0.kind == .passkey }).count < Self.maximumPasskeysPerItem else {
                 throw Blocked.refused(.passkey(.tooManyCredentials))
             }
+            // The items are read again here, so the check is made again on what is written to.
+            guard !withoutInteraction || !snapshot.isShared(item) else { throw Blocked.refused(.noItemToUpgrade) }
             existing = item
         }
+        let newItemVault = try Self.newItemVault(in: snapshot)
+        guard !withoutInteraction || existing != nil else { throw Blocked.refused(.noItemToUpgrade) }
         var newItemScope = relyingParty.scope
         if destination == .newItemBesideExisting,
             let shared = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot).sharedScope
@@ -332,15 +345,10 @@ extension CredentialProviderModel {
                 )
             }
             fields.append(field)
-            let vaultID: UUID
-            do {
-                vaultID = try await vault.defaultVaultID()
-            } catch {
-                throw Self.blocked(error)
-            }
             stored = try await save(
                 Item(
-                    id: itemID, vaultID: vaultID, title: relyingParty.value, scopes: [newItemScope], fields: fields),
+                    id: itemID, vaultID: newItemVault.id, title: relyingParty.value, scopes: [newItemScope],
+                    fields: fields),
                 replacing: nil)
         }
         return PasskeyRegistrationResult(
@@ -464,7 +472,8 @@ extension CredentialProviderModel {
             {
                 entries.append(
                     PasskeyEntry(
-                        itemID: item.id, fieldID: field.id, title: item.title, userName: credential.userName,
+                        itemID: item.id, fieldID: field.id, vault: snapshot.vault(of: item), title: item.title,
+                        userName: credential.userName,
                         relyingPartyID: credential.relyingPartyID, credentialID: credential.credentialID,
                         reportedUnknown: field.reportedUnknownAt != nil))
             }
@@ -480,7 +489,7 @@ extension CredentialProviderModel {
         guard let host = try? HostNormalizer.normalize(relyingParty.serviceIdentifier) else {
             throw Blocked.refused(.passkey(.relyingPartyRejected(.notCanonical(relyingParty.value))))
         }
-        return newItemProposal(
+        return try newItemProposal(
             title: relyingParty.value, narrow: relyingParty.scope, on: host, userName: userName, warning: nil,
             in: snapshot)
     }
@@ -501,7 +510,9 @@ extension CredentialProviderModel {
         }
         .prefix(maximumCredentialListCount)
         .map {
-            PasskeyRegistrationCandidate(itemID: $0.id, title: $0.title, userName: userName, matchesUserName: true)
+            PasskeyRegistrationCandidate(
+                itemID: $0.id, vault: snapshot.vault(of: $0), title: $0.title, userName: userName,
+                matchesUserName: true)
         }
     }
 
@@ -514,10 +525,13 @@ extension CredentialProviderModel {
         }
         let candidates = authorized.map {
             PasskeyRegistrationCandidate(
-                itemID: $0.item.id, title: $0.item.title, userName: $0.item.loginNames.first { !$0.isEmpty } ?? "",
+                itemID: $0.item.id, vault: snapshot.vault(of: $0.item), title: $0.item.title,
+                userName: $0.item.loginNames.first { !$0.isEmpty } ?? "",
                 matchesUserName: !userName.isEmpty && $0.item.loginNames.contains(userName))
         }
-        return candidates.filter(\.matchesUserName) + candidates.filter { !$0.matchesUserName }
+        // Items with the user name first, and among those the person's own before a shared vault's.
+        let ordered = candidates.filter { !$0.vault.isShared } + candidates.filter(\.vault.isShared)
+        return ordered.filter(\.matchesUserName) + ordered.filter { !$0.matchesUserName }
     }
 }
 

@@ -92,7 +92,7 @@ public actor CredentialProviderModel {
         for match in matching.primary where match.item.field(.password) != nil {
             let names = match.item.loginNames.filter { !$0.isEmpty }
             for name in names.isEmpty ? [""] : names {
-                passwords.append(Self.passwordEntry(match, userName: name))
+                passwords.append(Self.passwordEntry(match, userName: name, in: snapshot))
             }
         }
         var suggested: PasswordEntry?
@@ -214,7 +214,7 @@ public actor CredentialProviderModel {
             for field in item.fields where field.kind == .totp && (try? field.otpParameters()) != nil {
                 entries.append(
                     OneTimeCodeEntry(
-                        itemID: item.id, fieldID: field.id, title: item.title,
+                        itemID: item.id, fieldID: field.id, vault: snapshot.vault(of: item), title: item.title,
                         userName: item.loginNames.first { !$0.isEmpty } ?? "", label: field.label))
             }
         }
@@ -308,7 +308,9 @@ public actor CredentialProviderModel {
                 return .refused(.gate(.unusableIdentifier(error)))
             }
         }
-        let items = matching.primary.compactMap { Self.insertableItem($0.item, including: { $0 != .passkey }) }
+        let items = matching.primary.compactMap {
+            Self.insertableItem($0.item, in: snapshot, including: { $0 != .passkey })
+        }
         return .list(TextInsertionList(items: items, hostVerified: true))
     }
 
@@ -348,7 +350,7 @@ public actor CredentialProviderModel {
         switch await loadResult() {
         case .success(let snapshot):
             let items = snapshot.inUse.sorted { $0.title < $1.title }.compactMap {
-                Self.insertableItem($0, including: ManualChoice.isInsertable)
+                Self.insertableItem($0, in: snapshot, including: ManualChoice.isInsertable)
             }
             return .list(TextInsertionList(items: items, hostVerified: false))
         case .failure(.locked):
@@ -403,7 +405,7 @@ public actor CredentialProviderModel {
             guard let publisher = self.publisher else { return 0 }
             let snapshot = try await self.load()
             do {
-                return try await CredentialIdentityPublishing.publishAll(snapshot.all, to: publisher).count
+                return try await CredentialIdentityPublishing.publish(snapshot, to: publisher).count
             } catch {
                 throw Blocked.refused(.vault(.failed("identity store")))
             }
@@ -431,7 +433,7 @@ public actor CredentialProviderModel {
     /// The items of this request. Every vault error but `locked` is a refusal.
     func load() async throws -> VaultSnapshot {
         do {
-            return VaultSnapshot(try await vault.credentialItems())
+            return VaultSnapshot(try await vault.credentialSnapshot())
         } catch {
             throw Self.blocked(error)
         }
@@ -457,7 +459,7 @@ public actor CredentialProviderModel {
         if let publisher {
             let vault = vault
             _ = try? await CredentialIdentityPublishing.publishChange(
-                from: old, to: stored, all: { try await vault.credentialItems() }, to: publisher)
+                from: old, to: stored, all: { try await vault.credentialSnapshot() }, to: publisher)
         }
         return stored
     }
@@ -514,7 +516,7 @@ public actor CredentialProviderModel {
     ) -> InteractionReason? {
         if CredentialIdentityPlanner.identities(for: item, in: snapshot).contains(where: matches) { return nil }
         // Published for the item on its own, so it is the other items that stand in the way.
-        if CredentialIdentityPlanner.identities(for: item, in: VaultSnapshot([item])).contains(where: matches) {
+        if CredentialIdentityPlanner.identities(for: item, in: snapshot.only(item)).contains(where: matches) {
             return .ambiguousMatch
         }
         return .staleIdentity
@@ -529,52 +531,68 @@ public actor CredentialProviderModel {
     /// refuses an outranked item even when the person chooses it: the first account would drop out of AutoFill on
     /// that host. That is right when the new login is a different service under the same domain (scenario S1) and
     /// wrong when it is a second account on the same one, and nothing in the request says which. So the model does
-    /// neither on its own: the proposal says how many accounts would be hidden, and offers the scope of the most
-    /// specific matches as the alternative, which makes the accounts tie, and a tie is the person's to choose from
-    /// (PRD F6.6, F11.5). That scope is one the person gave an item and the scope policy accepts; the most specific
-    /// matches share its host by construction, and where they differ on subdomains or exclusions the narrower holds.
+    /// neither on its own: the proposal says how many accounts would be hidden, and offers the scope of the person's
+    /// own most specific matches as the alternative, which makes the accounts tie, and a tie is the person's to
+    /// choose from (PRD F6.6, F11.5).
+    ///
+    /// The new item goes into the default vault, which is the person's own, so it outranks less specific items of
+    /// every vault, shared ones included, and all of those are counted as hidden. The scope offered for copying is
+    /// only ever one the person gave an item of their own and the scope policy accepts: an item of a shared vault
+    /// carries whatever scope a member chose, and copying that into a new item would let the member widen it
+    /// (review finding Z60). The person's own most specific matches share the scope's host by construction, and
+    /// where they differ on subdomains or exclusions the narrower holds.
     static func newItemProposal(
         title: String, narrow: ServiceScope, on host: NormalizedHost, userName: String, warning: LookAlikeWarning?,
         in snapshot: VaultSnapshot
-    ) -> (proposal: NewItemProposal, sharedScope: ServiceScope?) {
+    ) throws -> (proposal: NewItemProposal, sharedScope: ServiceScope?) {
+        let destination = try newItemVault(in: snapshot)
         func proposal(hidden: Int, beside: SharedScopeProposal?) -> NewItemProposal {
             NewItemProposal(
-                title: title, scopeHost: narrow.host, includesSubdomains: narrow.includeSubdomains, userName: userName,
-                warning: warning, hiddenAccounts: hidden, besideExisting: beside)
+                vault: destination, title: title, scopeHost: narrow.host, includesSubdomains: narrow.includeSubdomains,
+                userName: userName, warning: warning, hiddenAccounts: hidden, besideExisting: beside)
         }
-        let primary = ItemRanker.rank(items: snapshot.rankable, host: host).primary
-        guard let first = primary.first, let own = ScopeMatcher.match(narrow, host: host),
-            own.specificity > first.match.specificity
-        else { return (proposal(hidden: 0, beside: nil), nil) }
-
+        guard let own = ScopeMatcher.match(narrow, host: host) else { return (proposal(hidden: 0, beside: nil), nil) }
         // Only accounts in use can be hidden from the person, or stood beside: an archived or excluded item that
         // is outranked loses nothing, and its scope is not offered for copying.
-        let accounts = primary.filter { snapshot.isInUse($0.item) }.count
-        guard accounts > 0 else { return (proposal(hidden: 0, beside: nil), nil) }
-        let scopes = primary.map(\.match.scope)
+        let outranked = snapshot.offered(on: host).filter {
+            $0.match.specificity < own.specificity && snapshot.isInUse($0.item)
+        }
+        guard !outranked.isEmpty else { return (proposal(hidden: 0, beside: nil), nil) }
+
+        // The person's own matches among them all sit at one specificity (their own items shadow each other).
+        let mine = outranked.filter { !snapshot.isShared($0.item) }
+        guard let first = mine.first else { return (proposal(hidden: outranked.count, beside: nil), nil) }
+        let scopes = mine.map(\.match.scope)
         let shared = ServiceScope(
             host: first.match.scope.host, includeSubdomains: scopes.allSatisfy(\.includeSubdomains),
             excludedHosts: scopes.reduce(into: Set<String>()) { $0.formUnion($1.excludedHosts) })
         guard scopes.allSatisfy({ $0.host == shared.host }), ScopePolicy.isAcceptable(shared),
             ScopeMatcher.match(shared, host: host)?.specificity == first.match.specificity
-        else { return (proposal(hidden: accounts, beside: nil), nil) }
+        else { return (proposal(hidden: outranked.count, beside: nil), nil) }
         return (
             proposal(
-                hidden: accounts,
+                hidden: outranked.count,
                 beside: SharedScopeProposal(
-                    scopeHost: shared.host, includesSubdomains: shared.includeSubdomains, accounts: accounts)),
+                    scopeHost: shared.host, includesSubdomains: shared.includeSubdomains, accounts: mine.count)),
             shared
         )
     }
 
+    /// The vault a new item goes into, as the sheet names it: the default vault the snapshot carries.
+    static func newItemVault(in snapshot: VaultSnapshot) throws -> EntryVault {
+        guard let id = snapshot.defaultVaultID else { throw Blocked.refused(.vault(.noAccount)) }
+        return snapshot.vault(id)
+    }
+
     /// The warning to show in place of an empty result, if any of the hosts resembles a saved site (PRD F11.3).
+    ///
+    /// Judged per vault (`VaultSnapshot.assess`): a scope in a shared vault does not make a host recognised on
+    /// behalf of the other vaults, so a member cannot silence the warning about a look-alike of a site the person
+    /// saved themselves.
     static func warning(for hosts: [NormalizedHost], in snapshot: VaultSnapshot) -> LookAlikeWarning? {
         var fallback: LookAlikeWarning?
         for host in hosts {
-            guard
-                case .suspicious(let signals, let impersonating) = PhishingDetector.assess(
-                    host: host, againstItemsIn: snapshot.rankable)
-            else { continue }
+            guard case .suspicious(let signals, let impersonating) = snapshot.assess(host) else { continue }
             let warning = LookAlikeWarning(host: host.value, signals: signals, impersonating: impersonating)
             if !impersonating.isEmpty { return warning }
             fallback = fallback ?? warning
@@ -582,14 +600,17 @@ public actor CredentialProviderModel {
         return fallback
     }
 
-    static func passwordEntry(_ match: RankedMatch, userName: String) -> PasswordEntry {
+    static func passwordEntry(_ match: RankedMatch, userName: String, in snapshot: VaultSnapshot) -> PasswordEntry {
         PasswordEntry(
-            itemID: match.item.id, title: match.item.title, userName: userName, matchedHost: match.match.scope.host,
+            itemID: match.item.id, vault: snapshot.vault(of: match.item), title: match.item.title, userName: userName,
+            matchedHost: match.match.scope.host,
             hasOneTimeCode: match.item.fields.contains { $0.kind == .totp },
             reportedUnused: match.item.field(.password)?.reportedUnusedAt != nil)
     }
 
-    static func insertableItem(_ item: Item, including isIncluded: (FieldKind) -> Bool) -> InsertableItem? {
+    static func insertableItem(
+        _ item: Item, in snapshot: VaultSnapshot, including isIncluded: (FieldKind) -> Bool
+    ) -> InsertableItem? {
         let fields = item.fields.filter { isIncluded($0.kind) && !$0.value.isEmpty }.map { field in
             InsertableField(
                 fieldID: field.id, kind: field.kind, label: field.label,
@@ -599,7 +620,8 @@ public actor CredentialProviderModel {
         }
         guard !fields.isEmpty else { return nil }
         return InsertableItem(
-            itemID: item.id, title: item.title, userName: item.loginNames.first { !$0.isEmpty } ?? "", fields: fields)
+            itemID: item.id, vault: snapshot.vault(of: item), title: item.title,
+            userName: item.loginNames.first { !$0.isEmpty } ?? "", fields: fields)
     }
 }
 
@@ -612,11 +634,13 @@ struct Matching {
     /// The hosts of identifiers that named a page loaded over plain `http` (PRD F6.9). Nothing is listed for them:
     /// they are neither ranked nor assessed, and a list with nothing else to show is refused as `insecurePage`.
     var insecurePages: [NormalizedHost] = []
-    /// Items in use that are a most specific match for at least one host. Archived and excluded items, and items
-    /// that share an ID, take part in the ranking and are not listed. Items the ranking shadows are not listed
-    /// either: the gate never releases them on the host (PRD F6.6).
+    /// Items in use that the gate offers on at least one host. Archived and excluded items, and items that share
+    /// an ID, take part in the ranking and are not listed. Items the ranking shadows are not listed either: the
+    /// gate never releases them on the host (PRD F6.6). Nor is anything listed for a host the gate refuses, among
+    /// them one only a shared vault is scoped to that resembles a site saved in another vault.
     var primary: [RankedMatch] = []
-    /// The item to suggest first: set when every usable identifier's decision is to fill this one item.
+    /// The item to suggest first: set when every usable identifier's decision is to fill this one item. Never set
+    /// where an item of a shared vault stands beside one of the person's own: that is a choice (review finding Z60).
     var onlyFill: UUID?
 
     init(identifiers: [ServiceIdentifier], snapshot: VaultSnapshot) {
@@ -640,15 +664,21 @@ struct Matching {
             }
             guard !hosts.contains(host) else { continue }
             hosts.append(host)
-            let ranking = ItemRanker.rank(items: snapshot.rankable, host: host)
-            for match in ranking.primary
+            // One decision, the gate's, for what is listed and for what is suggested.
+            let offered: [RankedMatch]
+            switch snapshot.decide(for: identifier) {
+            case .fill(let match):
+                offered = [match]
+                if snapshot.isInUse(match.item) { fills.insert(match.item.id) } else { undecided = true }
+            case .chooseAmong(let matches):
+                offered = matches
+                undecided = true
+            case .refuse:
+                offered = []
+            }
+            for match in offered
             where snapshot.isInUse(match.item) && !primary.contains(where: { $0.item.id == match.item.id }) {
                 primary.append(match)
-            }
-            switch AutoFillGate.decide(for: identifier, among: snapshot.rankable) {
-            case .fill(let match) where snapshot.isInUse(match.item): fills.insert(match.item.id)
-            case .fill, .chooseAmong: undecided = true
-            case .refuse: break
             }
         }
         if !undecided, fills.count == 1 { onlyFill = fills.first }

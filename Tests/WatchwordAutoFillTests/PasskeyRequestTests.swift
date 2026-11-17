@@ -435,7 +435,7 @@ struct PasskeyRequestTests {
         #expect(
             options.newItem
                 == NewItemProposal(
-                    title: "shop.example", scopeHost: "shop.example", includesSubdomains: true,
+                    vault: Fixtures.personalVault, title: "shop.example", scopeHost: "shop.example", includesSubdomains: true,
                     userName: "pat@example.com", warning: nil, hiddenAccounts: 0, besideExisting: nil))
 
         let result = try await harness.model.registerPasskey(request, destination: .newItem, presence: .verified).value

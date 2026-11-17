@@ -23,10 +23,18 @@ public actor FakeCredentialVault: CredentialVault {
     public private(set) var saves: [Item] = []
     public private(set) var readCount = 0
 
-    public init(vaultID: UUID = UUID(), clock: FakeClock = FakeClock(), backedUp: Bool = true, items: [Item] = []) {
+    /// Vaults other accounts write, by ID, with the name each shows: items planted with one of these IDs are a
+    /// member's (adversary A4). Every other vault an item names is described as the person's own.
+    private var sharedVaults: [UUID: String]
+
+    public init(
+        vaultID: UUID = UUID(), clock: FakeClock = FakeClock(), backedUp: Bool = true, items: [Item] = [],
+        sharedVaults: [UUID: String] = [:]
+    ) {
         self.vaultID = vaultID
         self.clock = clock
         self.backedUp = backedUp
+        self.sharedVaults = sharedVaults
         for item in items {
             stored[item.id] = item
             order.append(item.id)
@@ -35,7 +43,7 @@ public actor FakeCredentialVault: CredentialVault {
 
     // MARK: CredentialVault
 
-    public func credentialItems() throws -> [Item] {
+    public func credentialSnapshot() throws -> CredentialSnapshot {
         try requireUnlocked()
         readCount += 1
         let items = order.compactMap { stored[$0] }
@@ -47,16 +55,16 @@ public actor FakeCredentialVault: CredentialVault {
                 readsUntilLock = remaining - 1
             }
         }
-        return items
+        let ids = Set(items.map(\.vaultID)).union([vaultID]).union(sharedVaults.keys)
+        let vaults = ids.sorted { $0.uuidString < $1.uuidString }.map { id in
+            CredentialVaultInfo(
+                id: id, name: sharedVaults[id] ?? (id == vaultID ? "Personal" : "Own"), isShared: sharedVaults[id] != nil)
+        }
+        return CredentialSnapshot(items: items, vaults: vaults, defaultVaultID: vaultID)
     }
 
     public func confirmUnlocked() throws {
         try requireUnlocked()
-    }
-
-    public func defaultVaultID() throws -> UUID {
-        try requireUnlocked()
-        return vaultID
     }
 
     public func isBackedUp() throws -> Bool {
@@ -120,6 +128,11 @@ public actor FakeCredentialVault: CredentialVault {
     /// Locks the vault as the `count`-th read from now returns: the lock that lands while a request is in flight.
     public func lockAfterReads(_ count: Int) {
         readsUntilLock = count
+    }
+
+    /// Makes `vaultID` a vault other accounts write, shown as `name`.
+    public func share(_ vaultID: UUID, name: String) {
+        sharedVaults[vaultID] = name
     }
 
     public func setBackedUp(_ value: Bool) {

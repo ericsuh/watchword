@@ -44,14 +44,13 @@ actor InterleavingRecordStore: RecordStore {
 struct LockingAfterRead: CredentialVault {
     let session: VaultSession
 
-    func credentialItems() async throws -> [Item] {
-        let items = try await session.credentialItems()
+    func credentialSnapshot() async throws -> CredentialSnapshot {
+        let snapshot = try await session.credentialSnapshot()
         await session.lock()
-        return items
+        return snapshot
     }
 
     func confirmUnlocked() async throws { try await session.confirmUnlocked() }
-    func defaultVaultID() async throws -> UUID { try await session.defaultVaultID() }
     func isBackedUp() async throws -> Bool { try await session.isBackedUp() }
     func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
         try await session.saveCredentialItem(item, replacingVersion: replacingVersion)

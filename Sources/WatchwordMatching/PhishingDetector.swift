@@ -169,8 +169,46 @@ public enum PhishingDetector {
         return .unrecognized
     }
 
-    public static func assess(host: NormalizedHost, againstItemsIn items: [Item]) -> PhishingAssessment {
-        assess(host: host, against: items.flatMap(\.scopes))
+    /// The assessment against saved items that come from more than one trust domain (review findings Z60, Z65).
+    ///
+    /// A scope says "this host is this account's site" on the word of whoever wrote it. `sharedVaults` names the
+    /// vaults accounts other than this one may write; every other item is the person's own. A match among the
+    /// person's own items is `recognized`, as ever. A match only in a shared vault recognises the host for that
+    /// vault and no further: the host is still compared with the scopes of every vault that does not match it, and
+    /// if it resembles one of those the answer is `suspicious`, naming it. So a member who scopes an item to
+    /// `amaz0n.com` cannot silence the warning about the `amazon.com` the person saved themselves. The signals that
+    /// name no saved site (a label that mixes scripts, punycode that did not decode) stand too: such a host cannot
+    /// be verified by eye, and only the person's own scope for it says they have looked.
+    public static func assess(
+        host: NormalizedHost, againstItemsIn items: [Item], sharedVaults: Set<UUID> = []
+    ) -> PhishingAssessment {
+        guard !sharedVaults.isEmpty else { return assess(host: host, against: items.flatMap(\.scopes)) }
+        var own: [ServiceScope] = []
+        var shared: [UUID: [ServiceScope]] = [:]
+        for item in items {
+            if sharedVaults.contains(item.vaultID) {
+                shared[item.vaultID, default: []].append(contentsOf: item.scopes)
+            } else {
+                own.append(contentsOf: item.scopes)
+            }
+        }
+        func matches(_ scopes: [ServiceScope]) -> Bool {
+            scopes.contains { ScopeMatcher.match($0, host: host) != nil }
+        }
+        if matches(own) { return .recognized }
+        var others = own
+        var isRecognizedBySharedVault = false
+        for vaultID in shared.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            let scopes = shared[vaultID] ?? []
+            if matches(scopes) {
+                isRecognizedBySharedVault = true
+            } else {
+                others.append(contentsOf: scopes)
+            }
+        }
+        let assessment = assess(host: host, against: others)
+        guard isRecognizedBySharedVault else { return assessment }
+        return assessment.isSuspicious ? assessment : .recognized
     }
 
     /// `true` when any single label draws letters from more than one writing system.

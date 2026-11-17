@@ -75,6 +75,70 @@ final class ItemRankerTests: XCTestCase {
         XCTAssertEqual(ranking.primary.count, 2)
     }
 
+    // MARK: A vault is a trust domain (review finding Z60)
+
+    private func item(_ title: String, vault: UUID, _ scope: ServiceScope) -> Item {
+        Item(vaultID: vault, title: title, scopes: [scope], fields: [])
+    }
+
+    /// An item of a shared vault never shadows an item of a vault only this account writes: both stay, and the
+    /// ranking is a choice.
+    func testSharedVaultItemDoesNotShadowAnOwnItem() throws {
+        let shared = UUID()
+        let own = item("Own", vault: ScenarioFixtures.vault, ServiceScope(host: "amazon.com"))
+        let planted = item("Planted", vault: shared, ServiceScope(host: "www.amazon.com", includeSubdomains: false))
+        let target = try host("www.amazon.com")
+
+        let ranking = ItemRanker.rank(items: [own, planted], host: target, sharedVaults: [shared])
+        XCTAssertEqual(ranking.primary.map(\.item.title), ["Own", "Planted"])
+        XCTAssertTrue(ranking.shadowed.isEmpty)
+        XCTAssertTrue(ranking.isAmbiguous)
+        XCTAssertTrue(ItemRanker.isSelectable(own, for: target, among: [own, planted], sharedVaults: [shared]))
+        XCTAssertTrue(ItemRanker.isSelectable(planted, for: target, among: [own, planted], sharedVaults: [shared]))
+
+        // With both in vaults the person alone writes, the more specific shadows, as it always did.
+        let alone = ItemRanker.rank(items: [own, planted], host: target)
+        XCTAssertEqual(alone.primary.map(\.item.title), ["Planted"])
+        XCTAssertEqual(alone.shadowed.map(\.item.title), ["Own"])
+    }
+
+    /// The person's own, more specific item still shadows a shared vault's (their AWS login keeps the household's
+    /// Amazon login off the console), and a shared vault's items shadow each other.
+    func testOwnItemsAndTheSameVaultStillShadow() throws {
+        let shared = UUID()
+        let household = item("Household", vault: shared, ServiceScope(host: "amazon.com"))
+        let householdAWS = item(
+            "Household AWS", vault: shared, ServiceScope(host: "signin.aws.amazon.com", includeSubdomains: false))
+        let ownAWS = item(
+            "Own AWS", vault: ScenarioFixtures.vault, ServiceScope(host: "aws.amazon.com"))
+        let target = try host("signin.aws.amazon.com")
+
+        let ownOverShared = ItemRanker.rank(items: [household, ownAWS], host: target, sharedVaults: [shared])
+        XCTAssertEqual(ownOverShared.primary.map(\.item.title), ["Own AWS"])
+        XCTAssertEqual(ownOverShared.shadowed.map(\.item.title), ["Household"])
+
+        let withinVault = ItemRanker.rank(items: [household, householdAWS], host: target, sharedVaults: [shared])
+        XCTAssertEqual(withinVault.primary.map(\.item.title), ["Household AWS"])
+        XCTAssertEqual(withinVault.shadowed.map(\.item.title), ["Household"])
+
+        // All three: the household's own more specific item shadows the household's, the person's own stays.
+        let all = ItemRanker.rank(items: [household, householdAWS, ownAWS], host: target, sharedVaults: [shared])
+        XCTAssertEqual(all.primary.map(\.item.title), ["Household AWS", "Own AWS"])
+        XCTAssertEqual(all.shadowed.map(\.item.title), ["Household"])
+    }
+
+    /// Two shared vaults have different members: neither's item shadows the other's.
+    func testOneSharedVaultDoesNotShadowAnother() throws {
+        let first = UUID()
+        let second = UUID()
+        let wide = item("Family", vault: first, ServiceScope(host: "amazon.com"))
+        let narrow = item("Club", vault: second, ServiceScope(host: "www.amazon.com", includeSubdomains: false))
+        let ranking = ItemRanker.rank(
+            items: [wide, narrow], host: try host("www.amazon.com"), sharedVaults: [first, second])
+        XCTAssertEqual(ranking.primary.map(\.item.title), ["Club", "Family"])
+        XCTAssertTrue(ranking.shadowed.isEmpty)
+    }
+
     func testRankingPerformanceWithManyItems() throws {
         var items: [Item] = []
         for i in 0..<5_000 {

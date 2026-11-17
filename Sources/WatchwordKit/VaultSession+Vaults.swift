@@ -24,6 +24,11 @@ public struct VaultInfo: Sendable, Hashable, Identifiable {
     /// device accepts the vault's invitation itself: readable, but nothing is written, sealed, published or deleted
     /// (docs/02-architecture.md §8.10; review finding Z41).
     public var isSharedUnavailable = false
+    /// Accounts other than this one read this vault, and those who may write there can add and change its items: it
+    /// is governed by a membership chain, as far as anything this device holds says so (`isMarkedShared`; true of an
+    /// unavailable vault too, and of every vault but the Personal one until the account's markers are read). The one
+    /// fact AutoFill reads to tell a vault of the person's own from one a member writes (review finding Z60).
+    public var isShared = false
 }
 
 /// A vault's own description, sealed under the vault key as a `.vaultMetadata` record whose record ID is the vault's
@@ -348,7 +353,8 @@ extension VaultSession {
                 VaultInfo(
                     id: vaultID, name: metadata?.name ?? (isPersonal ? VaultInfo.defaultPersonalName : ""),
                     createdAt: metadata?.createdAt ?? (isPersonal ? account.createdAt : nil), isPersonal: isPersonal,
-                    isDeleted: entry.isDeleted, isSharedUnavailable: unavailable))
+                    isDeleted: entry.isDeleted, isSharedUnavailable: unavailable,
+                    isShared: isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID)))
         }
         return result.sorted {
             if $0.isPersonal != $1.isPersonal { return $0.isPersonal }

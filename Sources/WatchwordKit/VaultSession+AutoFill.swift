@@ -20,10 +20,29 @@ extension VaultSession: CredentialVault {
     /// (`vaultsWithheldFromAutoFill`, review finding Z45): they stay on the device until the person removes them, and
     /// they are not offered to a page.
     public func credentialItems() async throws -> [Item] {
+        try await credentialSnapshot().items
+    }
+
+    /// The items AutoFill is given, and whose each vault is (review finding Z60).
+    ///
+    /// Whether a vault is shared is the session's one answer, `isMarkedShared` (through `VaultInfo.isShared`): a
+    /// ledger loaded, the account's signed marker, a key that arrived by grant, a sharing state that names the
+    /// vault, or markers not read yet. Never the item's claim, and never the vault's name. The vaults are described
+    /// after the items are read: a vault becomes shared before any other member's item can be merged into it, so an
+    /// item a member wrote is never returned beside a description from before the vault was shared. An extension
+    /// process that was not given the sharing state (`configureSharing`) sees every vault but the Personal one as
+    /// shared, or withheld: closed, not open.
+    public func credentialSnapshot() async throws -> CredentialSnapshot {
         try await translatingForAutoFill {
             let listing = try await items().items
             let withheld = try await vaultsWithheldFromAutoFill()
-            return withheld.isEmpty ? listing : listing.filter { !withheld.contains($0.vaultID) }
+            guard let personal = try await loadAccount()?.personalVaultID else { throw CredentialVaultError.noAccount }
+            let described = try await vaults(includingDeleted: true).filter { !withheld.contains($0.id) }.map {
+                CredentialVaultInfo(id: $0.id, name: $0.name, isShared: $0.isShared)
+            }
+            return CredentialSnapshot(
+                items: withheld.isEmpty ? listing : listing.filter { !withheld.contains($0.vaultID) },
+                vaults: described, defaultVaultID: personal)
         }
     }
 

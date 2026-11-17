@@ -20,6 +20,11 @@ extension CredentialProviderModel {
     /// person's call and is never made without them. An existing item is offered for update only if the gate would
     /// fill it on this host and it could be this account (same user name, or none recorded); a less specific "other
     /// account" is never a candidate, because updating it would not make it fill here.
+    ///
+    /// Every candidate and the new item name their vault (`EntryVault`). An item of a shared vault can be a
+    /// candidate, since a household does keep logins there, but it never displaces the person's own login from the
+    /// candidates (`ItemRanker`), the person's own come first, and the sheet says of each shared one that every
+    /// member of its vault will read the password (review finding Z60).
     public func savePasswordPlan(for request: SavePasswordRequest) async -> Outcome<SavePasswordPlan> {
         func run() async throws -> SavePasswordPlan {
             try Self.plan(for: request, in: try await self.load()).plan
@@ -44,10 +49,12 @@ extension CredentialProviderModel {
             let planned = try Self.plan(for: request, in: snapshot)
             switch destination {
             case .newItem:
-                return try await self.createLogin(request, scope: planned.scope, title: planned.host.value)
+                return try await self.createLogin(
+                    request, scope: planned.scope, title: planned.host.value, in: planned.newItemVault)
             case .newItemBesideExisting:
                 return try await self.createLogin(
-                    request, scope: planned.sharedScope ?? planned.scope, title: planned.host.value)
+                    request, scope: planned.sharedScope ?? planned.scope, title: planned.host.value,
+                    in: planned.newItemVault)
             case .existingItem(let itemID):
                 let authorization = try Self.unwrap(
                     ReleaseGate.authorize(itemID: itemID, for: [request.serviceIdentifier], in: snapshot))
@@ -64,15 +71,20 @@ extension CredentialProviderModel {
     /// A save the system asks for with no UI. Only what cannot disturb anything is done unasked: nothing at all when
     /// the login is already saved, or a new item for a host nothing is saved for and that resembles no saved site.
     /// Changing a saved password, adding a second account where one is already offered (the two then tie, and the
-    /// person chooses between them from then on), and saving on a look-alike host all need the person.
+    /// person chooses between them from then on), and saving on a look-alike host all need the person. So does
+    /// anything that would write into a shared vault: no existing item is ever written here, and a new one is made
+    /// only in a default vault that is this account's alone (review finding Z60).
     public func savePasswordWithoutInteraction(_ request: SavePasswordRequest) async -> SilentOutcome<SavedPassword> {
         func run() async throws -> SilentOutcome<SavedPassword> {
             let planned = try Self.plan(for: request, in: try await self.load())
             switch planned.plan {
             case .alreadySaved(let itemID):
                 return .success(SavedPassword(itemID: itemID, createdItem: false))
-            case .createItem(let proposal) where proposal.warning == nil && planned.isNewSite:
-                return .success(try await self.createLogin(request, scope: planned.scope, title: planned.host.value))
+            case .createItem(let proposal)
+            where proposal.warning == nil && planned.isNewSite && !proposal.vault.isShared:
+                return .success(
+                    try await self.createLogin(
+                        request, scope: planned.scope, title: planned.host.value, in: planned.newItemVault))
             case .createItem, .offerUpdate:
                 return .requiresInteraction(.confirmation)
             }
@@ -89,9 +101,11 @@ extension CredentialProviderModel {
         var host: NormalizedHost
         /// The exact host, without subdomains.
         var scope: ServiceScope
-        /// The scope of the accounts a new item scoped `scope` would outrank, if there are any.
+        /// The scope of the person's own accounts a new item scoped `scope` would outrank, if there are any.
         var sharedScope: ServiceScope?
         var isNewSite: Bool
+        /// The vault a new item would be created in.
+        var newItemVault: UUID
     }
 
     private static func plan(
@@ -118,17 +132,20 @@ extension CredentialProviderModel {
         }
 
         let matches: [RankedMatch]
-        switch AutoFillGate.decide(for: request.serviceIdentifier, among: snapshot.rankable) {
+        switch snapshot.decide(for: request.serviceIdentifier) {
         case .fill(let match): matches = [match]
         case .chooseAmong(let tied): matches = tied
         case .refuse: matches = []
         }
-        let candidates = matches.filter {
+        // The person's own items first, whatever a member titled theirs.
+        let usable = matches.filter {
             snapshot.isInUse($0.item) && couldBeAccount($0.item, userName: request.userName)
         }
-        let (proposal, sharedScope) = newItemProposal(
+        let candidates = usable.filter { !snapshot.isShared($0.item) } + usable.filter { snapshot.isShared($0.item) }
+        let (proposal, sharedScope) = try newItemProposal(
             title: host.value, narrow: scope, on: host, userName: request.userName,
             warning: matches.isEmpty ? warning(for: [host], in: snapshot) : nil, in: snapshot)
+        let newItemVault = proposal.vault.id
 
         if let saved = candidates.first(where: { match in
             guard let current = match.item.field(.password) else { return false }
@@ -137,22 +154,23 @@ extension CredentialProviderModel {
         }) {
             return Planned(
                 plan: .alreadySaved(itemID: saved.item.id), host: host, scope: scope, sharedScope: sharedScope,
-                isNewSite: false)
+                isNewSite: false, newItemVault: newItemVault)
         }
         guard !candidates.isEmpty else {
             return Planned(
                 plan: .createItem(proposal), host: host, scope: scope, sharedScope: sharedScope,
-                isNewSite: matches.isEmpty)
+                isNewSite: matches.isEmpty, newItemVault: newItemVault)
         }
         let offered = candidates.map { match in
             SaveCandidate(
-                itemID: match.item.id, title: match.item.title, userName: names(of: match.item).first ?? "",
+                itemID: match.item.id, vault: snapshot.vault(of: match.item), title: match.item.title,
+                userName: names(of: match.item).first ?? "",
                 matchedHost: match.match.scope.host,
                 passwordDiffers: !sameBytes(match.item.field(.password)?.value ?? "", request.password))
         }
         return Planned(
             plan: .offerUpdate(candidates: offered, newItem: proposal), host: host, scope: scope,
-            sharedScope: sharedScope, isNewSite: false)
+            sharedScope: sharedScope, isNewSite: false, newItemVault: newItemVault)
     }
 
     private static func names(of item: Item) -> [String] {
@@ -171,7 +189,7 @@ extension CredentialProviderModel {
     }
 
     private func createLogin(
-        _ request: SavePasswordRequest, scope: ServiceScope, title: String
+        _ request: SavePasswordRequest, scope: ServiceScope, title: String, in vaultID: UUID
     ) async throws -> SavedPassword {
         var fields: [Field] = []
         if !request.userName.isEmpty {
@@ -181,12 +199,6 @@ extension CredentialProviderModel {
         fields.append(
             Field(id: UUID.random(using: &random), kind: .password, label: "Password", value: request.password))
         let itemID = UUID.random(using: &random)
-        let vaultID: UUID
-        do {
-            vaultID = try await vault.defaultVaultID()
-        } catch {
-            throw Self.blocked(error)
-        }
         let stored = try await save(
             Item(id: itemID, vaultID: vaultID, title: title, scopes: [scope], fields: fields), replacing: nil)
         return SavedPassword(itemID: stored.id, createdItem: true)

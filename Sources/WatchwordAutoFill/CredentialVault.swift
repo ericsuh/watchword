@@ -17,6 +17,51 @@ public enum CredentialVaultError: Error, Equatable, Sendable {
     case failed(String)
 }
 
+/// One vault of the unlocked account, as the AutoFill core needs to know it (review finding Z60).
+public struct CredentialVaultInfo: Hashable, Sendable {
+    public var id: UUID
+    /// The vault's name, for a sheet to show beside `isShared`. In a shared vault any member who may write chooses
+    /// it, "Personal" included, so the name alone identifies nothing.
+    public var name: String
+    /// Whether accounts other than this one read the vault, and those who may write can add and change its items:
+    /// the vault is governed by a membership chain, as far as anything this device holds says so. The vault's own
+    /// answer (`VaultSession.isMarkedShared`), never an item's claim.
+    public var isShared: Bool
+
+    public init(id: UUID, name: String, isShared: Bool) {
+        self.id = id
+        self.name = name
+        self.isShared = isShared
+    }
+}
+
+/// What the vault hands the AutoFill core for one request: the items, and whose each vault is.
+///
+/// **A vault is a trust domain.** An item of a vault only this account writes says what the person said. An item of
+/// a shared vault says what some member said, and a member is adversary A4 (docs/02-architecture.md §2): they can
+/// write any item the scope policy accepts. The model therefore needs to know, for every item, which kind of vault
+/// it is in, and takes a vault this value does not describe as shared.
+public struct CredentialSnapshot: Sendable {
+    /// Every readable item of every unlocked vault, the archived and the trashed included: the model filters, and
+    /// needs archived items to rank against.
+    ///
+    /// Each item's `id` should occur once. The model does not rely on it: an ID that two returned items share
+    /// (a hostile member of a shared vault choosing a record ID, an item mid-move between vaults) is treated as
+    /// naming neither, so both keep ranking and neither is listed, released, written or published.
+    public var items: [Item]
+    /// The vaults those items are in, and the default vault. One entry per vault; a vault missing here is treated
+    /// as shared, with no name.
+    public var vaults: [CredentialVaultInfo]
+    /// The vault a new item is created in (the Personal vault).
+    public var defaultVaultID: UUID
+
+    public init(items: [Item], vaults: [CredentialVaultInfo], defaultVaultID: UUID) {
+        self.items = items
+        self.vaults = vaults
+        self.defaultVaultID = defaultVaultID
+    }
+}
+
 /// The vault as the AutoFill core sees it: read the unlocked items, write one back (docs/02-architecture.md §9.1).
 ///
 /// This is the whole surface between `WatchwordAutoFill` and the vault, so that the request model can be tested with
@@ -24,13 +69,10 @@ public enum CredentialVaultError: Error, Equatable, Sendable {
 /// production conformer. Every method throws `CredentialVaultError`, and `locked` whenever the vault is not
 /// unlocked at the moment of the call.
 public protocol CredentialVault: Sendable {
-    /// Every readable item of every unlocked vault, the archived and the trashed included: the model filters, and
-    /// needs archived items to rank against.
-    ///
-    /// Each item's `id` should occur once. The model does not rely on it: an ID that two returned items share
-    /// (a hostile member of a shared vault choosing a record ID, an item mid-move between vaults) is treated as
-    /// naming neither, so both keep ranking and neither is listed, released, written or published.
-    func credentialItems() async throws -> [Item]
+    /// The items of every unlocked vault and what kind of vault each is in, read together: the vaults are described
+    /// no earlier than the items were read, so an item another member wrote is never returned beside a description
+    /// of its vault from before it was shared.
+    func credentialSnapshot() async throws -> CredentialSnapshot
 
     /// Throws `locked` unless the vault is unlocked at this moment, and does nothing else.
     ///
@@ -38,9 +80,6 @@ public protocol CredentialVault: Sendable {
     /// on this actor). It calls this as its last suspension before handing a secret back, so a lock that lands in
     /// between wins: the request reports the lock and the plaintext it read goes nowhere.
     func confirmUnlocked() async throws
-
-    /// The vault a new item is created in (the Personal vault).
-    func defaultVaultID() async throws -> UUID
 
     /// Whether items stored here also reach the sync store, so a passkey created now is backed up (WebAuthn's BS
     /// flag, which must be true to the facts).
