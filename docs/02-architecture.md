@@ -380,9 +380,11 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   and `.../snapshot/<lamport>.wwe`. Files are immutable once written (write to temp, then atomic
   rename), which removes the KeePass single-file conflict problem.
 - iCloud Drive: ubiquity container, every access through `NSFileCoordinator`, an `NSFilePresenter`
-  for change notification, and a reconciliation pass that lists the directory on each wake. Any
-  `NSFileVersion` conflict on an immutable file is treated as corruption and the newer copy is
-  discarded after signature verification of the other.
+  for change notification, and a reconciliation pass that lists the directory on each wake. An
+  `NSFileVersion` conflict on an immutable file, or a second create that iCloud renamed, means one
+  name was written twice. The transport resolves nothing: it hands the engine every copy, and the
+  engine keeps what verifies (owner decision, 2026-11-17: "try to detect and merge them"; §7.5,
+  "Conflict copies").
 - Other providers: the person picks a folder with the document picker; a security-scoped bookmark
   is stored; polling on foreground and a `BGAppRefreshTask`/`NSBackgroundActivityScheduler` cadence.
 - Sharing uses the provider's shared folder; members exchange public keys through the same folder
@@ -400,12 +402,17 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   nothing gives it up, so a process too busy to schedule its tasks cannot fail a granted access) or on
   cancellation and cancels its coordinator: a fetch so given up is `objectUnreadable` (that object waits, the sync goes
   on), a listing, create or delete `unavailable`. `SyncFolderPresenter` (`NSFilePresenter` on the root) turns changes
-  into remote-change hints. An object with unresolved `NSFileVersion` conflicts is refused (`conflictingVersions`)
-  rather than resolved, which leaves its stream waiting at it for good; and iCloud may rename a second create of one
-  name to `N 2.wwe`, which the layout ignores, so that copy is never read. Both need a device to have reused a sequence
-  number; keeping "the copy that verifies", as above, needs the engine's signature check and is **an owner decision**
-  (`03-implementation-plan.md`, milestone 3). Not built either: other providers with a security-scoped bookmark, and
-  their polling.
+  into remote-change hints. **Conflict copies** (drafted with the rest; §7.5 has the rules and the reasons). One name
+  can hold several copies: the file, each unresolved `NSFileVersion` conflict version of it, and a second create that
+  iCloud renamed (`N 2.wwe` beside `N.wwe`; the portable `FileSyncTransport` attributes `N 2` to `N 64`, and nothing
+  else, to `N`). A listing says which names hold more than the one file and how many copies (`listWithCopies`:
+  the count of `NSFileVersion.unresolvedConflictVersionsOfItem` per file, and the renamed files the walk sees), and `fetchCopies` reads them
+  all under one coordinated read, each within the reader's size limit, at most as many as the engine asks for. The
+  transport chooses none and resolves none: it never calls `NSFileVersion`'s resolution, never renames a duplicate
+  into place, and a plain `fetch` reads the current file as before. Only `delete` — the author collecting its own
+  object, when the engine says it may — removes the copies with the object (`removeOtherVersionsOfItem`, the renamed
+  files). A placeholder of a renamed copy is not attributed (the copy is read once it is downloaded and the count
+  changes). Not built either: other providers with a security-scoped bookmark, and their polling.
 
 ### 7.4 Sync while locked
 
@@ -518,6 +525,87 @@ a row that has merely gone missing from the database is damage, repaired by a re
 propagated as a deletion. A row that came back while its deletion was being made is settled against the deletion
 before publishing. Objects are created, never overwritten, and the next sequence number is never below anything the
 stream has on the transport, so a device whose state was rolled back never reuses a collected number.
+
+**Conflict copies** (owner decision, 2026-11-17: "try to detect and merge them"). A provider can hold more than one
+copy under one object name although objects are created once: iCloud Drive keeps both when a name is created twice
+before it has synced (an `NSFileVersion` conflict, or the second file renamed `N 2.wwe`, §7.3), and whoever holds the
+store (A1) can manufacture either. Until this was built the transport refused such an object and its stream waited at
+it for good. Now the transport says what it holds and the engine decides, as for everything else:
+
+- *The port.* `SyncTransport.listWithCopies` is `list` plus, for each name the provider holds anything besides the one
+  current object under, how many copies it holds in all; `fetchCopies` returns their bytes, the current one first, at
+  most `maximumCopies` of them and each within `maximumLength` (a copy over either bound is counted in `omitted`, not
+  returned, and never fails the call). Both default to `list` and `fetch`, so a transport that cannot hold two copies
+  (CloudKit saves only new records) implements nothing. `delete` removes every copy under the name. There is still no
+  "update", and no call that resolves a conflict.
+- *Each copy is checked alone, in the existing order.* Identical bytes are one copy. At download: the container, the
+  envelope's kind and context against the name (they need no key, so a genuine object of another name planted as a
+  copy is junk before any signature is looked at), then both signatures over `name ‖ 0x00 ‖ envelope` against the
+  registry (§7.4). At merge, again for every staged copy: kind, context, the signatures, the AEAD, the payload, its
+  location, and every entry's own context. Unsigned junk therefore costs one container parse and at most one
+  signature check, and is reported (`SyncReport.copiesRefused`); it is never staged.
+- *No copy verifies:* the object is refused alone, as a damaged one is (`SyncReport.rejected`, the stream waits at
+  it), and the sync and this device's publishing go on. It is never `unavailable`.
+- *Exactly one verifies:* it is used, whichever copy the provider calls current. A junk "current" file in front of
+  the genuine object, or junk beside it, changes nothing.
+- *Several verify:* the same device signed different bytes under one name, which an honest device does only after
+  its state was rolled back (a restored backup, A8) and it wrote again before it had seen what its earlier self
+  published. In a vault of one account the engine **merges every verifying copy**: the position holds a set of
+  payloads, and the entries of each are applied through the same per-entry path as any segment's. This is sound
+  because nothing about applying an entry depends on its being the only one for its stamp: the item merge is a join
+  over arbitrary states (`10-sync-correctness.md` §3, §6), so the copies in either order, once or again, give one
+  item; two copies may carry the same record *version* by the same device with different contents, and then the
+  rows differ in bytes at an equal stamp, which the engine has always sent to the merger rather than treated as "the
+  same" (only byte-identical rows are); two tombstones with one stamp and different summaries join
+  (`joinErasureSummaries`). It is exactly as sound as a rolled-back device already was without a name collision: the
+  two writes under one revision are both kept, and the stated limit of `10-sync-correctness.md` §8 (C1) applies — a
+  write that had seen the first is taken to have seen the second. Nothing new is lost by merging; refusing would
+  lose the reach of one copy's edits for good.
+  - *Sequence.* A stream is still merged strictly in sequence. A position with several copies is one position: all
+    its copies are checked and opened before any entry of any is applied, and if one that verified at download does
+    not open (a key not yet held, say) nothing is applied and the stream waits there, so the position is never passed
+    with part of what it holds.
+  - *Acknowledgements.* A segment's vector lets other devices collect their segments, so of several copies the engine
+    records the pointwise **minimum**: only what every copy acknowledges.
+  - *Snapshots.* Several verifying copies of a snapshot are each merged, and the coverage recorded is the pointwise
+    **maximum**: coverage says "the effects of these segments are in the local store", and once every copy's entries
+    are applied that holds for each copy's vector.
+  - *A copy found late.* A device that merged a position before a second copy appeared never fetches that position
+    again, so the listing's count is what tells it: a name whose count differs from the one remembered for it
+    (`SyncState.examinedCopies`) is examined again, and its verifying copies are applied *late*, with no change to
+    `merged` or the acknowledgements. That is the application of a stale snapshot's entries, which the engine already
+    does for every listed snapshot: idempotent, and unable to displace anything written knowing more.
+  - *The author hands on.* A device that finds its own stream forked (several verifying copies of one of its own
+    names) cannot assume any other device saw both. It owes a snapshot of its own (`SyncState.handOnOwed`), as a
+    device owes one for a revoked device's work (below): everything it holds, which now contains both copies. Until
+    that snapshot is written it collects nothing.
+- *Shared vaults refuse several verifying copies, explicitly* (`SyncTransportError.conflictingVersions` as the
+  rejection's reason; the stream waits, as before this was built). A write cut is a chain of segment digests per
+  device (`SyncWriteCut`, `SharedStreamIndex`, §8.10): one digest per position. Two verifying copies of one position
+  are two chains, and a member whose device signed both could show one to the administrator taking the cut and the
+  other to everyone else; which writes are inside the cut would then depend on the copy a device happened to read.
+  Nothing here can show that sound, so it is a limit, not a guess: the position is refused until one copy is left (a
+  member of the vault, or the provider, removes the other by hand), and a second copy found late at a position
+  already merged is reported and not applied. One verifying copy among junk is used in a shared vault as anywhere.
+- *Nothing is resolved on the provider; the decision is remembered locally.* Removing a copy deletes bytes another
+  device may not have read, and only the engine of a device that has merged a copy knows it is safe to lose there;
+  so no device removes another device's copies, ever, and no device "picks a winner" on the provider. Each device
+  remembers per name the number of copies it has examined, and looks again only when the provider's count changes.
+  The copies go when the object goes: its author collects it under the usual rule (every other stream acknowledges
+  the position, a listed snapshot covers it, and it is not the stream's newest), after its hand-on snapshot, and the
+  transport's `delete` then removes every copy under the name. Junk copies beside another device's object stay until
+  that device collects it.
+- *Bounds* (`SyncConfiguration.maximumCopiesPerObject`, 16; `maximumCopiesPerSync`, 512). At most 16 copies of one
+  name are fetched, each within the object size limit; more are counted (`SyncReport.copiesNotExamined`) and not
+  read. Once one sync has fetched 512 copies of flagged names it looks at no further name's copies (the name it is on
+  is finished, so the most is 527): a flagged name the stream needs is fetched as its current file alone, as before
+  this was built (its other copies are examined by a later sync, late), and already-merged names wait for a later
+  sync. So a flood of copies costs a bounded number of reads and signature
+  checks per sync, stalls no stream whose current file is genuine, and cannot stop this device publishing: rejections
+  are per object. What the bound gives up is a genuine copy hidden behind more than 15 planted ones, or a count that
+  A1 keeps equal while swapping copies; A1 can delete that copy outright, so this is withholding (Y7), not a new
+  capability. Copies of the account's own objects, and of the sharing objects, are not examined: those are named by
+  their digests or written once per device, and are read as their current file.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
 value (`EnvelopeKind.criticality(ofRawValue:)`: 10 to 127 ignorable, everything else critical; `scanStatus` is the first
