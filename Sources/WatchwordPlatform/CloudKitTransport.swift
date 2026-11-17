@@ -29,6 +29,10 @@
 
         /// Creates the zone, or does nothing if it exists.
         func saveZone(_ zone: CKRecordZone) async throws
+
+        /// Deletes the zone and every record in it. Called only by `CloudKitTransport.startStoreAgain`, for a zone
+        /// whose encryption key CloudKit reset: nothing in it can be read any more.
+        func deleteZone(_ zoneID: CKRecordZone.ID) async throws
     }
 
     /// `CKDatabase` as a `CloudKitDatabase`: each call forwarded, nothing decided.
@@ -80,6 +84,11 @@
             let results = try await database.modifyRecordZones(saving: [zone], deleting: [])
             if let result = results.saveResults[zone.zoneID] { _ = try result.get() }
         }
+
+        public func deleteZone(_ zoneID: CKRecordZone.ID) async throws {
+            let results = try await database.modifyRecordZones(saving: [], deleting: [zoneID])
+            if let result = results.deleteResults[zoneID] { try result.get() }
+        }
     }
 
     /// The CloudKit transport (docs/02-architecture.md §7.2): each sync object one record in a custom zone of the
@@ -109,13 +118,15 @@
     ///   then on a missing zone was deleted — by the person ("delete data" in iCloud settings), or by a reset — and
     ///   every operation is `storeReset`; the transport never recreates it, and never lists it as empty. So is
     ///   `userDeletedZone`, and a zone whose encryption key CloudKit reset. Starting again is the person's decision
-    ///   (§7.2; the flow is not built), and only it may `forget` the marker.
+    ///   (§7.10): `startStoreAgain`, which no sync calls, is the one place such a zone is created again. The marker is
+    ///   kept, not forgotten: the zone has been seen, and a second deletion is a reset like the first.
     /// - **Errors** map to `SyncTransportError` (`CloudKitErrors`): throttling with its `retryAfterSeconds`, a full
     ///   store, a missing account, the network.
     ///
     /// Every security decision is the engine's: this type only maps names and errors. Not built: `CKSyncEngine`
-    /// scheduling and push (the app's `AutoSyncDriver` takes a push as a remote-change hint), shared-database zones for
-    /// shared vaults (milestone 4), and re-uploading after a reset.
+    /// scheduling and push (the app's `AutoSyncDriver` takes a push as a remote-change hint) and shared-database zones
+    /// for shared vaults (milestone 4). What is uploaded again after a reset is the session's and the engine's
+    /// (`VaultSession.reuploadAfterStoreReset`); this type only recreates the zone when told to.
     public struct CloudKitTransport<Database: CloudKitDatabase>: SyncTransport {
         public static var recordType: CKRecord.RecordType { "WWObject" }
         public static var nameField: CKRecord.FieldKey { "name" }
@@ -192,6 +203,41 @@
             guard let zone = CloudKitErrors.zoneNotFound(in: error) else { return nil }
             if CloudKitErrors.isReset(zone) { return .storeReset }
             return await zoneWasSeen() ? .storeReset : nil
+        }
+
+        /// Starts the zone again after a reset, on the person's confirmed decision to upload again
+        /// (`VaultSession.reuploadAfterStoreReset`, docs/02-architecture.md §7.10): the one place a zone this device
+        /// has seen and then found missing is created. It uploads nothing. A zone that exists is left exactly as it
+        /// is, whatever it holds (another device may have started it again already). A zone that is missing, or that
+        /// CloudKit says the person deleted, is saved again. A zone whose encryption key CloudKit reset still exists
+        /// on the server with records nobody can read, so it is deleted first and then saved, which is what Apple
+        /// prescribes for `CKErrorUserDidResetEncryptedDataKey` (unverified against CloudKit: this file has not been
+        /// run there). The marker is set, never forgotten. Any other failure is the transport's typed error, and the
+        /// zone stays as it was.
+        public func startStoreAgain() async throws {
+            let query = CKQuery(recordType: Self.recordType, predicate: NSPredicate(value: true))
+            var keyWasReset = false
+            do {
+                _ = try await database.records(
+                    matching: query, inZoneWith: zoneID, desiredKeys: [Self.nameField], resultsLimit: 1,
+                    continuing: nil)
+                // The zone is there: nothing to recreate, and nothing in it is touched.
+                try? await marker.markSeen(markerName)
+                return
+            } catch let error where CloudKitErrors.zoneNotFound(in: error) != nil {
+                keyWasReset = CloudKitErrors.zoneNotFound(in: error).map(CloudKitErrors.isReset) ?? false
+            } catch let error as CKError where error.code == .userDeletedZone {
+                keyWasReset = false
+            } catch {
+                throw CloudKitErrors.transportError(for: error, name: zoneName)
+            }
+            do {
+                if keyWasReset { try await database.deleteZone(zoneID) }
+                try await database.saveZone(CKRecordZone(zoneID: zoneID))
+            } catch {
+                throw CloudKitErrors.transportError(for: error, name: zoneName)
+            }
+            try? await marker.markSeen(markerName)
         }
 
         // MARK: - SyncTransport

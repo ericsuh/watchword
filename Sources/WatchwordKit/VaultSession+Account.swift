@@ -1200,7 +1200,15 @@ extension VaultSession {
     /// Downloads and publishes the account's own objects: registry entries, the account header and candidates for a
     /// password changed elsewhere, and the vault directory. Downloading and checking need public keys only;
     /// vouching for vault keys and deletions needs the vault unlocked and this device registered.
-    func syncAccountObjects(account: AccountRecord, transport: any SyncTransport) async throws -> AccountObjectsReport {
+    ///
+    /// **A store that holds none of the account's objects** is either new or was emptied (a folder cleared, a zone
+    /// deleted where no `SyncStoreMarker` remembers it; docs/02-architecture.md §7.10). The two are told apart by
+    /// what this device remembers doing: if it has ever published or merged a vault's log (`hasSyncedBefore`), the
+    /// store was emptied, and the sync stops as at a transport that says `storeReset` — nothing is published, here
+    /// or in any vault, until the person has answered. `reuploading` is that answer and skips the check.
+    func syncAccountObjects(
+        account: AccountRecord, transport: any SyncTransport, reuploading: Bool = false
+    ) async throws -> AccountObjectsReport {
         var report = AccountObjectsReport()
         let accountID = account.accountID
         guard let accountKey = await trustedAccountSigningKey(account) else { return report }
@@ -1248,6 +1256,11 @@ extension VaultSession {
         registryView = nil
         guard let view = try? await registry(account) else { return report }
         try? await pinRegistry(view, accountID: accountID)
+        if !reuploading, gathered.listed.isDisjoint(with: view.state.retainedEntries),
+            try await hasSyncedBefore(account)
+        {
+            throw SyncTransportError.storeReset
+        }
         for id in view.state.retainedEntries.subtracting(gathered.listed).sorted() {
             guard let entry = view.entries[id] else { continue }
             if try await create(

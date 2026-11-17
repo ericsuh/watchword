@@ -6,9 +6,13 @@ import Foundation
 /// so it is `SyncTransportError.storeReset`, and the transport never recreates it or reports it as merely empty.
 /// Without this memory, the next sync would silently put back what the person had deleted.
 ///
-/// The memory is local and unsynced, and only the person's explicit choice to start the store again (not built) may
-/// `forget` it. Someone who can write this device's files (A8) can delete a marker; the store then reads as never
-/// created, which needs that and the person's deletion together, and costs re-uploading what the person deleted.
+/// The memory is local and unsynced. The person's explicit choice to start the store again
+/// (`VaultSession.reuploadAfterStoreReset`, §7.10) recreates the store and keeps the marker: the store has been seen,
+/// and a later deletion is a reset like the first. `forget` is for a device that leaves the account. Someone who can
+/// write this device's files (A8) can delete a marker; the store then reads as never created to the transport, which
+/// needs that and the person's deletion together. Even then nothing a reset removed is uploaded again unasked: the
+/// session stops at a store that holds none of the account's objects once this device has synced, and the engine
+/// writes no snapshot while its own objects are missing (§7.10).
 public protocol SyncStoreMarker: Sendable {
     func hasSeen(_ store: String) async throws -> Bool
     func markSeen(_ store: String) async throws

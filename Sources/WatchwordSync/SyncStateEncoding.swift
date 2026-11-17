@@ -45,6 +45,8 @@ struct EncodedState: Codable {
     /// Absent in a row written before a reset could be answered (§7.10).
     var collectedThrough: UInt64?
     var handedOn: Snapshot?
+    var storeResetSuspected: Bool?
+    var highestOwnSnapshot: UInt64?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -73,6 +75,8 @@ struct EncodedState: Codable {
         handOnOwed = state.handOnOwed
         collectedThrough = state.collectedThrough
         handedOn = state.handedOn.map { Snapshot(name: $0.snapshot.name, coverage: Self.strings($0.holding)) }
+        storeResetSuspected = state.storeResetSuspected
+        highestOwnSnapshot = state.highestOwnSnapshot
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -122,6 +126,8 @@ struct EncodedState: Codable {
             else { return nil }
             state.handedOn = HandedOn(snapshot: location, holding: holding)
         }
+        state.storeResetSuspected = storeResetSuspected ?? false
+        state.highestOwnSnapshot = highestOwnSnapshot ?? 0
         return state
     }
 

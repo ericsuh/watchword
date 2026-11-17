@@ -245,8 +245,8 @@ half delivered** on a Mac; the transports are open.
     device-local store's suites and "sync log"; the rest are Mac only.
   - **Decisions for the owner:** what to do with an iCloud Drive object that has conflict versions and with iCloud's
     `N 2.wwe` copy of a duplicate create — decided on 2026-11-17, "try to detect and merge them", and built (next
-    point); and the flow to start CloudKit again after a `storeReset`, which is also where the person's choice forgets
-    the `SyncStoreMarker`.
+    point); and the flow to start again after a `storeReset` — decided on 2026-11-17, re-upload, "but ask the user
+    first", and built (the point after).
   - **Conflict copies** (owner decision, 2026-11-17; architecture §7.5 "Conflict copies", §7.3). Portable, run on
     Linux: `SyncTransport.listWithCopies` and `fetchCopies` (default: one copy), with `InMemorySyncTransport`,
     `FileSyncTransport` (renamed duplicates `N 2.wwe` to `N 64.wwe`) and `SimulatedServer` able to hold copies; the
@@ -281,10 +281,40 @@ half delivered** on a Mac; the transports are open.
   first, as review finding S49 requires), discarded only through a confirmation. XCUITests: `DeviceRevocationTests`
   and `QuarantineTests` (`04-test-plan.md` §5), with `UITestPeer` able to join, change the password and write a
   version past the UI-test launch's version-jump ceiling of 16.
+- **Starting again after a reset** (owner decision, 2026-11-17: re-upload, "but ask the user first"; architecture
+  §7.10). Portable, run on Linux:
+  - *Engine.* `SyncEngine.sync(handingOn:)`: one snapshot of everything the device holds, written only on that
+    argument and only where the store lacks something it merged; `SyncState.collectedThrough`, `handedOn`,
+    `storeResetSuspected` and `highestOwnSnapshot`; `SyncReport.storeLacksObjects`, `reuploadRefused` and
+    `replayPostponed`. While a reset is suspected and unanswered: no snapshot, no collection, no replay. A replay is
+    also postponed whenever the log cannot be listed. `SyncTransport.startStoreAgain` (default: nothing).
+  - *Session.* `VaultSession.reuploadPlan()` and `reuploadAfterStoreReset(confirming:)`;
+    `AccountSyncReport.storeNeedsReupload` and `reuploadRefusals`; a store that holds none of the account's objects
+    is reported as `storeReset` once this device has synced, and nothing is published into it (`syncAccountObjects`,
+    `hasSyncedBefore`); the sharing pass is skipped at a reset store. Shared vaults are refused
+    (`ReuploadRefusal.sharedVault`).
+  - *Presentation.* `SyncNotice.storageNeedsUpload`, `sharedVaultsNotUploaded`, `vaultsTooLargeToUpload`;
+    `ReuploadQuestion` (the wording); `DevicesModel.askToUploadAgain`, `confirmUpload`, `declineUpload`.
+  - *Test support.* `ResettableSyncTransport` (a store that says it was reset, and records every create);
+    `InMemorySyncTransport.removeEverything` and `SimulatedServer.removeEverything` (an emptied folder).
+  - *Drafted, not compiled (Mac only):* `CloudKitTransport.startStoreAgain` and `CloudKitDatabase.deleteZone`, with
+    tests against the fake database ("CloudKit transport" and its adversarial suite); the alert and button in
+    `Apps/Shared/DevicesView.swift`.
+  - Tests: "Store reset: the engine", "Store reset: the session", "Screen models: after the sync storage was
+    reset", and adversarial tests in "sync log", "sync with real keys" and "account enrolment and device registry"
+    (`04-test-plan.md`); `LongRunningSyncSimulationTests` resets the store mid-run. Review: `06-adversarial-review.md`
+    §S.
+  - **For the owner:** (1) a shared vault is not uploaded again and its log does not sync after a reset; restoring
+    it needs devices to keep the signed log, or a later membership format (§7.10). (2) Nothing tells a second device
+    that the first person declined: each device asks its own person. (3) At an emptied store new edits also wait for
+    the answer; in a store another device has started again they are published behind a gap. (4) A vault over the
+    64 MiB envelope limit cannot be uploaded again in one snapshot.
 - **Still open (Mac):** sync in production builds (choosing a transport, enrolment and settings; until then the app is
   built without `SyncSettings`), with the app creating an `AutoSyncDriver` and registering for CloudKit pushes;
-  `CKSyncEngine`, if its scheduling is wanted over the driver; re-uploading after a CloudKit reset (`storeReset` stops
-  sync today); a Mac build of the conflict-copy adapter and a run in a real ubiquity container, where alone an
+  `CKSyncEngine`, if its scheduling is wanted over the driver; a Mac build of `CloudKitTransport.startStoreAgain` and
+  a run against CloudKit of a deleted zone and a reset key (§7.10: Apple's prescription is followed, unverified);
+  uploading a shared vault again after a reset (refused: §7.10); a Mac build of the conflict-copy adapter and a run
+  in a real ubiquity container, where alone an
   `NSFileVersion` conflict exists; merging a forked position in a shared vault (refused: `02-architecture.md` §7.5);
   the manual CloudKit workflow; the Secure Enclave `DeviceKeyStore` adapter; a macOS build and run of the account screens and
   their XCUITests; and item history in records of its own, so the never-pruned history (F1.4) no longer counts

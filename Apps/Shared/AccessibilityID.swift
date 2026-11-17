@@ -85,6 +85,7 @@ enum AccessibilityID {
         static let list = "devices.list"
         static let syncNow = "devices.syncNow"
         static let syncStatus = "devices.syncStatus"
+        static let uploadAgain = "devices.uploadAgain"
         static let thisDevice = "devices.thisDevice"
         static let notice = "devices.notice"
         static func row(_ name: String) -> String { "devices.row.\(name)" }

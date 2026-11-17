@@ -91,6 +91,17 @@ public struct SyncState: Sendable, Hashable {
     /// after a reset, and what it had merged of each stream then. While that snapshot is listed it stands for all of
     /// that, whatever coverage it could claim.
     public var handedOn: HandedOn?
+    /// The highest number this device has used in the name of a snapshot of its own. A snapshot that hands
+    /// everything on after a reset is named above it: the store, emptied, would accept an old name again, and a
+    /// device that had merged the earlier snapshot under that name would never read the new one.
+    public var highestOwnSnapshot: UInt64 = 0
+    /// The store looked reset when this device last listed it before merging: an object of its own that it had not
+    /// deleted was missing, and it had merged something nothing listed stood for (§7.10). Remembered, because what
+    /// another device uploads afterwards can stand for this device's own stream and so hide the first sign, while
+    /// this device still holds more of a third stream than the store. Cleared once everything it has merged is
+    /// listed or stood for again, or it has handed everything on. While set, and until the person answers, the
+    /// engine writes no snapshot, collects nothing and replays nothing.
+    public var storeResetSuspected = false
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID

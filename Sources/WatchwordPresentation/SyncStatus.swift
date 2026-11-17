@@ -19,6 +19,14 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case snapshotWithheld(by: [String])
     /// Versions kept aside for the person to look at (`quarantined` and `heldAside`).
     case keptAside(Int)
+    /// The sync storage was reset, or no longer holds what this device does, and the person has not said whether to
+    /// upload it again (`AccountSyncReport.storeNeedsReupload`; docs/02-architecture.md §7.10). The one notice with a
+    /// question behind it: `DevicesModel.askToUploadAgain`.
+    case storageNeedsUpload
+    /// Shared vaults that this device cannot upload again after a reset (`ReuploadRefusal.sharedVault`).
+    case sharedVaultsNotUploaded(Int)
+    /// Vaults the person asked to upload again that do not fit in one upload (`ReuploadRefusal.tooLarge`).
+    case vaultsTooLargeToUpload(Int)
 
     public var id: String {
         switch self {
@@ -29,6 +37,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .registryUnavailable: return "registryUnavailable"
         case .snapshotWithheld: return "snapshotWithheld"
         case .keptAside: return "keptAside"
+        case .storageNeedsUpload: return "storageNeedsUpload"
+        case .sharedVaultsNotUploaded: return "sharedVaultsNotUploaded"
+        case .vaultsTooLargeToUpload: return "vaultsTooLargeToUpload"
         }
     }
 
@@ -52,7 +63,83 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + names.joined(separator: ", ") + "."
         case .keptAside(let count):
             return "\(count) change(s) were held aside for you to review. See Held-Aside Changes."
+        case .storageNeedsUpload:
+            return "Your sync storage was emptied or reset, and no longer holds everything this device does. "
+                + "Nothing on this device has been lost, and nothing has been uploaded again. Until you decide, "
+                + "changes made here may not reach your other devices."
+        case .sharedVaultsNotUploaded(let count):
+            return "\(count) shared vault(s) cannot be uploaded again from this device after the reset. They stay "
+                + "on this device, readable and unchanged, and do not sync."
+        case .vaultsTooLargeToUpload(let count):
+            return "\(count) vault(s) are too large to upload again in one piece. They stay on this device, "
+                + "unchanged."
         }
+    }
+}
+
+/// The question a person is asked before anything is uploaded again after the sync storage was reset
+/// (docs/02-architecture.md §7.10; owner decision, 2026-11-17: re-upload, "but ask the user first"). It says that the
+/// data is gone from the storage and may have been deleted on purpose, exactly what this device would upload, that
+/// uploading undoes a deletion made elsewhere, and what cannot be uploaded. Words only: the session decides what is
+/// uploaded, and checks that this is still the plan the person saw.
+public struct ReuploadQuestion: Hashable, Sendable {
+    /// The plan the wording describes, handed back to the session with a yes.
+    public let plan: ReuploadPlan
+    public let title: String
+    /// What happened, and that it may have been deliberate.
+    public let explanation: String
+    /// What this device would upload.
+    public let upload: String
+    /// What a yes undoes.
+    public let warning: String
+    /// What cannot be uploaded, or `nil`.
+    public let notUploaded: String?
+    public let confirmLabel: String
+    public let declineLabel: String
+
+    public init(_ plan: ReuploadPlan) {
+        self.plan = plan
+        title = "Upload your vaults again?"
+        explanation =
+            "Your sync storage no longer holds your Watchword data: it was emptied or reset. That can happen when "
+            + "the data is deleted in the storage's settings, on this device or another, and it may have been done "
+            + "on purpose. Everything is still on this device."
+        let live = plan.vaults.filter { !$0.isDeleted }
+        let items = live.reduce(0) { $0 + $1.itemCount }
+        var upload =
+            "If you continue, this device uploads everything it holds: \(Self.count(items, "item")) in "
+            + "\(Self.count(live.count, "vault")), encrypted as before, with the encrypted keys and the list of "
+            + "devices your other devices need to read them."
+        let deleted = plan.vaults.count - live.count
+        if deleted > 0 {
+            upload +=
+                " It also uploads the record of \(Self.count(deleted, "deleted vault")), so that "
+                + (deleted == 1 ? "it stays" : "they stay") + " deleted everywhere."
+        }
+        self.upload = upload
+        warning =
+            "Uploading puts the data back in the sync storage. If you, or someone using another of your devices, "
+            + "deleted it there deliberately, this undoes that deletion. Your other devices keep what they hold "
+            + "and will each ask the same question if they have something to add."
+        if plan.sharedVaults.isEmpty {
+            notUploaded = nil
+        } else {
+            notUploaded =
+                "\(Self.count(plan.sharedVaults.count, "shared vault")) cannot be uploaded again from one member's "
+                + "device. " + (plan.sharedVaults.count == 1 ? "It stays" : "They stay")
+                + " on this device, readable and unchanged, and will not sync."
+        }
+        confirmLabel = "Upload Again"
+        declineLabel = "Not Now"
+    }
+
+    /// The whole question as paragraphs, in the order a screen shows them.
+    public var paragraphs: [String] {
+        [explanation, upload, warning] + (notUploaded.map { [$0] } ?? [])
+    }
+
+    static func count(_ number: Int, _ noun: String) -> String {
+        "\(number) \(noun)\(number == 1 ? "" : "s")"
     }
 }
 
@@ -88,11 +175,23 @@ public struct SyncSummary: Hashable, Sendable {
         }
         let kept = combined.quarantined.count + combined.heldAside.count
         if kept > 0 { notices.append(.keptAside(kept)) }
+        if report.storeNeedsReupload { notices.append(.storageNeedsUpload) }
+        let refusals = report.reuploadRefusals.values
+        let shared = refusals.filter { $0 == .sharedVault }.count
+        if shared > 0 { notices.append(.sharedVaultsNotUploaded(shared)) }
+        let tooLarge = refusals.filter { $0 == .tooLarge }.count
+        if tooLarge > 0 { notices.append(.vaultsTooLargeToUpload(tooLarge)) }
         self.notices = notices
     }
 
+    /// Whether the person should be asked about uploading again (`SyncNotice.storageNeedsUpload`).
+    public var storageNeedsUpload: Bool { notices.contains(.storageNeedsUpload) }
+
     /// The one line about a sync's outcome. The words "received" and "sent" are what the UI tests wait for.
     public static func describe(_ report: SyncReport) -> String {
+        if report.transportFailure == .storeReset {
+            return "Sync storage was emptied or reset. Nothing was sent, and nothing was uploaded again."
+        }
         if report.transportUnavailable { return "Sync storage could not be reached. Nothing was sent." }
         if !report.rejected.isEmpty, report.rejected.allSatisfy({ $0.reason == .keyring(.trustedKeyUnavailable) }) {
             return "Changes will be downloaded and checked after you unlock."

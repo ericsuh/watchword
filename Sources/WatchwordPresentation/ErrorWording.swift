@@ -28,6 +28,8 @@ public enum ErrorWording {
             return ""
         case SyncError.syncInProgress:
             return "A sync is already running."
+        case let error as SyncTransportError where error.stopsSync:
+            return "Sync storage could not be reached. Nothing was sent."
         case RecordStoreError.versionConflict:
             return "This item changed while you were editing it. Review it and try again."
         default:
@@ -94,6 +96,10 @@ public enum ErrorWording {
             return "Watchword's files on this device are older than expected and were not trusted."
         case .vaultKeyMissing, .vaultKeyUnreadable:
             return "This device does not have that vault's key yet. Sync, then try again."
+        case .reuploadNotConfirmed:
+            return "Something changed on this device since you were asked. Nothing was uploaded; review and try again."
+        case .deviceNotRegistered:
+            return "This device is not registered with your account yet, so nothing it uploaded would be read."
         default:
             return "Something went wrong. Your vault is unchanged."
         }

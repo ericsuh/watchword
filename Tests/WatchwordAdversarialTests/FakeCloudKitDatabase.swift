@@ -23,6 +23,9 @@
         private(set) var savePolicies: [CKModifyRecordsOperation.RecordSavePolicy] = []
         private(set) var savedChangeTags: [String?] = []
         private(set) var queriedKeys: [[CKRecord.FieldKey]] = []
+        /// Every zone save and zone deletion asked for, in order.
+        private(set) var savedZones: [String] = []
+        private(set) var deletedZones: [String] = []
         let pageLimit: Int
         /// A1 answering without end: every page repeats the same records and offers another.
         var endless = false
@@ -161,7 +164,19 @@
 
         func saveZone(_ zone: CKRecordZone) async throws {
             try takeInjected()
-            lock.withLock { _ = zones.insert(zone.zoneID.zoneName) }
+            lock.withLock {
+                _ = zones.insert(zone.zoneID.zoneName)
+                savedZones.append(zone.zoneID.zoneName)
+            }
+        }
+
+        func deleteZone(_ zoneID: CKRecordZone.ID) async throws {
+            try takeInjected()
+            lock.withLock {
+                zones.remove(zoneID.zoneName)
+                stored = stored.filter { $0.key.zoneID.zoneName != zoneID.zoneName }
+                deletedZones.append(zoneID.zoneName)
+            }
         }
 
         /// A copy as the server would return it, with only `keys` (plain or encrypted) when given.

@@ -183,14 +183,20 @@ public struct SyncReport: Sendable, Equatable {
     /// This device owes a snapshot for a fork of its own stream and has not been able to write it yet
     /// (`SyncState.handOnOwed`); until it has, it collects nothing.
     public var handOnOwed = false
-    /// The transport no longer holds what this device published and merged: a segment of its own that it never
-    /// collected is not listed, and it has merged something nothing listed stands for (docs/02-architecture.md
-    /// §7.10). The store was reset, and perhaps started again by another device. Nothing is uploaded again for it:
-    /// this device writes no snapshot and collects nothing until the person has answered
-    /// (`VaultSession.reuploadAfterStoreReset`). New edits are still published.
+    /// The transport no longer holds what this device published and merged: an object of its own that it never
+    /// collected was not listed, and it has merged something nothing listed stands for (docs/02-architecture.md
+    /// §7.10; `SyncState.storeResetSuspected`). The store was reset, and perhaps started again by another device.
+    /// Nothing is uploaded again for it: this device writes no snapshot and collects nothing until the person has
+    /// answered (`VaultSession.reuploadAfterStoreReset`). New edits are still published.
     public var storeLacksObjects = false
-    /// The person asked for the upload and this vault's log was not uploaded again, and why.
+    /// This vault's log holds something the store lacks and cannot be uploaded again from this device, and why: a
+    /// shared vault (whether or not the person has been asked), or, once they asked, a vault too large for one
+    /// snapshot. Nothing was uploaded again for it and nothing was dropped.
     public var reuploadRefused: ReuploadRefusal?
+    /// A replay of the log was asked for (`sync(reconcile: true)`, or the stash needs one) and was not begun,
+    /// because the log could not be listed or the store was reset: a replay from a log that is gone rebuilds nothing
+    /// (§7.10). This device's state is as it was; a later sync replays.
+    public var replayPostponed = false
 
     public init() {}
 
@@ -313,8 +319,17 @@ public actor SyncEngine {
                 report.noteTransportFailure(error)
             }
         }
-        if let listing { noteCovered(&state, listing: listing) }
-        let storeLacked = listing.map { storeLacks(state, listing: $0, retired: retired) } ?? false
+        if let listing {
+            noteCovered(&state, listing: listing)
+            // Before anything listed is merged, while what another device may have uploaded since cannot yet hide
+            // it: objects of this device's own are gone, and it holds what nothing listed stands for. Remembered
+            // until the store stands for everything this device has merged again.
+            if ownObjectsMissing(state, listing: listing),
+                !lackingStreams(state, listing: listing, retired: retired).isEmpty
+            {
+                state.storeResetSuspected = true
+            }
+        }
         var reconcile = reconcile
         let carried = carriedRawKinds
         // An earlier version dropped entries of a kind this one carries, the stash being full; the stash was not
@@ -328,9 +343,14 @@ public actor SyncEngine {
         if incomplete {
             if judge == nil { reconcile = true } else { report.replayNeeded = true }
         }
-        // A replay rebuilds this device's state from the log. From a log that is gone it would rebuild nothing, and
-        // the outbox would then publish every row this device ever wrote again, unasked (§7.10): the state is kept.
-        if reconcile, storeLacked { reconcile = false }
+        // A replay rebuilds this device's state from the log. From a log that is gone, or cannot be listed now, it
+        // would rebuild nothing: the outbox would then publish every row this device ever wrote again, unasked, and
+        // what it had merged of other streams, which decides what it hands on, would be forgotten (§7.10). The state
+        // is kept, and a later sync replays.
+        if reconcile, listing == nil || state.storeResetSuspected {
+            reconcile = false
+            report.replayPostponed = true
+        }
         stashIncomplete = incomplete && !reconcile
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
@@ -348,6 +368,7 @@ public actor SyncEngine {
             state.handOnOwed = kept.handOnOwed
             state.collectedThrough = kept.collectedThrough
             state.handedOn = kept.handedOn
+            state.highestOwnSnapshot = kept.highestOwnSnapshot
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
             // so those are kept across it.
             var replayed = SyncStash()
@@ -376,23 +397,27 @@ public actor SyncEngine {
             if let listing {
                 noteCovered(&state, listing: listing)
                 lacking = lackingStreams(state, listing: listing, retired: retired)
-                report.storeLacksObjects = !lacking.isEmpty && ownSegmentsMissing(state, listing: listing)
+                // The store stands for everything again (another device uploaded it, or this one did): no question.
+                if lacking.isEmpty { state.storeResetSuspected = false }
+                report.storeLacksObjects = state.storeResetSuspected
+                // A shared vault writes no snapshot, so it has nothing to hand on with (§7.10): said whether or not
+                // the person has been asked, so that nobody is asked about a vault that cannot be uploaded.
+                if !configuration.maintainsLog, !lacking.isEmpty, handingOn || state.storeResetSuspected {
+                    report.reuploadRefused = .sharedVault
+                }
             }
             try await syncState.saveState(state)
             if !report.transportUnavailable, publishing, let listing {
                 try await push(
                     state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
-                if report.ownStreamConflict == nil {
-                    if !configuration.maintainsLog {
-                        // A shared vault writes no snapshot, so it has nothing to hand on with (§7.10).
-                        if handingOn, !lacking.isEmpty { report.reuploadRefused = .sharedVault }
-                    } else if handingOn || !report.storeLacksObjects {
-                        // While the store lacks what this device holds and the person has not answered, no snapshot
-                        // (it would carry the whole vault) and no collection.
-                        try await maintain(
-                            state: &state, listing: listing, retired: retired,
-                            handingOn: handingOn && !lacking.isEmpty, report: &report)
-                    }
+                // While the store lacks what this device holds and the person has not answered, no snapshot (elected
+                // or owed: either would carry the whole vault) and no collection.
+                if report.ownStreamConflict == nil, configuration.maintainsLog,
+                    handingOn || !state.storeResetSuspected
+                {
+                    try await maintain(
+                        state: &state, listing: listing, retired: retired,
+                        handingOn: handingOn && !lacking.isEmpty, report: &report)
                 }
             }
         } catch SyncKeyringError.locked {
@@ -598,15 +623,20 @@ public actor SyncEngine {
         state.collectedThrough = max(through ?? 0, covered)
     }
 
-    /// Whether a segment this device published, and did not collect, is no longer listed. A device sees its own
-    /// objects at once, keeps its newest segment, and nobody else deletes its objects: an honest store lists them
-    /// all. Linear in the listing.
-    private func ownSegmentsMissing(_ state: SyncState, listing: Listing) -> Bool {
+    /// Whether an object this device wrote, and did not delete, is no longer listed: a segment it published past
+    /// what it may have collected, or a snapshot it remembers writing. A device sees its own objects at once, keeps
+    /// its newest segment, and nobody else deletes its objects, so an honest store lists them all. (A state restored
+    /// from a backup remembers objects its later self collected; that alone asks nothing, see `sync`.) Linear in the
+    /// listing.
+    private func ownObjectsMissing(_ state: SyncState, listing: Listing) -> Bool {
+        let listed = Set(listing.snapshots)
+        if state.snapshots.keys.contains(where: { $0.author == deviceID && !listed.contains($0) }) { return true }
+        if let handedOn = state.handedOn, !listed.contains(handedOn.snapshot) { return true }
         let after = state.collectedThrough ?? 0
         let last = state.lastPublishedSequence
         guard last > after else { return false }
-        let listed = Set((listing.segments[deviceID] ?? []).filter { $0 > after && $0 <= last })
-        return UInt64(listed.count) < last - after
+        let own = Set((listing.segments[deviceID] ?? []).filter { $0 > after && $0 <= last })
+        return UInt64(own.count) < last - after
     }
 
     /// The streams of which this device has merged something that nothing listed stands for: a segment past what
@@ -622,12 +652,6 @@ public actor SyncEngine {
             if UInt64(listed.count) < merged - after { lacking.insert(author) }
         }
         return lacking
-    }
-
-    /// The engine's sign of a reset: its own segments are missing *and* it holds what the store lacks. Either alone
-    /// has innocent causes (a state restored from a backup; a provider showing a snapshot's replacement late).
-    private func storeLacks(_ state: SyncState, listing: Listing, retired: Set<UUID>) -> Bool {
-        ownSegmentsMissing(state, listing: listing) && !lackingStreams(state, listing: listing, retired: retired).isEmpty
     }
 
     /// Fetches the copies the transport holds under one name and checks each alone: the container, the envelope's
@@ -1586,13 +1610,12 @@ public actor SyncEngine {
             vector = state.merged.filter { retired.contains($0.key) }
             if handingOn {
                 // After a reset the segments are gone whatever this snapshot covers, and a reader must be able to
-                // pass the gap in this device's own stream, whose segments carried nothing it could not read. It
-                // also covers the streams of devices whose objects carried no kept entry, where the stash can say
-                // whose did; a reader waits at the others until their own devices upload again (§7.10).
-                let known = stash.crowdedOut.isEmpty && !stashIncomplete
-                vector = state.merged.filter {
-                    retired.contains($0.key) || $0.key == deviceID || (known && !holding.contains($0.key))
-                }
+                // pass the gap in this device's own stream, whose segments carried nothing it could not read. No
+                // other trusted device's stream is covered: a kept entry names the device whose object carried it,
+                // which for a snapshot is not the device whose segment did, so the stash cannot say which streams
+                // carried none. A reader waits at those streams until their own devices, which read the kind and
+                // hold it as rows, upload again (§7.10).
+                vector = state.merged.filter { retired.contains($0.key) || $0.key == deviceID }
                 report.snapshotWithheldBy = holding
             }
         }
@@ -1609,6 +1632,13 @@ public actor SyncEngine {
             entries.append(.tombstone(key, stamp: erasure.stamp, erasure: erasure.summary))
         }
         var lamport = max(entries.map(\.version).max() ?? 0, 1)
+        if handingOn {
+            // Never a name this device has used for a snapshot: after a reset the store no longer refuses a second
+            // create of it, and a device that merged the earlier snapshot under that name would not read this one.
+            let used = state.snapshots.keys.filter { $0.author == deviceID }.map(\.number)
+            let highest = max(state.highestOwnSnapshot, used.max() ?? 0, state.handedOn?.snapshot.number ?? 0)
+            lamport = max(lamport, min(highest, configuration.maximumVersion) + 1)
+        }
         // A snapshot this device owes must be written even if it already wrote one at this Lamport time (nothing
         // newer has been stored since): the next free number is as good a name.
         for _ in 0..<(owed ? 16 : 1) {
@@ -1631,6 +1661,7 @@ public actor SyncEngine {
                 continue
             }
             state.snapshots[location] = vector
+            state.highestOwnSnapshot = max(state.highestOwnSnapshot, lamport)
             state.snapshotCoverage.merge(vector, uniquingKeysWith: max)
             // Handed on: what this device merged from revoked devices is now in a snapshot of its own.
             state.snapshots = state.snapshots.filter { !retired.contains($0.key.author) }
@@ -1641,6 +1672,7 @@ public actor SyncEngine {
             if handingOn {
                 // It holds everything this device had merged, whatever it could claim to cover.
                 state.handedOn = HandedOn(snapshot: location, holding: state.merged)
+                state.storeResetSuspected = false
                 report.storeLacksObjects = false
             }
             report.snapshotsWritten += 1
@@ -1694,6 +1726,7 @@ public actor SyncEngine {
             guard superseded else { continue }
             try await transport.delete(location.name)
             state.snapshots[location] = nil
+            if state.handedOn?.snapshot == location { state.handedOn = nil }
             report.collected += 1
         }
     }

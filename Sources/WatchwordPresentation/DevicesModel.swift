@@ -124,6 +124,12 @@ public final class DevicesModel: LockSensitive {
     /// The removal being filled in, passwords included: here rather than in the view, so a lock clears it whatever is
     /// on screen (finding 6).
     public var revocation = RevocationForm()
+    /// The question about uploading again after the sync storage was reset, while it is on screen
+    /// (docs/02-architecture.md §7.10). Set only by `askToUploadAgain`, which a person's tap calls.
+    public private(set) var reuploadQuestion: ReuploadQuestion?
+    /// The last sync says the storage was reset and the person has not uploaded again: the screen offers the question
+    /// (`askToUploadAgain`). Still true after "Not Now"; declining decides nothing for good.
+    public var storageNeedsUpload: Bool { sync?.storageNeedsUpload ?? false }
 
     private let context: ScreenContext
 
@@ -135,6 +141,8 @@ public final class DevicesModel: LockSensitive {
 
     public func dropOnLock() {
         revocation = RevocationForm()
+        // A question answered after a lock would be answered unread.
+        reuploadQuestion = nil
     }
 
     /// How sentences name each device, by ID, for wording reports that name devices.
@@ -155,6 +163,50 @@ public final class DevicesModel: LockSensitive {
             try await reload()
             sync = SyncSummary(report, deviceNames: names)
         }
+    }
+
+    // MARK: - After the sync storage was reset (docs/02-architecture.md §7.10)
+
+    /// Prepares the question: what this device would upload, read from the device alone. Nothing is uploaded and the
+    /// storage is not asked anything.
+    public func askToUploadAgain() async {
+        guard isSyncConfigured else { return }
+        await perform {
+            reuploadQuestion = ReuploadQuestion(try await context.session.reuploadPlan())
+        }
+    }
+
+    /// "Not Now": the question goes away and nothing else happens. The notice stays, and the person can be asked
+    /// again whenever they choose.
+    public func declineUpload() {
+        context.recordActivity()
+        reuploadQuestion = nil
+    }
+
+    /// "Upload Again": the person's yes to `question`, which is the one they were shown, and the only caller of
+    /// `VaultSession.reuploadAfterStoreReset`. A question can only be made from what this device holds
+    /// (`askToUploadAgain`), and the session checks that it still holds exactly that: if something changed since,
+    /// nothing is uploaded and the question is made again from what it holds now, for the person to read before they
+    /// answer. Returns whether the upload was made.
+    @discardableResult
+    public func confirmUpload(_ question: ReuploadQuestion) async -> Bool {
+        var done = false
+        reuploadQuestion = nil
+        await perform {
+            do {
+                let report = try await context.session.reuploadAfterStoreReset(confirming: question.plan)
+                try await reload()
+                sync = SyncSummary(report, deviceNames: names)
+                if !report.storeNeedsReupload, report.transportFailure == nil {
+                    notice = "This device uploaded what it holds. Your other devices will pick it up when they sync."
+                    done = true
+                }
+            } catch VaultError.reuploadNotConfirmed {
+                reuploadQuestion = ReuploadQuestion(try await context.session.reuploadPlan())
+                throw VaultError.reuploadNotConfirmed
+            }
+        }
+        return done
     }
 
     /// Removes a device. Both choices take the current password; the session refuses this device and unknown ones.

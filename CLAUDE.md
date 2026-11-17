@@ -201,7 +201,8 @@ Fifteen shipped modules, dependency-ordered, plus test support:
 - **`WatchwordKit`** — `VaultSession` (the actor every UI calls: create, unlock, quick unlock, lock, items,
   history, trash, password change, deletion, `sync()`, conflict resolution; vaults, move, copy and search in
   `VaultSession+Vaults.swift`; enrolment, devices, revocation and the account's objects on the transport in
-  `VaultSession+Account.swift`; import preview and commit, password-checked export and the archive in
+  `VaultSession+Account.swift`; the upload after the sync store was reset, which only a screen calls, in
+  `VaultSession+Reupload.swift`; import preview and commit, password-checked export and the archive in
   `VaultSession+Interchange.swift`), `UnlockPolicy`, `AutoLockPolicy`, `ItemCodec`, `VaultMetadataCodec`, `ItemSearch`,
   `EmergencyKit`, the ports (`KeychainStore`, `BiometricGate`, `WallClock`, `DeviceKeyStore` with the software
   `KeychainDeviceKeyStore`), and `VaultSyncAdapter`, the production `SyncKeyring` and `ItemSealer`
@@ -244,7 +245,8 @@ Fifteen shipped modules, dependency-ordered, plus test support:
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `FakeDeviceKeyStore`, `TestVault`, whose
   `enrolledDevice` enrols a real second device over the transport; `RegistryFixture` for hand-built registry
   entries; for sync `FakeSyncKeyring` over a keyed checksum that is not cryptography, `FakeItemMerger`,
-  `SyncTestClient`, `SimulatedServer`, and `SyncTransportContract` (the transport contract, run against every
+  `SyncTestClient`, `SimulatedServer`, `ResettableSyncTransport` (a store that can be reset as a CloudKit zone is,
+  and records every create), and `SyncTransportContract` (the transport contract, run against every
   transport); for AutoFill `FakeCredentialVault`, `FakeCredentialIdentityPublisher`,
   `AutoFillHarness` and the S1 to S4 items in `AutoFillFixtures`; for hygiene `FakeHTTPClient`, which records every
   request, `RecordingPwnedRangeCache`, `SimulatedPwnedPasswords`, and `HygieneSessionFixture` (a session with hygiene
@@ -256,10 +258,11 @@ Fifteen shipped modules, dependency-ordered, plus test support:
 
 `docs/02-architecture.md` §15 maps each module to its milestone; §14 describes import and export as built; §7.5
 describes sync as built, §7.6 the vault side (keyring, saves, state, conflict UI), §7.7 vaults, the account's objects
-on the transport and enrolment, §7.8 the device registry (and what revocation does not do), §7.9 automatic syncing;
+on the transport and enrolment, §7.8 the device registry (and what revocation does not do), §7.9 automatic syncing,
+§7.10 starting again after the store was reset;
 `docs/10-sync-correctness.md` is the model of an item as a CRDT and the argument that sync converges;
 `docs/03-implementation-plan.md` milestone 3 lists what is still open (a Mac run of the transports, sync in production
-builds, `CKSyncEngine`, re-upload after a CloudKit reset, the Secure Enclave device key, `UITestPeer`). §8 describes sharing as built, and milestone 4
+builds, `CKSyncEngine`, a Mac run of the conflict-copy and reset adapters, the Secure Enclave device key, `UITestPeer`). §8 describes sharing as built, and milestone 4
 what is open there (`CKShare`, the key directory's adapter, the UI). §13 describes hygiene as built, and
 milestone 6 what is still open (a Mac run of the `URLSession` adapter, configuring hygiene in the app, background glue,
 the report UI). §14.1 describes import and export through the session and the encrypted archive as built; milestone 7
@@ -395,8 +398,25 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   vaults (`transportStopped`), so one sync asks a stopped transport once. A failure of one object is never
   `unavailable`: it is `objectUnreadable` (or another per-object case), refused alone, so one broken record cannot stop
   this device publishing. A CloudKit zone this device has seen (`SyncStoreMarker`) and then finds missing is
-  `storeReset`, never recreated: the person may have deleted it. Adapter listings and waits are bounded
+  `storeReset`, never recreated by a sync: the person may have deleted it. Adapter listings and waits are bounded
   (`listingTooLarge`, coordination deadlines).
+- **After a reset nothing is uploaded again unasked** (§7.10; owner decision 2026-11-17: re-upload, "but ask the user
+  first"). Three signs, each good only for stopping and asking: the transport's `storeReset`; a store that lists none
+  of the registry entries this device retains although its sync state says it has published or merged a log
+  (`syncAccountObjects`, `hasSyncedBefore`: reported as `storeReset`, and nothing is published, the account's objects
+  and new edits included); and the engine's own (`SyncState.storeResetSuspected`: an object of its own missing at a
+  listing *before* merging, and something merged that nothing listed stands for; sticky until the store stands for
+  everything again). While suspected and unanswered the engine writes no snapshot, elected or owed, and collects
+  nothing. **A replay never begins without a listing or while a reset is suspected** (`replayPostponed`): it would
+  forget `published` and `merged` in front of a log that is gone. The one upload is
+  `VaultSession.reuploadAfterStoreReset(confirming:)`, called by a screen on the person's yes with the
+  `ReuploadPlan` they were shown: `SyncTransport.startStoreAgain` (the only call that recreates a store; never call
+  it from a sync, a timer or `AutoSyncPolicy`), then one sync with `handingOn`, in which each of the account's own
+  vaults that holds what the store lacks writes one snapshot of everything it holds. Never restart a sequence number
+  and never reuse a snapshot name (`highestOwnSnapshot`); never forget, overwrite or delete local state on a reset;
+  never put the stash, the quarantine or held-aside versions in that snapshot (with a stash it covers this device's
+  own stream and revoked streams only); never upload a shared vault from one member's device
+  (`ReuploadRefusal.sharedVault`: a snapshot has no segment for a write cut to be judged by).
 - **Conflict copies** (§7.5; owner decision 2026-11-17). A provider can hold several copies under one name
   (`listWithCopies`, `fetchCopies`; `FileSyncTransport` attributes `N 2.wwe` to `N 64.wwe` to `N`). The transport
   chooses none and resolves none; never add a "pick the winner" or a conflict resolution to a transport, and never let

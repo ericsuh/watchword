@@ -32,19 +32,34 @@ extension VaultSession {
     /// in the Keychain; each report's `deferredUntilUnlock` says so (§7.4). The same holds, unlocked, while this
     /// device is not registered, has been revoked, or has seen a password change it has not been given yet: it
     /// downloads, and neither merges nor publishes.
+    ///
+    /// A sync never uploads again what a reset removed from the store (§7.10): it stops at a store that was reset or
+    /// emptied (`transportFailure` is `storeReset`), and in a store another device has started again it publishes new
+    /// edits only. The report says when the person should be asked (`AccountSyncReport.storeNeedsReupload`); only
+    /// `reuploadAfterStoreReset(confirming:)`, which a screen calls on their answer, uploads.
     @discardableResult
     public func syncAll(reconcile: Bool = false) async throws -> AccountSyncReport {
-        guard let syncSettings, let syncState else { throw VaultError.syncNotConfigured }
-        guard var record = try await loadAccount() else { throw VaultError.noAccount }
+        guard syncSettings != nil else { throw VaultError.syncNotConfigured }
+        guard try await loadAccount() != nil else { throw VaultError.noAccount }
         guard !syncInFlight else { throw SyncError.syncInProgress }
         syncInFlight = true
         defer { syncInFlight = false }
+        return try await runSync(reconcile: reconcile, reuploading: false)
+    }
+
+    /// One sync, for a caller that holds `syncInFlight`. `reuploading` is the person's confirmed answer to a reset
+    /// and comes from `reuploadAfterStoreReset(confirming:)` alone: the account's objects are published into a store
+    /// that holds none of them, and every vault's engine hands on what it holds that the store lacks.
+    func runSync(reconcile: Bool, reuploading: Bool) async throws -> AccountSyncReport {
+        guard let syncSettings, let syncState else { throw VaultError.syncNotConfigured }
+        guard var record = try await loadAccount() else { throw VaultError.noAccount }
         var report = AccountSyncReport()
         registryView = nil
 
         do {
             try await startRegistryIfAccountPredatesIt(account: record, transport: syncSettings.transport)
-            report.account = try await syncAccountObjects(account: record, transport: syncSettings.transport)
+            report.account = try await syncAccountObjects(
+                account: record, transport: syncSettings.transport, reuploading: reuploading)
         } catch let error as SyncTransportError where error.stopsSync {
             report.transportUnavailable = true
             report.transportFailure = report.transportFailure ?? error
@@ -73,7 +88,19 @@ extension VaultSession {
             .scanStatus: ScanStatusMerger(sealer: adapter),
         ])
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
-        var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
+        // Not at a store that was reset: the pass publishes this device's proposals, and nothing is published there
+        // before the person has answered (§7.10).
+        var sharingReports: [UUID: SharedVaultSyncReport]
+        if report.transportFailure == .storeReset {
+            await loadSharedVaultsIfNeeded()
+            sharingReports = sharing.vaults.mapValues { _ in
+                var stopped = SharedVaultSyncReport()
+                stopped.transportFailure = .storeReset
+                return stopped
+            }
+        } else {
+            sharingReports = await syncSharedVaultsBeforeLogs(account: record)
+        }
         func engine(_ vaultID: UUID) -> SyncEngine {
             let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
             return SyncEngine(
@@ -95,8 +122,11 @@ extension VaultSession {
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 vaultReport = try await engine(vaultID).sync(
                     reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
-                    transportStopped: stopped)
-                sharedEngineDidRun(vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport)
+                    transportStopped: stopped, handingOn: reuploading)
+                // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
+                sharedEngineDidRun(
+                    vaultID, reconciled: (reconcile || shared.reconcile) && !vaultReport.replayPostponed,
+                    report: vaultReport)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
@@ -128,7 +158,7 @@ extension VaultSession {
                 await prepareSharedReplay(vaultID)
                 let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
                 let second = try await engine(vaultID).sync(reconcile: true, publishing: shared.publishing)
-                sharedEngineDidRun(vaultID, reconciled: true, report: second)
+                sharedEngineDidRun(vaultID, reconciled: !second.replayPostponed, report: second)
                 report.vaults[vaultID] = Self.report(first, followedBy: second)
             }
             await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
@@ -169,6 +199,10 @@ extension VaultSession {
         total.copiesRefused += first.copiesRefused
         total.copiesNotExamined += first.copiesNotExamined
         total.forkedObjects = first.forkedObjects + second.forkedObjects
+        // Whether the store lacks what this device holds is as the second run left it; what the first refused or
+        // postponed still happened.
+        total.reuploadRefused = second.reuploadRefused ?? first.reuploadRefused
+        total.replayPostponed = total.replayPostponed || first.replayPostponed
         return total
     }
 
@@ -712,8 +746,28 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.copiesNotExamined += report.copiesNotExamined
             total.forkedObjects += report.forkedObjects
             total.handOnOwed = total.handOnOwed || report.handOnOwed
+            total.storeLacksObjects = total.storeLacksObjects || report.storeLacksObjects
+            total.replayPostponed = total.replayPostponed || report.replayPostponed
         }
         return total
+    }
+
+    /// The store was reset, or lacks what this device holds, and the person has not been asked or has not answered
+    /// (docs/02-architecture.md §7.10): the transport says so or the store holds none of the account's objects
+    /// (`storeReset`, and this sync stopped), or a vault's engine found its own objects gone and holds what nothing
+    /// listed stands for. Nothing was uploaded again. A screen shows the question (`VaultSession.reuploadPlan`) and
+    /// calls `reuploadAfterStoreReset(confirming:)` only on a yes. A shared vault alone never raises it: it cannot
+    /// be uploaded again from one member's device (`reuploadRefusals`).
+    public var storeNeedsReupload: Bool {
+        if transportFailure == .storeReset { return true }
+        if vaults.values.contains(where: { $0.transportFailure == .storeReset }) { return true }
+        if sharing.values.contains(where: { $0.transportFailure == .storeReset }) { return true }
+        return vaults.values.contains { $0.storeLacksObjects && $0.reuploadRefused == nil }
+    }
+
+    /// The vaults whose logs hold something the store lacks and were not, or cannot be, uploaded again, and why.
+    public var reuploadRefusals: [UUID: ReuploadRefusal] {
+        vaults.compactMapValues(\.reuploadRefused)
     }
 }
 

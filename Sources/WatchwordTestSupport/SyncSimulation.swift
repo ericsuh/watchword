@@ -237,6 +237,17 @@ public actor SimulatedServer {
         objects.mapValues(\.bytes)
     }
 
+    /// Removes every object and copy, for every device: a store that was reset, or a folder that was emptied
+    /// (docs/02-architecture.md §7.10).
+    public func removeEverything() {
+        objects = [:]
+        otherCopies = [:]
+    }
+
+    public func setVisibilityDelay(_ ticks: Int) {
+        maximumVisibilityDelay = ticks
+    }
+
     /// How many copies are kept beside objects, in all.
     public var copyCount: Int {
         otherCopies.values.reduce(0) { $0 + $1.count }

@@ -989,6 +989,37 @@ other does, and reported as not required on Linux, where they cannot compile.
   with real keys" (planted copies while locked and after unlock; a really signed fork merged by every device and
   handed on). `LongRunningSyncSimulationTests` plants junk copies and forked copies of a device's newest segment and
   still converges, loses nothing, and leaves no hand-on owed.
+- **Starting again after a reset** (architecture §7.10; portable, Linux). *Engine* ("Store reset: the engine",
+  over the fakes): no sync, replay included, uploads again what the store held; a store never set up is not a
+  reset; one device hands on everything and a new device reads all of it, with sequence numbers and state kept;
+  asked twice it hands on once; an offline device that holds more is asked, and its new edits wait behind a gap
+  until it answers; two devices in either order, and at once without seeing each other's snapshot, converge; a
+  device whose own stream another device's upload stands for is still asked about a third stream; a second reset is
+  noticed by the missing snapshot, and no snapshot name is used twice; a pending deletion and a merged erasure
+  travel; the quarantine and the stash stay (a stash narrows the snapshot's coverage to the uploader's own stream);
+  a vault that keeps its whole log refuses; an honest store with snapshots, collection and a restored state file
+  never raises the question; a replay is postponed offline and rebuilds from the snapshot afterwards; the state's
+  new fields survive encoding and an older row. *Session* ("Store reset: the session", real sessions, both kinds of
+  reset — the transport saying so, and a store merely emptied): nothing uploaded unasked, locked or not, new edits
+  included; a store that never held the account publishes; after the call a brand-new device enrols and reads every
+  vault, a deleted vault and a trashed item as such; a stale plan, a locked vault and a revoked device are refused;
+  two devices in either order converge; an offline device returning is asked and merges; a deletion made before the
+  reset is not undone; a shared vault is refused by name and does not keep the question open. *Screens* ("Screen
+  models: after the sync storage was reset"): the notice and headline, the question's wording (counts, deleted and
+  shared vaults), Not Now, Upload Again, a stale question renewed, a lock dropping the question, the refusals.
+  *Adversarial*: "sync log" (`AdversarialSyncStoreResetTests`: an emptied store with a replay planted in the state
+  file; a device's own objects deleted one by one; resets repeated after every upload; a store rolled back to an
+  older copy; a whole-log vault with a judge asked to hand on), "sync with real keys"
+  (`AdversarialVaultStoreResetTests`: nothing put back unasked under either kind of reset; a reset only claimed;
+  repeated resets reusing no name; an old copy of the store put back; the quarantine and an unpublished deletion; a
+  shared vault never uploaded from one member's device) and "account enrolment and device registry"
+  (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
+  revoked device cannot answer and stays revoked; a password change survives). `LongRunningSyncSimulationTests`
+  resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone
+  recreated by `startStoreAgain` alone, left alone when it exists, deleted first after a key reset, nothing created
+  offline) and its adversarial suite (a faked reset repeated; no deletion of a zone that answers). Not covered: a
+  vault too large for one snapshot (`ReuploadRefusal.tooLarge` needs 64 MiB of records), CloudKit itself, and the
+  SwiftUI alert.
 - **"Adversarial: Apple adapters: CloudKit transport"** (`AdversarialCloudKitTransportTests`, Mac, over the fake
   database). A1 as the CloudKit store: records whose `name` disagrees with their ID, or whose names are outside the
   layout, are not listed and are refused when fetched; a payload in a plain field is never read, two payloads are
