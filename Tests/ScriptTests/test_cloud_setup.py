@@ -71,7 +71,7 @@ print("[GNUPG:] GOODSIG 0123456789ABCDEF A signing key")
 print(f"[GNUPG:] VALIDSIG {'A' * 40} 2026-09-01 1788220800 0 4 0 1 10 00 {signer}")
 '''
 
-FAKE_SWIFT = "#!/bin/sh\necho 'Swift version 6.4.1 (a stand-in, from the release tarball)'\n"
+FAKE_SWIFT = "#!/bin/sh\necho 'Swift version 6.4.1 (swift-6.4.1-RELEASE)'\necho 'Target: a stand-in'\n"
 
 # What swiftly does that the script relies on: `init` moves the binary into its own bin directory, and `install`
 # leaves a toolchain under ~/.local/share/swiftly/toolchains.
@@ -174,6 +174,23 @@ class CloudSetupTests(support.ScriptTestCase):
         self.assertTrue(os.path.islink(os.path.join(self.root, "usr", "local", "bin", "swift")))
         self.assertNotIn("watchword-cloud-setup:begin", self.note())
 
+    def test_another_release_signed_by_the_same_key_is_not_the_one_asked_for(self):
+        """Found by the review of this change: the signature says who made the tarball, not which release it is, so
+        whoever serves the download could answer the request for 6.4.1 with any older toolchain the key ever signed,
+        known faults included."""
+        for reported in ("Swift version 6.0.3 (swift-6.0.3-RELEASE)", "Swift version 6.4.10 (swift-6.4.10-RELEASE)", ""):
+            with self.subTest(reported=reported):
+                self.setUp()
+                older = f"#!/bin/sh\necho '{reported}'\n"
+                tarball = archive(self.path("older.tar.gz"), "swift-6.4.1-RELEASE-ubuntu24.04/usr/bin/swift", older)
+                output = self.setup(opt_in="1", tarball=tarball)
+                self.assertIn(f"signature verified against {self.pinned_key}", output)
+                self.assertIn("is not Swift 6.4.1", output)
+                self.assertIn("REFUSING to try another install method", output)
+                self.assert_swiftly_untouched()
+                self.assert_nothing_installed(output)
+                self.assertIn("possible tampering", self.note())
+
     def test_swiftly_is_not_even_fetched_when_the_tarball_works(self):
         """Finding: the unverified installer was downloaded on every run, used or not."""
         self.setup()
@@ -210,7 +227,11 @@ class CloudSetupTests(support.ScriptTestCase):
                 self.assertIn("NOT falling back to swiftly", output)
                 self.assert_swiftly_untouched()
                 self.assert_nothing_installed(output)
-                self.assertIn("WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1", self.note())
+                # A setup script is not given the variables saved on a cloud environment, so the note must not
+                # send the person there (found by the review of this change).
+                self.assertIn("export WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1", self.note())
+                self.assertIn("above the setup script", self.note())
+                self.assertNotIn("the environment sets", self.note())
                 self.assertNotIn("possible tampering", self.note())
 
     def test_an_unavailable_tarball_reaches_swiftly_when_the_person_opted_in(self):
@@ -224,6 +245,24 @@ class CloudSetupTests(support.ScriptTestCase):
         self.assertIn("SUCCESS: swift is on PATH", output)
         self.assertTrue(self.installed("home", ".local", "share", "swiftly", "toolchains", "6.4.1", "usr", "bin", "swift"))
         self.assertFalse(self.installed("opt", "swift", "usr", "bin", "swift"))
+
+    def test_the_opt_in_is_a_line_above_the_pasted_script(self):
+        """The setup field holds the script's text; the opt-in is one `export` line in front of it."""
+        with open(SCRIPT, encoding="utf-8") as handle:
+            pasted = self.write("setup-field.sh", "export WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1\n" + handle.read())
+        answers = {"tarball": "fail", "swiftly": self.swiftly}
+        environment = {
+            "PATH": self.bin + os.pathsep + os.path.join(self.root, "usr", "local", "bin"),
+            "HOME": os.path.join(self.root, "home"),
+            "WATCHWORD_SETUP_TEST_ROOT": self.root,
+            "STUB_LOG": self.path("stub.log"),
+            "STUB_CURL": json.dumps(answers),
+            "STUB_SIGNER": self.pinned_key,
+        }
+        result = self.run_process([shutil.which("bash"), pasted], **environment)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("swiftly produced a toolchain", result.stdout)
+        self.assertIn("swiftly install 6.4.1 --assume-yes --use", self.requests())
 
     def test_a_swiftly_that_cannot_be_fetched_installs_nothing(self):
         output = self.setup(opt_in="1", tarball="fail", swiftly="fail")

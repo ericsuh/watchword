@@ -315,7 +315,11 @@ MACOS_EXTENSION = "Release/Watchword.app/Contents/PlugIns/AutoFillExtension-macO
 IOS_APP = "Release-iphonesimulator/Watchword.app/Watchword"
 IOS_EXTENSION = "Release-iphonesimulator/Watchword.app/PlugIns/AutoFillExtension-iOS.appex/AutoFillExtension-iOS"
 # What a binary looks like to a search for text: strings between runs of other bytes.
-CLEAN = "\xcf\xfa\xed\xfe\x00\x00Account password\x00Unlock\x00\x01\x02"
+CONTROL = "Watchword cannot reach its shared storage"
+# What a binary looks like to a search for text: strings between runs of other bytes. BARE is one in which the search
+# finds nothing it knows, the control included; CLEAN is the app as it should be.
+BARE = "\xcf\xfa\xed\xfe\x00\x00Account password\x00Unlock\x00\x01\x02"
+CLEAN = BARE + CONTROL + ". This build is missing its App Group entitlement.\x00"
 
 
 class ReleaseBuildTests(AppTaskTestCase):
@@ -325,7 +329,7 @@ class ReleaseBuildTests(AppTaskTestCase):
         shutil.copytree(os.path.join(support.ROOT, "Apps", "Shared"), self.path("Apps", "Shared"))
 
     def products(self, **changes):
-        files = {"macos": {MACOS_APP: CLEAN, MACOS_EXTENSION: CLEAN}, "ios": {IOS_APP: CLEAN, IOS_EXTENSION: CLEAN}}
+        files = {"macos": {MACOS_APP: CLEAN, MACOS_EXTENSION: BARE}, "ios": {IOS_APP: CLEAN, IOS_EXTENSION: BARE}}
         for platform, platform_changes in changes.items():
             for path, contents in platform_changes.items():
                 if contents is None:
@@ -371,6 +375,47 @@ class ReleaseBuildTests(AppTaskTestCase):
                 self.assertIn("::error::The Release build of macOS contains", result.stdout)
                 self.assertIn("derived/macos/Build/Products/" + MACOS_APP, result.stdout)
                 self.assertIn("::error::Release builds failed inspection: macOS", result.stdout)
+
+    def test_a_binary_the_search_cannot_read_proves_nothing(self):
+        """Found by the review of this change: the markers' absence is evidence only if this search can see such a
+        literal in this binary at all (a compressed or encrypted executable, a literal built in registers). So the
+        app must show one that is always compiled in, found the same way."""
+        result = self.release(products=self.products(macos={MACOS_APP: BARE}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f'::error::The Release build of macOS does not contain "{CONTROL}"', result.stdout)
+        self.assertNotIn("none of the 4 Debug-only markers", result.stdout)
+        # The control is the app's, not the extension's: finding it only there is not finding it in the app.
+        result = self.release(products=self.products(macos={MACOS_APP: BARE, MACOS_EXTENSION: CLEAN}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_the_control_is_a_literal_the_app_always_compiles(self):
+        """Long enough to be stored as bytes (over 15), in code outside `#if DEBUG`, and the one the task names."""
+        self.assertGreater(len(CONTROL.encode()), 15)
+        with open(os.path.join(TASKS, "release"), encoding="utf-8") as handle:
+            self.assertIn(f'\ncontrol="{CONTROL}"\n', handle.read())
+        with open(os.path.join(support.ROOT, "Apps", "Shared", "AppEnvironment.swift"), encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        depth = 0
+        found = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#if"):
+                depth += 1
+            elif stripped.startswith("#endif"):
+                depth -= 1
+            elif f'"{CONTROL}' in line and not stripped.startswith("//"):
+                found.append(depth)
+        self.assertEqual(found, [0])
+
+    def test_a_control_that_left_the_sources_makes_the_check_stale(self):
+        path = os.path.join("Apps", "Shared", "AppEnvironment.swift")
+        with open(self.path(path), encoding="utf-8") as handle:
+            text = handle.read()
+        self.write(path, text.replace(CONTROL, "Watchword cannot open its storage"))
+        result = self.release()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f'"{CONTROL}" is no longer in Apps/Shared', result.stdout)
+        self.assertEqual(self.actions(), [])
 
     def test_the_embedded_extension_is_read_too(self):
         binary = CLEAN + "WATCHWORD_UITEST_PASSWORD\x00"

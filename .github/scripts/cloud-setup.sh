@@ -34,6 +34,10 @@ readonly FALLBACK_VERSION="6.4.1"   # used only when .swift-version is missing o
 # signer is pinned for it here, yet what it serves is run as root. It is fetched and run only when the verified
 # tarball could not be had *and* WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 says the person accepts that
 # (docs/09-cloud-sessions.md §3). It is never the answer to a download that failed verification.
+#
+# A setup script is not given the variables saved on its cloud environment, so the opt-in cannot be set there. It is
+# a line the person adds above this script where they paste it, `export WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1`, or
+# puts in front of the command when running the script by hand in a session.
 readonly SWIFTLY_URL="https://download.swift.org/swiftly/linux/swiftly-x86_64.tar.gz"
 readonly ALLOW_UNVERIFIED_SWIFTLY="${WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY:-0}"
 readonly SWIFT_KEYS_URL="https://www.swift.org/keys/all-keys.asc"
@@ -173,9 +177,10 @@ find_toolchain_bin() {
 # It answers in three ways, and the difference between the last two is the point of this section:
 #   0  a verified toolchain was extracted;
 #   1  the tarball could not be had at all (no such URL, a failed download): nothing was learnt about it;
-#   2  a tarball arrived and could not be shown to be the one the pinned key signed (no signature, no key bundle, a
-#      signature by any other key). That is what tampering looks like, so it is where installing stops: section 4b
-#      tries nothing else, and the session is told why.
+#   2  a tarball arrived and could not be shown to be the release asked for, signed by the pinned key (no signature,
+#      no key bundle, a signature by any other key, or a toolchain that reports another version). That is what
+#      tampering looks like, so it is where installing stops: section 4b tries nothing else, and the session is told
+#      why.
 #
 # The URL layout is not guessable and was wrong in the first version of this script: the release
 # directory is lower-case (`swift-6.4.1-release`) while the directory and filename inside it are
@@ -245,6 +250,22 @@ install_via_tarball() {
     }
     # The archive is over a gigabyte and the snapshot keeps files; don't cache it twice.
     rm -f "$WORK/swift.tar.gz"
+
+    # The signature says who made the archive, not which release it is: the pinned key has signed every Swift release,
+    # so whoever serves this URL could answer it with an older toolchain and its signature, known faults included, and
+    # pass the check above. The toolchain itself says which it is, and it must be the one that was asked for. One that
+    # is not is treated as one that did not verify: removed, and nothing else tried.
+    local reported
+    reported="$("$ROOT/opt/swift/usr/bin/swift" --version 2>&1)" || reported="${reported:-nothing}"
+    case "$reported" in
+        *"(${tag})"*) log "the toolchain reports ${tag}" ;;
+        *)
+            log "the verified tarball is not Swift ${version}; it reports: ${reported:-nothing}"
+            log "discarding a toolchain that is signed but is not the release that was asked for"
+            rm -rf "$ROOT/opt/swift"
+            return 2
+            ;;
+    esac
     return 0
 }
 
@@ -393,14 +414,16 @@ else
     case "$why_no_toolchain" in
         unverified)
             detail="The toolchain that download.swift.org served did not verify against the pinned Swift
-signing key (or its signature or the key bundle could not be fetched), so it was discarded and no other
-installer was tried. Treat that as possible tampering with the download, not as a flaky network: tell the
+signing key (or its signature or the key bundle could not be fetched, or it was not the release asked for),
+so it was discarded and no other installer was tried. Treat that as possible tampering with the download, not as a flaky network: tell the
 user exactly this, and do not install a toolchain from any other source in this session unless they ask."
             ;;
         fallback-refused)
             detail="The signed release tarball could not be downloaded. The script's other method, swiftly,
-is an installer it cannot verify and runs as root, so it is used only when the environment sets
-WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 (docs/09-cloud-sessions.md §3). Tell the user; do not set it for them.
+is an installer it cannot verify and runs as root, so it is used only when the person has put the line
+\`export WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1\` above the setup script where it is pasted, or in front of a run by
+hand (docs/09-cloud-sessions.md §3; a variable saved on the environment does not reach a setup script). Tell the
+user; do not set it for them.
 If the download was refused, the environment's network access may not allow \`download.swift.org\` (§4)."
             ;;
         *)

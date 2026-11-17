@@ -229,18 +229,27 @@ class Reader:
         if not match:
             self.refuse("a block scalar header other than `|`, `|-`, `>` or `>-`", self.index - 1)
         style, strip = match.group(1), match.group(2) == "-"
-        lines, width = [], None
+        lines, width, blank = [], None, 0
+        # A line of nothing but spaces that is longer than the scalar's indentation is refused: before the first line
+        # of text a full parser rejects it, and after it the extra spaces are content this reader would drop.
+        longer = "a whitespace-only line longer than its block scalar's indentation"
         while self.index < len(self.lines):
             line = self.lines[self.index]
             if line.strip(" \t") == "":
                 if "\t" in line:
                     self.refuse("a tab on an otherwise blank line")
+                if width is None:
+                    blank = max(blank, len(line))
+                elif len(line) > width:
+                    self.refuse(longer)
                 lines.append("")
             else:
                 if width is None:
                     if indent_of(line) <= indent:
                         break
                     width = indent_of(line)
+                    if blank > width:
+                        self.refuse(longer)
                 elif indent_of(line) < width:
                     break
                 lines.append(line[width:])
@@ -272,7 +281,19 @@ def load(path):
 
 # ----------------------------------------------------------------------------------------------------- actions
 
-PINNED = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}")
+# `owner/repository[/path]@<40 hex>`. The owner is a GitHub account name, so it starts with a letter or digit: a value
+# that starts with `.` is not an action in someone's repository but a path in the checkout, and GitHub reads the whole
+# of it as that path, an `@…` ending included. `./ci/build@<40 hex>` matched an earlier form of this pattern with `.`
+# as the owner (docs/06-adversarial-review.md Z109). No local action is allowed at all: a composite action's manifest
+# in the checkout is the pull request's own file, it may sit anywhere, and nothing here would read its `uses:`.
+PINNED = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[A-Za-z0-9_.-]+)+@[0-9a-f]{40}")
+
+
+def pinned(value):
+    """Whether value names an action or reusable workflow in a repository at a full commit ID."""
+    if not isinstance(value, str) or not PINNED.fullmatch(value):
+        return False
+    return not any(part in (".", "..") for part in value.split("@")[0].split("/"))
 
 
 def uses_values(node, where):
@@ -316,9 +337,11 @@ def audit_actions(root):
             problems.append(f"::error file={path}::{refusal} (yaml-audit.py reads a subset of YAML and refuses the rest)")
             continue
         for where, value in uses_values(document, ""):
-            if not isinstance(value, str) or not PINNED.fullmatch(value):
+            if not pinned(value):
                 shown = value if isinstance(value, str) else json.dumps(value)
-                problems.append(f"::error file={path}::{where}: `{shown}` is not pinned to a 40-hex commit SHA")
+                local = isinstance(value, str) and value.startswith(".")
+                reason = ": it is a path in the checkout, and local actions are not permitted" if local else ""
+                problems.append(f"::error file={path}::{where}: `{shown}` is not pinned to a 40-hex commit SHA{reason}")
     return problems, f"All actions pinned to commit SHAs ({len(files)} files)."
 
 
@@ -367,7 +390,9 @@ BUILD_ACTIONS = {"run", "test", "profile", "analyze", "archive"}
 CONFIGURATIONS = {"Debug", "Release"}
 # A relative path of ordinary names: no `..`, no `.`, nothing hidden, not absolute, no `~` or variable.
 PATH = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*")
-NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+# The package's own modules. XcodeGen would accept any product name the package graph can supply, swift-crypto's
+# `Crypto` and `CryptoExtras` (BoringSSL) among them, so the name is held to the repository's.
+PRODUCT = re.compile(r"SecureMemory|Watchword[A-Za-z0-9]*")
 
 
 def one_of(value, allowed):
@@ -470,8 +495,11 @@ class SpecAudit:
                 product = dependency["product"]
                 if dependency["package"] != "Watchword":
                     self.problem(f"{here}.package: only the repository's own package, Watchword, may be linked")
-                if not isinstance(product, str) or not NAME.fullmatch(product) or product == "WatchwordTestSupport":
-                    self.problem(f"{here}.product `{product}` is not a product an app may link")
+                if not isinstance(product, str) or not PRODUCT.fullmatch(product) or product == "WatchwordTestSupport":
+                    self.problem(
+                        f"{here}.product `{product}` is not a product an app may link (SecureMemory or a Watchword "
+                        "module; never swift-crypto's own products, and never WatchwordTestSupport)"
+                    )
             else:
                 self.problem(
                     f"{here} must be `target:` (with `embed:`) or `package: Watchword` with `product:`; frameworks, "

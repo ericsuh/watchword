@@ -172,21 +172,38 @@ fi
 
 # A manifest is a program, and the structural checks below read what it evaluates to *here*. One that imports
 # anything but PackageDescription, or branches on the platform, the environment, where it is checked out, how it was
-# invoked or chance (`#if`, `Context`, `ProcessInfo`, `getenv`, `#file`, `CommandLine`, `random`), can evaluate to
-# something else on another machine: a dependency or a setting that appears only where this script is not running. So
-# the manifest must be the same value everywhere. The names are refused as words, so an alias for one is refused where
-# it is made. Comment lines are ignored. A tripwire: Package.swift is reviewed like cryptography (docs/07 §2.1).
+# invoked, the size of a type, the time or chance, can evaluate to something else on another machine: a dependency or
+# a setting that appears only where this script is not running. So the manifest must be the same value everywhere.
+#
+# This is a list of words, and a list of words is a tripwire: it cannot be complete. Swift has more ways to tell two
+# machines or two runs apart than can be named (the order of a Set is one that needs no name at all), and the review
+# of this change found several the first list missed (docs/06-adversarial-review.md Z111). The check that would not
+# depend on a list is to dump the manifest on Linux and on macOS, and under more than one environment, and compare;
+# that is tracked there, not built. Package.swift is reviewed like cryptography (docs/07-supply-chain.md §2.1), and
+# that review is the control.
+#
+# Three rules. No block comment anywhere: with `/*` a line can be code to Swift and a comment to a line filter. The
+# word `import` on any line that is not a comment must be the whole line `import PackageDescription`: access
+# modifiers, attributes and a statement before it on the line are all ways to write another. And none of the names
+# below on a line that is not a comment; they are refused as words, so an alias for one is refused where it is made.
 manifest_is_constant() { # manifest_is_constant <Package.swift>
-  local found
-  found=$(grep -nE '^[[:space:]]*(@[A-Za-z_]+(\([^)]*\))?[[:space:]]+)*import([[:space:]]|$)' "$1" \
+  local found word='(^|[^A-Za-z0-9_])' end='([^A-Za-z0-9_]|$)'
+  local names='Context|ProcessInfo|CommandLine|getenv|canImport|NSHomeDirectory|FileManager|MemoryLayout'
+  names="$names|random[A-Za-z]*|shuffled?|hashValue|Hasher|[A-Za-z]*Clock|[A-Za-z]*RandomNumberGenerator"
+  found=$(grep -nF '/*' "$1" || true)
+  if [ -n "$found" ]; then
+    echo "$found"
+    echo "::error file=$1::A manifest may not contain a block comment: a line inside one can still be code."
+    return 1
+  fi
+  found=$(grep -nE "${word}import${end}" "$1" | grep -vE '^[0-9]+:[[:space:]]*//' \
     | grep -vE '^[0-9]+:import PackageDescription[[:space:]]*$' || true)
   if [ -n "$found" ]; then
     echo "$found"
-    echo "::error file=$1::A manifest may import PackageDescription and nothing else."
+    echo "::error file=$1::A manifest may import PackageDescription and nothing else, on a line of its own."
     return 1
   fi
-  found=$(grep -nE '#(if|elseif|else|file)|(^|[^A-Za-z0-9_])(Context|ProcessInfo|CommandLine|getenv|canImport|random|[A-Za-z]*RandomNumberGenerator)([^A-Za-z0-9_]|$)' "$1" \
-    | grep -vE '^[0-9]+:[[:space:]]*//' || true)
+  found=$(grep -nE "#(if|elseif|else|file)|${word}(${names})${end}" "$1" | grep -vE '^[0-9]+:[[:space:]]*//' || true)
   if [ -n "$found" ]; then
     echo "$found"
     echo "::error file=$1::A manifest must not depend on the platform or the environment it is evaluated in (or on chance)."
@@ -312,6 +329,10 @@ fi
 # project XcodeGen makes of it.
 if [ -f Apps/project.yml ]; then
   python3 -I "$here/yaml-audit.py" app-spec Apps/project.yml || fail=1
+elif [ -d Apps ]; then
+  # A spec that is gone, or was renamed to something XcodeGen is then pointed at, is not a spec that passed.
+  echo "::error::Apps/ exists without Apps/project.yml: the app project's allowlist has nothing to read."
+  fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then

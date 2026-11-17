@@ -124,6 +124,10 @@ class YAMLReaderTests(support.ScriptTestCase):
             "deeper indentation with no owner": "a: b\n    c: d\n",
             "a block scalar with an indentation indicator": "a: |2\n    b\n",
             "a kept block scalar": "a: |+\n  b\n",
+            # Found by the review of this change: a full parser rejects these two; the reader took them.
+            "a block scalar that starts with a longer blank line": "a: |-\n      \n  b\n",
+            "a folded scalar that starts with a longer blank line": "a: >-\n\n     \n  b\nc: d\n",
+            "a block scalar with a longer blank line inside": "a: |\n  b\n     \n  c\n",
             "text after a quoted value": "a: 'b' c\n",
             "text after a flow sequence": "a: [b] c\n",
             "an empty document": "# nothing\n",
@@ -134,6 +138,10 @@ class YAMLReaderTests(support.ScriptTestCase):
                 document, output = self.dump(text)
                 self.assertIsNone(document, output)
                 self.assertIn("document.yml:", output)
+
+    def test_blank_lines_in_a_block_scalar_are_still_read(self):
+        document, output = self.dump("a: |\n\n  \n  b\n\n  c\n \nd: e\n")
+        self.assertEqual(document, {"a": "\n\nb\n\nc\n", "d": "e"}, output)
 
     def test_bytes_that_are_not_utf8_are_refused(self):
         path = self.write("document.yml", b"a: \xff\n")

@@ -7,6 +7,7 @@ having run (docs/06-adversarial-review.md Z104)."""
 
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 
@@ -78,16 +79,127 @@ class AdversarialSuitesTests(support.ScriptTestCase):
         self.assertIn("::error::Adversarial suite missing: sync log\n", result.stdout)
 
     def test_a_skipped_started_or_failed_suite_has_not_run(self):
-        for line in (
-            '➜ Suite "Adversarial: crypto core" skipped.',
-            '➜ Suite "Adversarial: crypto core" skipped: "not today"',
-            '◇ Suite "Adversarial: crypto core" started.',
-            '✘ Suite "Adversarial: crypto core" failed after 0.2 seconds with 1 issue.',
+        for line, expected in (
+            ('➜ Suite "Adversarial: crypto core" skipped.', "skipped or failed"),
+            ('➜ Suite "Adversarial: crypto core" skipped: "not today"', "skipped or failed"),
+            ('◇ Suite "Adversarial: crypto core" started.', "missing"),
+            ('✘ Suite "Adversarial: crypto core" failed after 0.2 seconds with 1 issue.', "skipped or failed"),
         ):
             with self.subTest(line=line):
                 result = self.check(self.full_log(without=("crypto core",)) + [line])
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("::error::Adversarial suite missing: crypto core\n", result.stdout)
+                self.assertIn(f"::error::Adversarial suite {expected}: crypto core\n", result.stdout)
+
+    def test_a_pass_beside_a_skip_or_a_failure_is_not_a_pass(self):
+        """Found by the review of this change: a suite reported skipped, with a line elsewhere in the log that reads
+        as its pass (a test's title with a line break in it, or a line a test printed), still counted as run."""
+        skipped = '➜ Suite "Adversarial: crypto core" skipped.'
+        cases = {
+            "a title with a line break": [
+                skipped,
+                '✔ Test "a title',
+                '✔ Suite "Adversarial: crypto core" passed after 0.001 seconds." passed after 0.001 seconds.',
+            ],
+            "a printed line": [skipped, 'Suite "Adversarial: crypto core" passed after 0.001 seconds.'],
+            "a skip after the real pass": [passed("crypto core"), skipped],
+            "a failure beside a pass": [
+                passed("crypto core"),
+                '✘ Suite "Adversarial: crypto core" failed after 0.2 seconds with 1 issue.',
+            ],
+            "a skip quoted in other output": [passed("crypto core"), f"note: {skipped}"],
+        }
+        for name, lines in cases.items():
+            with self.subTest(case=name):
+                result = self.check(self.full_log(without=("crypto core",)) + lines)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("::error::Adversarial suite skipped or failed: crypto core\n", result.stdout)
+
+    def test_a_suite_reported_passed_twice_is_not_trusted(self):
+        """One of the two lines is not Swift Testing's, and the check cannot tell which."""
+        for extra in (passed("crypto core"), 'printed: Suite "Adversarial: crypto core" passed after 1 seconds.'):
+            with self.subTest(extra=extra):
+                result = self.check(self.full_log() + [extra], system="Darwin")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("::error::Adversarial suite reported as passed more than once: crypto core\n", result.stdout)
+
+    def test_the_result_symbol_is_not_a_letter_in_any_locale(self):
+        """Found by the review of this change: a byte-oriented awk classes the bytes of `✔` by the caller's locale,
+        and in a Latin-1 locale its first byte is a letter, so every genuine pass was reported missing. The check
+        reads the log as bytes whatever the locale."""
+        locale = self.latin1_locale()
+        if locale is None:
+            self.skipTest("no Latin-1 locale here, and none could be generated")
+        self.install("uname", "#!/bin/sh\necho Darwin\n")
+        log = self.write("test.log", "\n".join(self.full_log()) + "\n")
+        command = ["bash", "-c", 'source "$1" && check_adversarial_suites "$2"', "check", SUITES, log]
+        result = self.run_process(command, **locale)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def latin1_locale(self):
+        """Environment variables that select a locale in which bytes above 0x7F are letters, or None."""
+        if shutil.which("localedef"):
+            directory = self.path("locales")
+            os.makedirs(directory, exist_ok=True)
+            name = "en_US.ISO-8859-1"
+            command = ["localedef", "-i", "en_US", "-f", "ISO-8859-1", os.path.join(directory, name)]
+            subprocess.run(command, capture_output=True, check=False)
+            if os.path.isdir(os.path.join(directory, name)):
+                return {"LOCPATH": directory, "LC_ALL": name}
+        if shutil.which("locale"):
+            listed = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=False).stdout.split()
+            for name in ("en_US.ISO8859-1", "en_US.ISO-8859-1", "en_US.iso88591"):
+                if name in listed:
+                    return {"LC_ALL": name}
+        return None
+
+    def test_awk_is_run_in_the_c_locale_whatever_the_caller_s(self):
+        """The same, where no such locale exists to try: what awk is given."""
+        real = shutil.which("awk")
+        self.install("awk", f'#!/bin/sh\necho "LC_ALL=$LC_ALL" >> "$AWK_LOG"\nexec {real} "$@"\n')
+        self.write("awk.log", "")
+        self.install("uname", "#!/bin/sh\necho Linux\n")
+        log = self.write("test.log", "\n".join(self.full_log(darwin=False)) + "\n")
+        command = ["bash", "-c", 'source "$1" && check_adversarial_suites "$2" && no_skipped_tests "$2"', "check", SUITES, log]
+        result = self.run_process(command, LC_ALL="en_US.UTF-8", LANG="en_US.UTF-8", AWK_LOG=self.path("awk.log"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        runs = self.read("awk.log").splitlines()
+        self.assertGreater(len(runs), 10)
+        self.assertEqual(set(runs), {"LC_ALL=C"})
+
+    def skipped_tests(self, lines):
+        log = self.write("test.log", "\n".join(self.full_log(darwin=False) + lines) + "\n")
+        return self.run_process(["bash", "-c", 'source "$1" && no_skipped_tests "$2"', "check", SUITES, log])
+
+    def test_a_skipped_test_fails_the_adversarial_run(self):
+        """A suite whose every test is disabled is still reported as passed; the tests it did not run are not."""
+        for line in (
+            '➜ Test "a forged segment is refused" skipped.',
+            '➜ Test "a forged segment is refused" skipped: "flaky on the runner"',
+            "➜ Test forgedSegment() skipped.",
+            '\x1b[33m➜\x1b[0m Test forgedSegment() skipped: "later"',
+        ):
+            with self.subTest(line=line):
+                result = self.skipped_tests([line])
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("::error::An adversarial test was skipped", result.stdout)
+                self.assertIn("forged", result.stdout)
+
+    def test_a_test_that_is_about_skipping_is_not_a_skipped_test(self):
+        result = self.skipped_tests(
+            [
+                '◇ Test "An oversized item is skipped and listed; its neighbours are imported" started.',
+                '✔ Test "An oversized item is skipped and listed; its neighbours are imported" passed after 1.2 seconds.',
+                '✔ Test "a malformed vault entry in an archive is listed as skipped" passed after 0.8 seconds.',
+                '✔ Test "an entry is listed as skipped: with its reason" passed after 0.8 seconds.',
+                "the importer says: 3 entries skipped.",
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_adversarial_task_checks_for_skipped_tests(self):
+        with open(os.path.join(support.ROOT, "mise-tasks", "test", "adversarial"), encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn('\ncheck_adversarial_suites "$log"\nno_skipped_tests "$log"\n', text)
 
     def test_the_name_in_a_test_s_title_or_output_is_not_the_suite(self):
         for line in (

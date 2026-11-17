@@ -71,6 +71,27 @@ class AuditActionsTests(support.ScriptTestCase):
         self.assert_refused("      - uses: docker://alpine:3.20")
         self.assert_refused("      - uses: ./.github/actions/local")
 
+    def test_a_local_path_is_not_pinned_by_ending_like_a_commit(self):
+        """Found by the review of this change: `./ci/build@<40 hex>` matched the pattern for `owner/repo@<sha>` with
+        `.` as the owner. To GitHub anything that starts `./` is a path in the checkout, `@…` and all: a composite
+        action's manifest there is the pull request's own, and nothing here reads it. No local action is allowed."""
+        for value in (
+            f"./ci/build@{SHA}",
+            f"./.github/actions/setup@{SHA}",
+            f"../elsewhere/action@{SHA}",
+            f".github/actions/setup@{SHA}",
+            f"owner/../repo@{SHA}",
+            f"owner/./repo@{SHA}",
+            f"owner/repo/../../other@{SHA}",
+            f"-owner/repo@{SHA}",
+            f"owner/.@{SHA}",
+            "./ci/build",
+        ):
+            with self.subTest(value=value):
+                output = self.assert_refused(f"      - uses: {value}")
+                self.assertIn("is not pinned to a 40-hex commit SHA", output)
+        self.assertIn("a path in the checkout", self.assert_refused(f"      - uses: ./ci/build@{SHA}"))
+
     def test_spellings_the_grep_did_not_read_are_refused(self):
         """Each of these is a `uses:` to GitHub and none was matched by `^\\s*-?\\s*uses:\\s*\\S+`."""
         spellings = {

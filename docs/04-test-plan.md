@@ -1006,7 +1006,8 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   the iOS simulator. The task fails on a build error and then if the app bundle or its embedded AutoFill extension
   contains the text of a Debug-only UI-test facility (`--uitest`, `WATCHWORD_UITEST_PASSWORD`, the Settings section
   and the "Lock now" button): the evidence that the `--uitest` switch of §5 does not ship. Each marker must still be
-  in the sources, and a script test holds that each is used only inside `#if DEBUG`. Not yet run on a Mac
+  in the sources, and a script test holds that each is used only inside `#if DEBUG`. The same search must find one
+  literal the app always compiles in (the positive control), or it has shown nothing. Not yet run on a Mac
   [`app:release macos`, `app:release ios`].
 - `security-nightly.yml`: scheduled fuzzing, long randomised sync simulations and the action
   pinning audit again [`fuzz`, `test:long`, `audit:actions`].

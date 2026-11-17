@@ -31,11 +31,18 @@ markers=(
   "UI test: another device"
   "Lock now (UI test)"
 )
+# The positive control: text the app always compiles in, which the same search must find in the same binary. Without
+# it, "none of the markers" is also what a search reports of an executable it cannot read (compressed, encrypted, or
+# with its literals somewhere this does not look), and of a build that produced the wrong thing. It is the message
+# AppEnvironment gives when the App Group container is missing: a plain string literal on the path every launch
+# takes, long enough to be stored as bytes, and not in the Info.plist or the extension. It is looked for in the app
+# outside its embedded extension, which has no such literal of its own to show.
+control="Watchword cannot reach its shared storage"
 derived="$usage_derived_data"
 
-for marker in "${markers[@]}"; do
+for marker in "${markers[@]}" "$control"; do
   if ! grep -rqF -e "$marker" --include='*.swift' Apps/Shared; then
-    echo "::error::\"$marker\" is no longer in Apps/Shared, so its absence from a Release build proves nothing: update the markers in mise-tasks/app/release with the Debug-only code they stand for"
+    echo "::error::\"$marker\" is no longer in Apps/Shared, so what a Release build shows of it proves nothing: update the markers and the control in mise-tasks/app/release with the code they stand for"
     exit 1
   fi
 done
@@ -60,6 +67,11 @@ inspect() { # inspect <platform's name> <derived data>: 0 if the Release app hol
     echo "::error::$app holds no app extension: the AutoFill extension was not built into it, so it was not inspected"
     return 1
   fi
+  found=$(LC_ALL=C grep -rlaF -e "$control" "$app" | grep -v '\.appex/' || true)
+  if [ -z "$found" ]; then
+    echo "::error::The Release build of $name does not contain \"$control\", which every build of the app does: this search cannot read $app, so finding no marker in it would prove nothing"
+    return 1
+  fi
   for marker in "${markers[@]}"; do
     found=$(LC_ALL=C grep -rlaF -e "$marker" "$app" || true)
     if [ -n "$found" ]; then
@@ -68,7 +80,7 @@ inspect() { # inspect <platform's name> <derived data>: 0 if the Release app hol
       status=1
     fi
   done
-  [ "$status" -ne 0 ] || echo "Release build of $name: none of the ${#markers[@]} Debug-only markers in $app"
+  [ "$status" -ne 0 ] || echo "Release build of $name: none of the ${#markers[@]} Debug-only markers in $app (the control was found)"
   return "$status"
 }
 

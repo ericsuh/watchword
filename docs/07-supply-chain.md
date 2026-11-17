@@ -40,10 +40,15 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
   `WatchwordTestSupport` (seeded and deliberately broken RNGs) linked only into test targets.
   That dump is what the manifest evaluates to on the machine running the check, and a manifest is
   a program, so the script also holds it to being one value everywhere: it may import
-  `PackageDescription` and nothing else, and may not name `#if`, `Context`, `ProcessInfo`,
-  `CommandLine`, `getenv`, `#file` or `random`. Without that, a dependency added only where
-  `GITHUB_ACTIONS` is unset shows CI a clean dump (review finding Z104). The words are a tripwire,
-  not a proof that a Swift program is constant; §2.1's review of `Package.swift` is the backstop.
+  `PackageDescription` and nothing else, on a line of its own, may contain no block comment, and
+  may not name `#if`, `Context`, `ProcessInfo`, `CommandLine`, `getenv`, `#file`, `random`,
+  `shuffle`, `hashValue`, `Hasher`, a clock, `MemoryLayout`, `NSHomeDirectory` or `FileManager`.
+  Without that, a dependency added only where `GITHUB_ACTIONS` is unset shows CI a clean dump
+  (review finding Z104). The words are a tripwire, not a proof that a Swift program is constant,
+  and a list of them cannot be complete: the review of the first list found a dozen ways round it
+  (Z111), and the order of a `Set` is one that needs no word. **[open]** The check that does not
+  depend on a list is to dump the manifest on Linux and on macOS, under more than one
+  environment, and compare. Until that exists, §2.1's review of `Package.swift` is the control.
 - **[enforced; not yet run on a Mac]** The pin reaches the apps only through a second check. The
   committed `Package.resolved` governs `swift build` and `swift test`, where this package is the
   root. The apps are built by xcodebuild from a generated project that names the package by path,
@@ -68,6 +73,14 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
   argument: a call without it would compile from Xcode's own DerivedData, which nothing reads.
   That Xcode puts clean working copies in that directory is its documented behaviour and has not
   been seen: this version is unproven until a Mac run passes, and fails closed until then.
+  Resolving live and judging the result has a consequence worth knowing before it happens. On a
+  fresh runner Xcode takes the newest swift-asn1 in swift-crypto's range, so the day upstream
+  releases one, `app-tests` and `release-build` turn red on every pull request, and stay red
+  until `ALLOWED_PINS` and the root `Package.resolved` are bumped to it. That is fail-closed, on a
+  day upstream chooses; it is the expected trigger for the bump (read the diff between the two
+  commits, as for an action pin), not a fault to route round. **[open]** Handing Xcode the
+  committed pins, so that it resolves to them rather than to the newest, is to be tried once a
+  Mac run shows what it accepts.
 - **[enforced]** `Apps/project.yml` can add everything the manifest is forbidden: a remote
   package, shell at generation or build time, prebuilt frameworks, native sources, settings that
   switch off what the compiler enforces. `assert-no-dependencies.sh` hands it to
@@ -80,7 +93,9 @@ to it in full and each bump is reviewed accordingly. `CryptoExtras`, which compi
   since a setting that is merely deleted is off. No settings per configuration, so nothing can
   define `DEBUG` for Release. It was four `grep`s until review finding Z103, which a flow-style
   package, a quoted key or value, a key they did not list, a dependency written as a list entry
-  or a deleted line all passed. A tripwire still, with review as the backstop: it reads the spec,
+  or a deleted line all passed. A linked product must be `SecureMemory` or a `Watchword` module,
+  never swift-crypto's own (Z113), and `Apps/` without its spec fails rather than skipping the
+  check (Z118). A tripwire still, with review as the backstop: it reads the spec,
   not the project XcodeGen generates from it, and a new XcodeGen key is refused until it is added
   to the list in the same pull request. Adding a setting or target type is therefore an edit to
   that list, visible in review, like a dependency.
@@ -196,6 +211,14 @@ at run time, so that download is trusted the way the runner image is (§3.3).
   reading of every workflow with PyYAML's. The residual is the reader itself: it is this
   repository's code, a few hundred lines, and a workflow it accepts but GitHub reads differently
   would be a hole. That is why it refuses rather than interprets.
+- **[enforced]** No local action. A `uses:` whose value starts with `.` is a path in the
+  checkout, and GitHub reads all of it as that path, so `./ci/build@<40 hex>` is not pinned by
+  ending like a commit: the composite action's manifest there is the pull request's own file,
+  anywhere in the tree, and its `uses:` lines are whatever it says. The audit refuses every such
+  value, pinned-looking or not (review finding Z109: the first version of the parsed audit
+  passed that one). The repository has no local action and no reusable workflow of its own, so
+  this costs nothing today; if one is ever wanted, the audit has to learn to follow the path
+  and read the manifest it finds there first.
 - **[done]** `maxim-lobanov/setup-xcode` was removed entirely and replaced by
   `.github/scripts/select-xcode.sh`. It was the only third-party action in the project, it ran in
   every job, and it did work that is a few lines of `xcode-select`. Fewer actions is a better
@@ -442,7 +465,9 @@ at run time, so that download is trusted the way the runner image is (§3.3).
   verify now ends the attempt. It used to be followed by a second installer, swiftly, downloaded from an
   unversioned URL with no checksum and run as root, so the one check could be failed on purpose to reach the path
   without one (review finding Z106). swiftly is now fetched and run only when the tarball could not be downloaded at
-  all *and* `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` is set (`09-cloud-sessions.md` §3). **[open]** swiftly itself is
+  all *and* `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` is exported above the pasted script (`09-cloud-sessions.md` §3;
+  a setup script is not given the environment's saved variables, Z114). A verified tarball must also report the
+  release that was asked for, since the key has signed every release (Z115). **[open]** swiftly itself is
   still unpinned: no published checksum for it is recorded in this repository, and pinning one that was not checked
   against the publisher's would be worse than the opt-in.
 - **The runner image itself** is a large trust base (Xcode, Homebrew, preinstalled tooling) that we

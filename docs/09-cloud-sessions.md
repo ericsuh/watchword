@@ -105,7 +105,9 @@ checkout**, and it gets reviewed like `select-xcode.sh` rather than living only 
 | `BASH_MAX_TIMEOUT_MS` | `1800000` | Headroom for `WATCHWORD_LONG_TESTS=1` runs. |
 | `WATCHWORD_TEST_SEED` | *(optional)* | Pin the SplitMix64 `SeededGenerator` when reproducing a nightly failure. |
 | `MISE_DISABLE_TOOLS` | `xcodegen` | XcodeGen publishes macOS builds only, so a `mise install` run inside a session would otherwise fail on it. The setup script sets this for its own run; this makes sessions match. |
-| `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY` | *(unset; `1` only as a deliberate choice)* | Lets the setup script fall back to the swiftly installer, which it runs as root and cannot verify, when the signed tarball cannot be downloaded (§3). Leave it unset unless a session without a toolchain is worse for you than that. |
+
+These variables are for the session. A setup script is not given them, so the one switch the setup script has,
+`WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY` (§3), cannot be set in this table: it is a line above the pasted script.
 
 Do not put secrets here: anyone who can use the environment can read the variables and the setup
 script. Nothing in this repository needs a secret in a session — there are no dependencies to
@@ -122,7 +124,10 @@ authenticate to, and the GitHub proxy handles git.
 3. Installs the toolchain, judging the result by whether a `swift` binary actually appears:
    - **The release tarball**, verified with GPG against the pinned Swift signing key
      `52BB7E3D…B47A981F` before anything is extracted. A toolchain is compile-time code execution on
-     every later build, so it is verified rather than trusted (`07-supply-chain.md`, T3).
+     every later build, so it is verified rather than trusted (`07-supply-chain.md`, T3). The
+     signature says who made the archive, not which release it is, and that key has signed every
+     release; so once extracted the toolchain must also report the version that was asked for
+     (`swift --version`), or it is removed and treated as one that did not verify.
    - **A tarball that does not verify ends the attempt.** A signature by any other key, a signature
      or key bundle that cannot be fetched: the download is discarded, nothing else is tried, and the
      session starts without a toolchain and is told that the download did not verify. The script
@@ -132,12 +137,20 @@ authenticate to, and the GitHub proxy handles git.
      URLs itself, so it is the second opinion if the URL layout has moved. But the script downloads
      it from an unversioned URL and has no checksum or signer pinned for it, and then runs it as
      root; no published checksum was available to pin when this was written. So it is fetched and
-     run only when the tarball could not be downloaded at all **and** the environment sets
-     `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1`. Without that, a missing tarball also means a session
-     without a toolchain, and a note that says which variable would change it. Both subcommands pass
-     `--assume-yes`: a setup script has no TTY, and `swiftly install` prompts. To use it once without
-     changing the environment, run `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 .github/scripts/cloud-setup.sh`
-     inside a session.
+     run only when the tarball could not be downloaded at all **and** the script finds
+     `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` in its own environment. A setup script is not given the
+     variables saved on the cloud environment (§2), so the way to say so is a line of its own above
+     the pasted script, in the same field:
+
+     ```sh
+     export WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1
+     ```
+
+     or, to use it once without changing the environment,
+     `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 .github/scripts/cloud-setup.sh` inside a session. Without
+     that, a missing tarball also means a session without a toolchain, and a note that says what
+     would change it. Both subcommands pass `--assume-yes`: a setup script has no TTY, and
+     `swiftly install` prompts.
 4. Symlinks `swift`, `swiftc`, `swift-format` and `sourcekit-lsp` into `/usr/local/bin` and writes
    `/etc/profile.d/swift.sh`. The Bash tool does not run a login shell, so the symlinks are what
    actually make the toolchain reachable; only the drivers are linked, because symlinking the whole

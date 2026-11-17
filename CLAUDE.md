@@ -66,7 +66,8 @@ The root `Package.resolved` does not govern an Xcode build, and Xcode writes non
 build unless the git checkouts under that directory are exactly the packages and commits `assert-no-dependencies.sh`
 names, unchanged (`--checkouts`). A new task that runs `xcodebuild` sources `packages.sh`, calls `resolve_packages` and
 `check_resolved_packages`, and passes the arguments on every call; `test:scripts` fails one that does not. Unproven
-until a Mac run passes: a failure prints what Xcode left there.
+until a Mac run passes: a failure prints what Xcode left there. Xcode resolves live, so a new swift-asn1 release
+turns the app jobs red until `ALLOWED_PINS` and `Package.resolved` are bumped: that is the bump's trigger, not a flake.
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and syncs
 over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only Settings
@@ -805,9 +806,10 @@ directions are tested; keep both when adjusting constants.
 - **No third-party dependencies, ever, without an ADR.** The one exception is swift-crypto (ADR 0006).
   `.github/scripts/assert-no-dependencies.sh` fails CI on any other package or product, a version or
   `Package.resolved` commit other than the ones it names, `CryptoExtras` linked on a non-Linux platform,
-  `.binaryTarget`, `.plugin(` or `unsafeFlags`, a manifest that imports anything but `PackageDescription` or uses
-  `#if`, `Context`, `ProcessInfo`, `CommandLine`, `getenv`, `#file` or `random` (it must evaluate to the same package
-  everywhere), and a language mode
+  `.binaryTarget`, `.plugin(` or `unsafeFlags`, a manifest with a block comment, an `import` line other than
+  `import PackageDescription`, or one of a list of names that tell machines apart (`#if`, `Context`, `ProcessInfo`,
+  `getenv`, `#file`, `random`, `hashValue`, `MemoryLayout`, `FileManager`, ...: it must evaluate to the same package
+  everywhere, and the list is a tripwire that cannot be complete), and a language mode
   other than Swift 6. Shipped crypto comes only from CryptoKit, Security.framework and CommonCrypto.
 - **`Apps/project.yml` is held to an allowlist** (`.github/scripts/yaml-audit.py`, run by the same script): every key,
   target type, dependency kind and build setting the spec may hold is named there, source paths stay inside `Apps/`,
@@ -851,7 +853,8 @@ directions are tested; keep both when adjusting constants.
   `"synced breach-check results"`, `"device-local store files"`), so **renaming a suite breaks CI deliberately** — update
   `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). The suite's
   display name is `"Adversarial: <area>"`, and the check wants Swift Testing's own `Suite "Adversarial: <area>" passed`
-  line: a suite that is disabled or skipped counts as missing, as does one whose name merely contains another's. Each adversarial test's doc comment states the concrete threat
+  line, once: a suite that is disabled or skipped counts as missing, as does one whose name merely contains
+  another's, and `test:adversarial` fails on any skipped test. Don't disable an adversarial test to get a run through. Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks. A suite only an Apple platform can
   build (`"local vault store"`, `"Keychain item protection"`, `"Apple adapters: HTTP client"`, `"…: iCloud Drive
   transport"`, `"…: CloudKit transport"`) has a `darwin:` line: required on macOS, reported as not required on Linux
@@ -944,7 +947,8 @@ silently drops it from any branch-protection list that named the old one.
 Supply-chain rules that apply to edits in `.github/`:
 
 - **Pin actions to full commit SHAs**, never tags; add the `# v4`-style comment and the mapping in the
-  header block. `audit:actions` fails the pull request otherwise (`lint` job), and the nightly again.
+  header block. `audit:actions` fails the pull request otherwise (`lint` job), and the nightly again. No local
+  actions (`uses: ./…`): the audit refuses every one, because the manifest it would run is the pull request's own.
 - Keep `permissions: contents: read` at workflow and job level, `persist-credentials: false` on every
   checkout, and the trigger as `pull_request` — never `pull_request_target`. The two jobs with more
   (`pull-requests: write` in `claude-pr.yml` and in `screenshots.yml`'s `comment`) check out and run nothing from
@@ -959,9 +963,10 @@ Supply-chain rules that apply to edits in `.github/`:
   (`mise install xcodegen`).
 
 - `cloud-setup.sh` installs a toolchain as root on a cloud session's VM. A download that does not verify against the
-  pinned key ends the attempt: never add a fallback that runs after a failed verification, and keep the unverified
-  swiftly installer behind `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` until it is pinned by a checksum checked against
-  the publisher's.
+  pinned key, or is not the release asked for, ends the attempt: never add a fallback that runs after a failed
+  verification, and keep the unverified swiftly installer behind `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` (an `export`
+  line above the pasted script: a setup script is not given the environment's variables) until it is pinned by a
+  checksum checked against the publisher's.
 
 `.claude/` and other agent/editor configuration is intentionally uncommitted
 (`docs/07-supply-chain.md` §5). `docs/08-repository-hardening.md` is the `gh` runbook for branch

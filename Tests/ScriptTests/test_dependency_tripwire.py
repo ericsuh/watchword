@@ -263,6 +263,11 @@ class AppSpecTests(TripwireTestCase):
             "      - bundle: Evil.bundle\n",
             "      - package: Evil\n        product: Evil\n",
             "      - package: Watchword\n        product: WatchwordTestSupport\n",
+            # Found by the review of this change: any name passed, swift-crypto's own products among them, and
+            # CryptoExtras compiles BoringSSL into whatever links it.
+            "      - package: Watchword\n        product: CryptoExtras\n",
+            "      - package: Watchword\n        product: Crypto\n",
+            "      - package: Watchword\n        product: Watchword-Fuzz\n",
             "      - package: Watchword\n",
             "      - target: Nowhere\n",
             "      - target: AutoFillExtension-iOS\n        link: false\n",
@@ -271,6 +276,14 @@ class AppSpecTests(TripwireTestCase):
                 self.setUp()
                 self.spec(embedded, embedded + dependency)
                 self.assert_refused("targets.Watchword-iOS.dependencies[1]")
+
+    def test_a_missing_spec_is_a_failure_not_a_pass(self):
+        """Found by the review of this change: without Apps/project.yml the allowlist was skipped and the script
+        printed its all-clear, so deleting or renaming the spec was the quietest way past it."""
+        os.remove(self.path(self.SPEC))
+        self.assert_refused("Apps/ exists without Apps/project.yml")
+        os.rename(self.path("Apps"), self.path("NotApps"))
+        self.assert_passes()
 
     def test_a_value_taken_from_the_environment_is_refused(self):
         self.spec("  bundleIdPrefix: com.ericsuh\n", "  bundleIdPrefix: ${BUNDLE_PREFIX}\n")
@@ -313,6 +326,22 @@ class ManifestTests(TripwireTestCase):
             ("the checkout's path", 'let runner = #filePath.hasPrefix("/Users/runner")\n', "must not depend on"),
             ("how it was invoked", "let arguments = CommandLine.arguments\n", "must not depend on"),
             ("chance", "let sometimes = Bool.random()\n", "must not depend on"),
+            # Found by the review of this change.
+            ("a private import", "private import Foundation\n", "nothing else"),
+            ("an internal import", "internal import Foundation\n", "nothing else"),
+            ("a fileprivate import", "fileprivate import struct Foundation.Date\n", "nothing else"),
+            ("an import after a statement", "let zero = 0; import Foundation\n", "nothing else"),
+            ("an import behind a block comment", "/*\n// */ import Foundation\n", "block comment"),
+            ("a block comment", "let one = 1 /* and a half */\n", "block comment"),
+            ("the size of a type", "let wide = MemoryLayout<CLongDouble>.size == 16\n", "must not depend on"),
+            ("a random element", "let pick = [true, false].randomElement()!\n", "must not depend on"),
+            ("a shuffle", "let order = [1, 2, 3].shuffled()\n", "must not depend on"),
+            ("a shuffle in place", "var order = [1, 2]\norder.shuffle()\n", "must not depend on"),
+            ("a hash value", 'let odd = "x".hashValue % 2 == 1\n', "must not depend on"),
+            ("a hasher", "var hasher = Hasher()\n", "must not depend on"),
+            ("a clock", "let now = ContinuousClock.now\n", "must not depend on"),
+            ("the home directory", "let home = NSHomeDirectory()\n", "must not depend on"),
+            ("the file system", 'let there = FileManager.default.fileExists(atPath: "/Users/runner")\n', "must not depend on"),
             ("a platform conditional", "#if os(Linux)\nlet linux = true\n#endif\n", "must not depend on"),
             ("canImport", "#if canImport(Darwin)\nlet apple = true\n#endif\n", "must not depend on"),
             ("another import", "import Foundation\n", "nothing else"),
@@ -326,8 +355,16 @@ class ManifestTests(TripwireTestCase):
 
     def test_a_comment_may_mention_them(self):
         anchor = "import PackageDescription\n"
-        self.edit("Package.swift", anchor, anchor + "// Not `#if os(Linux)`, and no Context.environment: one value.\n")
+        comment = "// Not `#if os(Linux)`, no Context.environment, one import, no FileManager: one value.\n"
+        self.edit("Package.swift", anchor, anchor + comment)
         self.assert_passes()
+
+    def test_the_one_import_is_the_whole_line(self):
+        for line in ("import PackageDescription // and nothing more", "import PackageDescription; import Foundation"):
+            with self.subTest(line=line):
+                self.setUp()
+                self.edit("Package.swift", "import PackageDescription\n", line + "\n")
+                self.assert_refused("nothing else")
 
     def test_swift_5_language_mode_is_refused(self):
         """It turns off the data-race checking the actors' invariants rest on."""
