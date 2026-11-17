@@ -475,7 +475,7 @@ extension VaultSession {
     /// that is the owner or an administrator now, or inside the cut of the record that ended its role
     /// (`administratorSegmentCounts`); this device's own, not yet published, counts only while its account holds the
     /// role; and one that no segment held here shows to count is vouched for only by a version that an administrator
-    /// wrote, sealed since the record that ended its author's role if one did (`vouchesForDescription`). So a
+    /// wrote, sealed since the record that ended its author's role if one did (`vouchesForDescriptions`). So a
     /// read-write member's rename counts on no device, whoever's row carries it on, and a former administrator's
     /// late one is taken out again.
     ///

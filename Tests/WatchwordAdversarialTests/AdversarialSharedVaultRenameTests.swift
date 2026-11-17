@@ -499,6 +499,136 @@ extension AdversarialSharedVaultTests {
             #expect(try await Self.holdsDescriptionAside(vaultID, on: account))
         }
     }
+
+    /// Threat: the store (A1) chooses the order of arrival, with a former administrator (A5 as to the role) whose
+    /// client goes on renaming. `lateRenameOfADemotedAdministrator` shows a device the stream first and the record
+    /// afterwards; here a member's device is shown the record that ended the role first and none of the stream it
+    /// bounds, then all of it at once, the name chosen with the role and the late one in the same pass. The rule is
+    /// a function of the chain and the logs, so the order must decide nothing: while the stream is withheld the
+    /// device shows the last name it can check (a withheld stream delays, never widens), and once shown it the
+    /// name inside the cut is the vault's and the one outside it is held aside, as on the owner's device.
+    @Test("a device shown a demotion before the stream it bounds ends on the name inside the cut, like every other")
+    func demotionHeardBeforeTheNamesItBounds() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3_000)
+        let (former, formerView) = try await household.withheldAccount(seed: 3_017)
+        let (late, lateView) = try await household.withheldAccount(seed: 3_034)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.invite(former, to: vaultID, as: .administrator, owner: owner)
+        try await owner.invite(late, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([owner, former, late])
+        let formerDevice = try #require(await former.session.deviceIDForTest())
+        await lateView.withholdNew(under: SyncObjectLocation.vaultPrefix(vaultID) + "log/\(formerDevice.uuidString)/")
+
+        try await former.session.renameVault(id: vaultID, to: "Family")
+        try await Self.syncAll([former, owner])
+        // Their own device is not shown the record either, or it would take its late name out before publishing it.
+        await formerView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
+        try await owner.session.changeRole(of: former.accountID, in: vaultID, to: .readWrite)
+        try await former.session.renameVault(id: vaultID, to: "Late name")
+        try await former.session.sync()
+        try await owner.session.sync()
+        #expect(try await Self.name(of: vaultID, on: owner) == "Family")
+        #expect(try await Self.holdsDescriptionAside(vaultID, on: owner))
+
+        // The record, and none of the stream: neither name can be checked yet, and neither is shown.
+        try await Self.syncAll([late, owner, late])
+        #expect(
+            try await late.session.sharedVaultStatus(vaultID).membership.member(former.accountID)?.role == .readWrite)
+        #expect(try await Self.name(of: vaultID, on: late) == "Household")
+
+        await lateView.reveal()
+        try await Self.syncAll([late, owner, late])
+        #expect(try await Self.name(of: vaultID, on: late) == "Family")
+        #expect(try await Self.holdsDescriptionAside(vaultID, on: late))
+        #expect(try await Self.name(of: vaultID, on: owner) == "Family")
+    }
+
+    /// Threat: review finding S59, found in the second review of this rule. A former administrator (A5 as to the
+    /// role, still a member who may write) with the store (A1), against an administrator who joined after a rotation
+    /// and so takes older names on the word of whoever sealed them again. The store withholds the demotion from that
+    /// administrator's device while it merges the former administrator's late rename, and shows it the record only
+    /// when the device turns to a rotation of its own: the plan ingests the record, the rotation follows it on the
+    /// chain, and the records are sealed again under the new key before anything was judged against the new head. The
+    /// late name, sealed by an administrator under a key introduced after the role ended, is exactly what vouching
+    /// believes (§8.10): the device would keep it, publish it, and every member who joined since a rotation would
+    /// show it, while devices holding every key held it aside. A device seals again only what it has judged against
+    /// the head it seals under, so the late name is taken out before the rotation's re-seal and reaches nobody.
+    @Test("a late rename is not sealed again by an administrator's device that learns of the demotion as it rotates")
+    func lateRenameSealedAgainWhileRotating() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3_200)
+        let (former, formerView) = try await household.withheldAccount(seed: 3_217)
+        let leaving = try await household.account(seed: 3_234)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.invite(former, to: vaultID, as: .administrator, owner: owner)
+        try await owner.invite(leaving, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([owner, former, leaving])
+        // A rotation, then an administrator who joins after it and passes over the first key.
+        #expect(try await owner.session.removeMember(leaving.accountID, from: vaultID) == .complete)
+        try await Self.syncAll([owner, former, owner])
+        let (rotating, rotatingView) = try await household.withheldAccount(seed: 3_251)
+        try await owner.invite(rotating, to: vaultID, as: .administrator, owner: owner)
+        try await Self.syncAll([rotating, owner, former, rotating])
+        #expect(try await Self.name(of: vaultID, on: rotating) == "Household")
+
+        await formerView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
+        await rotatingView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
+        try await owner.session.changeRole(of: former.accountID, in: vaultID, to: .readWrite)
+        try await former.session.renameVault(id: vaultID, to: "Late name")
+        try await former.session.sync()
+        try await rotating.session.sync()
+        #expect(try await Self.name(of: vaultID, on: rotating) == "Late name")
+
+        // The store shows the device the demotion once its sync is over, as it turns to rotating the key.
+        await rotatingView.reveal()
+        try await rotating.session.planRotation(.routine, in: vaultID)
+        _ = try await rotating.session.carryOutRotation(in: vaultID)
+        #expect(
+            try await rotating.session.sharedVaultStatus(vaultID).membership.member(former.accountID)?.role
+                == .readWrite)
+        try await Self.syncAll([rotating, owner, rotating, owner], rounds: 3)
+        #expect(try await rotating.session.sharedVaultStatus(vaultID).pendingRotation.isEmpty)
+        for account in [rotating, owner] { #expect(try await Self.name(of: vaultID, on: account) == "Household") }
+        #expect(try await Self.holdsDescriptionAside(vaultID, on: rotating))
+
+        // A member invited now holds the newest key alone, and takes every older name on an administrator's word.
+        let newcomer = try await household.account(seed: 3_268)
+        try await owner.invite(newcomer, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([newcomer, owner, rotating, newcomer])
+        #expect(try await Self.name(of: vaultID, on: newcomer) == "Household")
+    }
+
+    /// Threat: a current member who may write but is no administrator (A4), with a client that does not keep the
+    /// rule, trying the other way to change what a vault is called: not a description of its own, which every judge
+    /// refuses, but a deletion of the description record, published in its own stream like the deletion of an item.
+    /// A vault left without a name is a vault whose name the member chose. A description is never erased by sync
+    /// (`VaultMetadataMerger.resolveErasure`), so the name stays on every other device, and an administrator's next
+    /// rename lands as usual. That held before the rule; the test is here because the rule leans on it.
+    @Test("a member's deletion of the vault's description takes the name from no other device")
+    func descriptionDeletedByAMember() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite, .readWrite], seed: 3_100)
+        let (hostile, bystander) = (members[0], members[1])
+        try await Self.syncAll([owner, hostile, bystander])
+
+        try await hostile.session.deleteDescriptionAsAModifiedClient(vaultID)
+        #expect(try await Self.name(of: vaultID, on: hostile) == "")
+        let report = try await hostile.session.syncAll()
+        #expect((report.vaults[vaultID]?.pushedEntries ?? 0) >= 1, "the deletion was published")
+        try await Self.syncAll([owner, bystander, owner])
+        for account in [owner, bystander] { #expect(try await Self.name(of: vaultID, on: account) == "Household") }
+
+        try await owner.session.renameVault(id: vaultID, to: "Family")
+        try await Self.syncAll([owner, bystander, hostile, owner, bystander])
+        for account in [owner, bystander] { #expect(try await Self.name(of: vaultID, on: account) == "Family") }
+        let newcomer = try await household.account(seed: 3_151)
+        try await owner.invite(newcomer, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([newcomer, owner, newcomer])
+        #expect(try await Self.name(of: vaultID, on: newcomer) == "Family")
+    }
 }
 
 extension VaultSession {
@@ -520,5 +650,13 @@ extension VaultSession {
         let row = try sealMetadata(metadata, vaultKey: vaultKey, account: account)
         try await store.commit(
             StoreChange(upserts: [row], expectations: [key: existing.map { .version($0.version) } ?? .absent]))
+    }
+
+    /// Deletes the vault's description the way a client that does not keep the rule would: through the store that
+    /// records a deletion to publish, as the permanent deletion of an item goes.
+    func deleteDescriptionAsAModifiedClient(_ vaultID: UUID) async throws {
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        try await writer(for: account).commit(
+            StoreChange(deletions: [RecordKey(recordID: vaultID, kind: .vaultMetadata)]))
     }
 }

@@ -336,8 +336,9 @@ down. Note-line removals, discards and history entries name the write that made 
 edits a current member has not published (S46) and a tombstone whose erasure summary does either (S45). Only the
 owner or an administrator renames a shared vault (PRD F4.7, owner decision of 2026-11-17; `06-adversarial-review.md`
 §R): the session refuses a member, every record that ends an administrator's role carries a cut, the judge counts a
-description only as an administrator's work, and descriptions merge by the stamp of the write that chose them
-(`02-architecture.md` §8.7, §8.10). The rename control in `VaultsView` follows `VaultRow.mayRename`; that view change
+description only as an administrator's work, descriptions merge by the stamp of the write that chose them, and a
+device seals again, after a rotation, only what it has judged against the new head (S59; `02-architecture.md` §8.7,
+§8.10). The rename control in `VaultsView` follows `VaultRow.mayRename`; that view change
 is not built.
 
 **Still open:**

@@ -531,7 +531,9 @@ each was a hole until it was said:
   of the row that carries it on, and for a name that word must be an administrator's, given at or after the record
   that ended the author's role if one did (S55, S56). Where that cannot be shown the device shows no name rather
   than one it cannot check, until the next rotation or rename (S57): the one place where devices that have received
-  the same versions may, for a while, not show the same name.
+  the same versions may, for a while, not show the same name. That word is `J_d` applied by the sealer, so a device
+  seals a row again only after judging it against the head whose key it seals under (S59); a row sealed again
+  without that would carry `J_d` of an earlier head to devices that cannot compute it themselves.
 
 `J_d` is false for a read-write member's description whatever row carries it, since no segment of an administrator's
 carried those bytes in the named device's stream; and for a former administrator's late one, whose carrier is outside

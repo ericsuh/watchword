@@ -524,8 +524,12 @@ as its own row; an owner's, an administrator's and a promoted member's renames c
 session's refusals; a name written before its author's promotion, judged alike on every device at each head (S58);
 an older name sealed again above the current one by a member and by a former administrator, and a description dated
 above its row (S54); a name labelled as an administrator's revision and sealed by a member for a device that joined
-after a rotation (S55); a former author publishing their own name again late to such a device (S56); and what such a
-device shows across another member's demotion, across the author's, and after the next rotation (S57). Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
+after a rotation (S55); a former author publishing their own name again late to such a device (S56); what such a
+device shows across another member's demotion, across the author's, and after the next rotation (S57); a device shown
+a demotion before the stream it bounds (`demotionHeardBeforeTheNamesItBounds`); a late name on the device of an
+administrator who joined after a rotation and learns of the demotion as it rotates, taken out before the re-seal
+(S59, `lateRenameSealedAgainWhileRotating`); and a member's deletion of the description, which erases it nowhere
+(`descriptionDeletedByAMember`, a property that held before the rule). Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
 parts names its writer and that a merge's attributed parts are exactly its inputs', and
 `LongRunningLateWriteSimulationTests` checks, over random histories, that a device that held late versions aside as
 they came and devices that merged them and rebuilt from what counts hold the same item, with nothing late in it and

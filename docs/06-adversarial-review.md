@@ -715,12 +715,15 @@ the rest were fixed with their tests written alongside.
 | ID | Decision | Threat and residual | Disposition |
 | --- | --- | --- | --- |
 | K9 | Only a shared vault's owner or an administrator may rename it. Decided against finding Q4's provisional answer, which had left renaming with every member who may write. | A4, a member who may write: calls the vault "Personal" (or anything a person trusts) so that someone's item lands where the member reads it. A rule in the screens would not bind a client that does not ask, so every device's write judge refuses a description that is not an administrator's work. Residual: an administrator can still choose any name, so every list keeps labelling vaults by ownership and role (Q4); S57 and S58 below. | **Changed.** `02-architecture.md` §8.4, §8.7 ("Who may name the vault"), §8.10 ("The vault's description"). `SharedVaultError.renameRefused`, `MembershipLedger.administratorStanding(of:)`, a cut on every record that ends an administrator's role, `VaultMetadataMerger` ordered by the description's own stamp, `VaultRow.mayRename`. |
+| K10 | Which of a *former* administrator's names stand: those inside the cut of the record that ended the role (implemented), or none ("administrator now", which admits less). | Both keep a read-write member's rename and a late rename out, on every device. They differ in what a person sees: under the cut a name an administrator chose stays when their role ends, as their items do; under "administrator now" it lapses on every device that day, to the highest-stamped name of an account that still holds the role, is held aside on each of them, and returns if they are promoted again. That undoes a write that was permitted and inside a cut, which §8.7 says counts for good. The cut costs one change to the verifier (a demotion to read-write carries a cut) and leaves S57. | **Implemented as the cut**, on those grounds; recorded for the owner because the other rule is the more restrictive. Moving to "administrator now" later only narrows what counts: `administratorSegmentCounts` and `descriptionMayBeVouched` would stop at `holdsRole`, and the cut on a demotion to read-write would go unread. |
 
-Implemented and reviewed in a remote Linux session against swift-crypto (ADR 0006); nothing here has run on a Mac, and
+Implemented and reviewed in remote Linux sessions against swift-crypto (ADR 0006); nothing here has run on a Mac, and
 the one view change (`VaultsView`: the rename button offered only to an account that may, the reason shown otherwise)
-is not built. The implementer reviewed the change as **A4** (a member who may write, and an administrator), **A5**
-(a former administrator, a former member) and **A1** (the store: withholds, reorders, replays), through real sessions.
-S54 to S56 were found that way, each reproduced by a test that failed before its fix.
+is not built. The change was reviewed twice, by the session that wrote it and by the one that finished it, as **A4**
+(a member who may write, and an administrator), **A5** (a former administrator, a former member) and **A1** (the
+store: withholds, reorders, replays), through real sessions. S54 to S56 were found that way by the first and S59 by
+the second, each reproduced by a test that fails with its fix taken out (checked again by the second session, which
+removed each fix in turn).
 
 | ID | Severity | Finding and threat | Disposition |
 | --- | --- | --- | --- |
@@ -730,6 +733,7 @@ S54 to S56 were found that way, each reproduced by a test that failed before its
 | S56 | Low | Found in review. The former author of the vault's name (A5 as to the role, still a member who holds the current key) published the same description again, byte for byte, in a late segment. For a member who joined after a rotation that late segment was the only carrier they could read, it did not count, and the judge then refused the name although an administrator's version vouched for it: the former administrator could take the vault's name away on every device that joined since the rotation, and on no other. | **Fixed.** A description whose carriers here do not count is still vouched for by an administrator's version, as one carried nowhere here is. Test: `ownNamePublishedAgainLate`. |
 | S57 | Low | What vouching leaves, as S42 does for items. A name chosen by an administrator whose role ended *after* the last rotation cannot be checked by a member who joined after that rotation: the carrier was sealed under a key older than the record, so nothing says its sealer had judged the name by the cut (a device that merged a late name before it knew would have sealed the same thing). That member's device shows no name and holds the version aside until the next rotation or rename; every other device shows the name. A carrier that a read-write member's device stored when two rows met at one version is likewise refused there, with the administrator's own row of the same name kept. Fail closed, never a name that should not count. | **Tracked.** Rotate after demoting an administrator (§8.10). The way out is for the record that ends the role to say which description it leaves standing (a digest in the cut, which has room), so that a newcomer can check the one name that matters without the segments. Test: `vouchedNameAcrossDemotions` pins both halves. |
 | S58 | Low | What the role leaves. (a) A name written by a member's modified client while read-write counts from the moment that member is made an administrator, on every device: standing is judged now (as S12 for writes), because only the writer says when a write was made, and they could write it again at once. (b) An administrator can date a name up to the version jump the engine allows and can seal another's description again; both are within renaming. (c) `modifiedAt` is not part of the bytes the judge attributes, so a carrier can state another time for a name; nothing reads it. | **Accepted, (a) for the owner.** A promotion that must not bring a name with it would need the promotion record to carry a cut as well (what the account had published before it), which a client that withholds a segment walks around; the owner sees the name at once and renames. |
+| S59 | Medium | Found in the second review. Vouching (S42 for items, S55 for names) believes a version sealed under a key introduced at or after a record to have been judged with that record in hand. But a rotation ingests membership while it is planned and carried out, after the sync's take-out, and `resealSharedVault` then sealed again whatever the store held. With the store (A1) showing an administrator's device a demotion only as it turned to rotating, the late rename of the former administrator (A5 as to the role) that the device had merged was sealed again under the new key as the device's own row. A device holding every key took that row out at its next sync, before publishing it. A device whose account had joined after a rotation vouched for its own row, kept it and published it, and every member who joined since a rotation showed the late name, while devices holding every key held it aside: the rule broken on some devices and a split between them. Read, not reproduced: a former member's late item values could travel the same way, though only where the store also keeps their stream from the rotating device (a value whose own late segment the device holds is refused whoever's version carries it; only a description has S56's exception). | **Fixed.** `resealSharedVault` takes out what no longer counts under the current head before it seals anything again, for every kind, and seals nothing while the stream index is being rebuilt; the next sync does both. Test: `lateRenameSealedAgainWhileRotating`, which fails without it (the rotating device and a member invited afterwards both showed the late name). No test builds the item case. |
 
 What the review tried and did not find a way through. **A rename by a read-write member**: published plainly, above
 an administrator's later rename, and labelled as the owner's revision; refused by the owner's device at once (it
@@ -747,3 +751,38 @@ before any log is merged. **Convergence**: the judge is a function of the descri
 index, and the merge of the description's own stamp, so arrival order, a cut learnt twice and replays end in the same
 name on every device that holds every key; what a newcomer cannot check is S57. **Items**: nothing in the rule reads
 an item, and a read-write member's writes count as before (asserted in the same tests).
+
+The second session tried these as well. **The order of arrival, the other way round** (A1 with A5): a device shown
+the demotion first and none of the stream it bounds, then the name inside the cut and a late one in one pass; it shows
+the last name it can check while the stream is withheld and ends on the name inside the cut with the late one held
+aside, as the owner's device does (`demotionHeardBeforeTheNamesItBounds`, which fails with the rule taken out of the
+judge). **Taking the name away instead of choosing one** (A4): a read-write member's client publishes a deletion of
+the description record; a description is never erased by sync, so the name stays on every other device and an
+administrator's next rename lands (`descriptionDeletedByAMember`; a property the rule leans on, which held before it).
+**A member's segment in an administrator's stream** (A4, the S33 shape): a member whose registry lists an
+administrator's device ID can sign a segment under that ID, carrying a description stamped with it; a segment counts
+as an administrator's by the account whose keys signed it, never by the stream it sits in, so it carries no name that
+counts on any device, the administrator's own included (by reading `signingAccount` and
+`administratorSegmentCounts`; no test builds the second registry). **An unaware
+administrator's device as the carrier**, where `lateRenameLaunderedThroughAMember` uses a member's: the description is
+judged by the write that chose it whoever's row carries it, and a row sealed under a key older than the record that
+ended the author's role vouches for nothing to a newcomer; an administrator's device cannot hold a later key without
+that record, because the key's grant follows the chain that contains it. (Holding the record turned out not to be
+enough: S59.) **A stamp nobody lists, the vault's current
+stamp over other bytes, and a stamp the administrator has not reached yet**: each names bytes no segment of that
+device's stream carried, and waits or is refused. **The cut itself**: an empty cut on a demotion counts none of the
+account's names, the verifier still refuses a cut where neither a permission nor a role ends, and a record that is
+missing a required cut is never signed (`writeCutRequired`). Each test written for a fix was run with that
+fix removed and failed: the rule in the judge (`forgedRenameByAMember`, `lateRenameOfADemotedAdministrator`,
+`lateRenameLaunderedThroughAMember`, `renameWrittenBeforeAPromotion`, `forgedRenameVouchedToANewcomer`,
+`vouchedNameAcrossDemotions`, and `renamingASharedVault` in `WatchwordKitTests`), the description's own stamp and its
+bound (`olderNameSealedAgain`, `descriptionDatedAboveItsRow`), the word of an administrator's version over a late
+copy (`ownNamePublishedAgainLate`), and the take-out before a re-seal (`lateRenameSealedAgainWhileRotating`, S59:
+written first, failing, then fixed).
+
+Seen while reading, not reproduced and not changed here: a rename an administrator made on a device that was
+registered again under a new ID before it published the rename (a store restored onto other hardware, W24) is
+attributed to the old ID (`carriedOver` keeps `writtenBy`, as S37 requires), whose stream never carried it. By the
+judge as written, other members would wait for that stream for good and the device would take the name out at the next
+change of head; the person would have to rename again. The attribution is older than this change and applies to any
+description of a shared vault, whoever may write one. For a follow-up, with a test.

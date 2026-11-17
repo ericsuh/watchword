@@ -650,6 +650,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   description again in `resealSharedVault`. Never judge a description by who sealed its row, and never let a path
   that stores one again make it the sealer's. `SharedVaultStatus.mayRename` is what the screens show
   (`VaultRow.mayRename`, `renameRefusal`); they decide nothing.
+- **Seal again only what was judged against the head it is sealed under** (S59). Vouching believes a version sealed
+  under a key introduced at or after a record to have been judged with that record in hand, and a rotation ingests
+  membership between the sync's take-out and its re-seal. `resealSharedVault` therefore calls
+  `takeOutWhatNoLongerCounts` first and seals nothing while the index is being rebuilt. A new path that seals a
+  record of a shared vault again under the current key (any kind) must do the same, or go through it.
 - A chain stopped at a later format (`continuesInLaterFormat`, §8.9) makes the vault read-only in the session and is
   reported (`SharedVaultStatus.requiresNewerVersion`): no proposal published, no plan resumed or made, nothing sealed
   again, no leave request. A later-format object is offered again until the ledger holds it; never add it to

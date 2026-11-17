@@ -1332,6 +1332,12 @@ Three rules were weighed.
   `requiresWriteCut(changingRoleOf:to:)`), which bounds the former administrator's descriptions and says nothing
   about their items: their `writeStanding` stays `mayWrite`. Only the owner signs such a record (§8.1).
 
+A fourth, the cut where a record already carried one and the current role for a demotion to read-write, needs no
+change to the verifier, and was rejected for what a person would see: the names of an administrator who was removed
+would stand while those of one merely demoted lapsed. "By current role alone" keeps the same adversaries out and
+admits less, and what it changes is visible to a person, so the choice of the cut over it is recorded for the owner
+(`06-adversarial-review.md` §R, K10); going from the cut to the role alone later only narrows what counts.
+
 The record's layout is unchanged: the field was always there, and what changed is which records the verifier lets
 carry a cut, and what an empty one on a demotion to read-write means (none of that account's names count). Nothing
 is released at format 2, so the version byte stays. After a release this would have to be a later format (§8.9): a
@@ -1397,7 +1403,10 @@ written out against a hostile store. One sync pass, in this order:
    who may write, seal again whatever `recordsToReseal` lists, from an inventory that holds only what counts; a
    re-seal is the same item state at a higher version (`ItemMerge.written`), not an edit, so two devices doing it at
    once converge, and it keeps every value's own author. The vault's description is sealed again only by an
-   administrator's device (§8.10).
+   administrator's device (§8.10). Planning and carrying out a rotation ingest membership again, so the head may have
+   moved since step 5 by someone else's record as well as this device's own: what no longer counts under the head is
+   taken out once more before anything is sealed again (S59), because a version sealed under the new key is believed
+   by a member who joins later to have been judged with every record up to that key in hand.
 
 Accepting an invitation passes the ledger the device already holds for that vault ID, if it ever held one
 (`continuing:`), and the owner it knows for it (`knownOwner:`).
@@ -1569,7 +1578,8 @@ account may write (a read-only or former member merges and publishes nothing, `s
 departing account's own segments (§8.8, "a departed account's log"). After the logs: a saved plan continued, owed
 removals this account may sign planned, leave requests turned into rotations by an administrator, and what
 `recordsToReseal` lists sealed again through `ItemMerge.written` (the description only by an administrator's device,
-below). While locked only membership is ingested and the logs download.
+below), after what no longer counts under the head has been taken out again (`resealSharedVault`, S59). While locked
+only membership is ingested and the logs download.
 
 **Verifying** (`SyncKeyring.verify`, `sharedVerify`): an object of a shared vault must carry the dual signature of a
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
@@ -1656,7 +1666,11 @@ an item's, and the three properties above carry over:
   judged the name by its cut. A member's version vouches for no name (S55), which is why only an administrator's
   device seals the description again after a rotation (the device that planned the rotation is one). The same word
   stands when the only carrier of the name that such a member can read is a late copy its former author published
-  again (S56).
+  again (S56). Holding the record is not having judged by it: a device that learns of a demotion while it plans a
+  rotation of its own holds, for a moment, a late name it merged before and a key newer than the demotion. So
+  `resealSharedVault` takes out what no longer counts under the head before it seals anything again, items as well
+  as the description, and seals nothing while it cannot (S59); without that such a device, if its own account had
+  joined after a rotation, kept the late name as a row of its own and handed it to every member who joined since.
 
 What is held aside is kept in the sync state's quarantine (`quarantinedVersions`, `SyncReport.heldAside`), never
 merged, never published by the device and discarded only by the person; the objects it came from are judged again

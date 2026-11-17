@@ -740,10 +740,21 @@ extension VaultSession {
     /// Seals again, under the current key, every record `recordsToReseal` lists: the same state at a higher version
     /// (`ItemMerge.written`), not an edit, so two devices doing it at once converge and every value keeps its own
     /// author (§8.6, §8.8 step 6). Only by a member who may write and holds the current key. Returns how many.
+    ///
+    /// **Only what has been judged against the head it is sealed under** (review finding S59). A version sealed
+    /// under a key introduced at or after the record that ended an account's standing is believed, by a member who
+    /// joined after a rotation, to have been judged with that record in hand (§8.10, vouching). A rotation ingests
+    /// membership on its way here, so the head may have moved past the one this device last judged its records
+    /// against, by another account's record as well as its own: what no longer counts is taken out first, and while
+    /// that cannot be done (the stream index is being rebuilt) nothing is sealed again; the next sync does both.
     func resealSharedVault(_ vaultID: UUID) async throws -> Int {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        guard try sharedVault(vaultID).ledger.writePermission(for: account.accountID).isAllowed else { return 0 }
+        try await takeOutWhatNoLongerCounts(vaultID)
+        guard try !sharedVault(vaultID).indexRebuilding else { return 0 }
+        _ = try requireKeys(since: epoch)
         let ledger = try sharedVault(vaultID).ledger
         guard ledger.writePermission(for: account.accountID).isAllowed else { return 0 }
         let stale = ledger.recordsToReseal(in: try await sharedInventory(vaultID))
