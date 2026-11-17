@@ -145,9 +145,6 @@ extension AdversarialSharedVaultTests {
 
         #expect(try await second.session.vaults().first { $0.id == vaultID }?.isSharedUnavailable == true)
         await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
-            try await second.session.shareVault(vaultID)
-        }
-        await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
             try await second.session.setArchived(true, id: bank.id)
         }
         let count = try await second.session.itemCount(in: vaultID)

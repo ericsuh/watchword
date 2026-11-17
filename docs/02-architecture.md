@@ -1633,15 +1633,17 @@ as one of the account's own, with no role, the lowest key ID held as the current
 time the key a removed member kept), no judge, snapshots and collection in a log that must stay whole, a second
 "Share", and "delete vault" open to it: any other device of a member's or the owner's account, which receives the keys
 through the vault directory and never held the ledger; and a device whose saved ledger, owner row or owner's pin was
-deleted (A8) or lost. Three things answer the question now, none of which goes with the ledger: a key of the vault that
-**arrived by grant**, the account's **marker** for it (both §7.7), and the sharing state naming the vault while its
-ledger does not load. A vault any of them names with no verified ledger loaded is **unavailable** on that device
+deleted (A8) or lost. Two things answer the question now, neither of which goes with the ledger: a key of the vault
+that **arrived by grant** and the account's **marker** for it (both §7.7). The sharing state is not a third: not every
+row of it is signed, and for a while a vault it named without a ledger that loaded was held closed too, so one planted
+row closed a private vault with no way out (Z50). A vault either names with no verified ledger loaded is
+**unavailable** on that device
 (`VaultInfo.isSharedUnavailable`, `SharedVaultError.ledgerUnavailable`): it is listed, labelled as shared and not set
 up here, and what the device already holds of it stays readable; it has no current key, so nothing is sealed, signed
 or published there and its engine only downloads (no snapshot, no collection); every write, the move of an item out of
 it, its rename, a second `shareVault` and its deletion are refused. Until the markers have been read in a session,
-every vault but the Personal one is treated so, and a sharing state that cannot be read closes its vaults until it can:
-a failed read is not an answer. The way out is the device accepting the vault's invitation itself, which works on a
+every vault but the Personal one is treated so, and a sharing state that cannot be read loads no ledger, so the
+vaults the marker or a granted key names stay closed until it can: a failed read is not an answer. The way out is the device accepting the vault's invitation itself, which works on a
 second device because the owner it must name is the one the marker gives, and only that one: a device that holds a
 granted key of the vault and cannot name its owner (no ledger, no marker yet) accepts no invitation for it at all
 (`ownerUnknown`), since anyone the person might verify could otherwise sign a chain for the same vault ID and stand in
@@ -1663,6 +1665,18 @@ vault is of the account's own class; then every member is one who joined after a
 the vault's earlier log, and takes its earlier values on a later sealer's word (S42's vouching, with what S42 leaves
 open for S36 and S46, for every member instead of for latecomers). That trade was not made here. And the ledger
 itself is still not synced between an account's devices (S35): each accepts the invitation.
+
+**A share that was cut short** (review finding Z50). `shareVault` writes the marker before the chain, so that every
+device of the account learns the vault is shared whether or not it ever sees the chain. A lock or the end of the
+process between the two left a marker naming this account, no ledger and no genesis record anywhere, and the vault
+closed with no way out. So a vault whose only mark is this account's own marker naming this account, none of whose
+keys came by grant, is this account's to finish sharing: `shareVault` goes on from there under the key the genesis
+record names either way, and for a vault that is already shared here it saves the state and publishes the genesis
+record again. That is also how the owner's other device takes up a vault the account shared elsewhere while it has
+not rotated (the record it signs has the same content; where a signature is not a function of its message, on
+CryptoKit, it is a second root that the fork rule sets aside for the one that has been built on, which a Mac run has
+yet to show). The owner's device also puts its genesis record back at every sync while the store does not list it:
+the one call that published it may have failed.
 
 **A vault this account is no longer in** (review finding Z45). Leaving and removal change the chain and the key;
 nothing takes the vault's records off the leaver's devices, and the screens no longer say that anything does. Once the

@@ -9,13 +9,15 @@ import WatchwordSync
 //
 // Whether a vault is governed by a membership chain used to be answered by the ledger a device had loaded, which is
 // per-device state: another device of the account, or this one after its sharing state was lost or edited (A8), ran
-// the vault as one of the account's own. Three things answer it now, none of which goes with the ledger:
+// the vault as one of the account's own. Two things answer it now, neither of which goes with the ledger:
 //
 // - a **marker** beside the vault's directory entry, signed by the account key and a device, published in the
 //   account's vault directory and kept as a row of the record store. It names the chain's owner;
 // - a vault key that **arrived by grant** (`VaultKey.arrivedByGrant`), which the key's own wrap authenticates, so it
-//   reaches every device of the account with the key and cannot be taken off it;
-// - the sharing state itself naming the vault while its ledger does not load (`SharingRuntime.unloadable`).
+//   reaches every device of the account with the key and cannot be taken off it.
+//
+// Nothing in the sharing state is a third: its rows are not all signed, and a row planted there must not close a
+// vault that was never shared (Z50).
 //
 // A vault any of them names, with no verified ledger loaded, is **unavailable** on this device: readable, and
 // otherwise held closed. `sharedCurrentKey` gives it no current key, so nothing is sealed, signed or published and its
@@ -189,9 +191,7 @@ extension VaultSession {
     /// on a fact that has not been looked up.
     func isMarkedShared(_ vaultID: UUID, keys: UnlockedKeys?, personalVaultID: UUID?) -> Bool {
         if vaultID == personalVaultID { return false }
-        if sharing.vaults[vaultID] != nil || sharing.markers[vaultID] != nil || sharing.unloadable.contains(vaultID) {
-            return true
-        }
+        if sharing.vaults[vaultID] != nil || sharing.markers[vaultID] != nil { return true }
         if keys?.vaultKeys.values.contains(where: { $0.vaultID == vaultID && $0.arrivedByGrant }) == true {
             return true
         }

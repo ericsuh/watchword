@@ -665,7 +665,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - **"Shared" does not depend on the ledger a device happens to hold** (Z41; `VaultSession+SharedMarker.swift`). A key
   opened from a grant is `arrivedByGrant`, which its wrap's context authenticates on every device of the account; the
   account signs a marker beside the vault's directory entry (`AccountObjectLocation.vaultShared`) naming the chain's
-  owner; and the sharing state naming a vault whose ledger does not load counts too. A vault any of them names with no
+  owner. Nothing in the sharing state marks a vault: its rows are not all signed (Z50). A vault either names with no
   verified ledger loaded is **unavailable**: `sharedCurrentKey` gives it no key (never the lowest key ID), its engine
   only downloads, and `checkSharedWrite`/`checkSharedDeletion` throw `ledgerUnavailable`. Never add a path that asks
   only `sharing.vaults[vaultID]` to decide a vault is private; ask `isMarkedShared`. Until the markers are read every
@@ -690,6 +690,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
   (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
+- `shareVault` can always be finished (Z50): the marker is written first, and a vault whose only mark is this
+  account's own marker naming this account, with no granted key, is shared again from there; the owner's device
+  republishes its genesis record while the store does not list it. Never add a state between "private" and "shared
+  with a ledger" that `shareVault` or `acceptInvitation` cannot leave.
 - A vault is shared with `indexRebuilding` set, so its index is built from the log before any row it already holds is
   judged, and one whose log was compacted (a snapshot listed, or merged) is not shared at all (`historyCompacted`,
   Z42): a value that survives only in a snapshot has no attribution. Do not lift that without a rule for such values.
