@@ -412,8 +412,9 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   transport chooses none and resolves none: it never calls `NSFileVersion`'s resolution, never renames a duplicate
   into place, and a plain `fetch` reads the current file as before. Only `delete` — the author collecting its own
   object, when the engine says it may — removes the copies with the object (`removeOtherVersionsOfItem`, the renamed
-  files). A placeholder of a renamed copy is not attributed (the copy is read once it is downloaded and the count
-  changes). Not built either: other providers with a security-scoped bookmark, and their polling.
+  files). The legacy placeholder of a renamed copy (`.N 2.wwe.icloud`) is attributed like the copy itself and
+  counted once with it, and `fetchCopies` counts it unread and asks for its download; unattributed, a copy present
+  only as a placeholder was seen by nobody, and its author collected the name with it unread (review finding R18). Not built either: other providers with a security-scoped bookmark, and their polling.
 
 ### 7.4 Sync while locked
 

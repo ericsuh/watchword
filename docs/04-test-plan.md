@@ -983,7 +983,9 @@ other does, and reported as not required on Linux, where they cannot compile.
 - **Conflict copies** (architecture §7.5; portable, Linux). *Transports* ("Conflict copies: transports"):
   `SyncTransportContract.singleCopies` on every transport and `heldCopies` on the in-memory, directory and simulated
   ones; only an exact `<name> <n>` (2 to 64) is a copy; a copy whose object is gone is still listed; a link or
-  directory under a copy's name is counted and never followed. *State* ("… what is staged and remembered"): staged
+  directory under a copy's name is counted and never followed; a copy known only by its iCloud placeholder
+  (`.N 2.wwe.icloud`) is counted once, with or without its downloaded file, and read as unread, and an inexact one is
+  nothing (R18, `duplicatePlaceholder`, `duplicatePlaceholderAlone`, `inexactDuplicatePlaceholders`). *State* ("… what is staged and remembered"): staged
   copies round-trip and a hostile row is no object; "Collecting a device's own objects": a deletion refused for one
   object is reported and tried again, never the sync's end (SR23, `refusedDeletionIsOneObjectsFailure`); the state's new fields survive encoding and an older row.
   *Engine* ("… the engine"): junk beside an object; the object behind a junk current file; no copy verifying refused

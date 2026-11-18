@@ -90,6 +90,68 @@ struct ConflictCopyTransportTests {
         #expect(try await transport.list(prefix: TransportFixtures.prefix).isEmpty)
     }
 
+    /// Review finding R18: iCloud's legacy placeholder of a renamed duplicate (`.<stem> 2.wwe.icloud`) has a space in
+    /// its stem, so it was neither an object nor a duplicate: nothing listed or counted it, the download was never
+    /// asked for, and the author collected the name with a copy nobody had read.
+    @Test("a renamed duplicate known only by its iCloud placeholder is counted, and read as unread, never as absent")
+    func duplicatePlaceholder() async throws {
+        let root = TransportFixtures.temporaryRoot()
+        let plain = FileSyncTransport(root: root)
+        let ubiquitous = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+        let name = TransportFixtures.name
+        try await ubiquitous.create(name, contents: [1])
+        let duplicate = try Self.duplicate(name, 2, in: ubiquitous)
+        try Data([2]).write(to: FileSyncTransport.placeholderURL(for: duplicate))
+        #expect(
+            try await ubiquitous.listWithCopies(prefix: TransportFixtures.prefix)
+                == SyncListing(names: [name], copied: [name: 2]))
+        #expect(
+            try await ubiquitous.fetchCopies(name, maximumLength: 100, maximumCopies: 8)
+                == SyncObjectCopies(copies: [[1]], unread: 1))
+        // Without placeholders listed (not iCloud Drive), a dot-file is nothing.
+        #expect(try await plain.listWithCopies(prefix: TransportFixtures.prefix) == SyncListing(names: [name]))
+
+        // Downloaded, with its placeholder still there for a moment: one copy, read.
+        try Data([2]).write(to: duplicate)
+        #expect(
+            try await ubiquitous.listWithCopies(prefix: TransportFixtures.prefix)
+                == SyncListing(names: [name], copied: [name: 2]))
+        #expect(
+            try await ubiquitous.fetchCopies(name, maximumLength: 100, maximumCopies: 8)
+                == SyncObjectCopies(copies: [[1], [2]]))
+    }
+
+    @Test("a name left with only a duplicate's placeholder is still listed, and its copy is unread")
+    func duplicatePlaceholderAlone() async throws {
+        let root = TransportFixtures.temporaryRoot()
+        let ubiquitous = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+        let name = TransportFixtures.name
+        try await ubiquitous.create(name, contents: [1])
+        try Data([2]).write(to: FileSyncTransport.placeholderURL(for: try Self.duplicate(name, 3, in: ubiquitous)))
+        try FileManager.default.removeItem(at: try ubiquitous.fileURL(for: name))
+        #expect(
+            try await ubiquitous.listWithCopies(prefix: TransportFixtures.prefix)
+                == SyncListing(names: [name], copied: [name: 1]))
+        #expect(
+            try await ubiquitous.fetchCopies(name, maximumLength: 100, maximumCopies: 8)
+                == SyncObjectCopies(unread: 1))
+    }
+
+    @Test(
+        "only an exact duplicate's placeholder counts",
+        arguments: ["N 1", "N 02", "N 65", "N  2", "N 2x", " 2", "N 2\u{301}"])
+    func inexactDuplicatePlaceholders(_ pattern: String) async throws {
+        let root = TransportFixtures.temporaryRoot()
+        let ubiquitous = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
+        let name = TransportFixtures.name
+        try await ubiquitous.create(name, contents: [1])
+        let url = try ubiquitous.fileURL(for: name)
+        let stem = String(url.lastPathComponent.dropLast(4))
+        let entry = "." + pattern.replacingOccurrences(of: "N", with: stem) + ".wwe.icloud"
+        try Data([9]).write(to: url.deletingLastPathComponent().appendingPathComponent(entry))
+        #expect(try await ubiquitous.listWithCopies(prefix: TransportFixtures.prefix) == SyncListing(names: [name]))
+    }
+
     @Test("a link or a directory under a duplicate's name is counted, never followed, and hides nothing after it")
     func plantedLinkAsDuplicate() async throws {
         let transport = FileSyncTransport(root: TransportFixtures.temporaryRoot())

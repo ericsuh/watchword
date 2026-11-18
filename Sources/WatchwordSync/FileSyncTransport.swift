@@ -20,7 +20,10 @@ import Foundation
 /// `<name>`, never an object of its own (a space is not in the layout's alphabet): `listingNow` counts it,
 /// `fetchCopiesNow` reads it after the file itself, and `deleteNow` removes it with the object. Only the numbers 2 to
 /// `maximumDuplicateNumber` are attributed, so reading the copies of a name is a bounded number of look-ups, never a
-/// scan. Which copy is genuine is not decided here (docs/02-architecture.md §7.5, "Conflict copies").
+/// scan. Which copy is genuine is not decided here (docs/02-architecture.md §7.5, "Conflict copies"). With
+/// `listsUbiquityPlaceholders`, a renamed duplicate iCloud has not downloaded (`.<name> 2.wwe.icloud`) is counted too,
+/// and read as unread, never as absent: otherwise a copy that exists only as a placeholder would be seen by nobody and
+/// collected with its object unread (review finding R18).
 ///
 /// This is the portable core. On iCloud Drive every access also goes through `NSFileCoordinator`, with an
 /// `NSFilePresenter` for change notification: `WatchwordPlatform.CoordinatedFileSyncTransport`, which runs the
@@ -96,14 +99,14 @@ public struct FileSyncTransport: SyncTransport {
             guard try Self.kind(of: start) == .directory else { return SyncListing() }
         }
         var names: [String] = []
-        var duplicates: [String: Int] = [:]
+        var duplicates: [String: Set<String>] = [:]
         try walk(start, relative: directoryComponents, into: &names, duplicates: &duplicates)
-        // A placeholder and its downloaded file can both be present for a moment: one object.
+        // A placeholder and its downloaded file can both be present for a moment: one object (and one duplicate).
         var listed = Set(names.filter { $0.hasPrefix(prefix) })
         var listing = SyncListing()
-        for (name, count) in duplicates where name.hasPrefix(prefix) {
+        for (name, stems) in duplicates where name.hasPrefix(prefix) {
             // Listed even when only renamed copies are left under the name: one of them may be the object.
-            listing.copied[name] = count + (listed.contains(name) ? 1 : 0)
+            listing.copied[name] = stems.count + (listed.contains(name) ? 1 : 0)
             listed.insert(name)
         }
         listing.names = listed.sorted()
@@ -111,12 +114,12 @@ public struct FileSyncTransport: SyncTransport {
     }
 
     private func walk(
-        _ directory: URL, relative: [String], into names: inout [String], duplicates: inout [String: Int]
+        _ directory: URL, relative: [String], into names: inout [String], duplicates: inout [String: Set<String>]
     ) throws {
         let entries = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         for entry in entries
         where Self.isValidComponent(entry) || entry.hasSuffix("." + Self.fileExtension)
-            || (listsUbiquityPlaceholders && Self.placeholderStem(entry) != nil)
+            || (listsUbiquityPlaceholders && Self.placeholderInner(entry) != nil)
         {
             let url = directory.appendingPathComponent(entry)
             switch try Self.kind(of: url) {
@@ -127,10 +130,15 @@ public struct FileSyncTransport: SyncTransport {
                 if Self.isValidComponent(stem) {
                     names.append((relative + [stem]).joined(separator: "/"))
                 } else if let original = Self.duplicatedStem(stem) {
-                    duplicates[(relative + [original]).joined(separator: "/"), default: 0] += 1
+                    duplicates[(relative + [original]).joined(separator: "/"), default: []].insert(stem)
                 }
             case .file where listsUbiquityPlaceholders:
-                if let stem = Self.placeholderStem(entry) { names.append((relative + [stem]).joined(separator: "/")) }
+                if let stem = Self.placeholderStem(entry) {
+                    names.append((relative + [stem]).joined(separator: "/"))
+                } else if let inner = Self.placeholderInner(entry), let original = Self.duplicatedStem(inner) {
+                    // A renamed duplicate not downloaded yet: a copy of `original` all the same (R18).
+                    duplicates[(relative + [original]).joined(separator: "/"), default: []].insert(inner)
+                }
             default:
                 continue  // Symbolic links, temporaries, anything else: not an object.
             }
@@ -164,12 +172,17 @@ public struct FileSyncTransport: SyncTransport {
     /// The file of `name` and its renamed duplicates, in that order, as bytes: at most `maximumCopies`, each within
     /// `maximumLength`. Anything else under those names (a link, a directory, a file over the limit) is counted as
     /// omitted, and a file whose read failed as unread (`SyncObjectCopies.unread`: it may be readable at the next
-    /// sync, review finding R11), so one planted entry cannot hide the copies after it.
+    /// sync, review finding R11), so one planted entry cannot hide the copies after it. With
+    /// `listsUbiquityPlaceholders`, a copy present only as its placeholder is unread too (R18).
     public func fetchCopiesNow(_ name: String, maximumLength: Int, maximumCopies: Int) throws -> SyncObjectCopies {
         var found = SyncObjectCopies()
         for url in [try fileURL(for: name)] + (try duplicateURLs(for: name)) {
             switch try Self.kind(of: url) {
-            case .missing: continue
+            case .missing:
+                if listsUbiquityPlaceholders, try Self.kind(of: Self.placeholderURL(for: url)) == .file {
+                    found.unread += 1
+                }
+                continue
             case .file:
                 guard found.copies.count < maximumCopies else {
                     found.omitted += 1
@@ -287,10 +300,19 @@ public struct FileSyncTransport: SyncTransport {
 
     /// The object stem an iCloud placeholder file name stands for (`.<stem>.wwe.icloud`), if it is one.
     public static func placeholderStem(_ entry: String) -> String? {
-        let suffix = "." + fileExtension + "." + placeholderSuffix
-        guard entry.utf8.first == UInt8(ascii: "."), entry.hasSuffix(suffix) else { return nil }
-        let stem = String(entry.dropFirst().dropLast(suffix.count))
-        return isValidComponent(stem) ? stem : nil
+        placeholderInner(entry).flatMap { isValidComponent($0) ? $0 : nil }
+    }
+
+    /// The stem inside an iCloud placeholder file name (`.<stem>.wwe.icloud`), unchecked: an object's stem
+    /// (`placeholderStem`) or a renamed duplicate's (`duplicatedStem`), or neither.
+    /// Compared as bytes, so a combining mark cannot join a dot to its neighbour.
+    public static func placeholderInner(_ entry: String) -> String? {
+        let bytes = Array(entry.utf8)
+        let suffix = Array(("." + fileExtension + "." + placeholderSuffix).utf8)
+        guard bytes.count > suffix.count + 1, bytes[0] == UInt8(ascii: "."),
+            bytes.suffix(suffix.count).elementsEqual(suffix)
+        else { return nil }
+        return String(decoding: bytes[1..<(bytes.count - suffix.count)], as: UTF8.self)
     }
 
     /// The legacy placeholder iCloud Drive keeps beside `url` while the file itself is not downloaded.
