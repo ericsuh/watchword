@@ -126,9 +126,12 @@ struct SharedStreamIndexTests {
         var vault = SharedVault(ledger: ledger)
         vault.index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: keyset.accountID))
         let owner = [keyset.accountID]
-        func believed(_ claimed: UInt64, accounts: [UUID] = owner, retired: Set<UUID> = []) -> Bool {
+        func believed(
+            _ claimed: UInt64, of record: VersionKey = Self.version(3), accounts: [UUID] = owner,
+            retired: Set<UUID> = []
+        ) -> Bool {
             VaultSession.neverCarriesHere(
-                Self.device, accounts: accounts, claimed: claimed, in: vault, retired: retired)
+                Self.device, accounts: accounts, claimed: claimed, of: record, in: vault, retired: retired)
         }
         #expect(!believed(2), "segments 1 and 2 are merely missing here")
         vault.index.collected[Self.device] = 1
@@ -136,6 +139,8 @@ struct SharedStreamIndexTests {
         vault.index.collected[Self.device] = 2
         #expect(believed(3))
         #expect(!believed(4), "a claim beyond what the stream carried is about edits still to come")
+        // Round 5's L-M3: what the stream carried of one record says nothing about another's.
+        #expect(!believed(1, of: Self.version(1)), "a version of another record bounded the claim")
         #expect(!believed(3, accounts: owner + [Self.insider]), "another account lists the device")
         #expect(believed(.max, accounts: [Self.insider], retired: [Self.device]), "a revoked device publishes nothing")
     }

@@ -879,7 +879,8 @@ extension VaultSession {
             // may write, in a version that otherwise counts, and never waited for.
             if !accounts.isEmpty,
                 Self.neverCarriesHere(
-                    value.device, accounts: accounts, claimed: revisions[value] ?? .max, in: vault, retired: retired)
+                    value.device, accounts: accounts, claimed: revisions[value] ?? .max, of: originKey, in: vault,
+                    retired: retired)
             {
                 if Self.allMayWrite(accounts, in: vault.ledger) { continue }
                 admitted = false
@@ -945,7 +946,7 @@ extension VaultSession {
             // good; or the owner's, whose first segments were collected before the vault was shared. Believed of an
             // account that may write, as such a device's own versions are (`counts`): a revoked device publishes
             // nothing any device reads, so a claim about its edits supersedes none yet to come. Never waited for.
-            if neverCarriesHere(device, accounts: accounts, claimed: count, in: vault, retired: retired) {
+            if neverCarriesHere(device, accounts: accounts, claimed: count, of: record, in: vault, retired: retired) {
                 if allMayWrite(accounts, in: vault.ledger) { continue }
                 if vouched, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) { continue }
                 return false
@@ -1103,15 +1104,18 @@ extension VaultSession {
     /// review finding Z151): requireWholeLog (Z42) refuses to share a compacted vault, so a stream whose first segments
     /// are not here has, nearly always, not shown them here yet, and believing claims about it then let any current
     /// writer claim to have seen the owner's device's future edits. And only for what that device can have written
-    /// before what its own segments here show (`claimed`, a revision's or clock's version no higher than the highest it
-    /// carried): its later edits are still to come, and a claim beyond them waits for its stream as any other (S46).
+    /// before what its own segments here show (`claimed`, a revision's or clock's version of `record` no higher than
+    /// the highest version of that record its stream carried, round 5's L-M3: a version of another record says nothing
+    /// about this one's): its later edits are still to come, and a claim beyond them waits for its stream as any other
+    /// (S46).
     static func neverCarriesHere(
-        _ device: UUID, accounts: [UUID], claimed: UInt64, in vault: SharedVault, retired: Set<UUID>
+        _ device: UUID, accounts: [UUID], claimed: UInt64, of record: VersionKey, in vault: SharedVault,
+        retired: Set<UUID>
     ) -> Bool {
         if retired.contains(device) { return true }
         guard let first = vault.index.firstSequence(ofStream: device), first > 1,
             (vault.index.collected[device] ?? 0) >= first - 1,
-            claimed <= vault.index.highestVersionCarried(by: device)
+            claimed <= vault.index.highestVersionCarried(by: device, of: record.recordID, kind: record.kind)
         else { return false }
         return accounts.allSatisfy { $0 == vault.ledger.owner.accountID }
     }

@@ -137,9 +137,9 @@ struct SharedStreamIndex: Sendable, Hashable {
         }
     }
 
-    /// The highest record version any segment of `device`'s stream recorded here carried.
-    func highestVersionCarried(by device: UUID) -> UInt64 {
-        firstCarrier[device]?.keys.map(\.version).max() ?? 0
+    /// The highest version of one record that any segment of `device`'s stream recorded here carried.
+    func highestVersionCarried(by device: UUID, of recordID: UUID, kind: UInt8) -> UInt64 {
+        firstCarrier[device]?.keys.filter { $0.recordID == recordID && $0.kind == kind }.map(\.version).max() ?? 0
     }
 
     /// Whether this device's stream already carried `value` at or before `sequence`.
