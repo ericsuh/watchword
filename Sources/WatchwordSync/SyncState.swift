@@ -85,6 +85,12 @@ public struct SyncState: Sendable, Hashable {
     /// the quarantine has room for every one of them again, the log is replayed to offer those versions again
     /// (review finding Z38).
     public var quarantineDropped: Set<UUID> = []
+    /// How many entries the quarantine held when its store last refused a version because entries crafted to share
+    /// its lookup digest had crowded it (Z141), with `quarantineDropped` naming its writer; `nil` if that has not
+    /// happened since the last replay. The caps then had room, so a replay at every sync would only drop it again:
+    /// the log is offered again only once the quarantine holds fewer entries than this, which the person discarding
+    /// the entries (or anything else leaving) brings about (review finding Z147).
+    public var quarantineCrowded: UInt64?
     /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
     /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
     /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the

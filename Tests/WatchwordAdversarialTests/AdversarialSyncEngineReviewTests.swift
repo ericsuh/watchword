@@ -99,4 +99,47 @@ extension AdversarialSyncTests {
         #expect(report.ownStreamUnverified == nil)
         #expect(await f.transport.allObjects[f.segmentName(4)] != nil)
     }
+
+    // MARK: - A version the store refused for a crowded digest (Z147)
+
+    /// Threat: a device of the account crafting entries that share a held-aside entry's unkeyed lookup digest, or
+    /// someone with the files (A8) writing quarantine rows that do. The store keeps nothing more under a crowded
+    /// digest, and Z141 remembered the version as dropped; the caps still had room, so every sync replayed the whole
+    /// log, dropped it again, and withheld this device's snapshots, for as long as the crowding stood. The log is
+    /// offered again only once something has left the quarantine, so the crowding costs one replay, not one a sync;
+    /// the snapshots stay withheld (nothing covers a version kept nowhere) until the person discards entries.
+    @Test("a version refused for a crowded digest is not offered again at every sync")
+    func crowdedDigestDoesNotReplayEverySync() async throws {
+        let f = try await Self.fixture()
+        let configuration = Self.jumpConfiguration()
+        let author = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: await f.writer.store)
+        try await author.save(Self.login("Mine", password: "m"))
+        let kept = try await Self.plantVersion(900, title: "Kept aside", on: author)
+        try await author.sync()
+        let refused = try await Self.plantVersion(950, title: "Crowded out", on: author)
+        try await author.sync()
+        let state = InterceptingStateStore()
+        await state.refuse([RecordKey(recordID: refused, kind: .item)])
+        let (engine, _, _) = await Self.joiner(f, state: state, configuration: configuration)
+        let first = try await engine.sync()
+        #expect(first.quarantineFull == 1, "the refused version was not counted: the test proves nothing")
+
+        for _ in 0..<2 {
+            let again = try await engine.sync()
+            #expect(again.fetched == 0 && again.quarantineFull == 0, "the whole log was replayed for nothing")
+            #expect(again.snapshotWithheldForQuarantine || again.snapshotsWritten == 0)
+        }
+        #expect(await state.loadState(vaultID: Self.vault)?.quarantineDropped == [Self.a])
+
+        // The person discards the kept entry and the crowding is gone: the log is offered again, and the version kept.
+        let held = await state.quarantined(vaultID: Self.vault)
+        await state.discardQuarantined(held.filter { $0.recordID == kept }, vaultID: Self.vault)
+        await state.refuse([])
+        let replayed = try await engine.sync()
+        #expect(replayed.fetched > 0, "the log was never offered again")
+        #expect(await state.quarantined(vaultID: Self.vault).contains { $0.recordID == refused })
+        #expect(await state.loadState(vaultID: Self.vault)?.quarantineDropped.isEmpty == true)
+    }
 }

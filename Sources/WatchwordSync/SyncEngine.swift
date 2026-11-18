@@ -327,7 +327,12 @@ public actor SyncEngine {
         if !state.quarantineDropped.isEmpty {
             let usage = try await syncState.quarantineUsage(vaultID: vaultID)
             quarantineUsage = usage
-            offerAgain = offerAgain || state.quarantineDropped.allSatisfy { hasRoom(usage, for: $0) }
+            // A version the store refused for a crowded digest is offered again only once something has left the
+            // quarantine: the caps alone had room, and a replay at every sync dropped it again (review finding Z147).
+            offerAgain =
+                offerAgain
+                || (state.quarantineDropped.allSatisfy { hasRoom(usage, for: $0) }
+                    && state.quarantineCrowded.map { UInt64(usage.entries) < $0 } ?? true)
         }
         if offerAgain {
             if judge == nil { reconcile = true } else { report.replayNeeded = true }
@@ -1351,7 +1356,10 @@ public actor SyncEngine {
             // its whole log at every change of head, remembering it would replay at every sync while the crowding
             // stands, for nothing a replay can bring back.
             report.quarantineFull += 1
-            if configuration.maintainsLog { state.quarantineDropped.insert(entry.device) }
+            if configuration.maintainsLog {
+                state.quarantineDropped.insert(entry.device)
+                state.quarantineCrowded = max(state.quarantineCrowded ?? 0, UInt64(usage.entries))
+            }
         }
     }
 
