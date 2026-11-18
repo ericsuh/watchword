@@ -1021,7 +1021,9 @@ other does, and reported as not required on Linux, where they cannot compile.
   two devices in either order converge; an offline device returning is asked and merges; a deletion made before the
   reset is not undone; a shared vault is refused by name and does not keep the question open. *Screens* ("Screen
   models: after the sync storage was reset"): the notice and headline, the question's wording (counts, deleted and
-  shared vaults), Not Now, Upload Again, a stale question renewed, a lock dropping the question, the refusals.
+  shared vaults), Not Now, Upload Again, a stale question renewed, a lock dropping the question, the refusals, and a
+  success notice that asks only after the vaults the upload was for, so a shared vault waiting for its key does not
+  hold it back (SR28, `successAsksOnlyTheUploadedVaults`).
   *Automatic syncing* ("Automatic sync outcome"): at a reset store, of either kind, every sync the policy starts is
   a failure it backs off from, and no number of them uploads anything or starts the store again.
   *Adversarial*: "sync log" (`AdversarialSyncStoreResetTests`: an emptied store with a replay planted in the state

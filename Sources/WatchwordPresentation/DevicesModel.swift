@@ -197,10 +197,7 @@ public final class DevicesModel: LockSensitive {
                 let report = try await context.session.reuploadAfterStoreReset(confirming: question.plan)
                 try await reload()
                 sync = SyncSummary(report, deviceNames: names)
-                // Only an upload that ran: a vault left locked or waiting for a new password uploaded nothing, and the
-                // question is not pending for it only because no engine could look (review finding SR21).
-                let ran = !report.vaults.values.contains { $0.deferredUntilUnlock || $0.awaitingNewPassword }
-                if !report.storeNeedsReupload, report.transportFailure == nil, ran {
+                if Self.uploadFinished(report, uploading: question.plan) {
                     notice = "This device uploaded what it holds. Your other devices will pick it up when they sync."
                     done = true
                 }
@@ -210,6 +207,21 @@ public final class DevicesModel: LockSensitive {
             }
         }
         return done
+    }
+
+    /// Whether `report`, the sync of an upload of `plan`, uploaded everything the plan named: nothing is still asked
+    /// for, the transport did not stop, and every vault the plan uploads ran. A vault left locked or waiting for a new
+    /// password uploaded nothing, and the question is not pending for it only because no engine could look (review
+    /// finding SR21). Only the plan's vaults, the account's own unshared ones (those the session marks before it
+    /// starts the store again), are asked: a shared vault waiting for a key it has not been granted yet is reported as
+    /// waiting for an unlock too, is never uploaded from one member's device, and must not keep a complete upload from
+    /// being told as one (review finding SR28).
+    public static func uploadFinished(_ report: AccountSyncReport, uploading plan: ReuploadPlan) -> Bool {
+        let uploaded = Set(plan.vaults.map(\.id))
+        let ran = !report.vaults.contains { vaultID, vault in
+            uploaded.contains(vaultID) && (vault.deferredUntilUnlock || vault.awaitingNewPassword)
+        }
+        return !report.storeNeedsReupload && report.transportFailure == nil && ran
     }
 
     /// Removes a device. Both choices take the current password; the session refuses this device and unknown ones.

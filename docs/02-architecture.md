@@ -1205,7 +1205,10 @@ documentation and is unverified, as are saving a zone again after `userDeletedZo
 after a key reset while its records answer the reset, SR26). `CoordinatedFileSyncTransport`
 needs nothing: its folder is created by the first write, and an emptied folder is the second signal. The Devices
 screen shows the notice, an "Upload Again…" button and the question as an alert (`DevicesModel.askToUploadAgain`,
-`confirmUpload`, `declineUpload`; the SwiftUI in `Apps/Shared/DevicesView.swift` is drafted, unbuilt).
+`confirmUpload`, `declineUpload`; the SwiftUI in `Apps/Shared/DevicesView.swift` is drafted, unbuilt). It says the
+upload is done only when every vault the plan named ran and nothing is still asked for
+(`DevicesModel.uploadFinished`); a vault outside the plan, a shared one waiting for its key say, does not hold it back
+(SR28).
 
 ## 8. Sharing protocol
 

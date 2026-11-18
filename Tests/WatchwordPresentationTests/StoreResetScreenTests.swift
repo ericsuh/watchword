@@ -137,6 +137,39 @@ struct StoreResetScreenTests {
         #expect(Set(try await devices.second.session.items().items.map(\.title)) == ["Bank", "Post", "Payroll"])
     }
 
+    /// Review finding SR28: any vault left waiting for an unlock kept the success notice away, and a shared vault
+    /// whose current key has not arrived is reported that way at every sync, so a complete upload was never told as
+    /// one. Only the vaults the upload was for are asked; an unfinished one of those still holds the notice back.
+    @Test("the success notice asks only after the vaults the upload was for, never a shared one waiting for its key")
+    func successAsksOnlyTheUploadedVaults() {
+        let own = ReuploadPlan.Vault(id: UUID(), name: "Personal", isPersonal: true, isDeleted: false, itemCount: 2)
+        let shared = ReuploadPlan.Vault(id: UUID(), name: "Family", isPersonal: false, isDeleted: false, itemCount: 1)
+        let plan = ReuploadPlan(deviceID: UUID(), vaults: [own], sharedVaults: [shared])
+        var report = AccountSyncReport()
+        var uploaded = SyncReport()
+        uploaded.snapshotsWritten = 1
+        var waiting = SyncReport()
+        waiting.deferredUntilUnlock = true
+        report.vaults = [own.id: uploaded, shared.id: waiting]
+        #expect(DevicesModel.uploadFinished(report, uploading: plan), "the shared vault was not part of the upload")
+        report.vaults[UUID()] = waiting
+        #expect(DevicesModel.uploadFinished(report, uploading: plan), "nor is any vault the plan does not name")
+        report.vaults[own.id] = waiting
+        #expect(!DevicesModel.uploadFinished(report, uploading: plan), "an uploaded vault that did not run")
+        var awaiting = SyncReport()
+        awaiting.awaitingNewPassword = true
+        report.vaults[own.id] = awaiting
+        #expect(!DevicesModel.uploadFinished(report, uploading: plan))
+        report.vaults[own.id] = uploaded
+        report.transportFailure = .unavailable
+        #expect(!DevicesModel.uploadFinished(report, uploading: plan), "a transport that stopped")
+        report.transportFailure = nil
+        var asking = SyncReport()
+        asking.storeLacksObjects = true
+        report.vaults[own.id] = asking
+        #expect(!DevicesModel.uploadFinished(report, uploading: plan), "a vault still asked about")
+    }
+
     @Test("a yes to a question that no longer describes the device uploads nothing and shows the question anew")
     func staleQuestion() async throws {
         let devices = try await Self.devices()
