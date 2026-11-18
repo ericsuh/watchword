@@ -529,6 +529,21 @@ this and the collected floor are signed only when set (`SyncStateAuthenticationT
 known only by a planted tombstone still holds its original's deletion back (`plantedTombstoneForAMovesCopy`, Z148).
 Collection: a name planted below what a device collected does not stop it collecting
 (`plantedNameBelowTheCollectedRun`, Z149).
+The review of the fourth round (`06-adversarial-review.md` Z150 to Z156; `AdversarialSharedVaultEngineRound4Tests.swift`
+in "shared vaults through the session", the end of `AdversarialSyncEngineReviewTests.swift` in "sync log", and the
+stream index suite `SharedStreamIndexTests`). A read-only and a removed member each revoke a device ID of another
+member's, one that has published and one that has not: neither stops being read, nor its own device syncing
+(`memberRevokesAnotherMembersDevice`, Z150). An owner's stream whose first segment is withheld from a joiner is not
+taken for one collected before sharing, and judging again when it arrives agrees with every other device
+(`ownerStreamMissingItsFirstSegment`), while a stream a snapshot covers still is (`collectedOwnerStream`, Z151). A
+read-only member's plant at segment 1 of a writer's stream does not take it when the member is promoted, the key is
+rotated, and the promoted member's later work counts (`promotionAfterAPlant`; whose segment names a stream, in any
+arrival order, `namingSegmentsComeFirst`, Z152). A revocation learnt after a version was held aside for that device
+admits it, and the vault settles (`revocationLearntAfterTheHold`, Z153). A segment's acknowledgement does not hold back
+a device of a vault that keeps its whole log (`acknowledgementInAWholeLog`, Z154). A read-only member's flood of
+segments into its own device's stream is not recorded, and a plant the victim steps over is recorded once the victim
+publishes above it (`readOnlyFloodIsNotRecorded`, Z155). The deletion gate of Z148 opens once the copy is published
+(`plantedTombstoneForAMovesCopy`, Z156).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

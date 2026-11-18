@@ -301,7 +301,12 @@ half delivered** on a Mac; the transports are open.
   revoked device's own versions carried, which a device joining after the revocation never receives (there is no
   snapshot to carry it, Z144); keeping the report of another account's segment in a device's own stream beyond the
   sync that met it (Z146); and the owner's choice for a crowded digest, between withholding snapshots until the person
-  discards entries (built) and counting the drop without remembering it (Z147).
+  discards entries (built) and counting the drop without remembering it (Z147). From the review of the fourth round
+  (Z150 to Z156): telling a planted listing of another account's revoked device from a genuine one, which keeps that
+  revocation from counting on a device that never read the revoked stream (Z150); a replay when a registry changes
+  which accounts list a device, without a revocation (Z153); and the promoted member's window, between a promotion and
+  that member's first segment under the rotated key, in which a writer's plant can still take their stream (Z152). The
+  rotation after each promotion is an owner decision (Z152).
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
   screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
   `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,

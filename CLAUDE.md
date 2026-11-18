@@ -490,7 +490,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   where the state could be behind the stream: no own object listed (`Listing.ownAnchored`, Z31), and an own-stream
   object at or past the next number that cannot be told from this device's own, or, for a device whose signed state
   says it published there, a trusted snapshot's coverage or segment's acknowledgement of its stream reaching the next
-  number (Z32, Z139, Z145). A name shown not to be this device's own is evidence of nothing, and a device that never
+  number (Z32, Z139, Z145), the latter only where the vault's log is collected (`maintainsLog`; a shared vault collects
+  nothing, so there it guarded nothing and could hold a device for good, Z154). A name shown not to be this device's own is evidence of nothing, and a device that never
   published is held by no claim: either brought back a hold nothing could end.
   `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
   every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that starts
@@ -753,7 +754,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   key from the chain (`sharedVerify`), whatever that account's standing, for segments; `writeStanding` decides, never
   the envelope's signer alone. A segment of an account whose work cannot count at all is passed over in sequence and
   nothing of it kept (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever
-  step over it. It is recorded by digest and signer alone, asks for no replay, and names no stream (Z146); stepping
+  step over it. It is recorded by digest and signer alone, asks for no replay, and names no stream (Z146), and only
+  below a segment of another account's in the same stream, where a cut's chain can run over it; elsewhere it is noted
+  as skipped and a counting segment above it replays, which records it (`skippedPassedOver`, Z155): never record such
+  a segment unconditionally, which let a never-writing member grow every index without bound; stepping
   over another account's segment in this device's own stream is reported (`ownStreamSteppedOver`).
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
   (`ItemMerge.attributedValues`, note-line removals, discards and history entries included, S32 and S43; a vault's
@@ -765,13 +769,20 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z136; a stream with
   no first segment here is waited for, never taken for one that cannot be read; a stream that will never grow here, a
   revoked device's or an owner's device's whose first segments were collected before sharing, is never waited for, and
-  what names it is believed for an account that may write, Z144). A tombstone's erasure summary is judged the same
+  what names it is believed for an account that may write, Z144). A revocation counts only from the account the device
+  is (`revokedDevices`, the same set the engine stops reading, Z150): its stream is that account's, or for a stream
+  nothing was recorded of every registry listing it revoked it, and this device only by its own registry; never union
+  the registries' revocations. "Collected" only where an owner's snapshot merged here covers the gap
+  (`SharedStreamIndex.collected`, `WriteJudge.recordSnapshot`) and for no version above what the stream carried
+  (Z151). What a replay settles is the judged basis (`judgedBasis`: the head, and the counted revocations of the devices
+  a judgement waited for or asked about, `awaiting` and `relied`), and a change of it takes out and replays like a
+  change of head (Z153); a judgement made under the settled basis moves it with itself. A tombstone's erasure summary is judged the same
   way before it is applied or remembered (`WriteJudge.admitsErasure`, S45): a deletion built on a late write is held
   aside and the item stays. A value naming this device that it never published
   counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
-  (`requestReplay`, S41) and counted: a replaying pass settles the judged head only if no replay was asked for while
+  (`requestReplay`, S41) and counted: a replaying pass settles the judged basis only if no replay was asked for while
   it ran (`sharedEngineDidRun(requestsBefore:)`, Z120). Do not judge by who sealed a version, and do not keep what was
   merged "for good" (S28).
 - `shareVault` can always be finished (Z50): the marker is written first, and a vault whose only mark is this
@@ -810,7 +821,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   held aside in sequence and never numbers the stream, Z30), and any other
   belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`), passing
   over the segments of an account whose work cannot count under the current head (`passedOver`, set from the ledger
-  by `refreshPassedOver` before every judgement and never saved, Z146). Another
+  by `refreshPassedOver` before every judgement and never saved, Z146), and of the rest the lowest whose signer first
+  appeared in the accepted chain, while the key it was sealed under was current, in a role that could write
+  (`naming`, a function of the chain, never of the head: Z152), else the lowest other. A promotion therefore moves no
+  stream, and an administrator's device rotates the key after one (`promotedWithinKeyEra`) so that the promoted
+  member's later segments name their streams. Another
   account's segment in it is recorded for the cut's chain, filed nowhere, and held aside. Every device records
   every signed segment, opened or not (`WriteJudge.recordUnopened`, Z51), so the lowest segment and a cut's chain are
   the same everywhere; a change of a stream's account asks for a replay. Never attribute through a

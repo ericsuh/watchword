@@ -424,22 +424,37 @@ discard by its resolution's revision, each history entry once per write that rec
 stamp included, against the segment that carried them (S36); and (3) every edit its clock says it contains, of any
 device but its own writer's, was published in a segment of that device's stream that counts: one carried a version of
 the record at or above the clock's count (S44 for a device whose account's work does not all count, S46 for a current
-member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head, the stream index
-and the devices revoked in the registries the chain anchors, which every device holding the same segments and
-registries computes alike; it does not depend on when or where the version was merged. The index's attribution is
-itself a function of the head: a segment of an account whose work cannot count under it names no stream (Z146), and a
-change of head refiles the index before anything is judged, as every device does. Where (3) cannot be decided yet (the
+member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership chain (its head, and the
+roles and keys along it), the stream index (the segments held, each with its signer and sealing key, and the coverage
+of the owner's snapshots merged), and the registries the chain anchors: which accounts list a device, and which
+revocations count (a registry's only for a device that is its account's, Z150). Every device holding the same segments,
+snapshots and registries computes it alike; it does not depend on when or where the version was merged, nor on the
+order the segments arrived in. The index's attribution is itself a function of the chain: a segment of an account whose
+work cannot count under the head names no stream (Z146), and a segment names one ahead of any other only if its signer
+first appeared, while the key it was sealed under was current, in a role that could write (Z152), so a promotion moves
+no stream; a change of head refiles the index before anything is judged, as every device does.
+
+Each input that can change without a change of head asks for the judgement again, so that a device that learnt it late
+ends where one that knew it first began: a lower segment that changes a stream's account or lowers its first number
+(Z51, Z151), a new segment of a device a version waited for (`awaiting`), a snapshot whose coverage grows for one
+(Z151), a segment of a stream's own above a skipped passed-over one (Z155), and a counted revocation of a device a
+judgement waited for or asked about starting or stopping to count (Z153): the replay settles the *judged basis*, the
+head together with those revocations, and a change of it takes out and replays as a change of head does. Registries
+otherwise change `J` without a replay (which accounts list a device): only a later change of basis brings two such
+devices together, which is recorded in Z153. Where (3) cannot be decided yet (the
 claimed device's stream is not here that far) the version waits, held aside until that stream grows; a claim about the
 judging device's own edits beyond what it published is false at once, asked before anything else (Z136). A current
 member's device whose first segment this device holds and cannot open (sealed under keys this account was never given,
 S42) is not checked, and its edits are believed as before; one with no segment here has not published yet (a shared
 vault keeps its whole log, Z42), and a claim about it waits (Z136). A stream that will never grow here is never waited
 for (Z144): a revoked device's, which no device reads after it learns of the revocation, and a device of the owner's
-account whose first segments were collected before the vault was shared. Claims about them and values naming them are
+account whose first segments were collected before the vault was shared, which only an owner's snapshot merged here that
+covers them shows (Z151; otherwise they have not arrived), and only for versions no higher than that stream carried. Claims about them and values naming them are
 believed for an account that may write, so a device that recorded none of such a stream (enrolled, joined or rebuilt
 since) judges as one that recorded it all does: waiting, it held aside for good what every other device kept, which is
 divergence, not only loss. Until a device learns of a revocation it reads the stream and waits for it like any other,
-so the two judgements meet once the registry has reached every device.
+so the two judgements meet once the registry has reached every device: learning it changes the judged basis, which
+replays (Z153).
 
 **Completeness: every effect of a write leaves a trace that names it.** Take a write `w` and any version `v` made, by
 any sequence of merges and updates, from a state that contains `w`'s result.

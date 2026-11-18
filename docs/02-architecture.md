@@ -484,7 +484,9 @@ can create a file can list one. Without an own object listed, a device that has 
 state says so) also holds back while a device still trusted says, by a snapshot's coverage or a segment's
 acknowledgement, that it merged this stream further than the state's next number: a current state's head is listed
 unless the store withholds it and nobody can have merged beyond it, so this is what an older state whose head is
-missing from the listing sees (Z32, Z145). It is read from the state as it is now, so the head listed again, or the
+missing from the listing sees (Z32, Z145). Only where the vault's log is collected (`maintainsLog`): a shared vault's is
+not, so no number there was freed and creating at a used one is refused; there the clause guarded nothing, and a
+member's acknowledgement with the device's head deleted held it for good (Z154). It is read from the state as it is now, so the head listed again, or the
 claimant revoked, ends it; it never moves the numbering. A device that never published is held by nothing but an
 undecided name: a claim about a device that never wrote, which an honest device that merged it carries on in snapshots
 of its own, held it for good (Z139), and so did one junk name where the claim pointed (Z145). The price: a state lost
@@ -1964,7 +1966,18 @@ for the stream's first, and an insider who wrote one there had the stream on tha
 an account whose work cannot count under the current head (`nothingCounts`: a member never let write) is recorded by
 digest and signer alone and names no stream's account (`SharedStreamIndex.passedOver`, set from the ledger before each
 judgement and refiled when it changes, Z146): otherwise such a member, with a device listed under a writer's device ID,
-took the writer's stream everywhere by signing its segment 1 first, and every device held aside all the writer wrote. The same
+took the writer's stream everywhere by signing its segment 1 first, and every device held aside all the writer wrote.
+Such a segment is recorded at all only below a segment of another account's in the same stream, where a cut's chain can
+run over it; elsewhere the stream's lowest skipped number is noted (`skippedPassedOver`), and a counting segment
+recorded above it replays the log, which records it (Z155): otherwise such a member grew every device's signed index
+without bound. Which segment names a stream is a function of the chain, not the head (Z152): each segment records the
+key it was sealed under (its envelope header needs no key), and one names the stream ahead of any other only if its
+signer first appeared in the accepted chain, while that key was current, in a role that could write
+(`SharedStreamIndex.naming`); a stream with no such segment is named by its lowest other one. Passed over only while
+the head said so, a read-only member's plant at segment 1 took the writer's stream the day the member was promoted. A
+member promoted while a key is current signs under it with segments that name nothing ahead of another's, so an
+administrator's device rotates the key after a promotion (`promotedWithinKeyEra`, as for exposed key holders), after
+which they do. The same
 recording keeps a cut's chain whole across segments the cutting device could not open (Z52). And when an
 earlier segment arrives after a later one and shows the stream to be another account's, the index files it again and
 the log is replayed, so nothing judged under the wrong account stays merged. A cut covers the streams that are the
@@ -2001,7 +2014,17 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   segment is not checked. Nor is a stream that will never carry the edits here (Z144): a revoked device's, which is
   never read again (and a shared vault writes no snapshot to hand its work on), and a device of the owner's account
   whose first segments were collected before the vault was shared; for an account that may write, a claim about either
-  is believed and never waited for, as such a device's own versions already were. Waiting, every version whose clock
+  is believed and never waited for, as such a device's own versions already were. A revocation counts only from the
+  account the device is (Z150): its stream is that account's, or, for a stream nothing was recorded of, every registry
+  listing the device has revoked it; and this device is revoked by its own registry alone. Unioned, any member's
+  revocation of another member's device ID retired it everywhere, the victim's own device included. "Collected" only
+  where an owner's snapshot merged here covers the missing segments (`SharedStreamIndex.collected`, from
+  `WriteJudge.recordSnapshot`), and only for versions no higher than the stream carried (Z151): a compacted vault is
+  never shared (Z42), so a missing first segment had nearly always not arrived, and any writer's claim to have seen the
+  owner's device's future edits was believed. What a replay settles is the *judged basis* (`judgedBasis`): the head,
+  and the counted revocations of devices a judgement since the last replay waited for or asked about (`awaiting`,
+  `relied`); a change of it takes out and replays like a change of head (Z153), so a revocation learnt after a version
+  was held aside for that device does not leave it aside for good. Waiting, every version whose clock
   named a lost phone was held aside for good on any device that built its index after the revocation. A tombstone, from a segment or from a snapshot (Z21), is judged the same way before it is
   applied or remembered, a snapshot's with nobody exempt, since its signer chose the device its entry names, and with
   the pass's segments recorded first (Z34),
