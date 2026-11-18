@@ -723,6 +723,7 @@ extension VaultSession {
             }
         }
         let streamWas = vault.index.account(ofStream: location.author)
+        let firstWas = vault.index.firstSequence(ofStream: location.author)
         vault.index.record(
             device: location.author, sequence: location.number,
             segment: SharedStreamIndex.Segment(
@@ -735,6 +736,11 @@ extension VaultSession {
         // An earlier segment of the stream arrived after a later one, and another account signed it: the stream is
         // that account's, and whatever was judged while it looked like someone else's is judged again (Z51).
         if let streamWas, streamWas != vault.index.account(ofStream: location.author) {
+            requestReplay(location.vaultID)
+        } else if let firstWas, let first = vault.index.firstSequence(ofStream: location.author), first < firstWas {
+            // An earlier segment of the same account's stream arrived after later ones (a lagging listing, a store
+            // that withheld it): a stream whose first segments were missing may have been taken for one collected
+            // before sharing (Z144), and what was believed of it is judged again (review finding Z151).
             requestReplay(location.vaultID)
         }
         // A segment inside a cut that this device was waiting for, or a new segment of a device a version was held
@@ -773,6 +779,21 @@ extension VaultSession {
         return ItemMerge.attributedSettlement(ofErasureSummary: entry.erasure).map {
             SharedStreamIndex.ValueKey(device: $0.revision.device, digest: Self.valueDigest($0.bytes))
         }
+    }
+
+    /// Notes what a snapshot of the vault covers (`SharedStreamIndex.collected`, review finding Z151). Only the owner's
+    /// account's snapshots verify in a shared vault (`sharedVerify`), so these are from before it was shared. Coverage
+    /// that grows for a device a version waits for asks for a replay: what was missing may be accounted for now.
+    func judgeRecordSnapshot(_ location: SyncObjectLocation, covering vector: [UUID: UInt64]) {
+        guard location.kind == .snapshot, var vault = sharing.vaults[location.vaultID] else { return }
+        var grewForAwaited = false
+        for (device, sequence) in vector where sequence > (vault.index.collected[device] ?? 0) {
+            vault.index.collected[device] = sequence
+            if vault.index.awaiting.contains(device) { grewForAwaited = true }
+            vault.indexChanged = true
+        }
+        sharing.vaults[location.vaultID] = vault
+        if grewForAwaited { requestReplay(location.vaultID) }
     }
 
     func judgeAdmitsSegment(_ location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async
@@ -855,6 +876,7 @@ extension VaultSession {
         var awaited: Set<UUID> = []
         var relied: Set<UUID> = []
         var admitted = true
+        let revisions = Dictionary(values.map { ($0.value, $0.revision.version) }, uniquingKeysWith: max)
         // Every value is filed under the device its stamp names (`attributedValues`).
         for value in Set(values.map(\.value)) {
             if let carriers = vault.index.valueCarriers[value] {
@@ -881,7 +903,10 @@ extension VaultSession {
             // A stream that will never carry it here: a revoked device's, which is not read again, or one whose first
             // segments were collected before the vault was shared (review finding Z144). Believed of an account that
             // may write, in a version that otherwise counts, and never waited for.
-            if !accounts.isEmpty, Self.neverCarriesHere(value.device, accounts: accounts, in: vault, retired: retired) {
+            if !accounts.isEmpty,
+                Self.neverCarriesHere(
+                    value.device, accounts: accounts, claimed: revisions[value] ?? .max, in: vault, retired: retired)
+            {
                 if Self.allMayWrite(accounts, in: vault.ledger) { continue }
                 admitted = false
                 continue
@@ -946,7 +971,7 @@ extension VaultSession {
             // good; or the owner's, whose first segments were collected before the vault was shared. Believed of an
             // account that may write, as such a device's own versions are (`counts`): a revoked device publishes
             // nothing any device reads, so a claim about its edits supersedes none yet to come. Never waited for.
-            if neverCarriesHere(device, accounts: accounts, in: vault, retired: retired) {
+            if neverCarriesHere(device, accounts: accounts, claimed: count, in: vault, retired: retired) {
                 if allMayWrite(accounts, in: vault.ledger) { continue }
                 if vouched, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) { continue }
                 return false
@@ -1124,9 +1149,21 @@ extension VaultSession {
     /// are not here, which in a vault that keeps its whole log only collection before the vault was shared explains
     /// (a stream of another account never lost its first segments, and one that shows none at all has not published
     /// yet, Z136).
-    static func neverCarriesHere(_ device: UUID, accounts: [UUID], in vault: SharedVault, retired: Set<UUID>) -> Bool {
+    ///
+    /// "Collected" only where a snapshot merged here covers the missing segments (`SharedStreamIndex.collected`,
+    /// review finding Z151): requireWholeLog (Z42) refuses to share a compacted vault, so a stream whose first segments
+    /// are not here has, nearly always, not shown them here yet, and believing claims about it then let any current
+    /// writer claim to have seen the owner's device's future edits. And only for what that device can have written
+    /// before what its own segments here show (`claimed`, a revision's or clock's version no higher than the highest it
+    /// carried): its later edits are still to come, and a claim beyond them waits for its stream as any other (S46).
+    static func neverCarriesHere(
+        _ device: UUID, accounts: [UUID], claimed: UInt64, in vault: SharedVault, retired: Set<UUID>
+    ) -> Bool {
         if retired.contains(device) { return true }
-        guard let first = vault.index.firstSequence(ofStream: device), first > 1 else { return false }
+        guard let first = vault.index.firstSequence(ofStream: device), first > 1,
+            (vault.index.collected[device] ?? 0) >= first - 1,
+            claimed <= vault.index.highestVersionCarried(by: device)
+        else { return false }
         return accounts.allSatisfy { $0 == vault.ledger.owner.accountID }
     }
 
@@ -1360,6 +1397,10 @@ extension VaultSyncAdapter: WriteJudge {
         segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8], entries: [SyncEntry]
     ) async throws {
         await session.judgeRecord(segment: location, signature: signature, envelope: envelope, entries: entries)
+    }
+
+    func recordSnapshot(_ location: SyncObjectLocation, covering vector: [UUID: UInt64]) async throws {
+        await session.judgeRecordSnapshot(location, covering: vector)
     }
 
     func recordUnopened(segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async throws {

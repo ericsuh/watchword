@@ -53,7 +53,8 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// recorded too, each segment saying whether it was opened (Z51): an earlier index lacks them, and names a
     /// stream's account by the first segment that happened to open. 5 since `ownTakenOut` (Z54) moved to a row of its
     /// own, which a rebuild of the index leaves alone (`OwnTakenOutRow`, Z121). 6 since `relied` (Z153): an earlier
-    /// index does not say which revocations what it admitted rested on, so it is rebuilt by a replay.
+    /// index does not say which revocations what it admitted rested on, so it is rebuilt by a replay; with it
+    /// `collected` (Z151).
     static let formatVersion: UInt8 = 6
     static let maximumLength = 64 << 20
 
@@ -86,6 +87,12 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// no segment here showed (review finding Z153). Together with `awaiting`, what the judged basis binds
     /// (`VaultSession.judgedBasis`): a revocation of one of them that starts or stops counting changes what counts.
     var relied: Set<UUID> = []
+    /// For each stream, the most of it that a snapshot merged here says its author had merged (review finding Z151).
+    /// A shared vault reads only its owner's snapshots, from before it was shared: what they cover of a stream whose
+    /// first segments are not here was collected then, and is in the store through them. A stream whose first
+    /// segments no snapshot covers is merely missing them here (a lagging listing, a store withholding them) and is
+    /// waited for.
+    var collected: [UUID: UInt64] = [:]
 
     init() {}
 
@@ -174,6 +181,11 @@ struct SharedStreamIndex: Sendable, Hashable {
         }
     }
 
+    /// The highest record version any segment of `device`'s stream recorded here carried for the stream's account.
+    func highestVersionCarried(by device: UUID) -> UInt64 {
+        firstCarrier[device]?.keys.map(\.version).max() ?? 0
+    }
+
     /// Whether this device's stream already carried `value` at or before `sequence`.
     func carries(_ value: ValueKey, device: UUID, atOrBefore sequence: UInt64) -> Bool {
         (valueCarriers[value]?[device] ?? .max) <= sequence
@@ -249,6 +261,9 @@ struct SharedStreamIndex: Sendable, Hashable {
             out += SharedBytes.littleEndian32(UInt32(devices.count))
             for device in devices { out += SharedBytes.bytes(device) }
         }
+        let covered = collected.keys.sorted { $0.precedes($1) }
+        out += SharedBytes.littleEndian32(UInt32(covered.count))
+        for device in covered { out += SharedBytes.bytes(device) + SharedBytes.littleEndian(collected[device]!) }
         return out + (try keyset.sign(out, domain: .membership))
     }
 
@@ -318,6 +333,15 @@ struct SharedStreamIndex: Sendable, Hashable {
                 previous = device
                 index[keyPath: keyPath].insert(device)
             }
+        }
+        guard let coveredCount = reader.uint32(), Int(coveredCount) <= reader.remaining / 24 else { return nil }
+        var previousCovered: UUID?
+        for _ in 0..<coveredCount {
+            guard let device = reader.uuid(), previousCovered.map({ $0.precedes(device) }) ?? true,
+                let sequence = reader.uint64(), sequence > 0
+            else { return nil }
+            previousCovered = device
+            index.collected[device] = sequence
         }
         guard reader.remaining == 0 else { return nil }
         return index

@@ -48,6 +48,12 @@ public protocol WriteJudge: Sendable {
     /// Z51). The same segment may be given to `record` later, once it opens.
     func recordUnopened(segment location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async throws
 
+    /// Called with each snapshot of the pass that opened and validated, before any of its entries is judged: its
+    /// coverage vector, the segments of each stream it says it merged. A judge that keeps a whole log reads snapshots
+    /// only from before it began (a shared vault's owner's, for the segments collected then), and needs to know which
+    /// of a stream's missing first segments such a snapshot accounts for (review finding Z151).
+    func recordSnapshot(_ location: SyncObjectLocation, covering vector: [UUID: UInt64]) async throws
+
     /// Whether the entries of this segment count. Asked in stream order, after `record` has seen every segment of
     /// the pass.
     func admitsSegment(_ location: SyncObjectLocation, signature: [UInt8], envelope: [UInt8]) async throws
@@ -81,6 +87,9 @@ extension WriteJudge {
         async throws
     {
     }
+
+    /// A judge that keeps nothing by stream has nothing to note of a snapshot.
+    public func recordSnapshot(_ location: SyncObjectLocation, covering vector: [UUID: UInt64]) async throws {}
 
     /// A judge that has nothing to say about erasures admits every one.
     public func admitsErasure(_ entry: SyncEntry, in location: SyncObjectLocation, sealedUnder keyID: UUID)

@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 import WatchwordCrypto
+import WatchwordSharing
+import WatchwordTestSupport
 
 @testable import WatchwordKit
 
@@ -109,6 +111,8 @@ struct SharedStreamIndexTests {
         index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.victim, opened: false))
         index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: Self.victim))
         index.awaiting = [Self.device]
+        index.relied = [Self.victim, Self.insider]
+        index.collected = [Self.device: 4, Self.victim: 1]
         let saved = try index.signed(account: keyset.accountID, vaultID: vaultID, keyset: keyset)
         let parsed = try #require(SharedStreamIndex.parse(saved, account: bundle, vaultID: vaultID))
         #expect(parsed == index)
@@ -119,6 +123,33 @@ struct SharedStreamIndexTests {
         var earlier = saved
         earlier[4] = 4
         #expect(SharedStreamIndex.parse(earlier, account: bundle, vaultID: vaultID) == nil)
+    }
+
+    /// Review finding Z151: a device of the owner's account whose first segments are not here is taken for one whose
+    /// segments were collected before the vault was shared only where a snapshot merged here covers them, and only for
+    /// what it can have written before what its segments here carried.
+    @Test("an owner's stream is taken for collected only where a snapshot covers the missing segments")
+    func collectedOwnerStream() throws {
+        let keyset = Keyset.generate(accountID: UUID())
+        var generator = SeededGenerator(seed: 151)
+        let vaultID = UUID()
+        let ledger = try MembershipLedger.create(
+            vaultKey: VaultKey.generate(vaultID: vaultID, using: &generator), owner: keyset)
+        var vault = SharedVault(ledger: ledger)
+        vault.index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: keyset.accountID))
+        let owner = [keyset.accountID]
+        func believed(_ claimed: UInt64, accounts: [UUID] = owner, retired: Set<UUID> = []) -> Bool {
+            VaultSession.neverCarriesHere(
+                Self.device, accounts: accounts, claimed: claimed, in: vault, retired: retired)
+        }
+        #expect(!believed(2), "segments 1 and 2 are merely missing here")
+        vault.index.collected[Self.device] = 1
+        #expect(!believed(2), "a snapshot covers segment 1 of the two missing")
+        vault.index.collected[Self.device] = 2
+        #expect(believed(3))
+        #expect(!believed(4), "a claim beyond what the stream carried is about edits still to come")
+        #expect(!believed(3, accounts: owner + [Self.insider]), "another account lists the device")
+        #expect(believed(.max, accounts: [Self.insider], retired: [Self.device]), "a revoked device publishes nothing")
     }
 
     /// What the take-out held aside is a row of its own, which survives the index being refused or rebuilt (review

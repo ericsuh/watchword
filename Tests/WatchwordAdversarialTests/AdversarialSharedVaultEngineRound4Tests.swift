@@ -137,3 +137,64 @@ extension AdversarialSharedVaultTests {
         }
     }
 }
+
+// Review finding Z151: an owner's stream whose first segments were not here yet was taken for one collected before the
+// vault was shared.
+extension AdversarialSharedVaultTests {
+    /// Threat: a member who may write (A4), with the store (A1) withholding the owner's device's first segment from a
+    /// device that joins (or no adversary but a lagging listing). Z144 believed claims about a device of the owner's
+    /// account whose first segments are not here, taking them for segments collected before sharing; but a vault
+    /// whose log was compacted is never shared (Z42), so nearly always they had merely not arrived. The member's
+    /// tombstone claims to have seen the owner's device's edits up to 5000, edits it has not made: on the joiner's
+    /// device it was believed and the item erased, while every other device held it aside; when the first segment
+    /// arrived, nothing judged again. Only a snapshot merged here that covers the missing segments makes a stream
+    /// collected, and an earlier segment arriving later asks for a replay.
+    @Test("an owner's stream missing its first segment is not taken for one collected before sharing")
+    func ownerStreamMissingItsFirstSegment() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3700)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let writer = try await household.account(seed: 3701)
+        try await owner.invite(writer, to: vaultID, as: .readWrite, owner: owner)
+        var bank = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, writer])
+        bank = try await owner.session.save(Self.setting(.password, to: "owner-change", in: bank))
+        try await Self.syncAll([owner, writer])
+        var edited = try await writer.session.item(id: bank.id)
+        edited.title = "Edited by the writer"
+        _ = try await writer.session.save(edited)
+        try await Self.syncAll([writer, owner])
+
+        let ownerDevice = try await Self.deviceID(of: owner)
+        let ownerStream = "vault/\(vaultID.uuidString)/log/\(ownerDevice.uuidString)/"
+        let first = try #require(await household.transport.list(prefix: ownerStream).sorted().first)
+        let (joiner, view) = try await household.withheldAccount(seed: 3702)
+        await view.withhold([first])
+        try await owner.invite(joiner, to: vaultID, as: .readWrite, owner: owner)
+
+        let writerDevice = try await Self.deviceID(of: writer)
+        let high: UInt64 = 5000
+        let summary = try ItemErasure(
+            seen: VersionVector([ownerDevice: high, writerDevice: high]), row: high, device: writerDevice, date: nil
+        ).summary()
+        let tombstone = SyncEntry.tombstone(
+            RecordKey(recordID: bank.id, kind: .item),
+            stamp: RecordStamp(version: high + 1, device: writerDevice, deleted: true), erasure: summary)
+        try await Self.plantSegment(by: writer, in: vaultID, on: household.transport, entries: [tombstone])
+
+        try await Self.syncAll([joiner])
+        #expect(
+            (try? await joiner.session.item(id: bank.id))?.title == "Edited by the writer",
+            "a claim about the owner's edits that do not exist erased the item")
+        // The first segment arrives: judged again, and the same as on every other device.
+        await view.reveal()
+        try await Self.syncAll([joiner, owner])
+        for (name, account) in [("joiner", joiner), ("owner", owner)] {
+            #expect(
+                (try? await account.session.item(id: bank.id))?.title == "Edited by the writer",
+                "the item is gone on the \(name)'s device")
+        }
+        #expect(await joiner.session.judgementIsSettled(vaultID))
+    }
+}

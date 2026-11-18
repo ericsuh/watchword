@@ -751,6 +751,7 @@ public actor SyncEngine {
             do {
                 let payload = try await open(snapshot)
                 try validate(payload, at: snapshot.location)
+                try await judge?.recordSnapshot(snapshot.location, covering: payload.vector)
                 // A snapshot that covers nothing new is counted, and merged all the same: merging is idempotent, and
                 // a snapshot can hold what no segment this device accepts does — what its author merged from a
                 // device revoked since (§7.8).
