@@ -427,9 +427,11 @@ the record at or above the clock's count (S44 for a device whose account's work 
 member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head and the stream index,
 which every device holding the same segments computes alike; it does not depend on when or where the version was
 merged. Where (3) cannot be decided yet (the claimed device's stream is not here that far) the version waits, held
-aside until that stream grows; a claim about the judging device's own edits beyond what it published is false at once.
-A current member's device whose stream this device cannot read from its first segment (collected before the vault was
-shared, or sealed under keys this account was never given, S42) is not checked, and its edits are believed as before.
+aside until that stream grows; a claim about the judging device's own edits beyond what it published is false at once,
+asked before anything else (Z127). A current member's device whose first segment this device holds and cannot open
+(sealed under keys this account was never given, S42) is not checked, and its edits are believed as before; one whose
+first segment is not here has not published it yet (a shared vault keeps its whole log, Z42), and a claim about it
+waits (Z127).
 
 **Completeness: every effect of a write leaves a trace that names it.** Take a write `w` and any version `v` made, by
 any sequence of merges and updates, from a state that contains `w`'s result.

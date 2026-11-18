@@ -474,8 +474,9 @@ create a file under the vault's prefix can list one (Z24). What cannot be told (
 to check with) holds publishing back (`SyncReport.ownStreamUnverified`) only where the device's state could be older
 than its stream and the stream cannot show which numbers it used: when no object of the stream that is known to be
 this device's is listed (one that verified as its own, or the one at the number its signed state last published).
-Segments are collected lowest first and never the newest, so while one of a stream's segments is listed none above it
-was collected; publishing then cannot reuse a number, and an unfetchable name far ahead mutes nothing (Z31). Without
+Segments are collected lowest first, as a contiguous run of listed numbers that stops at the first one the listing
+lacks, and never the device's own genuine head (what it published or verified as its own), whatever names are listed
+above it (Z126), so while one of a stream's segments is listed none above it was collected; publishing then cannot reuse a number, and an unfetchable name far ahead mutes nothing (Z31). Without
 such an object, a trusted device's snapshot that claims more of the stream than the device can account for holds
 publishing back too, read from the snapshots as they are, so it never moves the numbering and ends when the snapshot
 or its signer goes (Z32).
