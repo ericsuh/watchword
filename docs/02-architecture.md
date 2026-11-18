@@ -476,10 +476,10 @@ than its stream and the stream cannot show which numbers it used: when no object
 this device's is listed (one that verified as its own, or the one at the number its signed state last published).
 Segments are collected lowest first, as a contiguous run of listed numbers that stops at the first one the listing
 lacks, and never the device's own genuine head (what it published or verified as its own), whatever names are listed
-above it (Z126), so while one of a stream's segments is listed none above it was collected; publishing then cannot reuse a number, and an unfetchable name far ahead mutes nothing (Z31). Without
+above it (Z135), so while one of a stream's segments is listed none above it was collected; publishing then cannot reuse a number, and an unfetchable name far ahead mutes nothing (Z31). Without
 such an object, a trusted device's snapshot that claims more of the stream than the device can account for holds
 publishing back too, while some object of the stream at or past the next number is listed (a true claim implies one,
-since the head is never collected, Z130), read from the snapshots as they are, so it never moves the numbering and ends
+since the head is never collected, Z139), read from the snapshots as they are, so it never moves the numbering and ends
 when the snapshot or its signer goes, or when nothing of the stream is listed there (Z32).
 
 **Merge** (needs the vault key). Staged objects are verified again (the staging area is in the local file, which
@@ -593,7 +593,7 @@ stops this vault's publishing while it is there, reported at every sync (`ownStr
 sent; passing it needs a skip the author signs and readers honour, which is open. In a shared vault, an object there
 that verifies as another member's is staged and held aside in sequence, so the device steps over it after one sync
 that reports the conflict (Z30), and so is one signed by a member whose writes never count, which the judge passes over
-keeping nothing (Z128); junk, or an object under keys that differ from the pin or by an account the chain does not
+keeping nothing (Z137); junk, or an object under keys that differ from the pin or by an account the chain does not
 list, still squats, reported and worded.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
@@ -1877,7 +1877,7 @@ logs download.
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
 whose permission ended, the key in the record that ended it), and that account must not be one whose chain keys differ
 from this device's pin (`MemberKeyCheck.substituted`). A segment of an account whose standing is `nothingCounts`
-verifies, and the judge passes over it in sequence and keeps nothing of it (`SegmentAdmission.passOver`, Z128): refused
+verifies, and the judge passes over it in sequence and keeps nothing of it (`SegmentAdmission.passOver`, Z137): refused
 here, no device ever staged it, and in another member's device stream it squatted at its number for good.
 A snapshot needs the owner's account: a shared vault writes none, so an honest one is from before the vault was
 shared, when the owner's devices were its only writers, and it is read for one thing, the gap in a stream whose first

@@ -144,7 +144,7 @@ public struct SyncSummary: Hashable, Sendable {
         } else if report.ownStreamUnverified != nil {
             parts.append("this device's own changes are held back until its place in the sync storage is clear")
         } else if report.ownStreamConflict != nil {
-            // Its next place is taken (review finding Z128): a crash after publishing, a restored copy of this device,
+            // Its next place is taken (review finding Z137): a crash after publishing, a restored copy of this device,
             // or an object someone else put there. Nothing is lost, and deletions wait with the rest.
             parts.append(
                 "this device found its place in the sync storage already taken; some of its own changes, and its "

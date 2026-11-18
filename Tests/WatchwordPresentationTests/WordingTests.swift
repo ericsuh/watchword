@@ -30,7 +30,7 @@ struct WordingTests {
         report.ownStreamExhausted = true
         let exhausted = SyncSummary.describe(report)
         #expect(exhausted.contains("cannot go out"))
-        // Its next place in a vault's sync storage is taken (review finding Z128): the person used to read
+        // Its next place in a vault's sync storage is taken (review finding Z137): the person used to read
         // "Up to date." while nothing went out and deletions were held back.
         report = SyncReport()
         report.ownStreamConflict = 9

@@ -11,7 +11,7 @@ public enum SegmentAdmission: Sendable, Hashable {
     case holdAside
     /// Its signer's work cannot count here at all (a member the vault never let write): the stream carries on past it
     /// as past a held-aside one, and nothing it carries is kept, so that such a signer cannot fill the quarantine or
-    /// squat at a number in another device's stream (review finding Z128). The log still holds it, and a replay judges
+    /// squat at a number in another device's stream (review finding Z137). The log still holds it, and a replay judges
     /// it again if the signer's standing changes.
     case passOver
     /// Whether it counts cannot be told yet (the segments that bind a write cut are not all here): the stream waits

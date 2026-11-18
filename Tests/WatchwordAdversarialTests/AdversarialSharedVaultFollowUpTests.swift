@@ -10,7 +10,7 @@ import WatchwordTestSupport
 @testable import WatchwordKit
 
 // The engine's second-round fixes (Z30 to Z39) in shared vaults, as their independent review attacked them
-// (docs/06-adversarial-review.md §Z, rows from Z126).
+// (docs/06-adversarial-review.md §Z, rows from Z135).
 extension AdversarialSharedVaultTests {
     /// Where a planted tombstone comes from: the owner's snapshot (the one account whose snapshots a shared vault
     /// reads), or a segment of another member who may write.
@@ -102,7 +102,7 @@ extension AdversarialSharedVaultTests {
     }
 }
 
-// Review finding Z128: a read-only member's object in another member's stream squatted there for good.
+// Review finding Z137: a read-only member's object in another member's stream squatted there for good.
 extension AdversarialSharedVaultTests {
     /// Threat: a member the vault never let write (read-only from the start, A4), with a device registered under the
     /// victim's device ID (S33), who signs one segment a little past the victim's head in the victim's stream,

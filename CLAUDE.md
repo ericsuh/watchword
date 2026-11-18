@@ -475,7 +475,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (`SyncStateStore.prepared`, Z28): never add a step that needs keys between the commit and the record. The outbox
   compares rows with `SyncState.published`, not `known`, and a version found in the log under this device's name
   counts as published only if it is the row the device holds, and a deletion only if it is this device's own, pending
-  or published at that stamp, never because no row is held (Z29, Z35, Z129).
+  or published at that stamp, never because no row is held (Z29, Z35, Z138).
 - A record can be erased more than once. A device remembers the join of every erasure of a record
   (`RecordMerger.joinErasureSummaries`; for items the union of `ItemErasures`, stamped with the later stamp) and
   judges versions against that, so arrival order decides nothing. A pending
@@ -488,11 +488,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   snapshot's coverage beyond what the stream can have got (Z21). Publishing is held back (`ownStreamUnverified`) only
   where the state could be behind the stream: no own object listed (`Listing.ownAnchored`, Z31), and an own-stream
   object that cannot be told from this device's own, or a trusted snapshot claiming more of the stream while some object
-  of it at or past the next number is listed (Z32, Z130).
+  of it at or past the next number is listed (Z32, Z139).
   `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
   every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that stops
   at the first number the listing lacks, and never this device's own genuine head (what it published or verified as
-  its own), whatever names are listed above it (Z126; the anchor rests on that order).
+  its own), whatever names are listed above it (Z135; the anchor rests on that order).
 - A failure of local storage is a `StorageFailure` (`RecordStoreError`, `SQLiteConnection.Failure`) and stops a sync;
   never let one reject the object being merged (Z39).
 - A record ID that a record of another vault holds on this device costs that entry alone (`SyncReport.collided`,
@@ -745,7 +745,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`), whatever that account's standing, for segments; `writeStanding` decides, never
   the envelope's signer alone. A segment of an account whose work cannot count at all is passed over in sequence and
-  nothing of it kept (`SegmentAdmission.passOver`, Z128): never refuse one at download, where no device would ever
+  nothing of it kept (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever
   step over it.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
   (`ItemMerge.attributedValues`, note-line removals, discards and history entries included, S32 and S43; a vault's
@@ -754,7 +754,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   writer chose (S36). Then its clock (`knowledgeCounts`): every edit it contains, of any device but its own writer's,
   must have been published in a segment of that device's stream that counts, so a version built on a late write is
   held aside with it (S44), and one claiming a current member's edits their stream has not published waits for it
-  (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z127; a stream with
+  (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z136; a stream with
   no first segment here is waited for, never taken for one that cannot be read). A tombstone's erasure summary is judged the same
   way before it is applied or remembered (`WriteJudge.admitsErasure`, S45): a deletion built on a late write is held
   aside and the item stays. A value naming this device that it never published

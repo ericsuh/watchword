@@ -498,7 +498,7 @@ public actor SyncEngine {
     /// it, so a claim beyond this device's own count is what an older state would see. The claim is read from the
     /// snapshots as they are now, so a snapshot collected or a signer revoked ends it; it never moves the numbering.
     /// And it holds only while some object of this device's stream at or past its next number is listed (review
-    /// finding Z130): a device's genuine head is never collected (Z126), so a true claim implies one, and a claim about
+    /// finding Z139): a device's genuine head is never collected (Z135), so a true claim implies one, and a claim about
     /// a stream that lists nothing there (an insider's, about a device that never published in the vault, which an
     /// honest device that merged it carries on in snapshots of its own) would otherwise hold the device for good.
     private func ownStreamHold(state: SyncState, listing: Listing, retired: Set<UUID>) -> UInt64? {
@@ -806,7 +806,7 @@ public actor SyncEngine {
                     case .holdAside, .passOver:
                         // Kept for the person, never merged, never published on; the stream carries on past it and
                         // its acknowledgements count for nothing (docs/02-architecture.md §8.7). Passed over, nothing
-                        // of it is kept either: its signer's work cannot count here (Z128).
+                        // of it is kept either: its signer's work cannot count here (Z137).
                         if admission == .holdAside {
                             for entry in payload.entries {
                                 report.heldAside.append(entry.key)
@@ -1188,7 +1188,7 @@ public actor SyncEngine {
                 return
             }
         }
-        // The ceiling moves only for what merged (review finding Z131): raised before the merge was tried, each entry
+        // The ceiling moves only for what merged (review finding Z140): raised before the merge was tried, each entry
         // that then failed lifted it a step, so a chain of them one ceiling apart carried a version past U5.
         highWater = max(highWater, entry.version)
         state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
@@ -1207,7 +1207,7 @@ public actor SyncEngine {
     /// above its row, whose content the row already contains, changes nothing in the store, and marking its stamp as
     /// published would pass over a row that holds an edit nobody else has, and every later edit below the stamp. A
     /// row that differs is published again, which costs a segment and merges to nothing. A deletion where no row is
-    /// held is no exception (Z129): a record's ID can be predicted (a move's copy), and a planted tombstone for it,
+    /// held is no exception (Z138): a record's ID can be predicted (a move's copy), and a planted tombstone for it,
     /// counted as published, passed over the record's first version when this device wrote it, and a later genuine
     /// deletion of it as already sent. One of this device's own that a replay meets again is not marked, and costs
     /// nothing, there being no row to publish.
@@ -1696,7 +1696,7 @@ public actor SyncEngine {
         // lets a device whose state is older than its stream publish without reusing a number (`Listing.ownAnchored`,
         // review finding Z31). A failed delete stops the loop, so a gap can never open below a listed segment; and so
         // does a number missing from the listing (a provider's listing that left it out, or a store withholding it):
-        // deleting past it would leave it listed with higher numbers gone (review finding Z126). The newest kept is
+        // deleting past it would leave it listed with higher numbers gone (review finding Z135). The newest kept is
         // this device's own genuine head (what it published, or what verified as its own) or the highest listed number
         // below it, never a listed name above it: anyone who can create a file can list one far ahead, and keeping
         // that in place of the head deleted the anchor.

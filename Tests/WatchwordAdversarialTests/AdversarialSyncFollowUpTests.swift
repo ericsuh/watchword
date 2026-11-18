@@ -36,7 +36,7 @@ actor HidingTransport: SyncTransport {
 }
 
 /// The engine's second-round fixes (Z30 to Z39) as their independent review attacked them (docs/06-adversarial-review.md
-/// §Z, rows from Z126), over the fakes.
+/// §Z, rows from Z135), over the fakes.
 extension AdversarialSyncTests {
     /// Device A publishes `segments` segments; device B merges them, merges a snapshot of its own covering A's stream
     /// to its head, and acknowledges it, so that A may collect everything below its head.
@@ -57,7 +57,7 @@ extension AdversarialSyncTests {
         return reader
     }
 
-    // MARK: - Collection keeps this device's own head (Z126)
+    // MARK: - Collection keeps this device's own head (Z135)
 
     /// Threat: anyone who can create a file under the vault's prefix (A1, or a read-only or former member of a shared
     /// folder), holding no key. One name in the victim's own stream far past its head, which cannot be fetched (a
@@ -115,7 +115,7 @@ extension AdversarialSyncTests {
             "a segment above one still listed was collected")
     }
 
-    // MARK: - What this device published (Z129)
+    // MARK: - What this device published (Z138)
 
     /// Threat: whoever can put a validly signed object in a device's own stream (a device of the account in any vault;
     /// in a shared vault, Z46 holds another account's aside), before that device has a row of the record. Record IDs
@@ -151,7 +151,7 @@ extension AdversarialSyncTests {
         #expect(try await reader.items()[id] != nil, "the record never reached another device")
     }
 
-    // MARK: - A snapshot's claim about this device's stream (Z130)
+    // MARK: - A snapshot's claim about this device's stream (Z139)
 
     /// Threat: an insider device of the account (C), alone. C snapshots the vault claiming that device A's stream has
     /// got to 5, though A has never published in the vault. Z32 holds a device without an anchor back while a trusted
@@ -159,7 +159,7 @@ extension AdversarialSyncTests {
     /// segments were collected; here it held A back for good, since A had no anchor to get and an honest device that
     /// merged C's snapshot carries the claim on in snapshots of its own, which revoking C does not end. Its deletions
     /// in every vault were held back with it. A genuine claim implies a listed object of A's at or past the claimed
-    /// number, since a device's head is never collected (Z126): with none listed, the claim holds nothing back.
+    /// number, since a device's head is never collected (Z135): with none listed, the claim holds nothing back.
     @Test("a snapshot's claim about a stream that lists nothing does not hold that device back")
     func claimAboutAStreamWithNothingListed() async throws {
         let f = try await Self.fixture()
@@ -189,7 +189,7 @@ extension AdversarialSyncTests {
         #expect(try await later.items()[mine.id] != nil, "the device's work never arrived")
     }
 
-    // MARK: - The version-jump ceiling in the retry (Z131)
+    // MARK: - The version-jump ceiling in the retry (Z140)
 
     /// Threat: an insider device of the account (any trusted device in a vault with no judge). Its segment carries
     /// versions one ceiling apart, each over a row the reader holds and each with an envelope that does not open, and

@@ -598,7 +598,7 @@ extension VaultSession {
 
     /// `syncVerify` for a shared vault: the object must carry the dual signature of a device registered to an
     /// account the chain lists, under that account's key in the chain. A segment of an account whose writes cannot
-    /// count (`nothingCounts`) verifies too, and the judge passes over it in sequence (Z128). A snapshot needs the
+    /// count (`nothingCounts`) verifies too, and the judge passes over it in sequence (Z137). A snapshot needs the
     /// owner's account: no device writes one in
     /// a shared vault (`maintainsLog` is off), so the only honest ones are from before the vault was shared, when its
     /// owner's devices were its only writers, and a member's would have its coverage believed unjudged (review
@@ -631,7 +631,7 @@ extension VaultSession {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
         // A segment of an account whose work cannot count here at all is taken in too, and the judge passes over it in
-        // sequence (review finding Z128): refused here, it was never staged anywhere, so every device waited at it,
+        // sequence (review finding Z137): refused here, it was never staged anywhere, so every device waited at it,
         // and in another device's stream it squatted at that number for good.
         switch vault.ledger.writeStanding(of: signer) {
         case .mayWrite:
@@ -770,7 +770,7 @@ extension VaultSession {
         // owner's account's, and the vault is judged as that account's other vaults are, which is not at all (Z56).
         if Self.isOwnersAloneHere(current.ledger, account: account.accountID) { return .apply }
         // An account whose work cannot count here at all (a member never let write) has its segments passed over in
-        // sequence, in its own stream or anyone's, and nothing of them kept (review finding Z128): refused at download
+        // sequence, in its own stream or anyone's, and nothing of them kept (review finding Z137): refused at download
         // as before, such a segment squatted at its number in another device's stream for good.
         if case .nothingCounts = current.ledger.writeStanding(of: signer) { return .passOver }
         guard Self.streamAdmits(signer, at: location, in: current, account: account) else { return .holdAside }
@@ -884,9 +884,9 @@ extension VaultSession {
     /// yet is a claim about edits that do not exist, and it would supersede them when they are made, concurrent as
     /// they are. Until that device's stream carries them the version waits (`awaited`); a claim about this device's
     /// own edits beyond what it published is refused at once, before anything else, since it knows what it wrote
-    /// (Z127). A device whose first segment is here and sealed under keys this account was never given cannot be
+    /// (Z136). A device whose first segment is here and sealed under keys this account was never given cannot be
     /// checked, and a current member's edits there are believed as before; one whose first segment is not here has not
-    /// published it yet (a shared vault keeps its whole log), and the claim waits for it (Z127). A version that vouches
+    /// published it yet (a shared vault keeps its whole log), and the claim waits for it (Z136). A version that vouches
     /// (S42) vouches for others' edits as for its values. A device no account lists names nobody's work and is passed
     /// over.
     ///
@@ -905,12 +905,12 @@ extension VaultSession {
             if carriers.contains(where: { Self.segmentCounts(device, sequence: $0.value, in: vault) }) { continue }
             // A claim about this device's own edits beyond what it published is refused, whatever else is known: it
             // knows what it wrote, and no version vouches for that, nor does a stream it has not published in yet
-            // (review finding Z127).
+            // (review finding Z136).
             if device == me { return false }
             if accounts.allSatisfy({ vault.ledger.writeStanding(of: $0) == .mayWrite }) {
                 // "Cannot read from its first segment": here and sealed under a key not held. A stream with no first
                 // segment here has not published it yet (a shared vault keeps its whole log, Z42), and a claim about
-                // it waits for it (Z127): taken for unreadable, a claim about a member who had never published was
+                // it waits for it (Z136): taken for unreadable, a claim about a member who had never published was
                 // believed everywhere.
                 if vouched || vault.index.segment(device: device, sequence: 1)?.opened == false { continue }
                 awaited.insert(device)
