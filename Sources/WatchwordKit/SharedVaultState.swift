@@ -51,8 +51,9 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// S43): an index of an earlier format filed none of them, so it is refused on load and rebuilt from the log by a
     /// replay, which files them, before anything is judged against it. 4 since segments that do not open here are
     /// recorded too, each segment saying whether it was opened (Z51): an earlier index lacks them, and names a
-    /// stream's account by the first segment that happened to open. Format 4 also carries `ownTakenOut` (Z54).
-    static let formatVersion: UInt8 = 4
+    /// stream's account by the first segment that happened to open. 5 since `ownTakenOut` (Z54) moved to a row of its
+    /// own, which a rebuild of the index leaves alone (`OwnTakenOutRow`, Z121).
+    static let formatVersion: UInt8 = 5
     static let maximumLength = 64 << 20
 
     /// By device, then sequence number.
@@ -72,13 +73,6 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// Devices a version was held aside for because a value naming them was carried by none of their segments here:
     /// a new segment of theirs can make it count, so recording one asks for a replay (`judgedHead` cleared).
     var awaiting: Set<UUID> = []
-    /// Versions this device itself wrote and had not published that its own take-out removed from the vault and held
-    /// aside (a write made before it was shown the record that ended its account's permission). The copy half of a
-    /// move may be among them, and its other half, a deletion in another vault, waits for it
-    /// (`VaultSession.holdsUnpublishedWork`). Kept here, under the index's signature, because an entry in the
-    /// quarantine says only whose device its writer *claims*: anyone who can have this device hold an entry aside
-    /// could otherwise hold its deletions back in every vault (review finding Z54).
-    var ownTakenOut: Set<VersionKey> = []
 
     init() {}
 
@@ -222,9 +216,6 @@ struct SharedStreamIndex: Sendable, Hashable {
         let waiting = awaiting.sorted { $0.precedes($1) }
         out += SharedBytes.littleEndian32(UInt32(waiting.count))
         for device in waiting { out += SharedBytes.bytes(device) }
-        let takenOut = ownTakenOut.map(Self.versionBytes).sorted { $0.lexicographicallyPrecedes($1) }
-        out += SharedBytes.littleEndian32(UInt32(takenOut.count))
-        for version in takenOut { out += version }
         return out + (try keyset.sign(out, domain: .membership))
     }
 
@@ -293,24 +284,8 @@ struct SharedStreamIndex: Sendable, Hashable {
             previousWaiting = device
             index.awaiting.insert(device)
         }
-        guard let takenOutCount = reader.uint32(), Int(takenOutCount) <= reader.remaining / 25 else { return nil }
-        var previousTakenOut: [UInt8]?
-        for _ in 0..<takenOutCount {
-            guard let record = reader.uuid(), let kind = reader.read(1), let version = reader.uint64() else {
-                return nil
-            }
-            let key = VersionKey(recordID: record, kind: kind[0], version: version)
-            let encoded = versionBytes(key)
-            guard previousTakenOut.map({ $0.lexicographicallyPrecedes(encoded) }) ?? true else { return nil }
-            previousTakenOut = encoded
-            index.ownTakenOut.insert(key)
-        }
         guard reader.remaining == 0 else { return nil }
         return index
-    }
-
-    private static func versionBytes(_ version: VersionKey) -> [UInt8] {
-        SharedBytes.bytes(version.recordID) + [version.kind] + SharedBytes.littleEndian(version.version)
     }
 }
 
@@ -441,26 +416,49 @@ enum SharedKeyProvenance {
     }
 }
 
-/// `SharedStreamIndex.ownTakenOut` in a row of its own (review finding Z121): the take-out removed those versions
-/// from the store, so a rebuild of the index from the log cannot find them again, and the deletion gate
-/// (`holdsUnpublishedWork`) must not open because the index was refused, outgrew its bound, or was rebuilt.
+/// The versions this device itself wrote and had not published that its own take-out removed from a shared vault
+/// and held aside (a write made before it was shown the record that ended its account's permission), in a row of
+/// their own (`SharingStateKey.ownTakenOut`). The copy half of a move may be among them, and its other half, a
+/// deletion in another vault, waits for it (`VaultSession.holdsUnpublishedWork`). Signed, because an entry in the
+/// quarantine says only whose device its writer *claims*: anyone who can have this device hold an entry aside could
+/// otherwise hold its deletions back in every vault (review finding Z54). Not in the stream index any more (Z121):
+/// the take-out removed those versions from the store, so a rebuild of the index from the log cannot find them
+/// again, and the gate must not open because the index was refused, outgrew its bound, or was rebuilt.
+///
+/// `complete` says whether the set is all of them. It is not when the row could not be read (missing, or not
+/// verifying): versions may have been taken out that it does not list, and until the quarantine shows that none of
+/// this device's can be among them the gate falls back to the rule before Z54.
 enum OwnTakenOutRow {
     static let magic: [UInt8] = Array("WWTO".utf8)
 
-    static func signed(_ versions: Set<VersionKey>, account: UUID, vaultID: UUID, keyset: Keyset) throws -> [UInt8] {
+    static func signed(_ versions: Set<VersionKey>, complete: Bool, account: UUID, vaultID: UUID, keyset: Keyset)
+        throws -> [UInt8]
+    {
         try SignedLocalSet.signed(
-            magic: magic, items: versions.map(bytes), account: account, vaultID: vaultID, keyset: keyset)
+            magic: magic, items: versions.map(bytes), account: account, vaultID: vaultID,
+            binding: [complete ? 1 : 0], keyset: keyset)
     }
 
-    static func parse(_ bytes: [UInt8], account: PublicKeyBundle, vaultID: UUID) -> Set<VersionKey>? {
-        SignedLocalSet.parse(bytes, magic: magic, itemLength: 25, account: account, vaultID: vaultID).map { items in
-            Set(
-                items.map { item in
-                    var reader = SharedReader(item)
-                    return VersionKey(
-                        recordID: reader.uuid()!, kind: reader.read(1)![0], version: reader.uint64()!)
-                })
+    static func parse(_ bytes: [UInt8], account: PublicKeyBundle, vaultID: UUID)
+        -> (versions: Set<VersionKey>, complete: Bool)?
+    {
+        for complete in [true, false] {
+            guard
+                let items = SignedLocalSet.parse(
+                    bytes, magic: magic, itemLength: 25, account: account, vaultID: vaultID,
+                    binding: [complete ? 1 : 0])
+            else { continue }
+            var versions: Set<VersionKey> = []
+            for item in items {
+                var reader = SharedReader(item)
+                guard let record = reader.uuid(), let kind = reader.read(1), let version = reader.uint64() else {
+                    return nil
+                }
+                versions.insert(VersionKey(recordID: record, kind: kind[0], version: version))
+            }
+            return (versions, complete)
         }
+        return nil
     }
 
     static func bytes(_ version: VersionKey) -> [UInt8] {

@@ -175,8 +175,13 @@ extension VaultSession {
     /// a merge is its row too, in a vault it only reads, and holds nothing the others lack. And not every held-aside
     /// entry that names this device: that is its writer's claim, which a member who can have this device hold
     /// something aside would use to hold its deletions back everywhere (review finding Z54). Only what the take-out
-    /// itself put aside counts (`SharedStreamIndex.ownTakenOut`, signed with the index), for as long as the
-    /// quarantine still keeps it: once the person has discarded it, it is theirs to have discarded.
+    /// itself put aside counts (`SharedVault.ownTakenOut`, signed in a row of its own), for as long as the quarantine
+    /// still keeps it: once the person has discarded it, it is theirs to have discarded.
+    ///
+    /// Fails closed (review finding Z121): a quarantine that cannot be read holds the deletions back and forgets
+    /// nothing of the set, and while the set's own row has not loaded (deleted, refused, never written by this build)
+    /// every held-aside entry naming this device that the sync state does not know counts, as before Z54, until the
+    /// quarantine holds none and the set is known to be all there is.
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
         guard let syncState, let base = syncSettings?.state else { return false }
         let known = (try? await syncState.loadState(vaultID: vaultID))?.known ?? [:]
@@ -184,15 +189,30 @@ extension VaultSession {
         where row.deviceID == account.deviceID && known[row.key] == nil {
             return true
         }
-        guard let takenOut = sharing.vaults[vaultID]?.index.ownTakenOut, !takenOut.isEmpty else { return false }
-        var kept: Set<VersionKey> = []
-        for entry in (try? await base.quarantined(vaultID: vaultID)) ?? []
-        where entry.kind == .item && !entry.isDeletion && entry.device == account.deviceID {
-            let version = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
-            if takenOut.contains(version) { kept.insert(version) }
+        guard let vault = sharing.vaults[vaultID], !vault.ownTakenOut.isEmpty || !vault.ownTakenOutComplete else {
+            return false
         }
-        if kept != takenOut {
-            sharing.vaults[vaultID]?.index.ownTakenOut = kept
+        let entries: [SyncEntry]
+        do {
+            entries = try await base.quarantined(vaultID: vaultID)
+        } catch {
+            return true
+        }
+        let own = entries.filter { $0.kind == .item && !$0.isDeletion && $0.device == account.deviceID }
+        if !vault.ownTakenOutComplete {
+            if own.contains(where: { known[$0.key] == nil }) { return true }
+            // Nothing of this device's that the sync state does not know is held aside: whatever the lost row listed
+            // and the quarantine still keeps is among `own`, and none of it is waited for any more.
+            sharing.vaults[vaultID]?.ownTakenOutComplete = true
+            sharing.vaults[vaultID]?.indexChanged = true
+        }
+        var kept: Set<VersionKey> = []
+        for entry in own {
+            let version = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
+            if vault.ownTakenOut.contains(version) { kept.insert(version) }
+        }
+        if kept != vault.ownTakenOut {
+            sharing.vaults[vaultID]?.ownTakenOut = kept
             sharing.vaults[vaultID]?.indexChanged = true
         }
         return !kept.isEmpty

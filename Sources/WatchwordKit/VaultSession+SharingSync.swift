@@ -1116,12 +1116,12 @@ extension VaultSession {
         let published = (try? await syncState?.loadState(vaultID: vaultID))?.published ?? [:]
         for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
             for row in try await store.records(in: vaultID, kind: kind) where !(try await judgeAdmits(row)) {
-                // An item of this device's own that nobody else has is remembered as such, under the index's
-                // signature: a deletion in another vault may be waiting for it (Z44, Z54).
+                // An item of this device's own that nobody else has is remembered as such, signed, in a row that
+                // outlives the index: a deletion in another vault may be waiting for it (Z44, Z54, Z121).
                 if kind == .item, row.deviceID == ownDevice,
                     !(published[row.key].map { $0 >= RecordStamp(row) } ?? false)
                 {
-                    sharing.vaults[vaultID]?.index.ownTakenOut.insert(
+                    sharing.vaults[vaultID]?.ownTakenOut.insert(
                         VersionKey(recordID: row.recordID, kind: kind.rawValue, version: row.version))
                     sharing.vaults[vaultID]?.indexChanged = true
                 }

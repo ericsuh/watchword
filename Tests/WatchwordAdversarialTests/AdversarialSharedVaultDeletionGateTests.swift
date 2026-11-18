@@ -180,3 +180,58 @@ extension AdversarialSharedVaultTests {
         #expect(try await owner.session.items(in: vaultID).items.contains { $0.id == moved.id })
     }
 }
+
+// Review finding Z121: what the take-out held aside was kept inside the stream index, and went with it.
+extension AdversarialSharedVaultTests {
+    /// Threat: someone with the device's files (A8) deleting or corrupting the saved stream index, or no adversary at
+    /// all: an index past its size bound, or of an earlier format, is refused on every load, and the index is
+    /// rebuilt from the log. A member moves an item from one shared vault into another and is made read-only in the
+    /// second before syncing, so the copy is taken out and held aside and the first vault's deletion waits for it
+    /// (Z44). The set that said so lived in the index, and a rebuild cannot find it again, since the copy is no longer
+    /// in the store: the gate opened and the original was erased everywhere while its only copy sat in one device's
+    /// quarantine. The set is a row of its own; and while that row has not loaded, the rule before Z54 holds the
+    /// deletion back.
+    @Test(
+        "a move's deletion still waits for its held-aside copy once the saved index, or the set itself, is gone",
+        arguments: [[SharingStateKey.streamIndex], [.streamIndex, .ownTakenOut]])
+    func gateOutlivesTheIndex(lost: [SharingStateKey]) async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: lost.count == 1 ? 12100 : 12110)
+        let member = try await household.account(seed: lost.count == 1 ? 12101 : 12111)
+        let first = try await owner.session.createVault(name: "First").id
+        let second = try await owner.session.createVault(name: "Second").id
+        for vaultID in [first, second] {
+            try await owner.session.shareVault(vaultID)
+            try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        }
+        let item = try await owner.session.save(Self.bank(in: first))
+        try await Self.syncAll([owner, member])
+        let syncState = try #require(member.vault.sync?.state)
+
+        let moved = try await member.session.move(itemID: item.id, to: second)
+        try await owner.session.changeRole(of: member.accountID, in: second, to: .readOnly)
+        try await member.session.sync()
+        #expect(try await syncState.pendingDeletions(vaultID: first).count == 1)
+
+        await member.session.lock()
+        for key in lost { await member.state.tamper(key, vaultID: second, value: nil) }
+        let relaunched = member.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+        try await relaunched.session.sync()
+        try await relaunched.session.sync()
+        try await owner.session.sync()
+        #expect(
+            try await owner.session.items(in: first).items.map(\.id) == [item.id],
+            "the original was erased with its only copy held aside on one device")
+        #expect(try await syncState.pendingDeletions(vaultID: first).count == 1)
+
+        // The person discards the held-aside copy: then, and only then, the deletion goes.
+        let heldAside = try await relaunched.session.quarantine().filter { $0.entry.recordID == moved.id }
+        #expect(heldAside.count == 1)
+        try await relaunched.session.discardQuarantined(heldAside)
+        try await relaunched.session.sync()
+        #expect(try await syncState.pendingDeletions(vaultID: first).isEmpty)
+    }
+}

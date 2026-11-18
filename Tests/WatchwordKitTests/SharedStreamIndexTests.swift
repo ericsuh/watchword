@@ -109,17 +109,48 @@ struct SharedStreamIndexTests {
         index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.victim, opened: false))
         index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: Self.victim))
         index.awaiting = [Self.device]
-        index.ownTakenOut = [Self.version(7), Self.version(2)]
         let saved = try index.signed(account: keyset.accountID, vaultID: vaultID, keyset: keyset)
         let parsed = try #require(SharedStreamIndex.parse(saved, account: bundle, vaultID: vaultID))
         #expect(parsed == index)
         #expect(parsed.account(ofStream: Self.device) == Self.victim)
-        #expect(parsed.ownTakenOut == [Self.version(2), Self.version(7)])
         #expect(parsed.segment(device: Self.device, sequence: 2)?.opened == false)
         #expect(parsed.valueCarriers[Self.value(5)] == nil && parsed.valueCarriers[Self.value(3)]?[Self.device] == 3)
         // An index of the earlier format, or one altered, is refused whole and rebuilt from the log.
         var earlier = saved
-        earlier[4] = 3
+        earlier[4] = 4
         #expect(SharedStreamIndex.parse(earlier, account: bundle, vaultID: vaultID) == nil)
+    }
+
+    /// What the take-out held aside is a row of its own, which survives the index being refused or rebuilt (review
+    /// finding Z121), and says whether it is complete; the key provenance row is bound to the ledger's owner (Z59).
+    @Test("the rows beside the index say the same after they are read back, and refuse another account, vault or owner")
+    func rowsBesideTheIndex() throws {
+        let keyset = Keyset.generate(accountID: UUID())
+        let bundle = try keyset.publicKeyBundle()
+        let vaultID = UUID()
+        let versions: Set<VersionKey> = [Self.version(7), Self.version(2)]
+        for complete in [true, false] {
+            let saved = try OwnTakenOutRow.signed(
+                versions, complete: complete, account: keyset.accountID, vaultID: vaultID, keyset: keyset)
+            let parsed = try #require(OwnTakenOutRow.parse(saved, account: bundle, vaultID: vaultID))
+            #expect(parsed.versions == versions && parsed.complete == complete)
+            #expect(OwnTakenOutRow.parse(saved, account: bundle, vaultID: UUID()) == nil)
+            var altered = saved
+            altered[altered.count - 70] ^= 1
+            #expect(OwnTakenOutRow.parse(altered, account: bundle, vaultID: vaultID) == nil)
+        }
+        let other = try Keyset.generate(accountID: UUID()).publicKeyBundle()
+        let empty = try OwnTakenOutRow.signed(
+            [], complete: true, account: keyset.accountID, vaultID: vaultID, keyset: keyset)
+        #expect(OwnTakenOutRow.parse(empty, account: bundle, vaultID: vaultID)?.versions.isEmpty == true)
+        #expect(OwnTakenOutRow.parse(empty, account: other, vaultID: vaultID) == nil)
+
+        let owner = UUID()
+        let keyIDs: Set<UUID> = [UUID(), UUID()]
+        let provenance = try SharedKeyProvenance.signed(
+            keyIDs, owner: owner, account: keyset.accountID, vaultID: vaultID, keyset: keyset)
+        #expect(SharedKeyProvenance.parse(provenance, owner: owner, account: bundle, vaultID: vaultID) == keyIDs)
+        #expect(SharedKeyProvenance.parse(provenance, owner: UUID(), account: bundle, vaultID: vaultID) == nil)
+        #expect(SharedKeyProvenance.parse(provenance, owner: owner, account: other, vaultID: vaultID) == nil)
     }
 }

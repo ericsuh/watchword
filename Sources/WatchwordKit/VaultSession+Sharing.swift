@@ -31,6 +31,11 @@ struct SharedVault: Sendable {
     /// How many replays were asked for (`requestReplay`): a pass settles the head it judged against only if none was
     /// asked for while it ran (review finding Z120).
     var replayRequests: UInt64 = 0
+    /// What this device's own take-out held aside before it was published (`OwnTakenOutRow`, saved signed in a row of
+    /// its own, Z54 and Z121), and whether that is all of it: not when the row did not load, until the quarantine
+    /// shows that nothing of this device's can be missing from it.
+    var ownTakenOut: Set<VersionKey> = []
+    var ownTakenOutComplete = true
 }
 
 /// An account's device registry as one vault's chain anchors it: the account, and the signing key that chain lists
@@ -343,6 +348,16 @@ extension VaultSession {
             vault.keyCheck = try? await ledger.checkMemberKeys(against: contacts)
             // The keys this device saw the ledger hand to this account (Z59). None, if the row does not verify: the
             // next sync shows each again from its grant.
+            // What this device's own take-out held aside (Z121): a row that is missing or does not verify is not "none",
+            // and the deletion gate falls back to the rule before Z54 until the quarantine says otherwise.
+            if let bytes = try? await settings.state.value(.ownTakenOut, vaultID: vaultID),
+                let saved = OwnTakenOutRow.parse(bytes, account: bundle, vaultID: vaultID)
+            {
+                vault.ownTakenOut = saved.versions
+                vault.ownTakenOutComplete = saved.complete
+            } else {
+                vault.ownTakenOutComplete = false
+            }
             if let bytes = try? await settings.state.value(.vaultKeys, vaultID: vaultID),
                 let verified = SharedKeyProvenance.parse(
                     bytes, owner: ledger.owner.accountID, account: bundle, vaultID: vaultID)
@@ -389,6 +404,9 @@ extension VaultSession {
         let vaultKeys = try SharedKeyProvenance.signed(
             vault.verifiedKeys, owner: vault.ledger.owner.accountID, account: account.accountID, vaultID: vaultID,
             keyset: keys.keyset)
+        let ownTakenOut = try OwnTakenOutRow.signed(
+            vault.ownTakenOut, complete: vault.ownTakenOutComplete, account: account.accountID, vaultID: vaultID,
+            keyset: keys.keyset)
         try await settings.state.setValue(
             SharedBytes.bytes(vault.ledger.owner.accountID), for: .owner, vaultID: vaultID)
         try await settings.state.setValue(ledger, for: .ledger, vaultID: vaultID)
@@ -398,6 +416,7 @@ extension VaultSession {
         try await settings.state.setValue(index, for: .streamIndex, vaultID: vaultID)
         try await settings.state.setValue(memberDevices, for: .memberDevices, vaultID: vaultID)
         try await settings.state.setValue(vaultKeys, for: .vaultKeys, vaultID: vaultID)
+        try await settings.state.setValue(ownTakenOut, for: .ownTakenOut, vaultID: vaultID)
         sharing.vaults[vaultID]?.indexChanged = false
     }
 
@@ -1306,19 +1325,33 @@ extension VaultSession {
 
     func unsharedWorkCount(_ vaultID: UUID, account: AccountRecord) async -> Int {
         guard let syncState, let base = syncSettings?.state else { return 0 }
-        // What was published, as this device's signed sync state has it (Z20).
-        let published = (try? await syncState.loadState(vaultID: vaultID))?.published ?? [:]
+        // What was published, as this device's signed sync state has it (Z20), and what the sync layer knows of.
+        let state = try? await syncState.loadState(vaultID: vaultID)
+        let published = state?.published ?? [:]
+        let known = state?.known ?? [:]
         var count = 0
-        for row in (try? await store.records(in: vaultID, kind: .item)) ?? []
-        where row.deviceID == account.deviceID && !(published[row.key].map { $0 >= RecordStamp(row) } ?? false) {
-            count += 1
+        for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
+            // A change of this device's that nobody else has is an edit it made and never published: the latest of
+            // its own edits the item contains (its clock's entry for this device) above every version of the record
+            // it published. Not merely a row it sealed: the result of a merge is its row too, in a vault it only
+            // read, and holds nothing the others lack (review finding Z123). One that does not open here is counted.
+            let own: UInt64
+            if let keys, let item = try? openItem(row, keys: keys) {
+                own = ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[account.deviceID] ?? 0
+            } else {
+                own = .max
+            }
+            if own > (published[row.key]?.version ?? 0) { count += 1 }
         }
-        // What this device's own take-out put aside (Z54), never an entry's own word for whose it is.
-        let takenOut = sharing.vaults[vaultID]?.index.ownTakenOut ?? []
+        // What this device's own take-out put aside (Z54), never an entry's own word for whose it is; while that set's
+        // row has not loaded, every held-aside entry naming this device that the sync state does not know (Z121).
+        let vault = sharing.vaults[vaultID]
+        let takenOut = vault?.ownTakenOut ?? []
+        let complete = vault?.ownTakenOutComplete ?? true
         for entry in (try? await base.quarantined(vaultID: vaultID)) ?? []
         where entry.kind == .item && !entry.isDeletion && entry.device == account.deviceID {
             let version = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
-            if takenOut.contains(version) { count += 1 }
+            if takenOut.contains(version) || (!complete && known[entry.key] == nil) { count += 1 }
         }
         return count
     }
