@@ -279,8 +279,9 @@ extension VaultSession {
         let state = try? await syncState.loadState(vaultID: vaultID)
         let known = state?.known ?? [:]
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
-        // (review finding Z162): an edit of its own in a row it holds is unpublished whatever its state says, such as a
-        // move's copy published by a build from before this was refused.
+        // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
+        // move's copy published by a build from before this was refused. A value it stamped, never its clock's entry
+        // for it: a writing member's version can claim that entry, and merged here it held every deletion back (Z180).
         // A key that cannot be read counts as one that does not commit here: the gate fails closed.
         let receivedNowhere =
             sharing.vaults[vaultID] != nil ? !((try? await thisDeviceCommits(account)) ?? false) : false
@@ -297,7 +298,7 @@ extension VaultSession {
             if !items.isEmpty { return true }
         }
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
-            if receivedNowhere, holdsUnpublishedEdit(row, published: nil, account: account) { return true }
+            if receivedNowhere, holdsValue(ofAny: [account.deviceID], in: row) { return true }
             guard let stamp = known[row.key] else { return true }
             // Known only as a deletion: the log says nothing of a version of it. A move's copy has an ID anyone who
             // reads the source vault can derive, and a tombstone for it, found in the log before the copy was written,
