@@ -348,6 +348,7 @@ public actor SyncEngine {
             state.nextSequence = kept.nextSequence
             state.publishedAcknowledgement = kept.publishedAcknowledgement
             state.lastPublishedSequence = kept.lastPublishedSequence
+            state.collectedThrough = kept.collectedThrough
             if judge == nil { state.erasures = kept.erasures }
             state.stashGeneration = kept.stashGeneration
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
@@ -1739,7 +1740,10 @@ public actor SyncEngine {
         // this device's own genuine head (what it published, or what verified as its own) or the highest listed number
         // below it, never a listed name above it: anyone who can create a file can list one far ahead, and keeping
         // that in place of the head deleted the anchor.
-        let own = (listing.segments[deviceID] ?? []).sorted()
+        // The run starts above what this device has collected already (review finding Z149): a name planted below it,
+        // in the range already collected, was otherwise the run's start, deleted alone at each pass, and the gap above
+        // it stopped the run there for as long as the name was planted again.
+        let own = (listing.segments[deviceID] ?? []).filter { $0 > state.collectedThrough }.sorted()
         let newest = min(own.last ?? 0, max(state.lastPublishedSequence, listing.ownVerified))
         var expected = own.first
         for sequence in own {
@@ -1747,6 +1751,7 @@ public actor SyncEngine {
             try await transport.delete(
                 SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence).name)
             report.collected += 1
+            state.collectedThrough = max(state.collectedThrough, sequence)
             expected = sequence + 1
         }
         for (location, coverage) in state.snapshots where location.author == deviceID {

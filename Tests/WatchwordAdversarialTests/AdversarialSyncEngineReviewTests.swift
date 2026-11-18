@@ -142,4 +142,38 @@ extension AdversarialSyncTests {
         #expect(await state.quarantined(vaultID: Self.vault).contains { $0.recordID == refused })
         #expect(await state.loadState(vaultID: Self.vault)?.quarantineDropped.isEmpty == true)
     }
+
+    // MARK: - Collection above what was collected (Z149)
+
+    /// Threat: anyone who can create a file under the vault's prefix (A1, a read-only or former member of a shared
+    /// folder), holding no key. Collection takes a contiguous run of listed numbers from the lowest (Z135); a name
+    /// planted in the range this device had already collected was that lowest, so each pass deleted it alone and
+    /// stopped at the gap above it, and planted again each sync it stalled collection for good, the log growing. The
+    /// run starts above what this device has collected.
+    @Test("a name planted below what a device collected does not stop it collecting")
+    func plantedNameBelowTheCollectedRun() async throws {
+        let f = try await Self.fixture()
+        let reader = try await Self.collectableStream(f, segments: 4)
+        try await f.writer.sync()
+        #expect(await f.writer.state()?.collectedThrough == 3, "nothing was collected: the test proves nothing")
+        for index in 5...8 {
+            try await f.writer.save(Self.login("Later \(index)", password: "p"))
+            try await f.writer.sync()
+        }
+        try await reader.sync()
+        try await f.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: Self.vault, author: Self.b, number: 40, vector: [Self.a: 8], entries: []),
+            signedBy: reader.keyring)
+        try await reader.sync()
+        for _ in 0..<2 {
+            await f.transport.tamper(f.segmentName(2), contents: [1, 2, 3])
+            try await f.writer.sync()
+        }
+        for sequence in UInt64(4)...7 {
+            #expect(
+                await f.transport.allObjects[f.segmentName(sequence)] == nil, "segment \(sequence) was not collected")
+        }
+        #expect(await f.transport.allObjects[f.segmentName(8)] != nil, "the head was collected")
+    }
 }

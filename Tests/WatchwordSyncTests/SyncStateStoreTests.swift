@@ -77,6 +77,7 @@ enum StateStoreFixtures {
         state.retryUnfinished = true
         state.quarantineDropped = [SyncFixtures.deviceB]
         state.quarantineCrowded = 17
+        state.collectedThrough = 2
         state.authenticator = [0xA1, 0xA2, 0xA3]
         return state
     }
@@ -120,6 +121,7 @@ struct SyncStateAuthenticationTests {
             changed("quarantineCrowded") { $0.quarantineCrowded = 18 },
             changed("quarantineCrowded, cleared") { $0.quarantineCrowded = nil },
             changed("quarantineCrowded, zero") { $0.quarantineCrowded = 0 },
+            changed("collectedThrough") { $0.collectedThrough = 3 },
         ]
     }
 
@@ -135,7 +137,7 @@ struct SyncStateAuthenticationTests {
         #expect(resigned.authenticatedBytes == signed)
         // A field added to the state must be added to `authenticatedBytes` and to `variants`: this count is the
         // reminder.
-        #expect(Mirror(reflecting: base).children.count == 17)
+        #expect(Mirror(reflecting: base).children.count == 18)
         #expect(Set(Self.variants.map(\.1.authenticatedBytes)).count == Self.variants.count)
     }
 
@@ -147,14 +149,15 @@ struct SyncStateAuthenticationTests {
         state.retryUnfinished = false
         state.quarantineDropped = []
         state.quarantineCrowded = nil
+        state.collectedThrough = 0
         let before = state.authenticatedBytes
         state.retryUnfinished = true
         #expect(state.authenticatedBytes.count == before.count + 1 + 8)
         #expect(Array(state.authenticatedBytes.prefix(before.count)) == before)
-        // The field of review finding Z147 likewise: a row saved before it still verifies.
+        // The fields of review findings Z147 and Z149 likewise: a row saved before them still verifies.
         let withRetry = state.authenticatedBytes
-        state.quarantineCrowded = 4
-        #expect(state.authenticatedBytes.count == withRetry.count + 1 + 8)
+        state.collectedThrough = 4
+        #expect(state.authenticatedBytes.count == withRetry.count + 1 + 8 + 8)
         #expect(Array(state.authenticatedBytes.prefix(withRetry.count)) == withRetry)
     }
 

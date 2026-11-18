@@ -91,6 +91,10 @@ public struct SyncState: Sendable, Hashable {
     /// the log is offered again only once the quarantine holds fewer entries than this, which the person discarding
     /// the entries (or anything else leaving) brings about (review finding Z147).
     public var quarantineCrowded: UInt64?
+    /// The highest number of this device's own stream it has collected: every number from its stream's first up to
+    /// this one was deleted, lowest first. A listed name at or below it is no segment of its stream any more (a stale
+    /// listing, or a name anyone can create), so collection's contiguous run starts above it (review finding Z149).
+    public var collectedThrough: UInt64 = 0
     /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
     /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
     /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the
