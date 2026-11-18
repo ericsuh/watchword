@@ -900,7 +900,13 @@ full Public Suffix List for the tenant parents it omits (Z63); whether the revea
 update offered from the save sheet should list every host the item is offered on (Z62). **The Mac.** Everything here
 was built and run on Linux. `Apps/Shared/ImportView.swift`, `AccessibilityID.swift`, `ItemEditView.swift`,
 `ItemDetailView.swift` and `AppModel.swift` changed and have not been compiled; no UI test drives the editor's
-confirmation, the import's concern section or its options.
+confirmation, the import's concern section or its options. Rows Z70 to Z79 changed nothing under `Apps/`; the merge
+screen's new warning (Z75) reaches the existing confirmation dialog, which has not run with it. **From the review,
+the owner's:** whether the gate should also judge a page's host against the other scopes of the one shared vault
+that recognises it (Z76; not done, by the earlier decision that a member could as well edit the item), whether
+`isMarkedShared` itself, which the write paths ask, should count an item written from outside the account (Z77;
+AutoFill and the save checks do), and how a screen should word a copy's or move's concern once one offers them
+(Z72).
 
 ### Files on disk, exports, the Emergency Kit, hygiene's cache and the app shells (Z80 to Z99)
 
