@@ -1546,10 +1546,14 @@ Not solved here, and to be decided with integration:
   read-only there before the device synced) or whose copy was taken out and held aside as a write after the cut holds
   an item that exists nowhere else; while any vault does, no vault's deletions are published (Z44,
   `holdsUnpublishedWork`). What releases them is the copy going out, or the person discarding the held-aside copy.
-  "Held aside" here means what this device's own take-out put aside, which it notes under the stream index's
-  signature (`SharedStreamIndex.ownTakenOut`): an entry in the quarantine names the device its writer claims, and
-  counting any entry that named this device let a member who can have it hold something aside (a segment signed
-  into the stream named after it, Z46) stop its deletions in every vault, the Personal one included (Z54). A shared
+  "Held aside" here means what this device's own take-out put aside, which it notes in a signed row of its own
+  (`OwnTakenOutRow`, `WWTO`): an entry in the quarantine names the device its writer claims, and counting any entry
+  that named this device let a member who can have it hold something aside (a segment signed into the stream named
+  after it, Z46) stop its deletions in every vault, the Personal one included (Z54). The row is not the stream index:
+  the take-out removed those versions from the store, so an index refused or rebuilt from the log cannot find them
+  again, and the gate opened whenever it was (Z121). While the row has not loaded (deleted, refused), every held-aside
+  entry naming this device that the sync state does not know holds the deletions back, as before Z54, until the
+  quarantine holds none; a quarantine that cannot be read holds them back and forgets nothing. A shared
   vault's second replay in a sync defers deletions like every other pass, and deletions go out after the replays
   (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so.
 - **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
@@ -1645,7 +1649,8 @@ the record versions it carried, and the digest of every value it carried that it
 whose stamp names that stream's device (format 2, S36; format 3 since note-line removals, discards and history
 entries are values too, S32 and S43, so an older index is refused and rebuilt by a replay); and the devices a version
 is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
-account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
+account (`WWML`, `WWRP`, `WWSI` for the index, `WWVK` for the keys the ledger was seen to hand this account, and
+`WWTO` for what the take-out held aside) or re-checked on load (proposals are records, filtered to this
 account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
 anchors the ledger, and a ledger whose owner's pin is gone is not loaded: the vault is then held closed (below), not
 run as a private one. Pins live behind `VerifiedContactStore`.
@@ -1703,6 +1708,33 @@ the vault's earlier log, and takes its earlier values on a later sealer's word (
 open for S36 and S46, for every member instead of for latecomers). That trade was not made here. And the ledger
 itself is still not synced between an account's devices (S35): each accepts the invitation.
 
+**A device led into another chain** (review finding Z59). A member's new device that holds nothing of a vault (the
+store keeps from it every object the account's directory holds of the vault: key wraps, markers) has nothing to
+compare an invitation's owner with, so it accepts one from anyone the person verifies, and joins a chain that person
+signed for the same vault ID. Nothing on the device can tell, and nothing stops the join; what is stopped is its
+reaching the account's real items. **A key is used for a vault with a ledger only if that ledger hands it to this
+account**: one the device opened from a grant the ledger entitles the account to, or one the account's directory
+brought from another device whose bytes a grant of the ledger's shows to be the same (`SharedVault.verifiedKeys`,
+saved signed, `admitVaultKeys`); the account's own genesis key only where the ledger's owner is this account
+(`withholdUnvouchedKeys`, at unlock, when the directory adds keys, and whenever ledgers load). A key ID shows nothing:
+key IDs are public, and whoever signs a chain chooses the IDs it names. Before this the device made the real key
+resident when the directory delivered it, opened the account's other devices' segments (on the other chain the
+member is a writer) and sealed what they carried again under the other chain's key, publishing it. **A vault whose
+owner the account's devices disagree about is held closed on all of them, ledger or not** (`isOwnerDisputed`: two of
+the account's markers name different owners, or this device's ledger names an owner its account's marker does not):
+no current key, so nothing sealed, sealed again or published; no proposal, plan, rotation, invitation or acceptance;
+every write refused (`ownerDisputed`); not given to AutoFill; listed as closed and disputed
+(`VaultInfo.isOwnerDisputed`, `SharedVaultStatus.ownerDisputed`), with words that say the person's devices were given
+two owners and the items can be read and copied into a vault of their own. Both sides hold a chain verified to
+someone the person compared a safety number with, so neither device can be the one to go on. **Nothing ends a
+dispute in this version.** A marker is never retired: the account key signs markers, a revoked device keeps that key,
+and a retirement it could sign would reopen what the dispute closes; a retirement the person chooses, signed by the
+account and a device registered now, is the design that would end one, and is tracked. Last, a device answers "nobody
+owns this vault" only once it has listed its account's vault directory in the session and found nothing of the vault
+there (`SharingRuntime.directoryVaults`), so a device that has not synced, or whose listing names the vault while its
+objects do not arrive, takes no stranger's invitation; a store that withholds the vault's whole directory still gets
+that answer, and the two rules above are what hold then.
+
 **A share that was cut short** (review finding Z50). `shareVault` writes the marker before the chain, so that every
 device of the account learns the vault is shared whether or not it ever sees the chain. A lock or the end of the
 process between the two left a marker naming this account, no ledger and no genesis record anywhere, and the vault
@@ -1710,10 +1742,11 @@ closed with no way out. So a vault whose only mark is this account's own marker 
 keys came by grant, is this account's to finish sharing: `shareVault` goes on from there under the key the genesis
 record names either way, and for a vault that is already shared here it saves the state and publishes the genesis
 record again. That is also how the owner's other device takes up a vault the account shared elsewhere while it has
-not rotated (the record it signs has the same content; where a signature is not a function of its message, on
-CryptoKit, it is a second root that the fork rule sets aside for the one that has been built on, which a Mac run has
-yet to show). The owner's device also puts its genesis record back at every sync while the store does not list it:
-the one call that published it may have failed.
+not rotated. It lists the vault's membership records first and joins a chain rooted at this account's own bundle if
+one is there, signing a genesis only when none is (Z122): signed again on CryptoKit, where Ed25519 is randomised, the
+record was a second root, and where both roots were bare and each device invited someone the fork rule set one
+invitee's addition aside. The owner's device also puts its genesis record back at every sync while the store does not
+list it: the one call that published it may have failed.
 
 **A vault this account is no longer in** (review finding Z45). Leaving and removal change the chain and the key;
 nothing takes the vault's records off the leaver's devices, and the screens no longer say that anything does. Once the
@@ -1727,7 +1760,9 @@ still a member. Not all of it need be a copy: a change made on this device that 
 not published, or put aside when the account's permission ended) exists nowhere else, so the call is refused
 (`unsharedWork`) unless it is given the number of such changes the person was shown
 (`unsharedWork(inSharedVault:)`), and the confirmation says that number and that they would be discarded for good
-(review finding Z57). The key wraps and the ledger stay (S26). One consequence for the AutoFill extension, whose adapter is
+(review finding Z57). A change counts if the item's clock holds an edit of this device's above every version of it
+the device published, and not merely because the device sealed the row: a merge it sealed in a vault it only read is
+its row too, and holds nothing the others lack (Z123). The key wraps and the ledger stay (S26). One consequence for the AutoFill extension, whose adapter is
 not built: its session must be given the sharing state (`configureSharing` over the App Group's `sharing.sqlite`)
 like the app's, or every shared vault is one with no ledger there and none of its items is offered. What the leaver's device already copied elsewhere, and what a
 removed member's device holds, cannot be taken back, which the removal dialog says (F4.3); "read-only" is worded as a
@@ -1753,9 +1788,12 @@ The check at `shareVault` is made before any other device of the account can hav
 not seen it still runs the vault as a private one and may compact its log afterwards (review finding Z56). Three
 things bound that. The marker is put on the transport, and must be, before the chain's first record is published
 and before a key is wrapped to anyone (`publishSharedMarker`). A chain that has **never listed anyone but its owner**
-(`MembershipLedger.isOwnersAlone`) is not judged at all: only the owner's account can sign what verifies in it, as in
-a vault that is not shared, so the judge admits every segment, version and tombstone and nothing of the owner's is
-held aside, whatever became of the log. It is a function of the accepted chain, so the first record that lists
+(`MembershipLedger.isOwnersAlone`) is not judged at all on the owner's own devices: only the owner's account can sign
+what verifies in it, as in a vault that is not shared, so the judge admits every segment, version and tombstone and
+nothing of the owner's is held aside, whatever became of the log. On another account's device it is judged as any
+vault is (Z124): a member whose addition lost a fork to the owner's records accepts a chain that lists only the
+owner, its own account's signatures verify there, and its writes, which count nowhere then, would have stayed. It is
+a function of the accepted chain and of whose device this is, so the first record that lists
 someone else changes the head, and everything is taken out and judged then as at any change of head. And `invite`
 makes the whole-log check again before that first record exists: a vault whose log was compacted in between cannot
 take its first member (`historyCompacted`) and goes on as its owner's. What is left is a compaction that lands after
@@ -1777,7 +1815,8 @@ a different pinned bundle is `keySubstituted` unless the person replaces the pin
 record), `invite` (needs a verified contact: wraps the current key and proposes the addition), `acceptInvitation`
 (confirms the owner's fingerprint if not pinned, continues any ledger the device ever held for the vault, S26, and
 passes the owner it knows for the vault ID: the loaded ledger's, else the account's marker's, else the account itself
-for a vault none of whose keys arrived by grant, S6 and Z41), `sharedVaultInvitation` (the invitation a second device
+for a vault none of whose keys arrived by grant, S6 and Z41, and none only once the session's listing of the account's
+directory names nothing of the vault, Z59), `sharedVaultInvitation` (the invitation a second device
 accepts to set up a vault its account already takes part in), `leaveSharedVault`,
 `changeRole`, `removeMember`, `rotateVaultKey`, `sharedVaultIDs` and `sharedVaultStatus`. Each is checked by
 `MembershipRules` (through the ledger's proposing functions and `RotationPlanner`) before anything is signed.
@@ -1909,6 +1948,9 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   longer counts erases nothing (S40). Receiving a key, a segment inside a cut that was missing, or a new segment of a
   device a version is waiting on replays it again; the need is written down by clearing the saved index's head, and the
   index is saved before anything a recorded segment lets count is merged, so a restart in between still replays (S41).
+  Requests are counted, and a replaying pass settles the head it judged against only if none was made while it ran:
+  what such a pass learns (a stream's account changing when an earlier segment arrives) can make a version stop
+  counting that the pass's own take-out judged against the old index, and only a take-out removes it (Z120).
   An index refused on load is rebuilt by a replay before anything is taken out against it.
 
 What is held aside is kept in the sync state's quarantine (`quarantinedVersions`, `SyncReport.heldAside`), never

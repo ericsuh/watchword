@@ -369,6 +369,10 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   tell it the vault is shared). Syncing the ledger and pins between an account's devices, signed by the account, is
   not built; nor is a screen flow of its own for "set up this shared vault here" (the vault's screen shows the
   invitation to paste into the accept screen).
+- A vault whose owner the account's devices disagree about (one of them was led into another chain, Z59) is held
+  closed on all of them, and nothing ends that: no marker is retired. A retirement the person chooses, signed by the
+  account and a device registered now, with the joined chain forgotten on the device that joined it, is the design;
+  it is the owner's to decide.
 - Sharing a vault whose log was compacted is refused (`historyCompacted`, Z42): values that survive only in a
   snapshot have no attribution in a shared vault. A rule for them (the owner account vouching for its own devices'
   pre-sharing values) is open, and is the owner's decision.

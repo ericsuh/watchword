@@ -630,6 +630,20 @@ its device's revocation and a newly enrolled device before its first sync
 (`AdversarialSharedVaultClosedWritePathTests.swift`); the whole-log check by the device's own sync state; the
 deletion gate's first clause; a key no record introduced; and, in "sharing and membership", both sides of an
 invitation refusing evidence for a bundle other than the one shown.
+From the second review of those fixes (Z59, then Z120 to Z125; each failed first unless its row says otherwise): a
+member's new device led into another owner's chain, which never seals the account's items under that chain's key
+whether the store then hands it the directory whole, the real key alone, or the real key alone with the other chain
+naming its ID; a vault whose owner the account's devices disagree about held closed on both, ledger or not, across a
+restart; and a device whose directory listing names the vault, or that has not listed it yet, refusing a stranger's
+invitation (`AdversarialSharedVaultImpostorChainTests.swift`, Z59). A replay asked for during a replaying pass, driven
+through sessions with an insider and a withholding store, and a chain that lists only its owner judged on a member's
+device (`AdversarialSharedVaultReplayTests.swift`, Z120, Z124). The deletion gate with the saved index, or the set
+itself, gone (`AdversarialSharedVaultDeletionGateTests.swift`, Z121), with the rows' saved form in "Shared vaults: the
+stream index". The owner's other device taking up the listed chain without a sync, on every platform
+(`AdversarialSharedVaultInterruptedShareTests.swift`, Z122). What `unsharedWork` counts, in "Shared vaults through
+VaultSession" (`SharedVaultUnsharedWorkTests.swift`, Z123). Z48's `markShared` refusing a second owner and a revoked
+device's marker starting no dispute (`AdversarialSharedVaultOwnerUnknownTests.swift`, Z125). Not tested: a quarantine
+read that fails at the deletion gate (Z121).
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):

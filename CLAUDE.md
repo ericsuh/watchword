@@ -683,9 +683,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   commits through `writer(for:)` asks too.
 - A sync publishes no vault's deletions while any vault holds an item that exists nowhere else
   (`holdsUnpublishedWork`): the copy half of a move that was not published, or was held aside (Z44, PRD F7.6). Held
-  aside means what this device's own take-out noted in `SharedStreamIndex.ownTakenOut`, never an entry's `device`
-  field, which is its writer's claim (Z54). Every engine pass in `syncAll`, replays included, defers deletions; they
-  go out once, last (Z55).
+  aside means what this device's own take-out noted in its own signed row (`OwnTakenOutRow`, never in the stream
+  index, which a rebuild cannot refill, Z121), never an entry's `device` field, which is its writer's claim (Z54);
+  until that row loads, the rule before Z54 holds, and a quarantine that cannot be read holds deletions back. Every
+  engine pass in `syncAll`, replays included, defers deletions; they go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
 
@@ -704,8 +705,18 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   vault but the Personal one is held closed, so call `loadSharedMarkersIfNeeded()` before a path that picks a key. A
   second device gets out by `acceptInvitation`, whose `knownOwner` comes from the marker. `knownOwner` **throws**
   when a granted key is held and the owner cannot be named (`ownerUnknown`, Z48), and when the account's markers name
-  two owners (`markerConflicts`); never let it answer `nil` for a vault a key of which is held. The held-key fallback
-  in `IncomingInvitation.accept` is for an invitation whose owner is this account, and for nothing else.
+  two owners (`markerConflicts`); never let it answer `nil` for a vault a key of which is held, nor before this session
+  has listed the account's vault directory, nor for a vault that listing names (`directoryVaults`, Z59). The held-key
+  fallback in `IncomingInvitation.accept` is for an invitation whose owner is this account, and for nothing else.
+- **A key is used for a vault with a ledger only if that ledger hands it to this account** (Z59,
+  `VaultSession+SharedKeys.swift`): a granted key only if this device opened it from a grant the ledger entitles the
+  account to, or a grant shows the directory's copy to be the same bytes (`verifiedKeys`, `admitVaultKeys`); the
+  account's own genesis key only where the ledger's owner is this account. `withholdUnvouchedKeys` runs whenever keys
+  are made resident from the store and whenever ledgers load; never match a key to a chain by its ID alone.
+- **A vault whose owner the account's devices disagree about is held closed, ledger or not** (`isOwnerDisputed`, Z59):
+  no current key, no write (`ownerDisputed`), no proposal, plan, reseal, invitation or acceptance, not given to
+  AutoFill, listed as disputed. Nothing ends a dispute in this version (no marker is retired: a revoked device keeps
+  the account key); never let a device with a ledger go on by it while its account's markers disagree.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
@@ -721,20 +732,25 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
-  (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
+  (`requestReplay`, S41) and counted: a replaying pass settles the judged head only if no replay was asked for while
+  it ran (`sharedEngineDidRun(requestsBefore:)`, Z120). Do not judge by who sealed a version, and do not keep what was
+  merged "for good" (S28).
 - `shareVault` can always be finished (Z50): the marker is written first, and a vault whose only mark is this
-  account's own marker naming this account, with no granted key, is shared again from there; the owner's device
-  republishes its genesis record while the store does not list it. Never add a state between "private" and "shared
+  account's own marker naming this account, with no granted key, is shared again from there, taking up a chain rooted
+  at this account that the store already lists and signing a genesis only when none is (Z122: a second root wherever
+  signing is randomised); the owner's device republishes its genesis record while the store does not list it. Never add a state between "private" and "shared
   with a ledger" that `shareVault` or `acceptInvitation` cannot leave.
 - A vault is shared with `indexRebuilding` set, so its index is built from the log before any row it already holds is
   judged, and one whose log was compacted (a snapshot listed, or merged) is not shared at all (`historyCompacted`,
   Z42): a value that survives only in a snapshot has no attribution. Do not lift that without a rule for such values.
   The marker is on the transport before the chain's first record and before the first grant (`publishSharedMarker`),
   and `invite` asks `requireWholeLog` again while the chain is its owner's alone (Z56).
-- A chain that has never listed anyone but its owner is not judged (`MembershipLedger.isOwnersAlone`, Z56): the
-  judge admits everything, as for a vault that is not shared, because only the owner's account can sign what
-  verifies there. It must stay a function of the accepted chain alone, so that it changes only with the head, which
-  is what takes out and replays; never widen it to a chain that listed someone once.
+- A chain that has never listed anyone but its owner is not judged **on the owner's own devices**
+  (`isOwnersAloneHere`: `MembershipLedger.isOwnersAlone` and this account is the owner, Z56, Z124): the judge admits
+  everything, as for a vault that is not shared, because only the owner's account can sign what verifies there. On a
+  member's device whose addition lost a fork its own signatures verify too, so there it is judged. It must stay a
+  function of the accepted chain and the device's account, so that it changes only with the head, which is what
+  takes out and replays; never widen it to a chain that listed someone once.
 - A chain stopped at a later format (`continuesInLaterFormat`, §8.9) makes the vault read-only in the session and is
   reported (`SharedVaultStatus.requiresNewerVersion`): no proposal published, no plan resumed or made, nothing sealed
   again, no leave request. A later-format object is offered again until the ledger holds it; never add it to
@@ -761,7 +777,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   it are here, and only `removeLocalCopies` takes them off the device, without publishing anything (Z45). Leaving does
   not remove them, and no screen may say it does; read-only is worded as a client rule, never as encryption (F4.5).
   What this device wrote there and nobody else has is not a copy: `removeLocalCopies` refuses (`unsharedWork`) unless
-  given the number the person was shown, and the take-out at a change of head withdraws a deletion this device had
+  given the number the person was shown (an item whose clock holds an edit of this device's above what it published,
+  never a merge it merely sealed, Z123), and the take-out at a change of head withdraws a deletion this device had
   queued and not published when its account's permission to write ended, never leaving it for a later day (Z57).
 - A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
   `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
@@ -769,8 +786,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the gap collection left; their tombstones are judged like a segment's (Z21), with nobody exempt, since a
   snapshot's signer chose the device its entry names, and with the pass's segments recorded first (Z34). Do not
   refuse them outright: a stream whose first segments were collected would stop at every replay.
-- Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`) or re-verified on load; the owner's pin
-  anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from (S26).
+- Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`, `WWMD`, `WWVK`, `WWTO`) or re-verified on
+  load; the owner's pin anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from
+  (S26).
 
 ### Device registry and account objects (`docs/02-architecture.md` §7.7, §7.8)
 
