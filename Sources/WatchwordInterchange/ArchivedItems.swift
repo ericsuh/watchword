@@ -109,6 +109,20 @@ extension ImportAssembler {
         return date
     }
 
+    /// The prefix of the `Field.meta` keys the AutoFill extension writes (`autofill.lastReport` and the rest).
+    static let autoFillMetaPrefix = "autofill."
+
+    /// A field's metadata as an archive restores it: everything but the AutoFill extension's state (Z85).
+    static func restoredMeta(_ meta: [String: String], dropped: inout Int) -> [String: String] {
+        guard meta.keys.contains(where: { $0.hasPrefix(autoFillMetaPrefix) }) else { return meta }
+        var kept = meta
+        for key in meta.keys where key.hasPrefix(autoFillMetaPrefix) {
+            kept[key] = nil
+            dropped += 1
+        }
+        return kept
+    }
+
     /// The archive's counterpart of `add`: the same rules, applied to an item rather than to a format's record.
     mutating func addArchived(
         _ archived: Item, reference: ImportEntryReference, using generator: inout some RandomNumberGenerator
@@ -174,6 +188,10 @@ extension ImportAssembler {
         // an earlier version's field is still recognisably the same field. A repeated ID among the current fields
         // gets one of its own.
         var renamed: [UUID: UUID] = [:]
+        // Keys the AutoFill extension keeps about a relying party's reports (rate limits, flags) are this vault's
+        // state, not the item's: a person cannot type them, and a far-future `autofill.lastReport` from a crafted
+        // archive would silence that field's reports for good (Z85). They are not restored.
+        var deviceState = 0
         for field in archived.fields {
             let id = RandomUUID.make(using: &generator)
             if renamed[field.id] == nil { renamed[field.id] = id }
@@ -181,10 +199,13 @@ extension ImportAssembler {
             case .totp:
                 do {
                     let uri = try ImportAssembler.canonicalOneTimePasswordURI(field.value)
-                    fields.append(Field(id: id, kind: .totp, label: field.label, value: uri, meta: field.meta))
+                    fields.append(
+                        Field(
+                            id: id, kind: .totp, label: field.label, value: uri,
+                            meta: Self.restoredMeta(field.meta, dropped: &deviceState)))
                 } catch {
                     let reason = (error as? OTPAuthError) ?? .notAnOTPAuthURI
-                    var meta = field.meta
+                    var meta = Self.restoredMeta(field.meta, dropped: &deviceState)
                     meta[InterchangeMeta.sourceType] = "totp"
                     let label = field.label.isEmpty ? "One-time password" : field.label
                     fields.append(Field(id: id, kind: .custom, label: label, value: field.value, meta: meta))
@@ -199,7 +220,10 @@ extension ImportAssembler {
                     warnings.append(.passkeyRefused(reason: "encoding"))
                 }
             default:
-                fields.append(Field(id: id, kind: field.kind, label: field.label, value: field.value, meta: field.meta))
+                fields.append(
+                    Field(
+                        id: id, kind: field.kind, label: field.label, value: field.value,
+                        meta: Self.restoredMeta(field.meta, dropped: &deviceState)))
             }
         }
         for value in unresolved.fields {
@@ -217,7 +241,9 @@ extension ImportAssembler {
                 let id = renamed[field.id] ?? RandomUUID.make(using: &generator)
                 renamed[field.id] = id
                 entryFields.append(
-                    Field(id: id, kind: field.kind, label: field.label, value: field.value, meta: field.meta))
+                    Field(
+                        id: id, kind: field.kind, label: field.label, value: field.value,
+                        meta: Self.restoredMeta(field.meta, dropped: &deviceState)))
             }
             let replacedAt = ImportAssembler.plausible(entry.replacedAt)
             if replacedAt == nil { implausible = true }
@@ -227,6 +253,7 @@ extension ImportAssembler {
                     fields: entryFields))
         }
 
+        if deviceState > 0 { warnings.append(.autoFillStateNotRestored(count: deviceState)) }
         let tags = Set(archived.tags.map { UTF8Text.trimmed($0) }.filter { !$0.isEmpty })
         var title = UTF8Text.trimmed(archived.title)
         guard !(title.isEmpty && fields.isEmpty && scopes.isEmpty && archived.notes.isEmpty) else {

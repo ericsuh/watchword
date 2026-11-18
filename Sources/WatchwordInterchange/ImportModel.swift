@@ -123,6 +123,14 @@ public enum ImportWarning: Equatable, Sendable {
     /// concurrent restore: `Item.isTrashedByPerson` is false). It is imported as a live item, not skipped as the
     /// source's trash and not trashed again, where the 30-day purge would remove it as the person's (PRD F1.5, F7.7).
     case restoredFromSyncTrash
+    /// `count` entries the AutoFill extension had recorded on the item's fields about a site's reports (when it last
+    /// reported, what it flagged) were not restored from the archive: they describe the vault the archive came from,
+    /// and are earned again as the item is used (review §Z, Z85).
+    case autoFillStateNotRestored(count: Int)
+    /// A date the file gave (created, modified, or when an earlier version was replaced) was later than this device's
+    /// clock and was set to now: sync keeps an item's modification time from going backwards, so one date in the
+    /// future would stick on every device (review §Z, Z85).
+    case futureDateBounded
 }
 
 /// Why an entry was not imported.
@@ -221,6 +229,37 @@ public struct ImportResult: Equatable, Sendable {
     public init(entries: [ImportedEntry], report: ImportReport) {
         self.entries = entries
         self.report = report
+    }
+
+    /// The result with every date a draft keeps from the file (created, modified, each history entry's replacement
+    /// time) no later than `now`, each entry that had one later reported once (`futureDateBounded`). The obligation
+    /// `ImportedEntry` states for a path that keeps the file's dates; the session calls it with its clock's now
+    /// before a preview is shown (review §Z, Z85). This module has no clock, so `now` is the caller's.
+    public func boundingDates(notAfter now: Date) -> ImportResult {
+        var bounded = self
+        for index in bounded.entries.indices {
+            var item = bounded.entries[index].item
+            var changed = false
+            func bound(_ date: inout Date) {
+                if date > now {
+                    date = now
+                    changed = true
+                }
+            }
+            bound(&item.createdAt)
+            bound(&item.modifiedAt)
+            for entry in item.history.indices { bound(&item.history[entry].replacedAt) }
+            guard changed else { continue }
+            if item.createdAt > item.modifiedAt { item.createdAt = item.modifiedAt }
+            bounded.entries[index].item = item
+            if bounded.report.warnings.count < ImportReport.maximumWarnings {
+                bounded.report.warnings.append(
+                    ImportWarningRecord(entry: bounded.entries[index].reference, warning: .futureDateBounded))
+            } else {
+                bounded.report.omittedWarningCount += 1
+            }
+        }
+        return bounded
     }
 }
 

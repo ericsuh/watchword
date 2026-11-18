@@ -54,6 +54,10 @@ public enum InterchangeWording {
         case .unresolvedValuesOmitted(let count): return "\(count) unresolved value(s) were left out."
         case .restoredFromSyncTrash:
             return "it was in the trash only because of sync, not by choice, and was imported as a live item."
+        case .autoFillStateNotRestored:
+            return "what AutoFill had recorded about sites' reports on it was not restored."
+        case .futureDateBounded:
+            return "a date in it was later than this device's clock and was set to now."
         }
     }
 

@@ -578,6 +578,9 @@ extension VaultSession {
     ) async throws -> ImportPreview {
         _ = try requireKeys(since: epoch)
         guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
+        // The file's dates are kept (created, modified, history), so none may be later than this clock's now: sync
+        // keeps `modifiedAt` monotonic, and one date in the future would stick on every device (Z85).
+        let result = result.boundingDates(notAfter: await clock.now())
         let existing = try await items(inVaults: [vaultID]).items
         _ = try requireKeys(since: epoch)
         guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
