@@ -97,8 +97,10 @@ final class AppModel {
     var syncStatus: String? { lastSync?.headline }
 
     func start() async {
-        // Before anything is shown (AppEnvironment.make has swept once already, before the session was built).
-        staging.sweep()
+        // Before anything is shown (AppEnvironment.make has swept once already, before the session was built). Once
+        // per process: `start()` runs for every window, and a second window must not delete the file another
+        // window's mover is presenting (Z99).
+        staging.launched()
         guard let session else { return }
         await lockSignal.watch(session)
         #if DEBUG
@@ -113,7 +115,8 @@ final class AppModel {
             switch status.state {
             case .noAccount: phase = .onboarding
             case .locked: phase = .locked
-            case .unlocked: try await enterVault()
+            // Already unlocked (another window's start): no unlock happened, so no unlock sweep (Z99).
+            case .unlocked: try await enterVault(sweeping: false)
             }
         } catch {
             show(error)
@@ -153,10 +156,11 @@ final class AppModel {
 
     /// After an unlock: the vault, unless the Emergency Kit was never confirmed, in which case the kit again (F5.1).
     /// The session shows that kit without the password only to keys opened with it (Z86): after a quick unlock the
-    /// vault opens and the kit is in Settings, behind the password. Every unlock sweeps the staging folder (Z80).
-    private func enterVault() async throws {
+    /// vault opens and the kit is in Settings, behind the password. Every unlock sweeps the staging folder (Z80); a
+    /// window opened on a session already unlocked does not (Z99).
+    private func enterVault(sweeping: Bool = true) async throws {
         guard let session else { return }
-        staging.sweep()
+        if sweeping { staging.sweep() }
         if try await !session.status().emergencyKitConfirmed {
             do {
                 phase = .emergencyKit(try await session.unconfirmedEmergencyKit())

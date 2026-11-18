@@ -96,11 +96,16 @@ public struct StagingFolder: Sendable, Hashable {
 }
 
 /// Sweeps the staging folder on every lock of the session, whether or not any screen model that staged a file is
-/// still alive (Z80). The app holds one for as long as it runs, registered with its `LockSignal`, and calls `sweep()`
-/// itself at launch, at every unlock and at termination.
+/// still alive (Z80). The app holds one for as long as it runs, registered with its `LockSignal`, and calls
+/// `launched()` from its start, `sweep()` at every unlock and at termination.
+///
+/// The launch sweep is made once per process (review finding Z99): the app's start runs once per window, and a second
+/// window opened while the first one's save sheet is up must not delete the file that sheet is presenting. A lock
+/// still sweeps, and so loses a save whose sheet is up when it lands (architecture §14.1).
 @MainActor
 public final class StagingSweeper: LockSensitive {
     public let folder: StagingFolder
+    private var hasLaunched = false
 
     public init(folder: StagingFolder = .standard, locks: LockSignal? = nil) {
         self.folder = folder
@@ -108,6 +113,13 @@ public final class StagingSweeper: LockSensitive {
     }
 
     public func sweep() {
+        folder.sweep()
+    }
+
+    /// The launch sweep: the first call sweeps, every later one (another window's start) does nothing.
+    public func launched() {
+        guard !hasLaunched else { return }
+        hasLaunched = true
         folder.sweep()
     }
 

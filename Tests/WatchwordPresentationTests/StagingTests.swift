@@ -50,7 +50,7 @@ struct StagingTests {
         StagingFolder(temporaryDirectory: root).sweep()
         #expect(!FileManager.default.fileExists(atPath: staged.path))
         #expect(!FileManager.default.fileExists(atPath: staging.url.path))
-        #expect(!FileManager.default.fileExists(atPath: earlier.path), "an earlier build's leftover stays")
+        #expect(!FileManager.default.fileExists(atPath: earlier.path), "an earlier build's leftover is removed")
         #expect(FileManager.default.fileExists(atPath: unrelated.path), "the sweep removes only what is staged")
     }
 
@@ -70,6 +70,26 @@ struct StagingTests {
         for _ in 0..<1000 where !staging.stagedFiles().isEmpty { await Task.yield() }
         #expect(!FileManager.default.fileExists(atPath: staged.path))
         _ = sweeper
+    }
+
+    /// The review of Z80 (Z99): `start()` runs once per window, and swept on every call, so opening a second window
+    /// (Cmd-N, a second iPad window) deleted the file a first window's save sheet was presenting, and the save
+    /// failed. The launch sweep is the first start's only; a lock still sweeps.
+    @Test("a second window's start does not remove a file another window is saving")
+    func secondWindowKeepsTheStagedFile() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let staging = StagingFolder(temporaryDirectory: root)
+        let leftover = try staging.stage(named: "left.csv") { try Data("old".utf8).write(to: $0) }
+        let sweeper = StagingSweeper(folder: staging)
+        sweeper.launched()
+        #expect(
+            !FileManager.default.fileExists(atPath: leftover.path), "the first start sweeps what a dead process left")
+        let presenting = try staging.stage(named: "Export.csv") { try Data("rows".utf8).write(to: $0) }
+        sweeper.launched()
+        #expect(FileManager.default.fileExists(atPath: presenting.path), "the second window's start removed it")
+        sweeper.dropOnLock()
+        #expect(!FileManager.default.fileExists(atPath: presenting.path))
     }
 
     @Test("each staged file has a folder of its own, a name cannot leave it, and removal touches nothing else")

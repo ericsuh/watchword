@@ -3338,12 +3338,15 @@ app itself, one copy made straight from protected storage and wiped once written
 (`StagingFolder`: one fixed, backup-excluded folder, `<temporary directory>/Watchword Staging/`, with a sub-folder per
 file), with `.completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves the file
 where the person chooses. The staged copy is removed when the mover is done, on cancel, when the screen closes and at
-every lock; and the whole folder is swept independently of any model's state at launch (before the session is built),
-at every unlock, at every lock (`StagingSweeper`, on the lock signal) and at termination (macOS
+every lock; and the whole folder is swept independently of any model's state at launch (before the session is built,
+and at the first window's start only: a second window must not delete the file another window's mover is presenting,
+review finding Z99), at every unlock, at every lock (`StagingSweeper`, on the lock signal) and at termination (macOS
 `applicationWillTerminate`, iOS `willTerminateNotification`, which also fire the lock signal so every screen model
 drops what it holds). A process that dies with the mover up (a crash, a force quit, a jetsam kill, power loss) leaves
 the file until the next launch, with its protection class on iOS and none on macOS; no later than that (review §Z,
-Z80, Z90). The sweep also removes the `Export-<UUID>` folders earlier builds staged in. What the exporters build on the
+Z80, Z90). A lock that lands while the mover is up (the idle auto-lock included: no activity is recorded while the
+system's sheet is up) removes the file under it, and that save fails: the person exports again after unlocking.
+The sweep also removes the `Export-<UUID>` folders earlier builds staged in. What the exporters build on the
 way (the CSV or JSON text, the ZIP's parts) is ordinary memory and is not wiped, like every decoded item's `String`s
 (SEC4, D5). Not `fileExporter` with `FileWrapper.fileAttributes`, which says nothing about what the exporter stages.
 Where the mover copies rather than moves (another file provider), the copy's protection is the provider's. macOS has
