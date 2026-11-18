@@ -315,9 +315,11 @@ public final class InvitationModel {
         case nameAccount
         /// Type their full vault sharing code, from their own device; this device's own is shown for them.
         case compareFingerprint(FullCodeComparison)
-        /// The invitation went out. Through a session there is nothing to send (`code` nil); on the fallback, the
-        /// invitation as text.
-        case issued(code: String?)
+        /// The invitation went out. Through a session there is nothing to send (`code` nil); on the fallback, or when
+        /// the session could not deliver it, the invitation as text. `confirmation` is this device's six digits while
+        /// the session lives: the invitee's device opens the invitation only once it has checked them, and Send can
+        /// come first (V26).
+        case issued(code: String?, confirmation: String?)
     }
 
     public let vaultID: UUID
@@ -487,17 +489,17 @@ public final class InvitationModel {
                 do {
                     invitation = try await context.session.inviteThroughSharingCode(
                         to: vaultID, as: role, checked: checked)
-                    step = .issued(code: nil)
+                    step = .issued(code: nil, confirmation: checked.ownCode)
                 } catch SharedVaultError.invitationNotDelivered(let issued) {
                     // Issued, not delivered: the invitation as text, for them to paste (V22).
                     invitation = issued
-                    step = .issued(code: SharingCodes.text(for: issued))
+                    step = .issued(code: SharingCodes.text(for: issued), confirmation: checked.ownCode)
                     stepMessage = ErrorWording.invitationNotDelivered
                 }
             } else {
                 let issued = try await context.session.invite(contact.accountID, to: vaultID, as: role)
                 invitation = issued
-                step = .issued(code: SharingCodes.text(for: issued))
+                step = .issued(code: SharingCodes.text(for: issued), confirmation: nil)
             }
             // The proposal and the grant reach the shared storage now, not at the next scheduled sync.
             _ = try? await context.session.sync()

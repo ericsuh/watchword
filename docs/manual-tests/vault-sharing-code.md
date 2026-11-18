@@ -23,6 +23,9 @@ Steps:
 7. Choose "Fill in the household member's code (UI test)", then "Check".
 8. **Expected**: your own six digits appear, with the role picker and "Send Invitation"; the line under the invitee
    says their confirmation code matched.
+9. Choose "Send Invitation" before the household member types your six digits.
+10. **Expected**: "Sent. It appears on their device once it has checked your confirmation code.", with your six digits
+    still on the screen.
 
 ### The full code: the screen shows only your own
 

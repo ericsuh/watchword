@@ -51,7 +51,7 @@ struct SharingScreenTests {
         }
         invitation.role = .readWrite
         await invitation.invite()
-        guard case .issued(let code) = invitation.step else {
+        guard case .issued(let code, nil) = invitation.step else {
             Issue.record("expected an invitation, got \(invitation.step) \(invitation.errorMessage ?? "")")
             return
         }
@@ -134,18 +134,20 @@ struct SharingScreenTests {
         #expect(contact.accountID == invitee.accountID && contact.isVerified)
         #expect(invitation.verificationText == "Their confirmation code matched.")
 
+        // Send before the invitee has typed this device's code (V26): the code stays on the screen, since their
+        // device opens the invitation only once it has checked it.
+        invitation.role = .readOnly
+        await invitation.invite()
+        #expect(invitation.step == .issued(code: nil, confirmation: ownerCode), "\(invitation.errorMessage ?? "")")
+        await accept.refresh()
+        #expect(accept.errorMessage == nil && !accept.isWaiting, "nothing to look for before the code is typed")
+
         accept.typedCode = ownerCode
         await accept.confirmTheirCode()
         guard case .awaitingInvitation = accept.step else {
             Issue.record("expected to wait for the invitation, got \(accept.step) \(accept.errorMessage ?? "")")
             return
         }
-        await accept.refresh()
-        #expect(accept.isWaiting, "no invitation yet")
-
-        invitation.role = .readOnly
-        await invitation.invite()
-        #expect(invitation.step == .issued(code: nil), "\(invitation.errorMessage ?? "")")
         await accept.refresh()
         guard case .confirmJoin(let shown) = accept.step else {
             Issue.record("expected to be asked, got \(accept.step) \(accept.errorMessage ?? "")")
@@ -648,7 +650,7 @@ extension SharingScreenTests {
             SharingBoardName.invitation(parsed, session: commit.session), contents: Array(repeating: 1, count: 9))
 
         await invitation.invite()
-        guard case .issued(let text?) = invitation.step else {
+        guard case .issued(let text?, _) = invitation.step else {
             Issue.record("expected the invitation as text, got \(invitation.step)")
             return
         }
@@ -762,7 +764,10 @@ extension SharingScreenTests {
         await window1.startOver()
         #expect(await owner.session.sharingCodeStatus() != nil)
         await window2.invite()
-        #expect(window2.step == .issued(code: nil), "\(window2.errorMessage ?? "")")
+        guard case .issued(nil, _) = window2.step else {
+            Issue.record("expected the invitation sent, got \(window2.step) \(window2.errorMessage ?? "")")
+            return
+        }
         let secondStatus = try await owner.session.sharedVaultStatus(second)
         let secondMembers: [UUID] = secondStatus.membership.members.map(\.accountID)
         #expect(secondMembers.contains(carol.accountID))

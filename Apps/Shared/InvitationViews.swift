@@ -36,7 +36,9 @@ struct InviteView: View {
                 nameAccount
             case .compareFingerprint(let comparison):
                 compare(comparison)
-            case .issued(let code):
+            case .issued(let code, let confirmation):
+                // Still shown after Send: their device opens the invitation only once it has checked these (V26).
+                if let confirmation { ownCode(confirmation) }
                 issued(code)
             }
             ErrorText(message: model.errorMessage)
@@ -302,8 +304,11 @@ struct InviteView: View {
             #endif
         } else {
             Section {
-                Label("Invitation sent. It appears on their device now.", systemImage: "checkmark.circle")
-                    .accessibilityIdentifier(AccessibilityID.Invite.sent)
+                Label(
+                    "Sent. It appears on their device once it has checked your confirmation code.",
+                    systemImage: "checkmark.circle"
+                )
+                .accessibilityIdentifier(AccessibilityID.Invite.sent)
                 #if DEBUG
                     if app.uiTestPeer != nil {
                         Button("The household member joins (UI test)") {
