@@ -280,7 +280,10 @@ milestone 2 stores full item records only.
   account by another member's grant (`personalVaultMismatch` otherwise, and the session stays locked). A
   missing header row is refused wherever the Keychain holds a registry anchor. Only a store with neither (an
   account from before the registry, or a backup restored onto other hardware with its header removed) is
-  taken at the row's word, and such a store publishes nothing until it has enrolled again.
+  taken at the row's word. That is a residual, not a safe state (review finding Z16): such a store starts a
+  registry at its first sync if the transport holds no header for the account (`startRegistryIfAccountPredatesIt`),
+  and the header it makes then seals whichever Personal vault the row names, so from there the redirected vault is
+  the authenticated one.
 - The file is untrusted input (A8 can edit it while the app is locked; a restored backup is anyone's).
   The connection is opened with `SQLITE_OPEN_NOFOLLOW` (the database path is resolved first, since
   `/var` is itself a link), `trusted_schema = OFF`, `cell_size_check = ON` and `secure_delete = ON`;
@@ -326,8 +329,10 @@ milestone 2 stores full item records only.
     P-256 key where there is one (that adapter is Apple-only and not built yet), otherwise — and today — a
     software Ed25519 seed stored here with the device ID it belongs to (`KeychainDeviceKeyStore`).
   - `deviceRegistryAnchor` — what this device trusts of the device registry: the genesis entry, the credential
-    entry it follows and the newest entries it has applied. Not secret; in the Keychain so that A8 can neither
-    substitute a registry nor roll one back to before a revocation.
+    entry it follows, the newest entries it has applied, the password changes it has seen and not been given, and
+    a step of its own under way (the credential entry and the exact header row an adoption or a password change is
+    about to commit; review finding Z9). Not secret; in the Keychain so that A8 can neither substitute a registry,
+    nor roll one back to before a revocation, nor write a header ahead of it that the device takes for its own.
   - `deviceLocalSecret` — 32 random bytes this device makes for itself, mixed with the keyset into the key that
     seals its unsynced local records (the hygiene ledger and prefix cache, §13.8), so that another device of the
     account, which holds the same keyset, can neither read them nor plant its own.
@@ -817,7 +822,11 @@ account password and the Secret Key (typed, or the Emergency Kit's setup code, w
    (SEC5, SEC9); at most three that parse are tried, because each costs a derivation, and at most one per
    authoring device (its newest), so a device that publishes a chain of headers spends one of the three (Z1).
    Nothing can be checked against the registry yet: a store that plants well-formed headers under device IDs of
-   its own invention still uses up the three, as it can delete the real header (W5, Y7).
+   its own invention still uses up the three, as it can delete the real header (W5, Y7). So can a revoked device
+   that can create objects and delete none, and because a header's name is `header/<generation>-<device>`, with no
+   digest of its contents, it can also create the name a device will publish its next change under before that
+   device does: objects are never overwritten, so the genuine header is not published there and no lagging or new
+   device can follow that change (review finding Z16, tracked: a digest in the name, as sharing objects have, S20).
 2. Derive the AUK, open the keyset (bound to the account ID), open the binding. Any failure is the one error a
    wrong password and a wrong Secret Key share. The binding is what authenticates the header to a device that
    holds no key yet: nobody without the password and Secret Key can make one, and it fixes the two things a new
@@ -864,15 +873,34 @@ refused; it is never taken as confirming a "change" that happens to use the same
 that knew it can publish. If it does not open it, each device that published a *pending* change (one that follows
 the credentials this device has) gets one attempt, on its newest header, up to three; a change whose own history
 revokes this device is refused (`passwordChangeRevokesThisDevice`), and if more devices have published one than
-were tried, the unlock says that (`tooManyPasswordChangesPending`) rather than "wrong password". A change that
+were tried, the unlock says that (`tooManyPasswordChangesPending`) rather than "wrong password". The devices whose
+registration the checkpoint this device follows had sealed are tried first (review finding Z13): one registered
+after it may have been registered with the password it retired, by anyone who knew that password, and as many of
+them as they like, so the order of generations and IDs, both a change's author's choice, comes second. A change that
 branches off *before* the credentials this device follows (two devices changed the password at once, or someone
 used a password since retired) is not tried from the lock screen at all, or a retired password would open a
 device that has moved on. If the change was not the person's, they unlock a device they still hold with the
 password it has (`unlock(password:ignoringPasswordChange:)`, which reads no candidate), revoke the device that made
-it and set a password of their own. From an unlocked session `pendingPasswordChanges` lists the changes this
-device does not follow, with the device that made each and the devices each would revoke, and
-`followPasswordChange(by:password:)` follows the one the person names: that is how a fork is followed, and how the
-genuine change is reached when a revoked device has published more than an unlock tries.
+it and set a password of their own. From an unlocked session `pendingPasswordChanges` lists **every** device that
+made a change this device does not follow, sealed ones first, with what following each would revoke worked out for
+the first sixteen and for any other the person selects (`describePasswordChange`, Z13); and
+`followPasswordChange(by:current:password:)` follows the one the person names, given the password this device
+follows now, re-derived under its own header (Z14: an unlocked or quick-unlocked session is not enough), and that
+change's password. That is how a fork is followed, and how the genuine change is reached when a revoked device has
+published more than an unlock tries. Every derivation under a candidate's parameters (its author's choice, up to the
+ceiling) runs off the session's actor, so a `lock()` never waits for one (Z14).
+
+**A header ahead of the anchor** (review finding Z9). The local header row is A8's to write, and a revoked device's
+holder can make a header for a change of their own with the retired password, so a row one generation ahead of the
+Keychain anchor proves nothing. Before an adoption or a password change commits, the device writes into the anchor
+the credential entry it is moving to and the SHA-256 of the exact header row it commits; once the commit is pinned
+the intent is cleared. A crash between the two leaves an intent that the next read completes (the row is that
+header) or drops (the row is still the one the anchor follows). A row ahead of the anchor that no intent names is
+not this device's step: a change is pending, the password that opens it is refused like a retired one, with
+`ignoringPasswordChange` the device opens and follows nothing, and nothing moves the anchor onto it. Candidates are
+judged along the same chain as that question, and none is tried while a step of the device's own is under way. An
+anchor left behind its row by a version that wrote no intent reads the same way; the device is opened with
+`ignoringPasswordChange`, and the change is followed by naming its own device.
 
 ### 7.8 The device registry (as built; review findings D9, Y5, Y6)
 
@@ -959,7 +987,8 @@ enrolment key, and whoever holds those can make one that does.
 has applied, and the password changes it has seen and not been given are pinned in the Keychain
 (`deviceRegistryAnchor`). The genesis entry comes from the account header the person's password opened; the
 credential entry moves forward only when this device changes the password or the person unlocks it with a newer
-one. So the store cannot forge the registry (no account key), cannot roll a device back (the local file must
+one, and only through the intent such a step writes first (Z9). So the store cannot forge the registry (no account
+key), cannot roll a device back (the local file must
 still hold everything the anchor names, or nothing verifies until a sync restores it), and cannot fork it in any
 way that survives the entries reaching a device (union is the merge). It can withhold entries, as it can withhold
 anything (Y7): a device then acts on an older registry until they arrive. A header older than the pinned
@@ -1849,23 +1878,41 @@ password change is theirs, because the person typed its password. Another member
 kind: two changes made from the same generation each carry the account key's signature, a registered device's and
 the previous generation's enrolment key's, and a device that was revoked with a password change still holds all
 three for the generation before its revocation. So no rule picks between two branches, and following the highest
-generation followed whoever published most. Instead, what this device took once is an anchor (the genesis entry and
-the credential entry followed; signed by this account under `WWMD` and saved with each vault that lists the member,
-refused whole if it does not verify) that moves **only forward**: one credential entry at a time, and only where
-exactly one change follows that replays as a chain. A change that leaves the chain at or before the anchored entry
-is never followed, whatever its generation. Where two or more follow it, neither is taken, and a device counts only
-if it is registered at the anchored entry *and in every competing branch*: each side's revocations are honoured,
+generation followed whoever published most. Instead, what this device took once is an anchor (the genesis entry,
+the credential entry first anchored, its *base*, and the one followed now; signed by this account under `WWMD` and
+saved with each vault that lists the member, refused whole if it does not verify) that moves **only forward**: one
+credential entry at a time, and only where exactly one change follows that replays as a chain. A change that leaves
+the chain before the base is never followed, whatever its generation. One that leaves it at the base or after,
+beside a change this device has followed since, competes with it (review finding Z12): a device anchored long before
+a theft would otherwise follow whichever branch was published first, the forged one included, and hold the genuine
+change, arriving later, as one that leaves the chain behind it. Where two or more compete, neither is taken, and a
+device counts only if it is registered at the entry they leave *and in every competing branch*: each side's
+revocations are honoured,
 so neither the device a branch revokes nor the one it keeps signs anything that counts here, while a device nobody
 contests carries on (a contested device stays listed as a revoked one is, so what it wrote before is still its
 account's work). A second genesis entry neither replaces nor removes the one anchored; with none anchored, two
 anchor neither. Each such sight is reported in the vault's status (`membersWithDisagreeingDevices`: "this person's
-devices disagree: verify with them again") until the person settles it, and the one step that moves an anchor
-anywhere but forward is theirs: `verifyMemberDevices(of:code:)`, with the twelve-digit code the member reads off
-their own device (`memberDevicesCode`, a digest of the account and the credential entry that device follows).
+devices disagree"). **Nothing in this version settles it** (review finding Z11). A twelve-digit code once moved the
+anchor to the branch the member's own device named; it was about 40 bits of an unkeyed hash of a value the holder
+of the member's account key can grind (to collide with the genuine entry and deny the step, or to give a forged
+change the genuine code), the weakness ADR 0010 rejects, and was removed. Re-verifying a member's devices after a
+fork belongs to the vault sharing code session of ADR 0010, whose transcript can cover the member's registry tip.
+Comparing safety numbers again does not do it: that verifies the member's account keys, which both branches share.
+Until then the person's way out is outside this device: what the member's contested devices write is held aside
+here (not lost); the member can go on writing from a device every branch keeps, if they have one; and an
+administrator can remove the member, who makes a new account and is invited again under it, since a new account has
+a registry the old device never signed into.
+
+A refresh follows at most eight changes forward (review finding Z10; the pin carries the progress to the next), and
+its replays run off the session's actor, dropped if a `lock()` came meanwhile: each step costs up to eight replays
+of a registry its account fills, and a refresh runs before any vault's log.
+
 What this does not stop: the holder of the member's account key can keep that member's contested devices in
-question, and make the notice return, for as long as they like; and a device that anchors while only the forged
-branch is visible follows it until the person verifies. Both end with the account re-key (F10.1, not built), which
-gives the member a signing key the old device never held.
+question, and make the notice return, for as long as they like; a device that anchors while only the forged branch
+is visible follows it; and the pins are local state, which A8 can delete or roll back (review finding Z15,
+tracked): a device whose pins are gone anchors again from what the transport shows, with its base wherever it
+lands now. These end with the account re-key (F10.1, not built), which gives the member a signing key the old
+device never held, and the pins' digest in the Keychain.
 
 **A stream is one account's** (review finding Z46). An object's name carries a device ID and no account, device IDs
 are chosen by devices, and a member can list another member's device ID in their own registry (S33) and sign segments

@@ -1070,8 +1070,9 @@ retired password, and A8:
   sealing a back-dated revocation of the revoker, is refused when the retired password is typed, followed by
   nothing under `ignoringPasswordChange`, and described to the person (who made it, what it revokes); a chain of
   four changes under one device's name leaves the genuine one reachable by unlock and by enrolment; a change whose
-  own history revokes the device is refused there; with four devices claiming a change, the unlock reports that
-  and the genuine one is followed by naming its device from an unlocked session; a fork made with a retired
+  own history revokes the device is refused there; with four devices claiming a change, none of them registered
+  before the checkpoint the device follows, the unlock reports that and the genuine one is followed by naming its
+  device from an unlocked session; a fork made with a retired
   password does not open a device that follows the new one, and is followed only from an unlocked session.
 - The list of pending changes (Z2): 96 planted credential entries, half without a valid signature of the previous
   generation's enrolment key, cannot keep the genuine change off it, over four seeds, asserting that sixteen sort
@@ -1087,15 +1088,46 @@ retired password, and A8:
 - Another member's registry (Z6), through two sessions sharing a vault (`AdversarialSharedVaultMemberDevicesTests.swift`,
   suite "shared vaults through the session"): a member's laptop, revoked with a password change, forks the member's
   registry two generations long and writes into the vault as the member; the owner, who had followed the genuine
-  change, reads the member's phone and not the laptop and reports the disagreement; another member who sees both
-  branches at once reads neither device, keeps what the laptop wrote while it was the member's, reports it, refuses
-  a wrong code, and on the member's code reads the phone and saves a signed, settled anchor. And as a function
-  over `RegistryFixture`: the member's own change followed when it
-  is all there is; a forged branch two generations long ignored and reported once the genuine one is anchored;
-  both arriving together followed by neither, with only the uncontested device counting; the forged branch alone
-  followed and then held to, the genuine one reported, and the member's code naming it; a settled disagreement not
-  reported again and a new entry reported; a second genesis entry neither replacing nor removing the anchored one,
-  and two anchoring neither; the saved anchors refused whole on any edit, another vault's ID or another key.
+  change forward from where it first anchored, and another member who sees both branches at once, alike read
+  neither contested device (Z12), keep what the laptop wrote while it was the member's and report it; comparing
+  safety numbers again settles nothing, and the saved anchor stays where it was (Z11). And as a function over
+  `RegistryFixture`: the member's own change followed when it is all there is; a forged branch two generations long
+  ignored and reported once the genuine one is anchored at first sight; both arriving together followed by neither,
+  with only the uncontested device counting; the forged branch alone followed and then held to, the genuine one
+  reported; a disagreement settled by an earlier version not reported again and a new entry reported; a second
+  genesis entry neither replacing nor removing the anchored one, and two anchoring neither; the saved anchors
+  refused whole on any edit, another vault's ID or another key.
+
+Added by the review of those fixes (`AdversarialAccountReviewTests.swift`, the same suite unless named;
+`06-adversarial-review.md` §Z, Z9 to Z17):
+
+- A header ahead of the anchor (Z9): the revoked device's change, made with the retired password and written into a
+  laptop's file as its own header, is refused when that password is typed, whether or not the laptop had been told
+  of the genuine change; with `ignoringPasswordChange` it opens and follows nothing, a sync moves nothing, and the
+  new password still reaches the genuine change. A password change and an adoption interrupted between commit and
+  pin are completed from the intent (a fork made with the retired password then stays a fork; a pending list does
+  not outlive the adoption that followed it); an intent the file does not bear out is dropped if nothing was
+  committed and is no licence if a planted header is there; the anchor's third form round-trips an intent and reads
+  its second.
+- Another member's registry (Z10, Z12): one refresh follows at most eight of a 20-change chain and the pin carries
+  the rest over three refreshes; a lock while the replay is held off the actor takes effect at once and the replay
+  is dropped ("shared vaults through the session"); a branch followed forward from the base loses its standing when
+  a sibling arrives later beyond the base, the tip being kept; nine competing changes hold every device in question;
+  the saved pins' second format carries the base, the first reads with the base at the tip.
+- The way out of too many pending changes (Z13): seventeen puppets registered with the retired password, each with
+  a two-step chain, neither fill the lock screen's three attempts nor push the genuine change off the list, which
+  holds all eighteen authors, sealed first, sixteen described and the rest on request.
+- Following a change (Z14): from a quick-unlocked session it takes the password the device follows (a wrong or
+  retired one is refused and nothing moves); keys replaced meanwhile end with the new Account Unlock Key resident; a
+  lock while a candidate's key is derived, from a follow or at the lock screen, takes effect at once and adopts
+  nothing.
+- Claims nothing held before (Z17): the flag tries no candidate; a sync keeps one header per author, its newest; a
+  follow fetches a header no sync kept; sync's merge-and-publish gate asks the anchor when the file and the
+  transport have lost the change (the test fails with that term removed); in "unlock and quick unlock", each quick
+  unlock that opens the keyset takes its attempt back, and a released key that opens nothing destroys the
+  enrolment.
+- Tracked, as known issues: member pins deleted from the file are anchored again from the transport, base and all
+  (Z15); a header name created first by someone else keeps the genuine header off the store (Z16).
 
 Registry rules themselves, including the back-dating case the suite found, are in `WatchwordCryptoTests`
 "Device registry" (among them `puppets`: entries relying on a registration that can never count — forged, by the

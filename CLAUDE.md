@@ -619,9 +619,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `arrivedByGrant`. A new unlock path does the same.
 - **The device's own header first** (Z1, `openAccount`). A typed password is tried against the header this device
   has before anything else, and never against a candidate when it opens that or when `ignoringPasswordChange` is
-  set. Candidates are pending changes only, one attempt per authoring device; a fork is followed only from an
-  unlocked session (`followPasswordChange`, Z8). Never try a candidate ahead of the trusted header, and never
-  adopt one whose branch revokes this device.
+  set. Candidates are pending changes only, one attempt per authoring device, those whose registration the followed
+  checkpoint sealed first (Z13); a fork is followed only from an unlocked session, with the password the device
+  follows re-derived under its own header (`followPasswordChange(by:current:password:)`, Z8, Z14). Never try a
+  candidate ahead of the trusted header, and never adopt one whose branch revokes this device. A candidate's
+  derivation runs off the actor (`AwayWork.candidateDerivation`).
+- **A header ahead of the anchor is no step of this device's unless the Keychain named it** (Z9). `adopt` and
+  `rotateCredentials` commit through `commitOwnStep`, which writes the intent (credential entry, SHA-256 of the
+  header row) into the anchor first; decisions read `trustedAnchor`, which completes or drops it. Never move an
+  existing anchor from what the file holds, and never decide on `readAnchor` directly.
 - The actor is re-entrant across `await`: after every suspension, re-check the lock epoch (`requireKeys(since:)`)
   before touching key material, so `lock()` always wins.
 - Read contexts come from the store row, and a decrypted item's `id`/`vaultID`/`version` must equal the row's.
@@ -669,7 +675,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   decoding, and an export's password and archive derivations run off the actor (`awayFromSession`, named by
   `AwayWork`) on copied inputs, touching no session state, and the epoch is checked on return (`requireKeys(since:)`).
   IDs drawn there come from a `ForkedGenerator`, never a copy of `random`; key material, salts and nonces only from
-  `random`, on the actor. A new long step goes there too, with a test that holds it (`awayWorkHook`) and locks.
+  `random`, on the actor. A new long step goes there too, with a test that holds it (`awayWorkHook`) and locks. So do
+  a candidate header's derivation (Z14) and another member's registry replays (Z10), which may run while locked
+  (`awayFromSession(_:unlessLockedSince:)`, which drops the result after a `lock()`).
 - Every invariant above holds per vault. A vault's key and identity come from its `vaultKeyWrap` row; which vaults
   exist comes from the directory rows under the account's ID, and a vault counts as deleted only on a deletion
   signed by the account key and a registered device for that vault. The Personal vault is never deleted. Deleting
@@ -761,8 +769,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   entry this device anchored (`MemberRegistryPin`, saved signed as `WWMD`), one credential entry at a time, and only
   where exactly one change follows. Two changes from one generation are symmetric to an outsider, so no rule picks
   one: where two follow, only devices every branch keeps count, and the fork is reported
-  (`membersWithDisagreeingDevices`). Never follow the highest generation, never drop the anchor for a second
-  genesis, and move an anchor sideways only in `verifyMemberDevices`.
+  (`membersWithDisagreeingDevices`). The pin keeps the entry first anchored (`base`) apart from the tip, and a
+  change beside a followed entry from the base on competes with it (Z12): being published first earns a branch
+  nothing. Never follow the highest generation, never drop the anchor for a second genesis, and never move an anchor
+  sideways: nothing in this version settles a contested registry (the twelve-digit code was removed, Z11; that is
+  for ADR 0010's vault sharing code session). One refresh follows at most `memberRegistryStepsPerRefresh` changes,
+  off the actor (Z10).
 - **A stream is one account's** (Z46): this device's own stream takes only this account's signature (another's there is
   held aside in sequence and never numbers the stream, Z30), and any other
   belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`). Another
@@ -801,12 +813,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   finding W1). It is **listed** (`pendingCredentials`, `forkedCredentials`) from its own signatures and its links
   back to the chain alone, one verification each and no replay, so that no number of planted entries hides the
   genuine change (Z2). Never put a budget on the list, and never treat "listed" as "can be followed".
+  `pendingPasswordChanges` lists every author too, those the followed checkpoint sealed first (Z13); only the
+  replay that describes a row is bounded, and `describePasswordChange` does it for any other.
 - Every entry needs the account key's signature and its author's (a registered device, or the current enrolment
   key); a credential entry also the previous generation's enrolment key. A revoked ID or key never returns.
 - What a device trusts is in the Keychain (`deviceRegistryAnchor`, `accountSigningKey`), never in the database.
   The local store must still hold everything the anchor names, or the registry is unavailable and nothing verifies.
   The anchor also names the pending password changes seen (`RegistryAnchor.pending`, Z3), kept until the device
-  follows another credential entry: ask `passwordChangePending`, never whether a candidate header row exists.
+  follows another credential entry: ask `passwordChangePending`, never whether a candidate header row exists. A
+  non-empty list, an unsettled intent or a header row ahead of the anchor is pending, before anything else (Z9).
 - Everything fetched before a key is held is hostile: headers are bounded and KDF-validated before any derivation,
   authenticated by the binding under the derived AUK, and the genesis entry comes from that binding only.
 - A device with a password change it has not been given neither merges nor publishes, refuses the old password

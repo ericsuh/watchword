@@ -294,12 +294,20 @@ half delivered** on a Mac; the transports are open.
   and, for a device that has never published in a vault, an unfetchable name in its stream still holds its publishing
   there (Z31).
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
-  screen (`DevicesModel.passwordChanges` and `follow`, over `pendingPasswordChanges` and `followPasswordChange`; the
-  lock screen reports `tooManyPasswordChangesPending` and `passwordChangeRevokesThisDevice` in words, Z1 and Z8);
-  showing a member their devices code and taking another member's (`DevicesModel.devicesCode`,
-  `SharedVaultModel.verifyDevices`, over `memberDevicesCode` and `verifyMemberDevices`; the member list words the
-  warning, Z6). The models are written and tested; no SwiftUI view uses them. Whether that code should instead be
-  part of the safety number is ADR 0010's question.
+  screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
+  `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,
+  Z13 and Z14; the lock screen reports `tooManyPasswordChangesPending` and `passwordChangeRevokesThisDevice` in
+  words, Z1 and Z8); the member list's warning that a member's devices disagree (Z6). The models are written and
+  tested; no SwiftUI view uses them.
+- **Still open (settling a member's contested devices, Z11):** the twelve-digit member devices code is gone
+  (`memberDevicesCode`, `verifyMemberDevices`, `DevicesModel.devicesCode`, `SharedVaultModel.verifyDevices`): about
+  40 bits of a value the member's key holder can grind. Re-verifying a member's devices after a fork is to be part
+  of the vault sharing code session of ADR 0010; until it is, a contested member registry stays contested and is
+  reported, and comparing safety numbers again does not settle it.
+- **Still open (keys, tracked by the review of the audit's fixes):** the pins of other members' registries are
+  local state that A8 can delete or roll back (Z15; a digest or counter in the Keychain next to the registry anchor,
+  and a rule for a mismatch); account header names carry no digest, so a name created first keeps a genuine header
+  off the store, and planted headers under invented device IDs still use up enrolment's three derivations (Z16).
 
 ## Milestone 4 — Sharing (protocol core and session integration done; transports and UI open)
 
