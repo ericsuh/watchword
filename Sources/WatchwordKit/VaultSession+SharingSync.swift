@@ -96,8 +96,12 @@ extension VaultSession {
         configuration.maintainsLog = false
         // Disputed (Z59): downloaded only, like a vault with no ledger here.
         if isOwnerDisputed(vaultID) { return (configuration, nil, false, false) }
-        // A replay judges every version again, and notes again which devices' streams it is waiting on.
-        if vault.needsReconcile { sharing.vaults[vaultID]?.index.awaiting = [] }
+        // A replay judges every version again, and notes again which devices' streams it is waiting on and whose
+        // revocations it asks about.
+        if vault.needsReconcile {
+            sharing.vaults[vaultID]?.index.awaiting = []
+            sharing.vaults[vaultID]?.index.relied = []
+        }
         return (
             configuration, VaultSyncAdapter(session: self),
             vault.ledger.writePermission(for: account.accountID).isAllowed, vault.needsReconcile
@@ -115,8 +119,10 @@ extension VaultSession {
     /// stream's account changed when an earlier segment arrived, a key, a segment inside a cut) can make a version
     /// that the pass's own take-out judged against the old index stop counting, and only a take-out removes it: the
     /// request stays, and the next replay, in this sync or the next, takes out and replays again (review finding
-    /// Z120). Settled regardless, it was lost, and the device kept what every other device holds aside.
-    func sharedEngineDidRun(_ vaultID: UUID, reconciled: Bool, report: SyncReport, requestsBefore: UInt64) {
+    /// Z120). Settled regardless, it was lost, and the device kept what every other device holds aside. What is settled
+    /// is the judged basis (`judgedBasis`): the head, and the revocations what was judged rests on (Z153).
+    func sharedEngineDidRun(_ vaultID: UUID, reconciled: Bool, report: SyncReport, requestsBefore: UInt64) async {
+        let basis = reconciled ? await judgedBasis(vaultID) : nil
         guard var vault = sharing.vaults[vaultID] else { return }
         if reconciled, !report.deferredUntilUnlock, !report.transportUnavailable {
             if vault.replayRequests != requestsBefore {
@@ -129,7 +135,7 @@ extension VaultSession {
                 vault.index.judgedHead = nil
             } else {
                 vault.needsReconcile = false
-                vault.index.judgedHead = vault.ledger.state.hash.bytes
+                vault.index.judgedHead = basis ?? vault.ledger.state.hash.bytes
                 // What the replay did not rebuild is held aside whole: gone from the vault, for the hygiene engine too.
                 hygieneRuntime?.takenOut = []
             }
@@ -847,6 +853,7 @@ extension VaultSession {
         let vouched = Self.vouchesForUncarriedValues(record, in: vault, account: account.accountID)
         let retired = revokedDevices(in: record.vaultID, ownView: ownView, account: account)
         var awaited: Set<UUID> = []
+        var relied: Set<UUID> = []
         var admitted = true
         // Every value is filed under the device its stamp names (`attributedValues`).
         for value in Set(values.map(\.value)) {
@@ -870,6 +877,7 @@ extension VaultSession {
             if vouched, !accounts.isEmpty, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) {
                 continue
             }
+            if !accounts.isEmpty { relied.insert(value.device) }
             // A stream that will never carry it here: a revoked device's, which is not read again, or one whose first
             // segments were collected before the vault was shared (review finding Z144). Believed of an account that
             // may write, in a version that otherwise counts, and never waited for.
@@ -891,12 +899,9 @@ extension VaultSession {
                 ItemMerge.effectiveClock(item, origin: Self.origin(record)),
                 of: VersionKey(recordID: record.recordID, kind: record.kind.rawValue, version: record.version),
                 author: writersOwn ? record.deviceID : nil, judgedBy: account.deviceID, in: vault, vouched: vouched,
-                retired: retired, listing: listing, awaited: &awaited)
+                retired: retired, listing: listing, awaited: &awaited, relied: &relied)
         }
-        if let known = sharing.vaults[record.vaultID]?.index.awaiting, !awaited.isSubset(of: known) {
-            sharing.vaults[record.vaultID]?.index.awaiting.formUnion(awaited)
-            sharing.vaults[record.vaultID]?.indexChanged = true
-        }
+        noteJudgement(record.vaultID, awaited: awaited, relied: relied, counted: retired)
         return admitted
     }
 
@@ -921,7 +926,8 @@ extension VaultSession {
     /// to be its work (`judgeAdmits`), or the device whose stream carried a tombstone. `nil` exempts nobody.
     static func knowledgeCounts(
         _ clock: VersionVector, of record: VersionKey, author: UUID?, judgedBy me: UUID, in vault: SharedVault,
-        vouched: Bool, retired: Set<UUID>, listing: (UUID) -> [UUID], awaited: inout Set<UUID>
+        vouched: Bool, retired: Set<UUID>, listing: (UUID) -> [UUID], awaited: inout Set<UUID>,
+        relied: inout Set<UUID>
     ) -> Bool {
         for (device, count) in clock.entries where device != author {
             let accounts = listing(device)
@@ -934,6 +940,7 @@ extension VaultSession {
             // knows what it wrote, and no version vouches for that, nor does a stream it has not published in yet
             // (review finding Z136).
             if device == me { return false }
+            relied.insert(device)
             // A stream that will never show the edits here (review finding Z144): a revoked device's, never read again,
             // so a device that recorded none of it (enrolled, joined or rebuilt its index since) waited for it for
             // good; or the owner's, whose first segments were collected before the vault was shared. Believed of an
@@ -983,6 +990,7 @@ extension VaultSession {
         let vouched = Self.vouchesForUncarriedValues(sealedUnder: keyID, in: vault, account: account.accountID)
         let retired = revokedDevices(in: location.vaultID, ownView: ownView, account: account)
         var awaited: Set<UUID> = []
+        var relied: Set<UUID> = []
         var admitted = true
         let key = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
         // A segment's tombstone is its author's own (`validate` holds every entry of a segment to the stream's device),
@@ -994,16 +1002,13 @@ extension VaultSession {
             guard
                 Self.knowledgeCounts(
                     erasure.seen, of: key, author: author, judgedBy: account.deviceID, in: vault,
-                    vouched: vouched, retired: retired, listing: listing, awaited: &awaited)
+                    vouched: vouched, retired: retired, listing: listing, awaited: &awaited, relied: &relied)
             else {
                 admitted = false
                 break
             }
         }
-        if let known = sharing.vaults[location.vaultID]?.index.awaiting, !awaited.isSubset(of: known) {
-            sharing.vaults[location.vaultID]?.index.awaiting.formUnion(awaited)
-            sharing.vaults[location.vaultID]?.indexChanged = true
-        }
+        noteJudgement(location.vaultID, awaited: awaited, relied: relied, counted: retired)
         return admitted
     }
 
@@ -1032,6 +1037,49 @@ extension VaultSession {
         if sharing.vaults[vaultID]?.index.passedOver != passedOver {
             sharing.vaults[vaultID]?.index.setPassedOver(passedOver)
         }
+    }
+
+    /// Notes what one judgement waited for and whose revocations it asked about (`awaiting`, `relied`). A judgement made
+    /// while the settled basis is current used the revocations as they stand, so the basis moves with it; otherwise
+    /// the replay that is due settles it (Z153).
+    func noteJudgement(_ vaultID: UUID, awaited: Set<UUID>, relied: Set<UUID>, counted: Set<UUID>) {
+        guard let vault = sharing.vaults[vaultID],
+            !awaited.isSubset(of: vault.index.awaiting) || !relied.isSubset(of: vault.index.relied)
+        else { return }
+        let head = vault.ledger.state.hash.bytes
+        var index = vault.index
+        let before = Self.judgedBasis(head: head, index: index, counted: counted)
+        index.awaiting.formUnion(awaited)
+        index.relied.formUnion(relied)
+        if index.judgedHead == before {
+            index.judgedHead = Self.judgedBasis(head: head, index: index, counted: counted)
+        }
+        sharing.vaults[vaultID]?.index = index
+        sharing.vaults[vaultID]?.indexChanged = true
+    }
+
+    /// What a replay settles and a change of which takes out and replays (review finding Z153): the head, and the
+    /// devices whose revocation counts among those a judgement since the last replay waited for or asked about. A
+    /// device's revocation can start counting after a version naming it was held aside waiting for its stream, which
+    /// is then never read, and stop counting when a registry lists it again; either changes what counts, and no change
+    /// of head follows. Only those devices: every registry change replaying the log would let any member replay it at
+    /// will. The head's own hash when none counts, as before.
+    static func judgedBasis(head: [UInt8], index: SharedStreamIndex, counted: Set<UUID>) -> [UInt8] {
+        let bound = index.relied.union(index.awaiting).intersection(counted).sorted { $0.precedes($1) }
+        guard !bound.isEmpty else { return head }
+        return ObjectDigest(hashing: Array("WW-judged-v1".utf8) + head + bound.flatMap(SharedBytes.bytes)).bytes
+    }
+
+    /// `judgedBasis` for `vaultID` as this device stands now; `nil` for a vault with no ledger here.
+    func judgedBasis(_ vaultID: UUID) async -> [UInt8]? {
+        guard let head = sharing.vaults[vaultID]?.ledger.state.hash.bytes else { return nil }
+        guard let account = try? await loadAccount() else { return head }
+        let ownView = try? await registry(account)
+        refreshPassedOver(vaultID)
+        guard let vault = sharing.vaults[vaultID] else { return nil }
+        return Self.judgedBasis(
+            head: vault.ledger.state.hash.bytes, index: vault.index,
+            counted: revokedDevices(in: vaultID, ownView: ownView, account: account))
     }
 
     /// Whether every one of `accounts` may write now.
@@ -1235,13 +1283,15 @@ extension VaultSession {
 
     // MARK: - Taking out what no longer counts
 
-    /// After a change of head: every local version of the vault that no longer counts is taken out of the store and
-    /// held aside (kept in the quarantine, never published on), and the log is replayed with the judge, so that each
-    /// record is rebuilt from the versions that count (§8.7: "taken out, not only kept out").
+    /// After a change of head, or of the revocations what was judged rests on (`judgedBasis`, Z153): every local
+    /// version of the vault that no longer counts is taken out of the store and held aside (kept in the quarantine,
+    /// never published on), and the log is replayed with the judge, so that each record is rebuilt from the versions
+    /// that count (§8.7: "taken out, not only kept out").
     func takeOutWhatNoLongerCounts(_ vaultID: UUID) async throws {
-        guard let vault = sharing.vaults[vaultID], let syncSettings else { return }
-        let head = vault.ledger.state.hash.bytes
-        guard vault.index.judgedHead != head else { return }
+        guard sharing.vaults[vaultID] != nil, let syncSettings, let basis = await judgedBasis(vaultID),
+            let vault = sharing.vaults[vaultID]
+        else { return }
+        guard vault.index.judgedHead != basis else { return }
         guard !vault.indexRebuilding else {
             // Never judged against an index being rebuilt: the replay rebuilds it first.
             sharing.vaults[vaultID]?.needsReconcile = true

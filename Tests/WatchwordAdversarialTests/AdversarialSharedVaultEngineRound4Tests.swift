@@ -14,6 +14,13 @@ extension VaultSession {
     func retiredInVault(_ vaultID: UUID) async -> Set<UUID> {
         await syncRetiredAuthors(vaultID: vaultID)
     }
+
+    /// For tests: whether the vault's items were last judged against the basis as it stands, with no replay due.
+    func judgementIsSettled(_ vaultID: UUID) async -> Bool {
+        let basis = await judgedBasis(vaultID)
+        guard let vault = sharing.vaults[vaultID] else { return false }
+        return !vault.needsReconcile && vault.index.judgedHead == basis
+    }
 }
 
 // The review of the engine's fourth round (rows Z144 to Z149) in shared vaults (docs/06-adversarial-review.md §Z,
@@ -77,6 +84,56 @@ extension AdversarialSharedVaultTests {
             let titles = try await account.session.items(in: vaultID).items.map(\.title)
             #expect(titles.contains(fromLaptop.title), "the laptop's work did not reach the \(name)'s device")
             #expect(titles.contains(fromPhone.title), "the phone's work did not reach the \(name)'s device")
+        }
+    }
+}
+
+// Review finding Z153: a revocation learnt after a version naming the device was held aside changed nothing.
+extension AdversarialSharedVaultTests {
+    /// Threat: the store (A1), showing a member who joined (or any device) everything but the stream of another
+    /// member's laptop, and then the laptop's ordinary loss and revocation; or no adversary, a device whose listing
+    /// lags. The owner's version of an item carries the laptop's password value, so that device held it aside waiting
+    /// for the laptop's stream. Then the laptop was revoked: its stream is never read again, nothing that device waited
+    /// for can arrive, and nothing else made it judge again until some unrelated change of head, while a device that
+    /// judged after the revocation believed the value (Z144): the two disagreed about the same segments. A revocation
+    /// that starts counting for a device a judgement waited for changes the judged basis, which takes out and replays.
+    @Test("a revocation learnt after a version was held aside for that device is judged again")
+    func revocationLearntAfterTheHold() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3600)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let member = try await household.account(seed: 3601)
+        let (joiner, view) = try await household.withheldAccount(seed: 3602)
+        try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(joiner, to: vaultID, as: .readWrite, owner: owner)
+        let laptop = try await household.secondDevice(of: member)
+        try await laptop.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await Self.syncAll([owner, member, laptop, joiner])
+        let laptopID = try await Self.deviceID(of: laptop)
+        await view.withholdNew(under: "vault/\(vaultID.uuidString)/log/\(laptopID.uuidString)/")
+
+        var kept = Self.bank(in: vaultID)
+        kept = try await laptop.session.save(Self.setting(.password, to: "laptop-password", in: kept))
+        try await Self.syncAll([laptop, owner])
+        var renamed = try await owner.session.item(id: kept.id)
+        renamed.title = "Renamed by the owner"
+        _ = try await owner.session.save(renamed)
+        try await Self.syncAll([owner, joiner])
+        #expect(
+            (try? await joiner.session.item(id: kept.id)) == nil, "the joiner was not waiting: the test proves nothing")
+
+        try await member.session.revokeDevice(laptopID, password: .keepPassword(current: TestVault.password))
+        try await Self.syncAll([member, owner, joiner])
+        let item = try? await joiner.session.item(id: kept.id)
+        #expect(item?.title == "Renamed by the owner", "held aside for a stream that will never be read")
+        #expect(item?.field(.password)?.value == "laptop-password")
+        // And it settles: no replay at every sync after.
+        for _ in 0..<2 {
+            try await joiner.session.sync()
+            #expect(await joiner.session.judgementIsSettled(vaultID), "the log is replayed at every sync")
         }
     }
 }

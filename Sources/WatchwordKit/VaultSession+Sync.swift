@@ -99,7 +99,7 @@ extension VaultSession {
                 vaultReport = try await engine(vaultID).sync(
                     reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
                     transportStopped: stopped)
-                sharedEngineDidRun(
+                await sharedEngineDidRun(
                     vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport, requestsBefore: requests)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
@@ -139,7 +139,7 @@ extension VaultSession {
                 let requests = sharedReplayRequests(vaultID)
                 let second = try await engine(vaultID).sync(
                     reconcile: true, deferringDeletions: true, publishing: shared.publishing)
-                sharedEngineDidRun(vaultID, reconciled: true, report: second, requestsBefore: requests)
+                await sharedEngineDidRun(vaultID, reconciled: true, report: second, requestsBefore: requests)
                 if second.deletionsDeferred > 0, !deferred.contains(vaultID) { deferred.append(vaultID) }
                 if second.transportUnavailable || second.ownStreamConflict != nil || second.ownStreamExhausted
                     || second.ownStreamUnverified != nil

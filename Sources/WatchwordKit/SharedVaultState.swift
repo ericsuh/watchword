@@ -52,8 +52,9 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// replay, which files them, before anything is judged against it. 4 since segments that do not open here are
     /// recorded too, each segment saying whether it was opened (Z51): an earlier index lacks them, and names a
     /// stream's account by the first segment that happened to open. 5 since `ownTakenOut` (Z54) moved to a row of its
-    /// own, which a rebuild of the index leaves alone (`OwnTakenOutRow`, Z121).
-    static let formatVersion: UInt8 = 5
+    /// own, which a rebuild of the index leaves alone (`OwnTakenOutRow`, Z121). 6 since `relied` (Z153): an earlier
+    /// index does not say which revocations what it admitted rested on, so it is rebuilt by a replay.
+    static let formatVersion: UInt8 = 6
     static let maximumLength = 64 << 20
 
     /// By device, then sequence number.
@@ -69,8 +70,8 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// judgement (`setPassedOver`), never saved: it is a function of the head, and refiling on a change keeps every
     /// device that holds the same segments and head in agreement.
     private(set) var passedOver: Set<UUID> = []
-    /// The membership head the vault's items were last judged against (`MembershipHash.bytes`), so that a change of
-    /// head is noticed after a restart too.
+    /// The basis the vault's items were last judged against (`VaultSession.judgedBasis`: the membership head, and the
+    /// revocations the judgements rested on, Z153), so that a change of either is noticed after a restart too.
     var judgedHead: [UInt8]?
     /// The lowest sequence of each device's stream that carried each version.
     private(set) var firstCarrier: [UUID: [VersionKey: UInt64]] = [:]
@@ -81,6 +82,10 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// Devices a version was held aside for because a value naming them was carried by none of their segments here:
     /// a new segment of theirs can make it count, so recording one asks for a replay (`judgedHead` cleared).
     var awaiting: Set<UUID> = []
+    /// Devices whose revocation (counted or not) a judgement since the last replay asked about, for a value or an edit
+    /// no segment here showed (review finding Z153). Together with `awaiting`, what the judged basis binds
+    /// (`VaultSession.judgedBasis`): a revocation of one of them that starts or stops counting changes what counts.
+    var relied: Set<UUID> = []
 
     init() {}
 
@@ -239,9 +244,11 @@ struct SharedStreamIndex: Sendable, Hashable {
                 for value in segment.values { out += SharedBytes.bytes(value.device) + value.digest }
             }
         }
-        let waiting = awaiting.sorted { $0.precedes($1) }
-        out += SharedBytes.littleEndian32(UInt32(waiting.count))
-        for device in waiting { out += SharedBytes.bytes(device) }
+        for set in [awaiting, relied] {
+            let devices = set.sorted { $0.precedes($1) }
+            out += SharedBytes.littleEndian32(UInt32(devices.count))
+            for device in devices { out += SharedBytes.bytes(device) }
+        }
         return out + (try keyset.sign(out, domain: .membership))
     }
 
@@ -303,12 +310,14 @@ struct SharedStreamIndex: Sendable, Hashable {
                         opened: openedFlag[0] == 1))
             }
         }
-        guard let waitingCount = reader.uint32(), Int(waitingCount) <= reader.remaining / 16 else { return nil }
-        var previousWaiting: UUID?
-        for _ in 0..<waitingCount {
-            guard let device = reader.uuid(), previousWaiting.map({ $0.precedes(device) }) ?? true else { return nil }
-            previousWaiting = device
-            index.awaiting.insert(device)
+        for keyPath in [\SharedStreamIndex.awaiting, \SharedStreamIndex.relied] {
+            guard let count = reader.uint32(), Int(count) <= reader.remaining / 16 else { return nil }
+            var previous: UUID?
+            for _ in 0..<count {
+                guard let device = reader.uuid(), previous.map({ $0.precedes(device) }) ?? true else { return nil }
+                previous = device
+                index[keyPath: keyPath].insert(device)
+            }
         }
         guard reader.remaining == 0 else { return nil }
         return index
