@@ -92,7 +92,9 @@ extension AdversarialAutoFillRequestTests {
         }
         func confirmUnlocked() async throws {}
         func isBackedUp() async throws -> Bool { true }
-        func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item { item }
+        func saveCredentialItem(
+            _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+        ) async throws -> Item { item }
     }
 
     /// Threat: A4 wants the victim's password for the bank, or just wants the victim's login gone from AutoFill

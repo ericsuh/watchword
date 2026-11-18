@@ -2251,11 +2251,19 @@ protocol CredentialVault            (VaultSession conforms; FakeCredentialVault 
                                     name and whether other accounts write it; where a new item goes
   confirmUnlocked()                 throws `locked` unless unlocked now; the last call before a release
   isBackedUp()                      whether items reach the sync store (the BS flag)
-  saveCredentialItem(_:replacingVersion:)   create, or compare-and-swap on the version read
+  saveCredentialItem(_:replacingVersion:confirmingHosts:)
+                                    create, or compare-and-swap on the version read; a host it adds
+                                    that needs a confirmation is refused unless named
 ```
 
 Every method throws `CredentialVaultError`, and `locked` whenever there are no keys. The vault
-keeps owning versions, timestamps, history, sync metadata and the scope policy check. A vault the
+keeps owning versions, timestamps, history, sync metadata and the scope policy check, and judges
+every host a save adds as the editor's save is judged (F11.7, Z61): the model names a host in
+`confirmingHosts` only where its sheet showed the look-alike warning and the person chose the new
+item (review finding Z78; before, the session's conformance answered for every host, a public
+bypass of Z61). The planner's and the publisher's entry points that take bare `[Item]`, and the
+session's `credentialItems()`, which would treat every vault as the person's own, are internal,
+for tests. A vault the
 snapshot does not describe is taken to be shared. Item IDs
 should be unique in what `credentialSnapshot()` returns, and the model does not rely on it: an ID two
 items share (a member of a shared vault choosing a record ID, an item mid-move between vaults)

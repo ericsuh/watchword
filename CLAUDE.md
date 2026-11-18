@@ -637,7 +637,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   adds is judged against `SavedSites` (what the gate ranks among, every vault): one that resembles a saved site or
   cannot be read by eye is refused (`hostsNeedConfirmation`) unless the call names it in `confirmingHosts` (F11.7,
   Z61). It is recognised only by the person's own vaults or the item's own (`standing(…, inVault:)`, Z76): pass the
-  item's vault wherever a host is about to be added. `ItemEditorModel` asks; a view that skips it is refused all the same.
+  item's vault wherever a host is about to be added. `ItemEditorModel` asks; a view that skips it is refused all the
+  same. `saveCredentialItem` judges the same way (`confirmingHosts`: only a host whose warning the model's sheet
+  showed, Z78): no caller answers for every host.
 - The vault owns sync metadata: every write goes through `ItemMerge.stamped` and commits conditionally on the row it
   read (`commitItem`); a caller's `revisions`, `clock` or `conflicts` are never trusted. The session's deletions go
   through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.
@@ -904,7 +906,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   if it would take the item past `remoteWriteItemBudget` (`admitsRemoteWrite`: the item as written plus one history
   entry, Z71). A new such write asks it too.
 - Locked is a state the model reports (`vaultLocked`, `requiresInteraction(.vaultLocked)`). Each request reads the
-  items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:)`); and every
+  items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:confirmingHosts:)`,
+  which names only a host the person was warned about and confirmed); and every
   request that hands a secret back does so through `releasing(_:)`, which calls `CredentialVault.confirmUnlocked()`
   as the last suspension, so a lock that lands after the read wins.
 - Published identities are plaintext outside the app: `CredentialIdentityPlanner` emits hosts, user names, credential

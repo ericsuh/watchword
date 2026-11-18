@@ -449,10 +449,13 @@ public actor CredentialProviderModel {
 
     /// Writes `item` over `old` (or creates it), as a compare-and-swap on the version read, then republishes its
     /// identities. A conflict is reported, not retried: whoever asked decides again on what is there now.
-    func save(_ item: Item, replacing old: Item?) async throws -> Item {
+    /// `confirmingHosts`: the hosts of a new item whose look-alike warning the person was shown and confirmed past
+    /// (`NewItemProposal.warning`); empty for everything done without the person.
+    func save(_ item: Item, replacing old: Item?, confirmingHosts: Set<String> = []) async throws -> Item {
         let stored: Item
         do {
-            stored = try await vault.saveCredentialItem(item, replacingVersion: old?.version)
+            stored = try await vault.saveCredentialItem(
+                item, replacingVersion: old?.version, confirmingHosts: confirmingHosts)
         } catch {
             throw Self.blocked(error)
         }

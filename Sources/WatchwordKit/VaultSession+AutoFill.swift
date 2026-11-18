@@ -19,7 +19,10 @@ extension VaultSession: CredentialVault {
     /// Not the items of a shared vault this account is no longer a member of, or of one with no ledger on this device
     /// (`vaultsWithheldFromAutoFill`, review finding Z45): they stay on the device until the person removes them, and
     /// they are not offered to a page.
-    public func credentialItems() async throws -> [Item] {
+    ///
+    /// Internal, for tests (review finding Z78): the items without their vaults' standing would be taken as the
+    /// person's own by whatever published or ranked them. AutoFill is given `credentialSnapshot()`.
+    func credentialItems() async throws -> [Item] {
         try await credentialSnapshot().items
     }
 
@@ -104,15 +107,17 @@ extension VaultSession: CredentialVault {
     /// or at `replacingVersion`, checked against the row the write read and committed conditionally on it, so a save
     /// or a sync merge landing in between is refused with `versionConflict`, never merged over. The session owns the
     /// version, dates, history, trash state and sync metadata, stamps the edit through `ItemMerge.stamped`, and runs
-    /// every scope through `ScopePolicy`, as `save` does.
+    /// every scope through `ScopePolicy`, as `save` does, and judges every host it adds as `save` does (F11.7):
+    /// only the hosts in `confirmingHosts` may need a confirmation (review finding Z78; there is no caller that
+    /// answers for every host).
     @discardableResult
-    public func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
+    public func saveCredentialItem(
+        _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+    ) async throws -> Item {
         try await translatingForAutoFill {
-            // The model's own sheets carry the look-alike warning for a host it would create an item on
-            // (`NewItemProposal.warning`), and it never creates one there without the person.
             try await save(
                 item, expecting: replacingVersion.map(WriteExpectation.version) ?? .absent,
-                confirmed: .confirmedByCaller)
+                confirmed: .hosts(confirmingHosts))
         }
     }
 
@@ -128,6 +133,7 @@ extension VaultSession: CredentialVault {
             case .itemNotFound(let id): throw CredentialVaultError.itemNotFound(id)
             case .versionConflict(let id): throw CredentialVaultError.versionConflict(id)
             case .scopeRejected(let reason): throw CredentialVaultError.scopeRejected(reason)
+            case .hostsNeedConfirmation(let hosts): throw CredentialVaultError.hostsNeedConfirmation(hosts.map(\.host))
             default: throw CredentialVaultError.failed("VaultError")
             }
         } catch RecordStoreError.versionConflict(let id) {

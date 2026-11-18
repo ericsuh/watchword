@@ -1356,11 +1356,10 @@ public actor VaultSession: SharesExecutor {
 
     /// Who answers for the hosts a save adds.
     enum AddedHosts {
-        /// The person confirmed these by name; any other look-alike refuses the save.
+        /// The person confirmed these by name; any other look-alike refuses the save. The AutoFill model names the
+        /// host its sheet warned about (`saveCredentialItem(_:replacingVersion:confirmingHosts:)`); no caller answers
+        /// for every host (review finding Z78).
         case hosts(Set<String>)
-        /// The caller showed its own warning and took the person's confirmation: the AutoFill model, whose save and
-        /// registration sheets carry `NewItemProposal.warning` and never create an item on such a host silently.
-        case confirmedByCaller
     }
 
     /// The hosts `draft` would add to its item's scopes that need the person's confirmation by name: empty when the

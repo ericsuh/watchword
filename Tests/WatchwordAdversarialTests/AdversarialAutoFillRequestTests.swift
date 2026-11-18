@@ -1,9 +1,10 @@
 import Foundation
 import Testing
-import WatchwordAutoFill
 import WatchwordMatching
 import WatchwordModel
 import WatchwordTestSupport
+
+@testable import WatchwordAutoFill
 
 /// Cross-site release attempts through every request the credential provider answers (PRD SEC6, F11.1, F11.4, F11.7;
 /// docs/04-test-plan.md §6.3 and §6.7). `AdversarialMatchingTests` and `AdversarialPhishingTests` attack the gate;
@@ -650,7 +651,9 @@ struct AdversarialAutoFillRequestTests {
         }
         func confirmUnlocked() async throws {}
         func isBackedUp() async throws -> Bool { true }
-        func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
+        func saveCredentialItem(
+            _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+        ) async throws -> Item {
             throw CredentialVaultError.failed("read-only")
         }
     }

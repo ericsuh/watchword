@@ -2,12 +2,13 @@ import Foundation
 import Testing
 import WatchwordAutoFill
 import WatchwordCrypto
-import WatchwordKit
 import WatchwordModel
 import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
 import WatchwordTestSupport
+
+@testable import WatchwordKit
 
 // Review finding Z45 (docs/06-adversarial-review.md): what the screens said of leaving, and what the code did.
 extension AdversarialSharedVaultTests {

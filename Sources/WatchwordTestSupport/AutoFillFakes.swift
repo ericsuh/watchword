@@ -74,7 +74,9 @@ public actor FakeCredentialVault: CredentialVault {
     }
 
     @discardableResult
-    public func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
+    public func saveCredentialItem(
+        _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+    ) async throws -> Item {
         try requireUnlocked()
         if let error = nextSaveError {
             nextSaveError = nil

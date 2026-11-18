@@ -164,9 +164,10 @@ public enum CredentialIdentityPlanner {
     public static let maximumIdentitiesPerItem = 64
 
     /// The identities to publish for a vault holding exactly `items`, every one of them taken to be in a vault only
-    /// this account writes. For a caller with one private vault's items, and tests; what a session returns is
-    /// published through `identities(for: CredentialSnapshot)`, which knows which vaults are shared.
-    public static func identities(for items: [Item]) -> [CredentialIdentity] {
+    /// this account writes. For tests only, and internal for that reason (review finding Z78): given a session's
+    /// items it would publish a shared vault's as the person's own. What a session returns is published through
+    /// `identities(for: CredentialSnapshot)`, which knows which vaults are shared.
+    static func identities(for items: [Item]) -> [CredentialIdentity] {
         let snapshot = VaultSnapshot(ownItems: items)
         return snapshot.all.flatMap { identities(for: $0, in: snapshot) }
     }
@@ -181,8 +182,8 @@ public enum CredentialIdentityPlanner {
     }
 
     /// What changes in the store when the vault's items go from `old` to `new`. Removals and additions are
-    /// disjoint. As `identities(for: [Item])`: the items are taken to be the person's own.
-    public static func difference(from old: [Item], to new: [Item]) -> IdentityDifference {
+    /// disjoint. As `identities(for: [Item])`: the items are taken to be the person's own, so tests only (Z78).
+    static func difference(from old: [Item], to new: [Item]) -> IdentityDifference {
         difference(from: identities(for: old), to: identities(for: new))
     }
 
@@ -345,10 +346,10 @@ public protocol CredentialIdentityPublisher: Sendable {
 public enum CredentialIdentityPublishing {
     /// Publishes exactly the identities of `items`, replacing whatever was there. Run after every unlock, and after
     /// sync changes items. Does nothing while the provider is not enabled. The items are taken to be the person's
-    /// own (`CredentialIdentityPlanner.identities(for: [Item])`); what a session returns goes through
-    /// `publishAll(_: CredentialSnapshot, to:)`.
+    /// own (`CredentialIdentityPlanner.identities(for: [Item])`), so tests only (Z78); what a session returns goes
+    /// through `publishAll(_: CredentialSnapshot, to:)`.
     @discardableResult
-    public static func publishAll(
+    static func publishAll(
         _ items: [Item], to publisher: any CredentialIdentityPublisher
     ) async throws -> [CredentialIdentity] {
         try await publish(VaultSnapshot(ownItems: items), to: publisher)
@@ -391,9 +392,9 @@ public enum CredentialIdentityPublishing {
         }
     }
 
-    /// As above, for items that are all the person's own (tests, a single private vault).
+    /// As above, for items that are all the person's own: tests only (Z78).
     @discardableResult
-    public static func publishChange(
+    static func publishChange(
         from old: Item?, to new: Item?, all: @Sendable () async throws -> [Item],
         to publisher: any CredentialIdentityPublisher
     ) async throws -> IdentityDifference {

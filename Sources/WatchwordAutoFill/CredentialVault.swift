@@ -13,6 +13,9 @@ public enum CredentialVaultError: Error, Equatable, Sendable {
     case versionConflict(UUID)
     /// A scope the scope policy refuses (PRD F11.2). The vault checks whatever the caller sends.
     case scopeRejected(ScopeValidationError)
+    /// The save adds hosts that resemble a saved site or cannot be read by eye, and the caller did not name them as
+    /// confirmed by the person (PRD F11.7; review finding Z78). Nothing was written.
+    case hostsNeedConfirmation([String])
     /// Anything else, described for a log. Not interpreted.
     case failed(String)
 }
@@ -91,8 +94,21 @@ public protocol CredentialVault: Sendable {
     /// `replacingVersion`, or the call throws `versionConflict` and writes nothing. The vault owns `version`,
     /// `createdAt`, `modifiedAt`, `history`, the trash state and all sync metadata, whatever the caller put there,
     /// and it runs every scope through `ScopePolicy`. Returns the item as stored.
+    ///
+    /// A host the save adds that resembles a saved site, or cannot be read by eye, is refused
+    /// (`hostsNeedConfirmation`) unless `confirmingHosts` names it (PRD F11.7; review finding Z78): the model names
+    /// only a host whose warning its sheet showed the person (`NewItemProposal.warning`), never one it saves unasked.
     @discardableResult
-    func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item
+    func saveCredentialItem(_ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>) async throws -> Item
+}
+
+extension CredentialVault {
+    /// A save that names no host as confirmed: an update, which never adds a scope, or a new item on a host that
+    /// needs no confirmation.
+    @discardableResult
+    public func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
+        try await saveCredentialItem(item, replacingVersion: replacingVersion, confirmingHosts: [])
+    }
 }
 
 /// The wall clock, for one-time codes and timestamps. Same shape as `WatchwordKit.WallClock`, which this module

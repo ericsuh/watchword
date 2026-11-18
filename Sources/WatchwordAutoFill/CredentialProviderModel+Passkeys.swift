@@ -347,11 +347,12 @@ extension CredentialProviderModel {
         let newItemVault = try Self.newItemVault(in: snapshot)
         guard !withoutInteraction || existing != nil else { throw Blocked.refused(.noItemToUpgrade) }
         var newItemScope = relyingParty.scope
-        if destination == .newItemBesideExisting,
-            let shared = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot).sharedScope
-        {
+        let proposed = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot)
+        if destination == .newItemBesideExisting, let shared = proposed.sharedScope {
             newItemScope = shared
         }
+        // The sheet showed the relying party's look-alike warning: choosing a new item there confirmed it (Z78).
+        let confirmedHosts: Set<String> = proposed.proposal.warning != nil ? [newItemScope.host] : []
         let backedUp = try await backedUp()
         let now = await clock.now()
         var generator = random
@@ -419,7 +420,7 @@ extension CredentialProviderModel {
                 Item(
                     id: itemID, vaultID: newItemVault.id, title: relyingParty.value, scopes: [newItemScope],
                     fields: fields),
-                replacing: nil)
+                replacing: nil, confirmingHosts: confirmedHosts)
         }
         return PasskeyRegistrationResult(
             relyingPartyID: relyingParty.value, credentialID: credential.credentialID,

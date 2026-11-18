@@ -50,11 +50,12 @@ extension CredentialProviderModel {
             switch destination {
             case .newItem:
                 return try await self.createLogin(
-                    request, scope: planned.scope, title: planned.host.value, in: planned.newItemVault)
+                    request, scope: planned.scope, title: planned.host.value, in: planned.newItemVault,
+                    confirmed: planned.warned)
             case .newItemBesideExisting:
                 return try await self.createLogin(
                     request, scope: planned.sharedScope ?? planned.scope, title: planned.host.value,
-                    in: planned.newItemVault)
+                    in: planned.newItemVault, confirmed: planned.warned)
             case .existingItem(let itemID):
                 let authorization = try Self.unwrap(
                     ReleaseGate.authorize(itemID: itemID, for: [request.serviceIdentifier], in: snapshot))
@@ -106,6 +107,15 @@ extension CredentialProviderModel {
         var isNewSite: Bool
         /// The vault a new item would be created in.
         var newItemVault: UUID
+
+        /// Whether the sheet showed the new item's look-alike warning: then the person who chose the new item
+        /// confirmed its host (Z78).
+        var warned: Bool {
+            switch plan {
+            case .createItem(let proposal), .offerUpdate(_, let proposal): return proposal.warning != nil
+            case .alreadySaved: return false
+            }
+        }
     }
 
     private static func plan(
@@ -189,7 +199,7 @@ extension CredentialProviderModel {
     }
 
     private func createLogin(
-        _ request: SavePasswordRequest, scope: ServiceScope, title: String, in vaultID: UUID
+        _ request: SavePasswordRequest, scope: ServiceScope, title: String, in vaultID: UUID, confirmed: Bool = false
     ) async throws -> SavedPassword {
         var fields: [Field] = []
         if !request.userName.isEmpty {
@@ -200,7 +210,8 @@ extension CredentialProviderModel {
             Field(id: UUID.random(using: &random), kind: .password, label: "Password", value: request.password))
         let itemID = UUID.random(using: &random)
         let stored = try await save(
-            Item(id: itemID, vaultID: vaultID, title: title, scopes: [scope], fields: fields), replacing: nil)
+            Item(id: itemID, vaultID: vaultID, title: title, scopes: [scope], fields: fields), replacing: nil,
+            confirmingHosts: confirmed ? [scope.host] : [])
         return SavedPassword(itemID: stored.id, createdItem: true)
     }
 

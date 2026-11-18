@@ -52,8 +52,11 @@ struct LockingAfterRead: CredentialVault {
 
     func confirmUnlocked() async throws { try await session.confirmUnlocked() }
     func isBackedUp() async throws -> Bool { try await session.isBackedUp() }
-    func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
-        try await session.saveCredentialItem(item, replacingVersion: replacingVersion)
+    func saveCredentialItem(
+        _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+    ) async throws -> Item {
+        try await session.saveCredentialItem(
+            item, replacingVersion: replacingVersion, confirmingHosts: confirmingHosts)
     }
 }
 

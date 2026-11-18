@@ -1,9 +1,10 @@
 import Foundation
 import Testing
-import WatchwordAutoFill
 import WatchwordMatching
 import WatchwordModel
 import WatchwordTestSupport
+
+@testable import WatchwordAutoFill
 
 @Suite("Request model: credential list and passwords")
 struct CredentialListTests {
@@ -448,7 +449,9 @@ struct CredentialListTests {
             func credentialSnapshot() async throws -> CredentialSnapshot { throw CredentialVaultError.noAccount }
             func confirmUnlocked() async throws { throw CredentialVaultError.noAccount }
             func isBackedUp() async throws -> Bool { throw CredentialVaultError.noAccount }
-            func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
+            func saveCredentialItem(
+                _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+            ) async throws -> Item {
                 throw CredentialVaultError.noAccount
             }
         }

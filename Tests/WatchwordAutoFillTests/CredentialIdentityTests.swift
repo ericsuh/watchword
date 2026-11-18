@@ -1,9 +1,10 @@
 import Foundation
 import Testing
-import WatchwordAutoFill
 import WatchwordMatching
 import WatchwordModel
 import WatchwordTestSupport
+
+@testable import WatchwordAutoFill
 
 @Suite("Credential identity publishing")
 struct CredentialIdentityTests {

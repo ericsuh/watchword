@@ -1,10 +1,11 @@
 import Foundation
 import Testing
-import WatchwordAutoFill
 import WatchwordGenerator
 import WatchwordMatching
 import WatchwordModel
 import WatchwordTestSupport
+
+@testable import WatchwordAutoFill
 
 @Suite("Request model: saving and generating passwords")
 struct SaveAndGenerateRequestTests {
