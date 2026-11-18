@@ -214,3 +214,66 @@ extension AdversarialSyncTests {
         #expect(await f.transport.allObjects[f.segmentName(4)] != nil, "the device published nothing")
     }
 }
+
+// The review of the engine's fifth round (rows Z150 to Z156), over the fakes (docs/06-adversarial-review.md §Z, rows
+// from Z157).
+extension AdversarialSyncTests {
+    /// Threat: a member of a shared vault with delete access to the folder (A1's power over objects) together with
+    /// someone who can put back an older copy of this device's signed state (A8: a restored backup). The member removes
+    /// segments 3 to 5 of this device's stream and the state is rolled back to just after segment 2. Its listed and
+    /// verified head is then 2, so nothing held it, and since Z154 no claim did either in a vault that keeps its whole
+    /// log: it published new work at 3 to 5, which the account's other device, having merged through 5, never reads,
+    /// while a device that joins later reads it; the two never agree (round 5's L-M2). A device of its own account says
+    /// it merged the stream through 5, so the next number goes above that; a member's claim of 40 moves nothing.
+    @Test("a restored device of a vault that keeps its whole log publishes above what its own account merged")
+    func restoredStateAboveItsOwnAccountsWitness() async throws {
+        let f = try await Self.fixture()
+        var configuration = SyncTestClient.configuration
+        configuration.maintainsLog = false
+        configuration.ownStreamWitnesses = [Self.a, Self.b]
+        let writer = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        var older: SyncState?
+        for index in 1...5 {
+            try await writer.save(Self.login("Item \(index)", password: "p\(index)"))
+            try await writer.sync()
+            if index == 2 { older = await writer.state() }
+        }
+        // The account's other device merges the stream through 5 and publishes, acknowledging it.
+        await f.keys.trust(device: Self.b)
+        let witness = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        try await witness.sync()
+        try await witness.save(Self.login("The witness's own", password: "w"))
+        try await witness.sync()
+        // A member's device claims far more of the stream.
+        let member = UUID(uuidString: "D0000000-0000-4000-8000-0000000000C0")!
+        await f.keys.trust(device: member)
+        try await f.plant(
+            SyncPayload(
+                kind: .segment, vaultID: Self.vault, author: member, number: 1, vector: [Self.a: 40], entries: []),
+            signedBy: FakeSyncKeyring(deviceID: member, keys: f.keys))
+
+        for sequence in UInt64(3)...5 { await f.transport.tamper(f.segmentName(sequence), contents: nil) }
+        await writer.syncState.tamper(try #require(older))
+        let after = try await writer.save(Self.login("After the restore", password: "q"))
+        let report = try await writer.sync()
+        #expect(report.ownStreamUnverified == nil && report.ownStreamConflict == nil)
+        for sequence in UInt64(3)...5 {
+            #expect(
+                await f.transport.allObjects[f.segmentName(sequence)] == nil,
+                "a number the account's other device merged was used again")
+        }
+        #expect(await f.transport.allObjects[f.segmentName(6)] != nil, "the device did not publish above the claim")
+        #expect(await f.transport.allObjects[f.segmentName(41)] == nil, "a member's claim moved the numbering")
+        try await witness.sync()
+        #expect(try await witness.items()[after.id] != nil, "the edit made after the restore never reached the witness")
+
+        // The stream goes on from there, contiguous again.
+        let next = try await writer.save(Self.login("Next", password: "n"))
+        try await writer.sync()
+        #expect(await f.transport.allObjects[f.segmentName(7)] != nil)
+        try await witness.sync()
+        #expect(try await witness.items()[next.id] != nil)
+    }
+}

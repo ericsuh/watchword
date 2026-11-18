@@ -79,9 +79,11 @@ extension VaultSession {
     /// How the engine of `vaultID` runs: a shared vault gets the judge and keeps its whole log (no snapshots, no
     /// collection: the departing account's segments are what a cut is judged against, §8.8 "a departed account's
     /// log"), publishes only while this account may write, and replays its log when what counts has changed.
-    func sharedEngineOptions(_ vaultID: UUID, base: SyncConfiguration, account: AccountRecord)
-        -> (configuration: SyncConfiguration, judge: (any WriteJudge)?, publishing: Bool, reconcile: Bool)
-    {
+    /// `ownDevices` are this account's registered devices: in a vault whose log is kept whole, the only devices whose
+    /// word about this device's own stream moves its numbering (`SyncConfiguration.ownStreamWitnesses`, L-M2).
+    func sharedEngineOptions(
+        _ vaultID: UUID, base: SyncConfiguration, account: AccountRecord, ownDevices: Set<UUID>
+    ) -> (configuration: SyncConfiguration, judge: (any WriteJudge)?, publishing: Bool, reconcile: Bool) {
         guard let vault = sharing.vaults[vaultID] else {
             // Shared, with no ledger here (Z41): there is no judge to give it, so it is never published to and its
             // log is left whole. `syncAll` only downloads for it anyway, having no current key.
@@ -94,6 +96,7 @@ extension VaultSession {
         }
         var configuration = base
         configuration.maintainsLog = false
+        configuration.ownStreamWitnesses = ownDevices
         // Disputed (Z59): downloaded only, like a vault with no ledger here.
         if isOwnerDisputed(vaultID) { return (configuration, nil, false, false) }
         // A replay judges every version again, and notes again which devices' streams it is waiting on and whose

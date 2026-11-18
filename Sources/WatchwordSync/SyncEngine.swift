@@ -25,6 +25,15 @@ public struct SyncConfiguration: Sendable {
     /// judged against the departing account's own segments, so they must stay on the transport for every device
     /// that has yet to judge it (docs/02-architecture.md §8.8, "a departed account's log").
     public var maintainsLog = true
+    /// In a vault whose log is never collected (`maintainsLog` off, a shared vault): the devices whose word about this
+    /// device's own stream it takes, its own account's (round 5's L-M2). A snapshot's coverage or a segment's
+    /// acknowledgement from one of them, not revoked, that says it merged this stream at or past the next number
+    /// moves this device's next number above it (`push`): its state is older than what it published (a restored
+    /// backup, A8), and those numbers were taken out of the store since (a member with delete access), so nothing
+    /// listed shows them; publishing there anew, a device that merged them would never read it. A move, never a hold:
+    /// the numbers are gone, and a hold would never end. Another account's word moves nothing: any member could
+    /// otherwise push this device's numbering out of reach (Z154). `nil` takes nobody's word, as before.
+    public var ownStreamWitnesses: Set<UUID>?
     /// Entries of ignorable record kinds this version does not carry that one vault keeps aside (`SyncStash`, ADR
     /// 0009), and their bytes, in all and for what any one device's objects carried. Past any of them, an entry is
     /// not kept (`SyncReport.unknownEntriesDropped`, `SyncStash.overflow`): the stream still merges, the device writes
@@ -1490,8 +1499,11 @@ public actor SyncEngine {
         var batches = chunks(entries.values.sorted(by: SyncPayload.entryOrder))
         if !later.isEmpty { batches += chunks(later.sorted(by: SyncPayload.entryOrder)) }
         if batches.count > 1, batches[0].isEmpty { batches.removeFirst() }
+        let floor = witnessedFloor(state: state, retired: retired)
         for chunk in batches {
-            let sequence = state.nextSequence
+            // Above what a device of this account says it merged of this stream (`ownStreamWitnesses`), and never
+            // saved there unless published: a claim that a later revocation discounts moves nothing for good.
+            let sequence = max(state.nextSequence, floor)
             guard sequence <= configuration.maximumSequence else {
                 // No reader lists a name beyond this: published there, these rows would be marked as sent and never
                 // seen (review finding Z21). Nothing is written and nothing marked.
@@ -1512,9 +1524,13 @@ public actor SyncEngine {
                 report.ownStreamConflict = sequence
                 return
             }
+            // Published above a witnessed claim, the numbers below are this stream's as far as this device can know:
+            // they are gone from the store, and its acknowledgement says so (`vector`).
+            if (state.merged[deviceID] ?? 0) == sequence - 1 || sequence > state.nextSequence {
+                state.merged[deviceID] = sequence
+            }
             state.nextSequence = sequence + 1
             state.lastPublishedSequence = sequence
-            if (state.merged[deviceID] ?? 0) == sequence - 1 { state.merged[deviceID] = sequence }
             var published: [RecordKey: RecordStamp] = [:]
             for entry in chunk {
                 state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
@@ -1534,6 +1550,19 @@ public actor SyncEngine {
             try await syncState.removePendingDeletions(published, vaultID: vaultID)
         }
         try await syncState.removePendingDeletions(obsolete, vaultID: vaultID)
+    }
+
+    /// The lowest number this device may publish at given what its own account's other devices say they merged of its
+    /// stream (`SyncConfiguration.ownStreamWitnesses`): one above the furthest claim, or 1 for none.
+    private func witnessedFloor(state: SyncState, retired: Set<UUID>) -> UInt64 {
+        guard let witnesses = configuration.ownStreamWitnesses else { return 1 }
+        let counts = { (author: UUID) in
+            author != self.deviceID && witnesses.contains(author) && !retired.contains(author)
+        }
+        let covered = state.snapshots.filter { counts($0.key.author) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
+        let acknowledged = state.acknowledgements.filter { counts($0.key) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
+        let claim = max(covered, acknowledged)
+        return claim >= configuration.maximumSequence ? configuration.maximumSequence + 1 : claim + 1
     }
 
     /// Whether a pending deletion is on the transport already: this device published a deletion of the record at or

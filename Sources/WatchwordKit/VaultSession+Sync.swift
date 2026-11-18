@@ -67,6 +67,7 @@ extension VaultSession {
         report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
         let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
+        let ownDevices: Set<UUID> = view.map { Set($0.state.devices.keys) } ?? []
 
         let adapter = VaultSyncAdapter(session: self)
         let merger = KindRoutingMerger([
@@ -77,7 +78,8 @@ extension VaultSession {
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
         func engine(_ vaultID: UUID) -> SyncEngine {
-            let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+            let shared = sharedEngineOptions(
+                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices)
             return SyncEngine(
                 vaultID: vaultID, deviceID: record.deviceID, store: store, syncState: syncState,
                 transport: syncSettings.transport, keyring: adapter, merger: merger,
@@ -93,7 +95,8 @@ extension VaultSession {
         var stopped = report.transportFailure ?? sharingReports.values.lazy.compactMap(\.transportFailure).first
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
-            let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+            let shared = sharedEngineOptions(
+                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 let requests = sharedReplayRequests(vaultID)
                 vaultReport = try await engine(vaultID).sync(
@@ -135,7 +138,8 @@ extension VaultSession {
             for vaultID in sharedVaultsNeedingReplay() {
                 guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
                 await prepareSharedReplay(vaultID)
-                let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+                let shared = sharedEngineOptions(
+                    vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices)
                 let requests = sharedReplayRequests(vaultID)
                 let second = try await engine(vaultID).sync(
                     reconcile: true, deferringDeletions: true, publishing: shared.publishing)
