@@ -140,14 +140,32 @@ struct SharingCodesTests {
         #expect(SharingCodes.account(from: "WWFP1-" + String(repeating: "0", count: 10)) == nil)
     }
 
-    @Test("a typed safety number is preferred to the person's own comparison, and nothing else is evidence")
+    /// ADR 0010 (G3): the person's unchecked "they match" is no evidence; the full code typed is the only evidence the
+    /// fallback offers, and the device checks it.
+    @Test("a typed full vault sharing code is the only evidence the fallback offers")
     func evidenceOrder() {
         var confirmation = FingerprintConfirmation()
         #expect(confirmation.evidence() == nil)
-        confirmation.comparedByEye = true
-        #expect(confirmation.evidence() == .comparedByEye)
+        confirmation.typedSafetyNumber = "   "
+        #expect(confirmation.evidence() == nil)
         confirmation.typedSafetyNumber = " 12345 "
         #expect(confirmation.evidence() == .safetyNumber("12345"))
+    }
+
+    @Test("every way a vault sharing code session ends is worded, and a wrong code says how many tries are left")
+    func sharingCodeWording() {
+        let failures: [SharingCodeError] = [
+            .sessionNotFound, .sessionTaken, .numbersExhausted, .sameAccount, .malformedMessage, .commitmentMismatch,
+            .boardInterference, .tooManyAttempts, .expired, .scannedCodeMismatch, .malformedCode, .notReady,
+            .invitationInvalid,
+        ]
+        for failure in failures {
+            #expect(!SharingCodeWording.failure(failure).isEmpty, "\(failure)")
+            #expect(ErrorWording.message(for: failure) == SharingCodeWording.failure(failure))
+        }
+        #expect(SharingCodeWording.wrongCode(attemptsLeft: 2).contains("2 tries left"))
+        #expect(SharingCodeWording.wrongCode(attemptsLeft: 1).contains("One try left"))
+        #expect(!ErrorWording.message(for: SharedVaultError.sharingBoardNotConfigured).isEmpty)
     }
 
     @Test("a safety number shows as twelve groups of five")

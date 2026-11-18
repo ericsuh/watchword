@@ -69,15 +69,19 @@ public struct SharingSettings: Sendable {
     /// Published key bundles; the adapter is the account record on the transport (milestone 4's open list).
     public var directory: any KeyBundleDirectory
     public var shareAccess: (any ShareAccessControl)?
+    /// Where vault sharing code sessions meet (ADR 0010); `nil` where there is none, and only the full code is offered.
+    /// Like the directory, it has no production adapter yet (milestone 4's open list).
+    public var board: (any SharingBoard)?
 
     public init(
         state: any SharingStateStore, contacts: any VerifiedContactStore, directory: any KeyBundleDirectory,
-        shareAccess: (any ShareAccessControl)? = nil
+        shareAccess: (any ShareAccessControl)? = nil, board: (any SharingBoard)? = nil
     ) {
         self.state = state
         self.contacts = contacts
         self.directory = directory
         self.shareAccess = shareAccess
+        self.board = board
     }
 }
 
@@ -104,4 +108,9 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// (grant names, envelope headers) and, for a shared vault, chosen by its owner: adopting one would displace the
     /// other vault's key. Refused before anything is stored or made resident.
     case keyIDInUse(UUID)
+    /// No sharing board is configured, so no vault sharing code session can run (ADR 0010); the full code still can.
+    case sharingBoardNotConfigured
+    /// A vault sharing code session authenticated keys for an account that a shared vault here lists with other keys:
+    /// the pin is not replaced on the session's word against the chain's (`replacePinFromSharingCode`).
+    case sharingCodeKeysNotListed
 }

@@ -21,8 +21,8 @@ struct AdversarialAccountScreenTests {
 
     /// Threat: anyone who can send the person a message (outside §2's list: no access to anything of Watchword's)
     /// sends a fingerprint code for an account of their own, hoping a paste is taken as a comparison. It names the
-    /// account and nothing more: no pin is made without a typed number or the person's own comparison, and the pin
-    /// says which (S16), never "scanned".
+    /// account and nothing more: no pin is made without the full code typed (the person's own "they match" is no
+    /// longer offered, ADR 0010), and the pin says how it was made (S16), never "scanned".
     @Test("a pasted fingerprint code pins nothing, and the pin made after a comparison says how it was made")
     func pastedCode() async throws {
         let household = SharedVaultHousehold()
@@ -31,6 +31,7 @@ struct AdversarialAccountScreenTests {
         let vaultID = try await owner.session.createVault(name: "Household").id
         try await owner.session.shareVault(vaultID)
         let invitation = InvitationModel(vaultID: vaultID, context: Self.context(owner.session))
+        await invitation.useFullCode()
         invitation.accountText = OwnFingerprint(stranger.bundle).code
         await invitation.lookUp()
         guard case .compareFingerprint = invitation.step else {
@@ -40,10 +41,10 @@ struct AdversarialAccountScreenTests {
         await invitation.confirmFingerprint()
         let pins = VerifiedContacts(store: owner.contacts, account: owner.bundle)
         #expect(try await pins.pinned(stranger.accountID) == nil, "pinned on a pasted code alone")
-        invitation.confirmation.comparedByEye = true
+        invitation.confirmation.typedSafetyNumber = stranger.safetyNumber
         await invitation.confirmFingerprint()
-        #expect(try await pins.pinned(stranger.accountID)?.method == .comparedByEye)
-        #expect(invitation.verificationText == "You confirmed that the two safety numbers match.")
+        #expect(try await pins.pinned(stranger.accountID)?.method == .safetyNumber)
+        #expect(invitation.verificationText == "You typed their full vault sharing code, and it matched.")
     }
 
     /// Threat: a hostile import file (A7) offers an existing item a look-alike of its own site, `аmazon.com` with a

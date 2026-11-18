@@ -32,7 +32,7 @@ public enum SharingCodes {
         return UUID(uuidString: trimmed).map { AccountReference(accountID: $0, fingerprintCode: nil) }
     }
 
-    /// The safety number in groups, for display one group per cell.
+    /// The full vault sharing code (the 60-digit fingerprint) in groups, for display one group per cell.
     public static func groups(of safetyNumber: String) -> [String] {
         safetyNumber.split(separator: " ").map(String.init)
     }
@@ -84,7 +84,8 @@ public struct AccountReference: Hashable, Sendable {
     }
 }
 
-/// This account's own fingerprint, for the person to read out or show to someone inviting them (PRD F4.2).
+/// This account's own fingerprint, the full vault sharing code, for the fallback: read out or shown to someone who
+/// cannot be at their device at the same time (PRD F4.2; ADR 0010).
 public struct OwnFingerprint: Hashable, Sendable {
     public let accountID: UUID
     public let safetyNumber: String
@@ -100,11 +101,11 @@ public struct OwnFingerprint: Hashable, Sendable {
     public var groups: [String] { SharingCodes.groups(of: safetyNumber) }
 }
 
-/// Another account as the key directory gives it, for the person to compare out of band.
+/// Another account as the key directory gives it, with its full vault sharing code for the fallback.
 public struct ContactSummary: Hashable, Sendable {
     public let accountID: UUID
     public let safetyNumber: String
-    /// Already pinned: compared before, and the directory's keys are the ones compared.
+    /// Already pinned: checked before, and the directory's keys are the ones checked.
     public let isVerified: Bool
 
     public init(_ candidate: ContactCandidate) {
@@ -120,33 +121,91 @@ public struct ContactSummary: Hashable, Sendable {
     public var groups: [String] { SharingCodes.groups(of: safetyNumber) }
 }
 
-/// How the person confirms a fingerprint (PRD F4.2): the safety number they typed, or their own comparison of the two
-/// numbers. A typed number is preferred, and the session checks it.
+/// How the person confirms a fingerprint by the fallback, the full vault sharing code (PRD F4.2; ADR 0010): the sixty
+/// digits typed from the other person's screen or message, which the session checks. There is no "they match" switch:
+/// a person's unchecked word is not evidence (ADR 0010, G3).
 ///
 /// A fingerprint code is never evidence here. One pasted from a message names an account and nothing more: anyone who
 /// can message the person can send a code for an account of their own (review of the account screens, finding 2).
-/// `VerificationEvidence.scannedCode` is for a code read by the camera from the other person's screen, which the app
-/// does not do yet, so it never offers it, and a pin records only what the person did (S16: `VerifiedContact.method`).
+/// `VerificationEvidence.scannedCode` comes only from the camera, through the scanning screens' own entry points
+/// (`cameraScanned`), never from a text field.
 public struct FingerprintConfirmation: Hashable, Sendable {
     public var typedSafetyNumber = ""
-    public var comparedByEye = false
 
     public init() {}
 
-    /// The evidence to offer, or `nil` while the person has given none.
+    /// The evidence to offer, or `nil` while the person has typed nothing.
     public func evidence() -> VerificationEvidence? {
         let typed = typedSafetyNumber.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !typed.isEmpty { return .safetyNumber(typed) }
-        if comparedByEye { return .comparedByEye }
-        return nil
+        return typed.isEmpty ? nil : .safetyNumber(typed)
     }
 
     /// What the person did, for the step after it.
     public static func describe(_ evidence: VerificationEvidence) -> String {
         switch evidence {
-        case .safetyNumber: return "You typed their safety number, and it matched."
-        case .comparedByEye: return "You confirmed that the two safety numbers match."
+        case .safetyNumber: return "You typed their full vault sharing code, and it matched."
         case .scannedCode: return "You scanned their code, and it matched."
         }
     }
+
+    /// What a vault sharing code session did, for the step after it.
+    public static func describe(_ status: SharingCodeStatus) -> String {
+        status.scanned ? "You scanned their code, and it matched." : "Their confirmation code matched."
+    }
+}
+
+/// The words of a vault sharing code session (ADR 0010): what each screen says the person does, and why a session
+/// stopped. The session decides; these only say it.
+public enum SharingCodeWording {
+    /// What a wrong confirmation code says, with the attempts left.
+    public static func wrongCode(attemptsLeft: Int) -> String {
+        attemptsLeft == 1
+            ? "That code does not match. One try left; check each digit with them."
+            : "That code does not match. \(attemptsLeft) tries left; check each digit with them."
+    }
+
+    public static func failure(_ error: SharingCodeError) -> String {
+        switch error {
+        case .sessionNotFound:
+            return "No one is sharing under that code. Check the eight digits with the other person, or ask them to "
+                + "start again."
+        case .sessionTaken:
+            return "Someone else answered that code first, so it was stopped. Start again with a new code."
+        case .numbersExhausted:
+            return "A vault sharing code could not be made. Try again in a moment."
+        case .sameAccount:
+            return "That code is from your own account. Use the other person's device."
+        case .malformedMessage, .commitmentMismatch, .boardInterference:
+            return "Something between your devices changed the exchange, so it was stopped and nothing was shared. "
+                + "Start again; if it happens again, use the full vault sharing code."
+        case .tooManyAttempts:
+            return "The confirmation code was wrong three times, so this was stopped and nothing was shared. If you "
+                + "typed it right, someone may be between your devices. Start again."
+        case .expired:
+            return "This took more than ten minutes and was stopped. Start again."
+        case .scannedCodeMismatch:
+            return "The code you scanned is not this account's. Scan the other person's screen."
+        case .malformedCode:
+            return "Type the digits exactly as the other screen shows them."
+        case .notReady:
+            return "That step is not ready yet. Wait for the other device, then try again."
+        case .invitationInvalid:
+            return "The invitation did not come from the person you checked, and was refused."
+        case .busy:
+            return ""
+        }
+    }
+
+    /// A code as VoiceOver should read it: each digit on its own, a pause between groups ("1 2 3, 4 5 6"), so it is
+    /// heard as digits and not as a number in the hundreds of thousands.
+    public static func spoken(_ code: String) -> String {
+        code.split(separator: " ").map { group in group.map(String.init).joined(separator: " ") }
+            .joined(separator: ", ")
+    }
+
+    /// Whose screen the digits come from: the one protection the protocol cannot give (ADR 0010, "The people's
+    /// channel").
+    public static let channelWarning =
+        "Only use digits you read on their screen yourself, or hear from them in person or on a call you know is "
+        + "them. Never type digits someone sends you in a message."
 }

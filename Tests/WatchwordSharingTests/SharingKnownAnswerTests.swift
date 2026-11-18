@@ -90,7 +90,7 @@ struct SharingKnownAnswerTests {
 
     @Test("a chain written by an independent implementation verifies, with the hashes it computed")
     func chainVerifies() throws {
-        let owner = VerifiedContact(bundle: try Self.owner(), method: .comparedByEye, verifiedAt: nil)
+        let owner = VerifiedContact(bundle: try Self.owner(), method: .safetyNumber, verifiedAt: nil)
         let records = [Self.departure, Self.genesis, Self.addition].map { [UInt8](hex: $0) }
         let (ledger, report) = try MembershipLedger.join(vaultID: Self.vaultID, owner: owner, candidates: records)
 
@@ -136,7 +136,7 @@ struct SharingKnownAnswerTests {
         #expect(request.accountID == Self.memberID)
         #expect(request.memberSince == 1)
 
-        let owner = VerifiedContact(bundle: try Self.owner(), method: .comparedByEye, verifiedAt: nil)
+        let owner = VerifiedContact(bundle: try Self.owner(), method: .safetyNumber, verifiedAt: nil)
         let ledger = try MembershipLedger.join(
             vaultID: Self.vaultID, owner: owner,
             candidates: [Self.genesis, Self.addition].map { [UInt8](hex: $0) }

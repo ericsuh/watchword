@@ -9,7 +9,7 @@ import WatchwordTestSupport
 @Suite("Screen models: sharing")
 @MainActor
 struct SharingScreenTests {
-    @Test("an owner shares a vault and invites a verified contact, who accepts after comparing the owner's number")
+    @Test("by the full vault sharing code: an owner invites a checked contact, who accepts after typing the owner's")
     func inviteAndAccept() async throws {
         let household = SharedVaultHousehold()
         let owner = try await household.account(seed: 501)
@@ -25,8 +25,10 @@ struct SharingScreenTests {
         #expect(shared.ownRole == .owner && shared.mayInvite && !shared.mayLeave)
         #expect(shared.fingerprint?.safetyNumber == owner.safetyNumber)
 
-        // The owner names the invitee, compares their safety number and invites them.
+        // The owner names the invitee, types their full code and invites them.
         let invitation = InvitationModel(vaultID: vaultID, context: ContextProbe().context(owner.session))
+        #expect(invitation.step == .start)
+        await invitation.useFullCode()
         invitation.accountText = invitee.accountID.uuidString
         await invitation.lookUp()
         guard case .compareFingerprint(let contact) = invitation.step else {
@@ -52,9 +54,10 @@ struct SharingScreenTests {
             return
         }
 
-        // The invitee reads the code, compares the owner's number by eye and joins.
+        // The invitee pastes the invitation, types the owner's full code and joins.
         let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
-        accept.codeText = code
+        await accept.useFullCode()
+        accept.codeText = try #require(code)
         await accept.read()
         guard case .compareOwner(let ownerContact) = accept.step else {
             Issue.record("expected the owner's fingerprint, got \(accept.step)")
@@ -63,7 +66,7 @@ struct SharingScreenTests {
         #expect(ownerContact.accountID == owner.accountID)
         await accept.accept()
         #expect(accept.errorMessage != nil, "no evidence, no joining")
-        accept.confirmation.comparedByEye = true
+        accept.confirmation.typedSafetyNumber = owner.safetyNumber
         await accept.accept()
         #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
 
@@ -79,6 +82,130 @@ struct SharingScreenTests {
         await joined.load()
         let row = try #require(joined.row(vaultID))
         #expect(row.name == "Household" && row.sharing?.role == .readWrite && !row.isReadOnly)
+    }
+
+    /// ADR 0010 through the screens: the inviter shows the vault sharing code, the invitee types it, each types the
+    /// other's six digits (one wrong first), the invitation arrives inside the session and the invitee joins after
+    /// saying yes. Nothing is pasted.
+    @Test("an invitation by vault sharing code: eight digits one way, six each way back, and the invitation arrives")
+    func inviteBySharingCode() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 571)
+        let invitee = try await household.account(seed: 572)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+
+        let invitation = InvitationModel(vaultID: vaultID, context: ContextProbe().context(owner.session))
+        await invitation.startSession()
+        guard case .showCode(let number, let payload) = invitation.step else {
+            Issue.record("expected the vault sharing code, got \(invitation.step) \(invitation.errorMessage ?? "")")
+            return
+        }
+        #expect(number.count == 9 && payload.hasPrefix("WWSC1-") && invitation.isWaiting)
+        await invitation.refresh()
+        #expect(invitation.isWaiting, "nobody answered yet")
+
+        let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        accept.numberText = number
+        await accept.joinWithNumber()
+        #expect(accept.step == .waiting, "\(accept.errorMessage ?? "")")
+        await invitation.refresh()
+        #expect(invitation.step == .typeTheirCode(attemptsLeft: 3))
+        await accept.refresh()
+        guard case .showCodeAndType(let inviteeCode, _, _) = accept.step else {
+            Issue.record("expected the invitee's code, got \(accept.step)")
+            return
+        }
+
+        // One slip of the finger, then the right code.
+        let wrong = inviteeCode.first == "0" ? "1" + inviteeCode.dropFirst() : "0" + inviteeCode.dropFirst()
+        invitation.typedCode = String(wrong)
+        await invitation.confirmTheirCode()
+        #expect(invitation.step == .typeTheirCode(attemptsLeft: 2))
+        #expect(invitation.errorMessage?.contains("2 tries left") == true)
+        invitation.typedCode = inviteeCode
+        await invitation.confirmTheirCode()
+        guard case .chooseRole(let ownerCode?, let contact) = invitation.step else {
+            Issue.record("expected the role step with the owner's code, got \(invitation.step)")
+            return
+        }
+        #expect(contact.accountID == invitee.accountID && contact.isVerified)
+        #expect(invitation.verificationText == "Their confirmation code matched.")
+
+        accept.typedCode = ownerCode
+        await accept.confirmTheirCode()
+        guard case .awaitingInvitation = accept.step else {
+            Issue.record("expected to wait for the invitation, got \(accept.step) \(accept.errorMessage ?? "")")
+            return
+        }
+        await accept.refresh()
+        #expect(accept.isWaiting, "no invitation yet")
+
+        invitation.role = .readOnly
+        await invitation.invite()
+        #expect(invitation.step == .issued(code: nil), "\(invitation.errorMessage ?? "")")
+        await accept.refresh()
+        guard case .confirmJoin(let shown) = accept.step else {
+            Issue.record("expected to be asked, got \(accept.step) \(accept.errorMessage ?? "")")
+            return
+        }
+        #expect(shown.accountID == owner.accountID)
+        await accept.confirmJoin()
+        #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
+        #expect(try await invitee.session.sharedVaultStatus(vaultID).role == .readOnly)
+        let pins = VerifiedContacts(store: owner.contacts, account: owner.bundle)
+        #expect(try await pins.pinned(invitee.accountID)?.method == .sharingCode)
+    }
+
+    /// The screen of a member trusted through the chain only: a session with them makes them verified on this
+    /// device, and one another account answers is ended before anything is pinned.
+    @Test("checking a member by vault sharing code makes them verified, and only they may answer")
+    func memberVerification() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.administrator, .readWrite], seed: 581)
+        let (administrator, member) = (home.members[0], home.members[1])
+        try await administrator.session.sync()
+        let before = try await administrator.session.sharedVaultStatus(home.vaultID)
+        #expect(before.unverifiedMembers.contains(member.accountID))
+
+        let stranger = try await household.account(seed: 589)
+        let wrongPerson = MemberVerificationModel(
+            vaultID: home.vaultID, memberID: member.accountID, context: ContextProbe().context(administrator.session))
+        await wrongPerson.startSession()
+        guard case .showCode(let number, _) = wrongPerson.step else {
+            Issue.record("expected the code, got \(wrongPerson.step)")
+            return
+        }
+        _ = try await stranger.session.joinSharingCodeSession(number: number)
+        await wrongPerson.refresh()
+        guard case .failed(let message) = wrongPerson.step else {
+            Issue.record("another account's answer went on: \(wrongPerson.step)")
+            return
+        }
+        #expect(message.contains("Another account"))
+        let pins = VerifiedContacts(store: administrator.contacts, account: administrator.bundle)
+        #expect(try await pins.pinned(stranger.accountID) == nil)
+
+        let check = MemberVerificationModel(
+            vaultID: home.vaultID, memberID: member.accountID, context: ContextProbe().context(administrator.session))
+        await check.startSession()
+        guard case .showCode(let second, _) = check.step else {
+            Issue.record("expected the code, got \(check.step)")
+            return
+        }
+        _ = try await member.session.joinSharingCodeSession(number: second)
+        await check.refresh()
+        let shown = try await member.session.refreshSharingCodeSession()
+        check.typedCode = try #require(shown.ownCode)
+        await check.confirmTheirCode()
+        guard case .verified(let code?) = check.step else {
+            Issue.record("expected verified, got \(check.step) \(check.errorMessage ?? "")")
+            return
+        }
+        _ = try await member.session.enterSharingCode(code)
+        let after = try await administrator.session.sharedVaultStatus(home.vaultID)
+        #expect(after.verifiedMembers?.contains(member.accountID) == true)
+        #expect(!after.unverifiedMembers.contains(member.accountID))
     }
 
     @Test("a member made read-only sees the vault as read-only, and the key is rotated after the demotion (S42)")
@@ -123,6 +250,7 @@ struct SharingScreenTests {
         let household = SharedVaultHousehold()
         let invitee = try await household.account(seed: 560)
         let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        await accept.useFullCode()
         accept.codeText = "WWIV please let me in"
         await accept.read()
         #expect(accept.step == .enterCode)
@@ -208,8 +336,8 @@ extension SharingScreenTests {
 
 extension SharingScreenTests {
     /// A fingerprint code pasted from a message names an account; it is no comparison. Whoever can message the person
-    /// can send a code for an account of their own, so the safety number must still be typed or the comparison
-    /// confirmed, and a pin records how it was made, never as a scanned code.
+    /// can send a code for an account of their own, so the full code must still be typed, and a pin records how it was
+    /// made, never as a scanned code.
     @Test("a pasted fingerprint code identifies the account but verifies nothing")
     func pastedCodeIsNotEvidence() async throws {
         let household = SharedVaultHousehold()
@@ -218,6 +346,7 @@ extension SharingScreenTests {
         let vaultID = try await owner.session.createVault(name: "Household").id
         try await owner.session.shareVault(vaultID)
         let invitation = InvitationModel(vaultID: vaultID, context: ContextProbe().context(owner.session))
+        await invitation.useFullCode()
         invitation.accountText = OwnFingerprint(stranger.bundle).code
         await invitation.lookUp()
         guard case .compareFingerprint(let contact) = invitation.step else {
@@ -230,16 +359,16 @@ extension SharingScreenTests {
         let pins = VerifiedContacts(store: owner.contacts, account: owner.bundle)
         #expect(try await pins.pinned(stranger.accountID) == nil)
 
-        invitation.confirmation.comparedByEye = true
+        invitation.confirmation.typedSafetyNumber = stranger.safetyNumber
         await invitation.confirmFingerprint()
-        #expect(try await pins.pinned(stranger.accountID)?.method == .comparedByEye)
-        guard case .chooseRole(let chosen) = invitation.step else {
+        #expect(try await pins.pinned(stranger.accountID)?.method == .safetyNumber)
+        guard case .chooseRole(_, let chosen) = invitation.step else {
             Issue.record("expected the role step, got \(invitation.step)")
             return
         }
         #expect(chosen.accountID == stranger.accountID)
         #expect(invitation.inviteeName.contains(shortIdentifier(stranger.accountID)))
-        #expect(invitation.verificationText == "You confirmed that the two safety numbers match.")
+        #expect(invitation.verificationText == "You typed their full vault sharing code, and it matched.")
     }
 }
 
@@ -341,6 +470,7 @@ extension SharingScreenTests {
         let invitation = try await owner.session.invite(invitee.accountID, to: vaultID, as: .readWrite)
 
         let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        await accept.useFullCode()
         accept.codeText = SharingCodes.text(for: invitation)
         await accept.read()
         guard case .confirmJoin(let shown) = accept.step else {

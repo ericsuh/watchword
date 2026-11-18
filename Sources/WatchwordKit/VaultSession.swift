@@ -160,6 +160,10 @@ public actor VaultSession: SharesExecutor {
     package nonisolated let executorOwner = SerialExecutorOwner()
     /// Shared vaults: settings, ledgers, plans, proposals and stream indexes (VaultSession+Sharing.swift).
     var sharing = SharingRuntime()
+    /// The vault sharing code session running, if any (ADR 0010; `VaultSession+SharingCode.swift`). In memory only,
+    /// and dropped by `lock()`.
+    var sharingCodeRun: SharingCodeRun?
+    var sharingCodeGeneration: UInt64 = 0
     /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
     var pendingImport: PendingImport?
     /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.
@@ -731,6 +735,8 @@ public actor VaultSession: SharesExecutor {
         keys?.zeroise()
         keys = nil
         pendingImport = nil
+        sharingCodeRun = nil
+        sharingCodeGeneration &+= 1
         backgroundedAt = nil
         // After the keyset is zeroised, never before (§13.8): nothing the engine does can keep the keys resident.
         stopHygiene()

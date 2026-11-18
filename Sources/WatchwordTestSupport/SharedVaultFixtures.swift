@@ -38,7 +38,7 @@ public struct SharingAccount: Sendable {
 
     public static func make(
         over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory, seed: UInt64,
-        hygiene: HygieneSettings? = nil
+        hygiene: HygieneSettings? = nil, board: (any SharingBoard)? = nil
     ) async throws -> SharingAccount {
         let vault = TestVault.syncing(over: transport, seed: seed, hygiene: hygiene)
         try await vault.createAccount()
@@ -46,7 +46,8 @@ public struct SharingAccount: Sendable {
         let contacts = InMemoryVerifiedContactStore()
         let shareAccess = RecordingShareAccess()
         await vault.session.configureSharing(
-            SharingSettings(state: state, contacts: contacts, directory: directory, shareAccess: shareAccess))
+            SharingSettings(
+                state: state, contacts: contacts, directory: directory, shareAccess: shareAccess, board: board))
         let bundle = try await vault.session.publicKeyBundle()
         await directory.publish(bundle)
         // Publishes the account's registry, which other members check this device's signatures against.
@@ -65,17 +66,43 @@ public struct SharingAccount: Sendable {
         let invitation = try await session.invite(invitee.accountID, to: vaultID, as: role)
         try await invitee.session.acceptInvitation(invitation, ownerEvidence: .safetyNumber(owner.safetyNumber))
     }
+
+    /// Runs a vault sharing code session with `joiner` the way two people do (ADR 0010): this account shows the
+    /// number, the joiner types it, this account types the joiner's six digits, and the joiner types this account's.
+    /// Each ends with the other pinned. Returns the two final statuses.
+    @discardableResult
+    public func checkSharingCode(with joiner: SharingAccount) async throws -> (
+        starter: SharingCodeStatus, joiner: SharingCodeStatus
+    ) {
+        let started = try await session.startSharingCodeSession()
+        _ = try await joiner.session.joinSharingCodeSession(number: try Self.require(started.number))
+        _ = try await session.refreshSharingCodeSession()
+        let shown = try await joiner.session.refreshSharingCodeSession()
+        let accepted = try await session.enterSharingCode(try Self.require(shown.ownCode))
+        let done = try await joiner.session.enterSharingCode(try Self.require(accepted.ownCode))
+        return (accepted, done)
+    }
+
+    struct MissingValue: Error {}
+
+    static func require<T>(_ value: T?) throws -> T {
+        guard let value else { throw MissingValue() }
+        return value
+    }
 }
 
 /// A transport, a key directory and the accounts that share through them.
 public struct SharedVaultHousehold: Sendable {
     public let transport = InMemorySyncTransport()
     public let directory = InMemoryKeyBundleDirectory()
+    /// Where the household's vault sharing code sessions meet (ADR 0010).
+    public let board = InMemorySharingBoard()
 
     public init() {}
 
     public func account(seed: UInt64, hygiene: HygieneSettings? = nil) async throws -> SharingAccount {
-        try await SharingAccount.make(over: transport, directory: directory, seed: seed, hygiene: hygiene)
+        try await SharingAccount.make(
+            over: transport, directory: directory, seed: seed, hygiene: hygiene, board: board)
     }
 
     /// An owner with a new shared vault called `name`, and one member per role, each invited and joined.
@@ -145,6 +172,9 @@ extension SharedVaultHousehold {
         account: SharingAccount, view: WithholdingTransport
     ) {
         let view = WithholdingTransport(base: transport)
-        return (try await SharingAccount.make(over: view, directory: directory, seed: seed, hygiene: hygiene), view)
+        return (
+            try await SharingAccount.make(over: view, directory: directory, seed: seed, hygiene: hygiene, board: board),
+            view
+        )
     }
 }

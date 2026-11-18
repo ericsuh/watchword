@@ -2,21 +2,28 @@ import Foundation
 import WatchwordCrypto
 
 /// How a fingerprint was confirmed (docs/02-architecture.md §8.4). Raw values are part of the pin format.
+///
+/// Raw value 3 is reserved: it was "the person compared the two numbers themselves and said they match", the unchecked
+/// claim ADR 0010 (G3) removed. It is never written, and a pin that carries it is not a pin (`VerifiedContacts`
+/// ignores it, so that contact is back in front of the person).
 public enum VerificationMethod: UInt8, Sendable, Hashable {
-    /// The person typed or pasted the other person's safety number and it matched.
+    /// The person typed the other person's 60-digit fingerprint (the full vault sharing code) and the device found it
+    /// matched: the fallback for two people who cannot be at their devices together.
     case safetyNumber = 1
-    /// The person scanned the other person's QR code and it matched.
+    /// The person's device scanned the other person's QR code from their screen, and it matched.
     case scannedCode = 2
-    /// The person compared the two safety numbers themselves and said they match. The code cannot check this one.
-    case comparedByEye = 3
+    /// A vault sharing code session completed: the code the person typed from the other device matched this device's
+    /// transcript (ADR 0010).
+    case sharingCode = 4
 }
 
-/// What the person offers as proof that a bundle belongs to who they think it does.
+/// What the person offers as proof that a bundle belongs to who they think it does. Every case is checked by the
+/// device; there is no case for the person's word alone (ADR 0010, G3).
 public enum VerificationEvidence: Sendable, Hashable {
+    /// The full vault sharing code (the 60-digit fingerprint), typed.
     case safetyNumber(String)
-    /// The text of a scanned QR code (`FingerprintCode.payload`).
+    /// The text of a QR code the camera read from the other person's screen (`FingerprintCode.payload`).
     case scannedCode(String)
-    case comparedByEye
 }
 
 /// A key bundle whose fingerprint this account's person has confirmed out of band, or the account's own.
@@ -164,9 +171,28 @@ public struct VerifiedContacts: Sendable {
                 throw SharingError.fingerprintMismatch
             }
             method = .scannedCode
-        case .comparedByEye:
-            method = .comparedByEye
         }
+        return try await pin(bundle, method: method, signedBy: keyset, at: now, replacingPin: replacingPin)
+    }
+
+    /// Pins the bundle a vault sharing code session authenticated (ADR 0010). The evidence must have been made for
+    /// this account: a session's evidence is refused for any other (`SharingError.notPermitted`). A different bundle
+    /// already pinned is `keySubstituted` unless `replacingPin`, as for `verify(_:evidence:…)`.
+    public func verify(
+        _ evidence: SharingCodeEvidence, signedBy keyset: Keyset, at now: Date, replacingPin: Bool = false
+    ) async throws -> VerifiedContact {
+        guard keyset.accountID == account.accountID, evidence.pinningAccount == account.accountID else {
+            throw SharingError.notPermitted
+        }
+        guard evidence.contact.accountID != account.accountID else { throw SharingError.notPermitted }
+        return try await pin(
+            evidence.contact, method: evidence.method, signedBy: keyset, at: now, replacingPin: replacingPin)
+    }
+
+    private func pin(
+        _ bundle: PublicKeyBundle, method: VerificationMethod, signedBy keyset: Keyset, at now: Date,
+        replacingPin: Bool
+    ) async throws -> VerifiedContact {
         if let existing = try await pinned(bundle.accountID) {
             if existing.bundle.hasSameKeys(as: bundle) { return existing }
             guard replacingPin else { throw SharingError.keySubstituted(accountID: bundle.accountID) }

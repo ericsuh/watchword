@@ -455,7 +455,7 @@ struct KeyGrantAndRotationTests {
     static func restored(_ household: SharingHousehold) throws -> MembershipLedger {
         try MembershipLedger.restore(
             household.ledger.persisted(signedBy: household.owner.keyset), vaultID: household.vaultID,
-            owner: VerifiedContact(bundle: household.owner.bundle, method: .comparedByEye, verifiedAt: nil),
+            owner: VerifiedContact(bundle: household.owner.bundle, method: .safetyNumber, verifiedAt: nil),
             account: household.owner.bundle)
     }
 

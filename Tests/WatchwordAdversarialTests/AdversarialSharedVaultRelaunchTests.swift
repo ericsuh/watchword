@@ -20,7 +20,10 @@ extension AdversarialSharedVaultTests {
         let target = try await household.account(seed: 613)
         let forged = try Keyset.generate(accountID: target.accountID).publicKeyBundle()
         await household.directory.tamper(target.accountID, contents: KeyBundleCodec.encode(forged))
-        try await viewer.session.verifyContact(target.accountID, evidence: .comparedByEye)
+        try await viewer.session.verifyContact(
+            target.accountID,
+            evidence: .safetyNumber(
+                try await viewer.session.contactCandidate(target.accountID).fingerprint.safetyNumber))
         await household.directory.publish(target.bundle)
 
         let vaultID = try await owner.session.createVault(name: "Household").id

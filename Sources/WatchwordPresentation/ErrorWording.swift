@@ -16,6 +16,9 @@ public enum ErrorWording {
         case let error as VaultError: return vault(error)
         case let error as SharedVaultError: return sharedVault(error)
         case let error as SharingError: return sharing(error)
+        case let error as SharingCodeError: return SharingCodeWording.failure(error)
+        case is SharingBoardError:
+            return "The other device could not be reached. Check that you are both online, then try again."
         case let error as InterchangeSessionError: return interchange(error)
         case is InterchangeError:
             return
@@ -123,6 +126,11 @@ public enum ErrorWording {
             return "This device has not received the vault's current key yet. Sync, then try again."
         case .keyIDInUse:
             return "That invitation conflicts with a vault already on this device, and was refused."
+        case .sharingBoardNotConfigured:
+            return "Vault sharing codes are not available here. Use the full vault sharing code instead."
+        case .sharingCodeKeysNotListed:
+            return "The keys you just checked are not the ones this shared vault lists for them, so nothing was "
+                + "changed. Remove them from the vault, or have them invited again."
         }
     }
 
@@ -151,12 +159,12 @@ public enum ErrorWording {
         case .unknownAccount, .directoryMismatch:
             return "No Watchword account was found for that ID."
         case .keySubstituted:
-            return "This person's keys are not the ones you verified before. Do not continue until you have compared "
-                + "safety numbers with them again."
+            return "This person's keys are not the ones you checked before. Do not continue until you have checked a "
+                + "vault sharing code with them again."
         case .fingerprintMismatch:
-            return "The safety number does not match. Compare it with the other person again, digit by digit."
+            return "The full vault sharing code does not match. Check it with the other person again, digit by digit."
         case .fingerprintNotVerified:
-            return "Compare safety numbers first."
+            return "Check a vault sharing code with them first."
         case .invitationAlreadyCompleted:
             return "That invitation has already been used."
         case .vaultOwnerConflict:

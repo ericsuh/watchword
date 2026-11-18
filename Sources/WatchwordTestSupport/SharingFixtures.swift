@@ -187,7 +187,9 @@ public struct SharingHousehold: Sendable {
 
     /// `party` as a contact the owner has verified (by eye: these tests are not about the comparison).
     public func contact(_ party: SharingParty) async throws -> VerifiedContact {
-        try await contacts.verify(party.bundle, evidence: .comparedByEye, signedBy: owner.keyset, at: now)
+        try await contacts.verify(
+            party.bundle, evidence: .safetyNumber(party.bundle.fingerprint.safetyNumber), signedBy: owner.keyset,
+            at: now)
     }
 
     public var state: MembershipState {
