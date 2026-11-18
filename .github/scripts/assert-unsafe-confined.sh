@@ -20,6 +20,15 @@
 #    function with a pointer and a length, so that file must name a pointer type and export the symbol; its one
 #    permitted attribute is `@_cdecl("LLVMFuzzerTestOneInput")`, and nothing in Fuzz/ may bind a foreign symbol.
 #
+# 6. Test hooks stay in tests (review of round 7): `package` members that exist so a test can play an adversary or
+#    leave a check out are visible to every target of the package, WatchwordPlatform and WatchwordPresentation
+#    included, so the compiler would let a shipped target call one. Each may be named in code only in the file that
+#    defines it and under Sources/WatchwordTestSupport (Tests/ is not scanned): `playModifiedClient` (a session that
+#    writes and publishes in a shared vault whatever its device ID, Z162), `assigningDeviceID` (enrolment under a
+#    named device ID that commits to nothing, Z157) and `MemberKeyCheck.unchecked(in:)` (a member key check that
+#    compared nothing, so keys are wrapped to unpinned bundles). `dropKeys` and the other `package` members are
+#    production code shared between modules, not hooks.
+#
 # Comment lines are ignored. This is a tripwire, not a proof: review (and CODEOWNERS on Sources/SecureMemory) remains
 # the backstop. Tests are out of scope: they are not shipped and not built by the strict job.
 set -euo pipefail
@@ -56,6 +65,19 @@ outside=$(code_lines '[Uu]nsafe|@unchecked|@_[A-Za-z]|@(extern|section|used|excl
 bindings=$(code_lines '@(_silgen_name|_cdecl|_extern|extern)([^A-Za-z0-9_]|$)')
 [ -z "$bindings" ] || report "Hand-written foreign symbol bindings are not permitted anywhere:" "$bindings"
 
+# pattern, then the one file besides WatchwordTestSupport that may name it (where it is defined).
+test_hooks=(
+  '(^|[^A-Za-z0-9_])playModifiedClient([^A-Za-z0-9_]|$) Sources/WatchwordKit/VaultSession+Sharing.swift'
+  '(^|[^A-Za-z0-9_])assigningDeviceID([^A-Za-z0-9_]|$) Sources/WatchwordKit/VaultSession+Account.swift'
+  '(^|[^A-Za-z0-9_])unchecked[[:space:]]*\([[:space:]]*in[[:space:]]*: Sources/WatchwordSharing/MemberKeyCheck.swift'
+)
+for entry in "${test_hooks[@]}"; do
+  pattern=${entry% *}
+  home=${entry##* }
+  hooks=$(code_lines "$pattern" | awk -v home="$home:" 'index($0, "Sources/WatchwordTestSupport/") != 1 && index($0, home) != 1' || true)
+  [ -z "$hooks" ] || report "A test hook named outside $home and Sources/WatchwordTestSupport (tests only):" "$hooks"
+done
+
 if [ -d Fuzz ]; then
   entry=Fuzz/Sources/WatchwordFuzz/LibFuzzerEntry.swift
   fuzz_foreign=$(find Fuzz/Sources -type f ! -name '*.swift')
@@ -74,5 +96,5 @@ if [ -d Fuzz ]; then
   [ "$fuzz_entries" -le 1 ] || report "Fuzz/ may export one symbol, libFuzzer's entry point:" "$(fuzz_lines '@_cdecl')"
 fi
 
-[ "$fail" -eq 0 ] && echo "Unsafe constructs are confined to Sources/SecureMemory (and libFuzzer's entry point in Fuzz/); no hand-bound foreign symbols."
+[ "$fail" -eq 0 ] && echo "Unsafe constructs are confined to Sources/SecureMemory (and libFuzzer's entry point in Fuzz/); no hand-bound foreign symbols; test hooks only in tests."
 exit "$fail"
