@@ -676,15 +676,12 @@ extension AdversarialAccountTests {
         }
 
         // The forged branch alone is all a device has seen (the store withheld the rest): it is followed, as nothing
-        // tells it from the member's own. When the member's change appears, the device says so and stays put; the
-        // member's code is what moves it (the session's `verifyMemberDevices` sets this pin).
+        // tells it from the member's own. When the member's change appears, the device says so and stays put. A pin
+        // settled by an earlier version (which took a code, Z11) still reads as settled.
         let deceived = s.evaluate(s.before + s.forged, pin: nil)
         #expect(deceived.pin?.credential == s.forgedTip.id && deceived.state?.standing(of: S.laptop) == .active)
         let shown = s.evaluate(s.before + s.forged + s.genuine, pin: deceived.pin)
         #expect(shown.pin?.credential == s.forgedTip.id && shown.unsettled)
-        let code = VaultSession.devicesCode(accountID: s.f.accountID, credential: s.change.id)
-        #expect(code != VaultSession.devicesCode(accountID: s.f.accountID, credential: s.forgedTip.id))
-        #expect(code.filter(\.isNumber).count == 12)
         var settled = s.evaluate(
             s.before + s.forged + s.genuine,
             pin: MemberRegistryPin(genesis: s.genesis.id, credential: s.change.id, settled: nil))

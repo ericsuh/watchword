@@ -52,8 +52,9 @@ struct MemberRegistryAnchor: Hashable, Sendable {
 struct MemberRegistryPin: Hashable, Sendable {
     var genesis: ObjectDigest
     var credential: ObjectDigest
-    /// A digest of the disagreeing entries the person last settled (`verifyMemberDevices`): they are not reported
-    /// again, and anything new is.
+    /// A digest of the disagreeing entries the person last settled: they are not reported again, and anything new is.
+    /// Read from pins saved by an earlier version, which settled with a code (removed, review finding Z11); nothing
+    /// in this version sets it.
     var settled: ObjectDigest?
 }
 
@@ -179,8 +180,8 @@ public struct SharedVaultStatus: Sendable, Hashable {
     public let heldAside: Int
     /// Members whose own devices disagree about which of them are the account's (review finding Z6): the member's
     /// device registry holds a second first entry, or a password change beside the one this device follows. Whoever
-    /// made it holds that member's account key. Nothing a contested device signs counts here meanwhile, and nothing
-    /// is followed until the person has verified with the member again (`verifyMemberDevices`).
+    /// made it holds that member's account key. Nothing a contested device signs counts here meanwhile. Nothing in
+    /// this version settles it (review finding Z11): that is for the vault sharing code session of ADR 0010.
     public let membersWithDisagreeingDevices: [UUID]
     /// The vault has gone on in a format this version cannot read (`MembershipLedger.continuesInLaterFormat`,
     /// docs/02-architecture.md §8.9): it is read-only on this device, which proposes, plans, publishes and seals

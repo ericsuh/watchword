@@ -16,8 +16,9 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         case keysChanged
         /// Their account's own devices disagree about which of them are the account's: its device registry holds a
         /// second first entry, or a password change beside the one this device follows, made by someone who holds
-        /// their account key (review finding Z6). Nothing a device in question signs counts until the person has
-        /// verified with them again and typed the code their device shows.
+        /// their account key (review finding Z6). Nothing a device in question signs counts here, and nothing in this
+        /// version settles it (review finding Z11): comparing safety numbers again verifies their account's keys,
+        /// not which of its devices are theirs.
         case devicesDisagree
         /// No comparison of the chain with this device's pins has been made on the current head (the vault is
         /// locked, or the contacts could not be read). Never shown as verified (D17).
@@ -40,7 +41,8 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         case .you, .verified: return nil
         case .unverified: return "Not verified by you"
         case .keysChanged: return "Keys changed: compare safety numbers again"
-        case .devicesDisagree: return "This person's devices disagree: verify with them again"
+        case .devicesDisagree:
+            return "This person's devices disagree. What their devices in question write is held aside here"
         case .notChecked: return "Not checked yet"
         }
     }
@@ -212,18 +214,6 @@ public final class SharedVaultModel {
                 try? await reload()
                 throw error
             }
-        }
-    }
-
-    /// The person has verified with a member whose devices disagree (`MemberRow.Trust.devicesDisagree`) and typed the
-    /// code that member's own device shows: this device follows the password change the code names (Z6).
-    public func verifyDevices(of member: MemberRow, code: String) async {
-        await perform {
-            try await context.session.verifyMemberDevices(of: member.id, code: code)
-            try await reload()
-            notice =
-                "\(member.name)'s devices are verified. Only the devices of the password change they showed "
-                + "you count here now."
         }
     }
 

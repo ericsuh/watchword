@@ -149,9 +149,6 @@ public final class DevicesModel: LockSensitive {
     /// The password changes this device does not follow, one per device that made any: more than one means the
     /// account's devices disagree, and the person says which change is theirs by the device they made it on.
     public private(set) var passwordChanges: [PasswordChangeRow] = []
-    /// The code another member of a shared vault types when their device says this account's devices disagree
-    /// (`VaultSession.memberDevicesCode`, Z6).
-    public private(set) var devicesCode: String?
     public private(set) var sync: SyncSummary?
     public private(set) var isSyncConfigured: Bool
     public private(set) var isWorking = false
@@ -240,7 +237,6 @@ public final class DevicesModel: LockSensitive {
         passwordChanges = ((try? await session.pendingPasswordChanges()) ?? []).map {
             PasswordChangeRow($0, names: names)
         }
-        devicesCode = try? await session.memberDevicesCode()
     }
 
     private func perform(_ body: () async throws -> Void) async {

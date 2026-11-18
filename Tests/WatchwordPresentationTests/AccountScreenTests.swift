@@ -265,7 +265,7 @@ struct PasswordChangedElsewhereTests {
         await devices.first.session.lock()
         try await devices.first.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
         await model.load()
-        #expect(model.awaitingNewPassword && model.devicesCode?.filter(\.isNumber).count == 12)
+        #expect(model.awaitingNewPassword)
         let change = try #require(model.passwordChanges.first)
         #expect(model.passwordChanges.count == 1 && change.mayFollow)
         #expect(change.summary.hasPrefix("The account password was changed on “"), "\(change.summary)")

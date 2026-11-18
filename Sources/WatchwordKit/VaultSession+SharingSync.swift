@@ -378,11 +378,14 @@ extension VaultSession {
     /// revokes nor the one it keeps signs anything that counts here, while a device nobody contests carries on.
     /// With nothing anchored, more than one genesis entry anchors none.
     ///
-    /// Every such sight is returned as a disagreement, for the screens to say that this person's devices disagree
-    /// and to verify with them again; `verifyMemberDevices` is that step, and the only thing that moves the anchor
-    /// to a branch of the person's choosing. What this does not stop: the key holder can keep the member's
-    /// contested devices in question for as long as they like, and a device that anchors while only the forged
-    /// branch is visible follows it until the person verifies. The cure for both is the account re-key (F10.1).
+    /// Every such sight is returned as a disagreement, for the screens to say that this person's devices disagree.
+    /// Nothing in this version settles one (review finding Z11): the twelve-digit code that once moved an anchor to
+    /// the branch the person named was about 40 bits of a value the key holder can grind, the weakness ADR 0010
+    /// rejects, and was removed. Re-verifying a member's devices after a fork belongs to the vault sharing code
+    /// session of ADR 0010; until that exists a contested registry stays contested, and is reported. What this does
+    /// not stop: the key holder can keep the member's contested devices in question for as long as they like, and a
+    /// device that anchors while only the forged branch is visible follows it. The cure for both is the account
+    /// re-key (F10.1).
     ///
     /// At most `maximumSteps` changes are followed in one call (Z10): the rest are followed by the next, from the pin.
     static func evaluateMemberRegistry(
@@ -488,104 +491,6 @@ extension VaultSession {
 
     static func disagreementDigest(_ entries: Set<ObjectDigest>) -> ObjectDigest {
         ObjectDigest(hashing: Array("WW-devices-settled-v1".utf8) + entries.sorted().flatMap(\.bytes))
-    }
-
-    /// The code that names a credential entry of an account's registry: twelve digits from SHA-256 of a label, the
-    /// account and the entry's ID. A member reads theirs off their own device (`memberDevicesCode`); whoever shares a
-    /// vault with them types it to say which of that account's password changes is the member's own.
-    static func devicesCode(accountID: UUID, credential: ObjectDigest) -> String {
-        let digest = ObjectDigest(
-            hashing: Array("WW-devices-code-v1".utf8) + SharedBytes.bytes(accountID) + credential.bytes
-        ).bytes
-        let value = digest.prefix(5).reduce(UInt64(0)) { $0 << 8 | UInt64($1) } % 1_000_000_000_000
-        let digits = String(repeating: "0", count: 12 - String(value).count) + String(value)
-        return stride(from: 0, to: 12, by: 4).map { offset in
-            String(digits.dropFirst(offset).prefix(4))
-        }.joined(separator: " ")
-    }
-
-    /// This account's own code: the password change this device follows, for another member to type on theirs when
-    /// their device reports that this account's devices disagree. Read it to them in person or over a call you
-    /// trust, as with a safety number.
-    public func memberDevicesCode() async throws -> String {
-        guard let account = try await loadAccount() else { throw VaultError.noAccount }
-        let view = try await registry(account)
-        return Self.devicesCode(accountID: account.accountID, credential: view.state.credential.id)
-    }
-
-    /// The person has verified with a member again, and typed the code that member's own device shows
-    /// (`memberDevicesCode`): this device anchors that member's registry on the credential entry the code names,
-    /// whichever branch it is on, and takes what it has seen disagree as settled. The one step that moves an anchor
-    /// anywhere but forward, and it is the person's.
-    ///
-    /// The code must name exactly one credential (or genesis) entry of the account's registry that replays as a
-    /// chain; otherwise nothing changes (`memberDevicesCodeUnknown`).
-    public func verifyMemberDevices(of member: UUID, code: String) async throws {
-        _ = try sharingSettings()
-        let epoch = lockEpoch
-        _ = try requireKeys()
-        guard let account = try await loadAccount() else { throw VaultError.noAccount }
-        await loadSharedVaultsIfNeeded()
-        let transport = try sharingTransport()
-        var signingKeys: Set<[UInt8]> = []
-        for vault in sharing.vaults.values {
-            if let key = Self.memberAnchors(of: vault.ledger, excluding: account.accountID)[member] {
-                signingKeys.insert(key)
-            }
-        }
-        guard !signingKeys.isEmpty, let raw = await fetchMemberRegistry(member, transport: transport) else {
-            throw SharedVaultError.memberDevicesCodeUnknown(member)
-        }
-        _ = try requireKeys(since: epoch)
-        let wanted = code.filter(\.isNumber)
-        var settled: [MemberRegistryAnchor: MemberRegistryEvaluation] = [:]
-        for signingKey in signingKeys {
-            let anchor = MemberRegistryAnchor(accountID: member, signingKey: signingKey)
-            let entries = DeviceRegistry.admit(raw, accountID: member, accountSigningKey: signingKey)
-            let named = entries.filter { id, entry in
-                switch entry.body {
-                case .genesis, .credential:
-                    return Self.devicesCode(accountID: member, credential: id).filter(\.isNumber) == wanted
-                default:
-                    return false
-                }
-            }.keys.sorted()
-            let geneses = entries.filter {
-                if case .genesis = $0.value.body { return true }
-                return false
-            }.keys.sorted()
-            guard named.count == 1 else { continue }
-            // The genesis entry the named one descends from: the anchored one, or the one it replays from.
-            let candidates =
-                sharing.registryPins[anchor].map { [$0.genesis] } ?? Array(geneses.prefix(Self.maximumMemberBranches))
-            let genesis = candidates.first { candidate in
-                (try? DeviceRegistry.evaluate(
-                    entries, accountID: member, accountSigningKey: signingKey, genesis: candidate,
-                    credential: named[0])) != nil
-            }
-            guard let genesis else { continue }
-            var evaluated = Self.evaluateMemberRegistry(
-                raw, accountID: member, signingKey: signingKey,
-                pin: MemberRegistryPin(genesis: genesis, credential: named[0], settled: nil))
-            guard evaluated.complete, var pin = evaluated.pin else { continue }
-            pin.settled = evaluated.disagreement.isEmpty ? nil : Self.disagreementDigest(evaluated.disagreement)
-            evaluated.pin = pin
-            evaluated.unsettled = false
-            settled[anchor] = evaluated
-        }
-        guard !settled.isEmpty else { throw SharedVaultError.memberDevicesCodeUnknown(member) }
-        for (anchor, evaluated) in settled {
-            sharing.registries[anchor] = evaluated.state
-            sharing.registryPins[anchor] = evaluated.pin
-            sharing.registryDisagreements.remove(anchor)
-        }
-        // Whose devices count has changed: the vaults that list the member are judged again, and the pins saved.
-        for (vaultID, vault) in sharing.vaults
-        where Self.memberAnchors(of: vault.ledger, excluding: account.accountID)[member] != nil {
-            requestReplay(vaultID)
-            _ = try requireKeys(since: epoch)
-            try await saveSharedVault(vaultID)
-        }
     }
 
     /// The accounts whose registries, as `vaultID`'s chain anchors them, list `device`, this account's own first;

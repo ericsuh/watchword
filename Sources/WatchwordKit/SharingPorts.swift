@@ -124,9 +124,6 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// `removeLocalCopies` was asked for a vault this account is still a member of: a member leaves first, and the
     /// copies can go once the chain says they are out.
     case stillAMember(UUID)
-    /// `verifyMemberDevices` was given a code that no entry of that account's device registry, or more than one,
-    /// answers to. Nothing was anchored: read the code again from the member's own device.
-    case memberDevicesCodeUnknown(UUID)
     /// `removeLocalCopies` was asked for a vault in which this device holds changes of its own that nobody else has,
     /// more of them than the caller said the person had been told of (review finding Z57): those are not copies,
     /// and discarding them is the person's choice, made knowing the number. Carries the number.

@@ -133,9 +133,6 @@ public enum ErrorWording {
             return "This device has not received the vault's current key yet. Sync, then try again."
         case .keyIDInUse:
             return "That invitation conflicts with a vault already on this device, and was refused."
-        case .memberDevicesCodeUnknown:
-            return "That code does not match any of this person's devices. Ask them to read it again from Devices "
-                + "on their own device."
         case .ownerUnknown:
             return "This device cannot yet tell whose shared vault that is, so it cannot accept an invitation to it. "
                 + "Sync, then try again."

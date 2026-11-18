@@ -17,8 +17,8 @@ extension AdversarialSharedVaultTests {
     /// password change of its own from the generation before its revocation, sealing a back-dated revocation of the
     /// member's phone, and a second one on top, then writes into a vault the member shares, as the member. The other
     /// members have no password to tell the two branches by. One who had already followed the member's own change
-    /// keeps to it; one who sees both at once follows neither, reads neither contested device, and says so, until
-    /// the person has the code from the member's own device.
+    /// keeps to it; one who sees both at once follows neither, reads neither contested device, and says so, and
+    /// nothing in this version settles it (Z11).
     @Test("a member's revoked device does not write as that member in a shared vault by changing the password itself")
     func revokedDeviceOfAMemberForksTheRegistry() async throws {
         let household = SharedVaultHousehold()
@@ -85,26 +85,23 @@ extension AdversarialSharedVaultTests {
         #expect(
             try await bystander.session.sharedVaultStatus(vaultID).membersWithDisagreeingDevices == [member.accountID])
 
-        // Verified with the member again: the code their own device shows names their change, and only that.
-        await #expect(throws: SharedVaultError.memberDevicesCodeUnknown(member.accountID)) {
-            try await bystander.session.verifyMemberDevices(of: member.accountID, code: "0000 0000 0000")
-        }
-        let code = try await member.session.memberDevicesCode()
-        try await bystander.session.verifyMemberDevices(of: member.accountID, code: code)
-        try await Self.syncAll([bystander], rounds: 3)
+        // Comparing safety numbers with the member again verifies their account's keys, which both branches share,
+        // not which devices are theirs: it settles nothing, and nothing in this version does (Z11). The contested
+        // devices stay unread and the vault keeps saying so.
+        try await bystander.session.verifyContact(
+            member.accountID, evidence: .safetyNumber(member.safetyNumber), replacingPin: true)
+        try await Self.syncAll([bystander], rounds: 2)
         titles = Set(try await bystander.session.items().items.filter { $0.vaultID == vaultID }.map(\.title))
-        #expect(titles.contains(genuine.title) && !titles.contains(planted.title))
-        #expect(try await bystander.session.sharedVaultStatus(vaultID).membersWithDisagreeingDevices.isEmpty)
+        #expect(!titles.contains(planted.title) && !titles.contains(genuine.title))
+        #expect(
+            try await bystander.session.sharedVaultStatus(vaultID).membersWithDisagreeingDevices == [member.accountID])
 
-        // Across a relaunch of the sharing state the anchor holds: a session that loads it again follows the
-        // member's change without being told twice.
+        // Across a relaunch of the sharing state the anchor holds where it was: before the fork, on neither branch.
         let pins = try #require(await bystander.state.value(.memberDevices, vaultID: vaultID))
         let saved = try #require(MemberRegistryPins.parse(pins, account: bystander.bundle, vaultID: vaultID))
-        let anchored = saved.first { $0.key.accountID == member.accountID }?.value
-        #expect(anchored?.settled != nil)
-        #expect(
-            VaultSession.devicesCode(accountID: member.accountID, credential: try #require(anchored).credential)
-                == code)
+        let anchored = try #require(saved.first { $0.key.accountID == member.accountID }?.value)
+        #expect(anchored.settled == nil)
+        #expect(anchored.credential == anchored.genesis, "the bystander had seen no change of the member's before")
     }
 
     /// Threat: a member of the vault (A4) publishes a registry that is long to replay (review finding Z10); A3 holding
