@@ -273,4 +273,22 @@ extension AdversarialSyncTests {
             await state.loadState(vaultID: Self.vault)?.quarantineDropped == [Self.a],
             "whose version was not kept was not remembered")
     }
+
+    // MARK: - Local storage failing while downloading (Z142)
+
+    /// Threat: none; a database that fails as an object is staged (a full disk, a damaged file). Z39 made a failure of
+    /// local storage stop a sync, but the download still caught it as a refusal of the object: reported as a rejected
+    /// object and a waiting stream, as if the object were at fault, and the sync went on to publish. It stops the
+    /// sync, as it does while merging.
+    @Test("a state store that fails while staging stops the sync instead of refusing the object")
+    func stagingFailureStopsTheSync() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("Bank", password: "x"))
+        try await f.writer.sync()
+        let state = InterceptingStateStore()
+        await state.fail(staging: DiskFailure())
+        let (engine, _, _) = await Self.joiner(f, state: state, configuration: SyncTestClient.configuration)
+        await #expect(throws: DiskFailure.self) { try await engine.sync() }
+        await #expect(throws: DiskFailure.self) { try await engine.download() }
+    }
 }

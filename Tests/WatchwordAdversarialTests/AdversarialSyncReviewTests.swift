@@ -100,6 +100,8 @@ actor InterceptingStateStore: SyncStateStore {
     var usage: QuarantineUsage?
     /// Thrown when the quarantine is counted, as a database that cannot be read would.
     var usageFailure: (any Error)?
+    /// Thrown when an object is staged, as a database that cannot be written would.
+    var stageFailure: (any Error)?
     /// Records whose entries the quarantine refuses to keep, as the SQLite store refuses one whose digest is crowded.
     var refused: Set<RecordKey> = []
 
@@ -107,13 +109,17 @@ actor InterceptingStateStore: SyncStateStore {
     func report(usage: QuarantineUsage?) { self.usage = usage }
     func fail(usage failure: any Error) { usageFailure = failure }
     func refuse(_ keys: Set<RecordKey>) { refused = keys }
+    func fail(staging failure: any Error) { stageFailure = failure }
 
     func loadState(vaultID: UUID) async -> SyncState? { await base.loadState(vaultID: vaultID) }
     func saveState(_ state: SyncState) async {
         await base.saveState(state)
         await afterSave?(state)
     }
-    func stage(_ object: StagedObject) async { await base.stage(object) }
+    func stage(_ object: StagedObject) async throws {
+        if let stageFailure { throw stageFailure }
+        await base.stage(object)
+    }
     func staged(vaultID: UUID) async -> [StagedObject] { await base.staged(vaultID: vaultID) }
     func unstage(_ locations: [SyncObjectLocation]) async { await base.unstage(locations) }
     func addPendingDeletion(_ deletion: PendingDeletion) async { await base.addPendingDeletion(deletion) }

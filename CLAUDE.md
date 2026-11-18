@@ -494,7 +494,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   at the first number the listing lacks, and never this device's own genuine head (what it published or verified as
   its own), whatever names are listed above it (Z135; the anchor rests on that order).
 - A failure of local storage is a `StorageFailure` (`RecordStoreError`, `SQLiteConnection.Failure`) and stops a sync;
-  never let one reject the object being merged (Z39).
+  never let one reject the object being merged or downloaded (Z39, Z142).
 - A record ID that a record of another vault holds on this device costs that entry alone (`SyncReport.collided`,
   kept in the quarantine): never reject an object, or stop a stream, for it (Z22).
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.

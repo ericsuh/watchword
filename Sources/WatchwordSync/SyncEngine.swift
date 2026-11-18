@@ -581,6 +581,10 @@ public actor SyncEngine {
                 try await syncState.stage(StagedObject(location: location, object: object))
             } catch let error as SyncTransportError where error.stopsSync {
                 throw error
+            } catch let error where error is any StorageFailure {
+                // Local storage failing (staging the object, or reading what is staged) is no fault of the object:
+                // it stops the sync, as while merging (review findings Z39, Z142).
+                throw error
             } catch {
                 report.rejected.append(SyncRejection(name: location.name, reason: Self.reason(error)))
                 if location.kind == .segment {
