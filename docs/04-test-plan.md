@@ -477,6 +477,23 @@ for both stores, the SQLite one on a Mac); a device that kept a version aside wr
 "sync with real keys"): typed errors, never a trap (`headerRowAtTheLastVersion`, `directoryRowAtTheLastVersion`,
 `fetchedDeletionOverTheLastVersion`, `metadataRowAtTheLastVersion`). Not an adversary's: a lock as a deletion commits
 loses no tombstone, and one before it deletes nothing (`DeletionLockRaceTests`).
+The review of those fixes (`06-adversarial-review.md` Z30 to Z39; `AdversarialSyncReviewTests.swift` in "sync log",
+`AdversarialSharedVaultOwnStreamTests.swift` in "shared vaults through the session"). A device's own stream in a
+shared vault: a member's segment far ahead in it, or at the last number, does not move its numbering
+(`memberPlantAheadInOwnStream`), and a read-only member's object there holds back nothing, deletions in other vaults
+included (`readOnlyMemberPlantInOwnStream`). The hold: an unfetchable name far ahead does not mute a device whose
+stream shows its own (`unfetchableNameFarAheadInOwnStream`), and a device whose state is behind its collected stream
+does not publish over a collected number while a trusted snapshot covers more of it
+(`olderStateUnderACoveringSnapshot`).
+A lock before the retry of an out-of-reach version does not leave it out (`lockBeforeTheRetry`); a retried version whose
+merge fails stops nothing (`retriedEntryThatDoesNotMerge`). The owner's snapshot's tombstone naming a member's device is
+judged against that device's stream (`ownerSnapshotTombstoneNamingAMember`); a planted deletion in the device's own
+name marks nothing as sent (`plantedOwnDeletionDoesNotSuppressPublishing`). The quarantine: a version it could not keep
+withholds snapshots and is offered again when there is room (`droppedVersionIsRemembered`), sizes near the integer
+limit read as full (`quarantineSizesNearTheLimit`), and a failing store stops the sync instead of refusing an object
+(`storageFailureStopsTheSync`). The withheld snapshot is combined and worded (`SyncReportCombinationTests`,
+`WordingTests.snapshotWithheldForReview`), and the two fields added to the state are signed, and only when set
+(`SyncStateAuthenticationTests`).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

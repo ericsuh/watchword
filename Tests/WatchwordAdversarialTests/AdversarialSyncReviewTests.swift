@@ -98,9 +98,12 @@ actor InterceptingStateStore: SyncStateStore {
     var afterSave: (@Sendable (SyncState) async -> Void)?
     /// What the quarantine is said to hold, in place of what it holds.
     var usage: QuarantineUsage?
+    /// Thrown when the quarantine is counted, as a database that cannot be read would.
+    var usageFailure: (any Error)?
 
     func intercept(afterSave: (@Sendable (SyncState) async -> Void)?) { self.afterSave = afterSave }
     func report(usage: QuarantineUsage?) { self.usage = usage }
+    func fail(usage failure: any Error) { usageFailure = failure }
 
     func loadState(vaultID: UUID) async -> SyncState? { await base.loadState(vaultID: vaultID) }
     func saveState(_ state: SyncState) async {
@@ -127,7 +130,8 @@ actor InterceptingStateStore: SyncStateStore {
     func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) async -> Bool {
         await base.holdsQuarantined(entry, vaultID: vaultID)
     }
-    func quarantineUsage(vaultID: UUID) async -> QuarantineUsage {
+    func quarantineUsage(vaultID: UUID) async throws -> QuarantineUsage {
+        if let usageFailure { throw usageFailure }
         if let usage { return usage }
         return await base.quarantineUsage(vaultID: vaultID)
     }
@@ -358,5 +362,30 @@ extension AdversarialSyncTests {
         #expect(
             QuarantineUsage(devices: [Self.a: .init(entries: .max, bytes: .max), Self.b: .init(bytes: 1)]).bytes
                 == .max)
+    }
+}
+
+/// A failure of the disk under the state store, as the SQLite stores throw one.
+struct DiskFailure: StorageFailure {}
+
+extension AdversarialSyncTests {
+    /// Threat: none; a database that fails (a full disk, a damaged file). The SQLite stores throw their connection's
+    /// failures as they come, and the engine stopped a sync only for `RecordStoreError`: a failure while keeping a
+    /// version aside rejected the object that carried it, as if the object were at fault, and left its stream waiting
+    /// (Z39). A failure of the storage itself stops the sync, and nothing is refused for it.
+    @Test("a failing state store stops the sync instead of refusing the object it was working on")
+    func storageFailureStopsTheSync() async throws {
+        let f = try await Self.fixture()
+        let configuration = Self.jumpConfiguration()
+        let author = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: await f.writer.store)
+        try await author.save(Self.login("Mine", password: "m"))
+        _ = try await Self.plantVersion(900, title: "Far ahead", on: author)
+        try await author.sync()
+        let state = InterceptingStateStore()
+        await state.fail(usage: DiskFailure())
+        let (engine, _, _) = await Self.joiner(f, state: state, configuration: configuration)
+        await #expect(throws: DiskFailure.self) { try await engine.sync() }
     }
 }

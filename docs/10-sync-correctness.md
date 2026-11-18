@@ -385,7 +385,11 @@ failed each time.
   segment that carried it as merged without having merged it, so, like a device holding entries it cannot read
   (below), it writes no ordinary snapshot while the quarantine holds a version a trusted device wrote
   (`06-adversarial-review.md` Z26): the collection rule below would otherwise let that segment go while no snapshot
-  carried the version.
+  carried the version. The same holds for a version it was to keep there and could not, the quarantine being full:
+  which devices' versions found no room is part of its signed state, and it writes no ordinary snapshot while that
+  names a trusted device (Z38). And a version it refused only as a jump for now is tried again in the same pass; a
+  pass cut short before that leaves a retry owed in the state, and the next sync replays the log (Z33), so the order
+  in which a log was read never leaves an honest version out for good.
 - **Kinds a device does not know** (ADR 0009, N7). The argument above is about items, on devices that read every kind
   in the log. A device of an earlier version keeps the entries of an ignorable kind it cannot read aside, unmerged,
   and merges everything else, so its items converge with everyone's; its state of that kind is simply behind, and

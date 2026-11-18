@@ -415,14 +415,17 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - A segment carries only its author's versions, and each record envelope's own context must match its entry
   before anything is applied. Record versions above `maximumVersion` or jumps beyond `maximumVersionJump` are
   quarantined (U5); a jump is measured against what the pass has merged (`retryOutOfReach` tries again, lowest first,
-  what was refused on the way), and a device that holds nothing of a vault with no judge takes the snapshots it
-  starts from as its baseline (Z25). Never merge from the quarantine itself: it is a local file.
+  what was refused on the way, and a pass cut short leaves `SyncState.retryUnfinished` set so the next sync replays,
+  Z33; an entry whose retry fails stays aside, Z36), and a device that holds nothing of a vault with no judge takes the
+  snapshots it starts from as its baseline (Z25). Never merge from the quarantine itself: it is a local file.
 - **Never lose data (PRD F7.6, F7.7).** `ItemMerge` is a multi-value register per group: a value is replaced only
   by one written *knowing about it* (its `GroupStamp.seen` vector contains it); concurrent values all stay, in
   `Item.conflicts`, until the person edits the group or calls `ItemMerge.resolve`. Notes merge line by line
   (`NoteText`). Merges never shorten a history; quarantined versions are kept, up to a cap per vault and per writing
   device, past which a version is not kept on this device and the report counts it (`quarantineFull`, Z27: the
-  quarantine is found by lookup and never reread). A permanent deletion carries an
+  quarantine is found by lookup and never reread; sizes are summed without overflow, Z39), and the state remembers
+  whose (`SyncState.quarantineDropped`, Z38): no ordinary snapshot while it names a trusted device, and a replay once
+  there is room. A permanent deletion carries an
   erasure summary and removes only what its author had seen; anything else is kept, trashed
   (`Item.keptAfterDeletion`). Every discard is the person's: a permanent deletion, `ItemMerge.resolve`, and the 30-day
   trash purge (F1.5). Sync can leave an item in the trash that nobody chose to discard, so the purge removes only
@@ -463,18 +466,25 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   counts as an erasure while merging. Its tombstone is signed *before* the deletion commits and recorded after
   (`SyncStateStore.prepared`, Z28): never add a step that needs keys between the commit and the record. The outbox
   compares rows with `SyncState.published`, not `known`, and a version found in the log under this device's name
-  counts as published only if it is the row the device holds (Z29).
+  counts as published only if it is the row the device holds, and a deletion only if no row is held or it is this
+  device's own (Z29, Z35).
 - A record can be erased more than once. A device remembers the join of every erasure of a record
   (`RecordMerger.joinErasureSummaries`; for items the union of `ItemErasures`, stamped with the later stamp) and
   judges versions against that, so arrival order decides nothing. A pending
   deletion is done only when this device published a deletion at or after its stamp *and* the join already holds
   what it had seen; never skip one because another device's erasure, or this device's own earlier one, is stamped
   later (W13, W18).
-- The next sequence number is never below the highest object of this device's own stream that verifies, and comes
-  from nothing else: never from a listed name (anyone can create one, Z24) and never from a snapshot's coverage
-  beyond what the stream can have got (Z21). An own-stream object that cannot be told from this device's own holds
-  publishing back (`ownStreamUnverified`); `push` never writes beyond `maximumSequence`. Every listed snapshot is
-  merged; a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
+- The next sequence number is never below the highest object of this device's own stream that carries this device's
+  *own* signatures (`SyncKeyring.verifyOwn`; in a shared vault another member's device can verify there, S33, Z30),
+  and comes from nothing else: never from a listed name (anyone can create one, Z24), a staged row (Z39), or a
+  snapshot's coverage beyond what the stream can have got (Z21). Publishing is held back (`ownStreamUnverified`) only
+  where the state could be behind the stream: no own object listed (`Listing.ownAnchored`, Z31), and an own-stream
+  object that cannot be told from this device's own, or a trusted snapshot claiming more of the stream (Z32).
+  `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
+  every other stream acknowledges it and a listed snapshot covers it, lowest first and never the newest (the anchor
+  rests on that order).
+- A failure of local storage is a `StorageFailure` (`RecordStoreError`, `SQLiteConnection.Failure`) and stops a sync;
+  never let one reject the object being merged (Z39).
 - A record ID that a record of another vault holds on this device costs that entry alone (`SyncReport.collided`,
   kept in the quarantine): never reject an object, or stop a stream, for it (Z22).
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
@@ -512,7 +522,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - The state row is signed too (`SyncState.authenticator`, `SignatureDomain.syncState`, bound to the vault and the
   device, Z20): its erasures become this device's signed tombstones and its merged vector signed coverage, so a row
   the session did not sign is no state and the log is replayed. A field added to `SyncState` goes into
-  `authenticatedBytes`; read the row through the session's `syncState`, never `syncSettings.state`, wherever what
+  `authenticatedBytes` (appended only when set, as `retryUnfinished` and `quarantineDropped` are, so that older rows
+  still verify); read the row through the session's `syncState`, never `syncSettings.state`, wherever what
   it says is acted on.
 
 ### `WatchwordSharing` invariants
@@ -725,7 +736,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   one: where two follow, only devices every branch keeps count, and the fork is reported
   (`membersWithDisagreeingDevices`). Never follow the highest generation, never drop the anchor for a second
   genesis, and move an anchor sideways only in `verifyMemberDevices`.
-- **A stream is one account's** (Z46): this device's own stream takes only this account's signature, and any other
+- **A stream is one account's** (Z46): this device's own stream takes only this account's signature (another's there is
+  held aside in sequence and never numbers the stream, Z30), and any other
   belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`). Another
   account's segment in it is recorded for the cut's chain, filed nowhere, and held aside. Every device records
   every signed segment, opened or not (`WriteJudge.recordUnopened`, Z51), so the lowest segment and a cut's chain are
@@ -743,8 +755,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
   `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
   judge a cut. The only snapshots a shared vault reads are its owner's account's, from before it was shared, for
-  the gap collection left; their tombstones are judged like a segment's (Z21). Do not refuse them outright: a
-  stream whose first segments were collected would stop at every replay.
+  the gap collection left; their tombstones are judged like a segment's (Z21), with nobody exempt, since a
+  snapshot's signer chose the device its entry names, and with the pass's segments recorded first (Z34). Do not
+  refuse them outright: a stream whose first segments were collected would stop at every replay.
 - Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`) or re-verified on load; the owner's pin
   anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from (S26).
 

@@ -286,7 +286,13 @@ half delivered** on a Mac; the transports are open.
   ID in one vault cannot collide with another's (Z22; the engine now confines a collision to the one entry); a skip
   the author signs and readers honour, for an unsigned object squatting at a device's next sequence number (Z24);
   refusing at download a segment that an ended account's cut cannot admit (Z27); an intent row in the record store's
-  own transaction, for a crash between a deletion and its tombstone (Z28).
+  own transaction, for a crash between a deletion and its tombstone (Z28). From the review of those fixes (Z30 to
+  Z39): a Mac run of `SQLiteSyncStateStore`'s paged migration, clamped sizes and capped digest rows, and of
+  `SQLiteConnection.Failure` as a `StorageFailure` (Z39); signing the quarantine's rows and taking out a kept version
+  once a version that supersedes it is merged (Z37), which want a column and an index in that schema; charging a
+  snapshot's entries to the snapshot's author rather than to the device each names (Z38), which wants a column too;
+  and, for a device that has never published in a vault, an unfetchable name in its stream still holds its publishing
+  there (Z31).
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
   screen (`DevicesModel.passwordChanges` and `follow`, over `pendingPasswordChanges` and `followPasswordChange`; the
   lock screen reports `tooManyPasswordChangesPending` and `passwordChangeRevokesThisDevice` in words, Z1 and Z8);
