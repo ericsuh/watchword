@@ -614,6 +614,8 @@ extension VaultSession {
     /// next one if this one does not get that far (review finding S41).
     func requestReplay(_ vaultID: UUID) {
         guard sharing.vaults[vaultID] != nil else { return }
+        // Counted, so that a pass that was running when this was asked does not settle it away (Z120).
+        sharing.vaults[vaultID]?.replayRequests &+= 1
         sharing.vaults[vaultID]?.needsReconcile = true
         sharing.vaults[vaultID]?.index.judgedHead = nil
         sharing.vaults[vaultID]?.indexChanged = true

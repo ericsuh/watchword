@@ -104,11 +104,25 @@ extension VaultSession {
         )
     }
 
-    /// After a shared vault's engine ran: a replay that finished settles the head it judged against.
-    func sharedEngineDidRun(_ vaultID: UUID, reconciled: Bool, report: SyncReport) {
+    /// How many replays of `vaultID` have been asked for so far: what a pass reads before it starts and hands to
+    /// `sharedEngineDidRun` (Z120).
+    func sharedReplayRequests(_ vaultID: UUID) -> UInt64 {
+        sharing.vaults[vaultID]?.replayRequests ?? 0
+    }
+
+    /// After a shared vault's engine ran: a replay that finished settles the head it judged against, unless a replay
+    /// was asked for while it ran (`requestsBefore` is the count when it started). What the pass learnt then (a
+    /// stream's account changed when an earlier segment arrived, a key, a segment inside a cut) can make a version
+    /// that the pass's own take-out judged against the old index stop counting, and only a take-out removes it: the
+    /// request stays, and the next replay, in this sync or the next, takes out and replays again (review finding
+    /// Z120). Settled regardless, it was lost, and the device kept what every other device holds aside.
+    func sharedEngineDidRun(_ vaultID: UUID, reconciled: Bool, report: SyncReport, requestsBefore: UInt64) {
         guard var vault = sharing.vaults[vaultID] else { return }
         if reconciled, !report.deferredUntilUnlock, !report.transportUnavailable {
-            if vault.indexRebuilding {
+            if vault.replayRequests != requestsBefore {
+                vault.needsReconcile = true
+                vault.index.judgedHead = nil
+            } else if vault.indexRebuilding {
                 // The index is whole again: now take out what no longer counts, and replay once more (S41).
                 vault.indexRebuilding = false
                 vault.needsReconcile = true

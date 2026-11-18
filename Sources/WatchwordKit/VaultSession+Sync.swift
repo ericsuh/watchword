@@ -95,10 +95,12 @@ extension VaultSession {
             var vaultReport: SyncReport
             let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
+                let requests = sharedReplayRequests(vaultID)
                 vaultReport = try await engine(vaultID).sync(
                     reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
                     transportStopped: stopped)
-                sharedEngineDidRun(vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport)
+                sharedEngineDidRun(
+                    vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport, requestsBefore: requests)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
@@ -134,9 +136,10 @@ extension VaultSession {
                 guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
                 await prepareSharedReplay(vaultID)
                 let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+                let requests = sharedReplayRequests(vaultID)
                 let second = try await engine(vaultID).sync(
                     reconcile: true, deferringDeletions: true, publishing: shared.publishing)
-                sharedEngineDidRun(vaultID, reconciled: true, report: second)
+                sharedEngineDidRun(vaultID, reconciled: true, report: second, requestsBefore: requests)
                 if second.deletionsDeferred > 0, !deferred.contains(vaultID) { deferred.append(vaultID) }
                 if second.transportUnavailable || second.ownStreamConflict != nil || second.ownStreamExhausted
                     || second.ownStreamUnverified != nil
