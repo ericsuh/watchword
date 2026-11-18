@@ -164,6 +164,10 @@ public actor VaultSession: SharesExecutor {
     /// and dropped by `lock()`.
     var sharingCodeRun: SharingCodeRun?
     var sharingCodeGeneration: UInt64 = 0
+    /// Numbers this device answered as a joiner, with when, for `SharingCodeLimits.answeredMemory`: not dropped by
+    /// `lock()` or by ending a session, so that a board that serves a fresh commit under a number already answered
+    /// cannot turn one starter session into several tries (docs/06-adversarial-review.md, V23). Public values only.
+    var answeredSharingNumbers: [String: Date] = [:]
     /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
     var pendingImport: PendingImport?
     /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.

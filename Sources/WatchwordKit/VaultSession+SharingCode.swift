@@ -161,9 +161,18 @@ extension VaultSession {
         let nonce = SharingNonce.draw(using: &random)
         let now = await clock.now()
         try requireSharingCodeUnchanged(epoch: epoch, generation: generation)
+        // One answer per number: a starter session meets one joiner session from this device (V23).
+        answeredSharingNumbers = answeredSharingNumbers.filter {
+            now.timeIntervalSince($0.value) <= SharingCodeLimits.answeredMemory
+        }
+        guard answeredSharingNumbers[number.digits] == nil else { throw SharingCodeError.numberAlreadyAnswered }
         let joiner = try await SharingCodeJoiner.join(
             number, scanned: scanned, as: bundle, board: board, directory: directory, nonce: nonce, at: now
-        ) { try await self.requireSharingCodeUnchanged(epoch: epoch, generation: generation) }
+        ) {
+            try await self.requireSharingCodeUnchanged(epoch: epoch, generation: generation)
+            // Remembered before the reply goes out, whatever its create answers.
+            await self.rememberAnswered(number, at: now)
+        }
         try requireSharingCodeUnchanged(epoch: epoch, generation: generation)
         sharingCodeRun = SharingCodeRun(side: .joiner(joiner), generation: generation)
         try await pinSharingCodeEvidence(epoch: epoch)
@@ -350,6 +359,10 @@ extension VaultSession {
     }
 
     // MARK: - Internals
+
+    func rememberAnswered(_ number: SharingSessionNumber, at now: Date) {
+        answeredSharingNumbers[number.digits] = now
+    }
 
     /// Throws if the vault locked, or the session changed, since `epoch` and `generation`: what a step checks before it
     /// puts anything on the board.

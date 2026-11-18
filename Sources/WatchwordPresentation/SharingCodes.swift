@@ -177,9 +177,11 @@ public struct FingerprintConfirmation: Hashable, Sendable {
 public enum SharingCodeWording {
     /// What a wrong confirmation code says, with the attempts left.
     public static func wrongCode(attemptsLeft: Int) -> String {
-        attemptsLeft == 1
+        let tries =
+            attemptsLeft == 1
             ? "That code does not match. One try left; check each digit with them."
             : "That code does not match. \(attemptsLeft) tries left; check each digit with them."
+        return tries + " If their screen now shows other digits than before, stop and start a new code."
     }
 
     public static func failure(_ error: SharingCodeError) -> String {
@@ -212,6 +214,8 @@ public enum SharingCodeWording {
                 + "text, and paste it instead."
         case .busy:
             return ""
+        case .numberAlreadyAnswered:
+            return "You already answered this code on this device. Ask them to start a new one."
         }
     }
 

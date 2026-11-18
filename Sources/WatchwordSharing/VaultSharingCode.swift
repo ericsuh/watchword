@@ -6,7 +6,10 @@ import WatchwordCrypto
 // with a short authentication string over a commitment. The starter S shows an eight-digit number, the vault sharing
 // code; the joiner J types it (or scans it); each device then derives a six-digit confirmation code from everything
 // it saw, and each person types the other's. An adversary in the middle (A1, holding the board and the directory)
-// gets one blind try per session at making the two transcripts agree in six digits: 10^-6 per direction.
+// gets one blind try per session at making the two transcripts agree in six digits: 10^-6 per direction. Wrong codes
+// are compared with the starter's transcript, fixed for the session, so a slip costs nothing; what would cost is a
+// joiner that answered the same number again with a fresh nonce, and a joiner never does within
+// `SharingCodeLimits.answeredMemory` (docs/06-adversarial-review.md, V23).
 //
 // ```
 // S: number, session (16), Ns (32);  C = SHA-256("WWSC1-commit" ‖ session ‖ S.account ‖ Ns)
@@ -148,6 +151,10 @@ public enum SharingCodeError: Error, Hashable, Sendable {
     case invitationInvalid
     /// Another step of the same session is still running; nothing was done.
     case busy
+    /// This device already answered that number within `SharingCodeLimits.answeredMemory`: the other person starts a
+    /// new code. An honest board refuses a second answer anyway (the reply slot is taken); one that serves a fresh
+    /// commit would turn one starter session into several tries (docs/06-adversarial-review.md, V23).
+    case numberAlreadyAnswered
 }
 
 /// A session's nonce, drawn from the generator the caller injects (production: the system's), never chosen.
@@ -323,6 +330,10 @@ public enum SharingCodeLimits {
     public static let attempts = 3
     /// Numbers drawn before giving up on a board where every one is taken.
     public static let numberDraws = 8
+    /// How long a joiner remembers a number it answered, and refuses to answer it again: longer than any starter
+    /// session it could have answered can last. A starter waits at most `lifetime` for a reply after publishing, and
+    /// its session ends `lifetime` after its reveal, so it ends at most `2 × lifetime` after the reply.
+    public static let answeredMemory: TimeInterval = 2 * lifetime
 }
 
 /// The starter's side of a vault sharing code session (ADR 0010): the inviter, or whoever shows the number.

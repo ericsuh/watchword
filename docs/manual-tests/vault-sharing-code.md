@@ -40,7 +40,7 @@ Steps:
 Steps:
 1. Start a session as above until it asks for their six digits.
 2. Type `000000` and choose "Check".
-3. **Expected**: "That code does not match. 2 tries left; check each digit with them."
+3. **Expected**: "That code does not match. 2 tries left; check each digit with them. If their screen now shows other digits than before, stop and start a new code."
 4. Do it twice more.
 5. **Expected**: the session ends with "The confirmation code was wrong three times, so this was stopped and nothing
    was shared…", and "Start Over". The member list does not show the household member as verified.

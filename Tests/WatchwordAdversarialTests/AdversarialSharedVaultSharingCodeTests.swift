@@ -462,4 +462,50 @@ extension AdversarialSharedVaultTests {
         try await invitee.session.sync()
         #expect(try await invitee.session.sharedVaultStatus(vaultID).role == .readWrite)
     }
+
+    /// Threat: A1 holds the board and the directory and runs V1's adversary in the middle (V23). The starter's session
+    /// is fixed once it has revealed; toward the joiner A1 runs a session of its own under the same number. After a
+    /// wrong code, the joiner's person starts over and types the same eight digits again; an honest board refuses the
+    /// second answer (the reply slot is taken), but A1's serves a fresh commit, so the joiner would show a new,
+    /// independent code for the starter's still-open session: three tries in one starter session, not one. The joiner
+    /// remembers the numbers it answered, across Start Over and a lock, and refuses to answer one again.
+    @Test("a joiner never answers the same number twice, so a fresh commit buys the middle no second try")
+    func noSecondAnswerToOneNumber() async throws {
+        let household = SharedVaultHousehold()
+        let starter = try await household.account(seed: 1_321)
+        let joiner = try await household.account(seed: 1_322)
+        let started = try await starter.session.startSharingCodeSession()
+        let number = try Self.number(started)
+        _ = try await joiner.session.joinSharingCodeSession(number: try #require(started.number))
+
+        // A1 makes the number look new: a fresh commit of a session of its own, and the reply slot emptied.
+        let elsewhere = InMemorySharingBoard()
+        let middle = try SharingParty(seed: 1_329)
+        await household.directory.publish(middle.bundle)
+        var generator = SeededGenerator(seed: 1_330)
+        var fresh = SharingCodeStarter.draw(as: middle.bundle, using: &generator, at: Date())
+        try await fresh.publish(on: elsewhere, at: Date())
+        let freshCommit = try #require(await elsewhere.allObjects[SharingBoardName.commit(fresh.number)])
+        await household.board.tamper(SharingBoardName.commit(number), contents: freshCommit)
+        await household.board.tamper(SharingBoardName.reply(number), contents: nil)
+
+        await joiner.session.endSharingCodeSession()
+        await #expect(throws: SharingCodeError.numberAlreadyAnswered) {
+            _ = try await joiner.session.joinSharingCodeSession(number: try #require(started.number))
+        }
+        await joiner.session.lock()
+        try await joiner.session.unlock(password: TestVault.password)
+        await #expect(throws: SharingCodeError.numberAlreadyAnswered, "a lock does not forget it") {
+            _ = try await joiner.session.joinSharingCodeSession(number: try #require(started.number))
+        }
+        #expect(await household.board.allObjects[SharingBoardName.reply(number)] == nil, "no second answer")
+
+        // A number that found no session was not answered, and can be typed again.
+        await #expect(throws: SharingCodeError.sessionNotFound) {
+            _ = try await joiner.session.joinSharingCodeSession(number: "0000 0001")
+        }
+        await #expect(throws: SharingCodeError.sessionNotFound) {
+            _ = try await joiner.session.joinSharingCodeSession(number: "0000 0001")
+        }
+    }
 }

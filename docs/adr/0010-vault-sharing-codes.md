@@ -136,7 +136,9 @@ authentic and public.
   reply written after `Ns` is public could be searched for. One reply slot, created once, and a session abandoned on
   restart, make that structural.
 - **Retries.** A typed code is compared with a value fixed for the session, so three tries for a slip of the finger
-  give the adversary nothing; what would is a new session, and every failed one is seen by both people (G2). An
+  give the adversary nothing; what would is a new session, and every failed one is seen by both people (G2). (As
+  built, the value typed must not change either: a joiner never answers a number it already answered, or a board
+  serving a fresh commit would make each retry a new joiner session against the same starter one; V23.) An
   operator attacking every session succeeds in one of a million and visibly breaks the rest.
 - **Sniping and denial of service.** The number is for finding the session and carries no security: anyone who
   guesses it can take the reply slot, and the session then fails at the first code. The board is fetched by name
