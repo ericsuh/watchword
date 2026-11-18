@@ -532,7 +532,8 @@ administrator who joined after a rotation and learns of the demotion as it rotat
 never seals (S60, `readWriteMemberResealsWithoutTheDescription`); a member's snapshot carrying a description row
 labelled as the owner's rotation re-seal, refused on a newcomer's device (S61, `forgedDescriptionInAMembersSnapshot`);
 a forged rename at the version ceiling, after which an administrator's rename and a member's item still land
-everywhere (S62, `forgedRenameAtTheCeiling`); and a member's deletion of the description, which erases it nowhere
+everywhere (S62, `forgedRenameAtTheCeiling`); a replay that saw the head move settling the head it began with
+(S65, `replaySettlesTheHeadItBeganWith`); and a member's deletion of the description, which erases it nowhere
 (`descriptionDeletedByAMember`, a property that held before the rule). Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
 parts names its writer and that a merge's attributed parts are exactly its inputs', and
 `LongRunningLateWriteSimulationTests` checks, over random histories, that a device that held late versions aside as

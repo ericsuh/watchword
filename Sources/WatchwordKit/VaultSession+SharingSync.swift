@@ -69,23 +69,33 @@ extension VaultSession {
 
     /// How the engine of `vaultID` runs: a shared vault gets the judge and keeps its whole log (no snapshots, no
     /// collection: the departing account's segments are what a cut is judged against, §8.8 "a departed account's
-    /// log"), publishes only while this account may write, and replays its log when what counts has changed.
+    /// log"), publishes only while this account may write, and replays its log when what counts has changed. `head`
+    /// is the membership head as the run begins, for `sharedEngineDidRun`.
     func sharedEngineOptions(_ vaultID: UUID, base: SyncConfiguration, account: AccountRecord)
-        -> (configuration: SyncConfiguration, judge: (any WriteJudge)?, publishing: Bool, reconcile: Bool)
+        -> (
+            configuration: SyncConfiguration, judge: (any WriteJudge)?, publishing: Bool, reconcile: Bool,
+            head: [UInt8]?
+        )
     {
-        guard let vault = sharing.vaults[vaultID] else { return (base, nil, true, false) }
+        guard let vault = sharing.vaults[vaultID] else { return (base, nil, true, false, nil) }
         var configuration = base
         configuration.maintainsLog = false
         // A replay judges every version again, and notes again which devices' streams it is waiting on.
         if vault.needsReconcile { sharing.vaults[vaultID]?.index.awaiting = [] }
         return (
             configuration, VaultSyncAdapter(session: self),
-            vault.ledger.writePermission(for: account.accountID).isAllowed, vault.needsReconcile
+            vault.ledger.writePermission(for: account.accountID).isAllowed, vault.needsReconcile,
+            vault.ledger.state.hash.bytes
         )
     }
 
-    /// After a shared vault's engine ran: a replay that finished settles the head it judged against.
-    func sharedEngineDidRun(_ vaultID: UUID, reconciled: Bool, report: SyncReport) {
+    /// After a shared vault's engine ran: a replay that finished settles the head it judged against, which is the head
+    /// as the run began (`judgedAgainst`, from `sharedEngineOptions`), never the head as it ended. Membership can be
+    /// ingested while a run is suspended (`removeMember` and `leaveSharedVault` ingest before `syncAll`'s guard), and
+    /// versions admitted earlier in the run were judged against the earlier head; marking them judged against the new
+    /// one would keep the next sync from taking out what the new head no longer counts (review finding S65). A head
+    /// that moved leaves the marker behind it, so the next sync's take-out runs.
+    func sharedEngineDidRun(_ vaultID: UUID, reconciled: Bool, judgedAgainst head: [UInt8]?, report: SyncReport) {
         guard var vault = sharing.vaults[vaultID] else { return }
         if reconciled, !report.deferredUntilUnlock, !report.transportUnavailable {
             if vault.indexRebuilding {
@@ -95,7 +105,9 @@ extension VaultSession {
                 vault.index.judgedHead = nil
             } else {
                 vault.needsReconcile = false
-                vault.index.judgedHead = vault.ledger.state.hash.bytes
+                // Settled only if the take-out before the run and the run itself began at one head; otherwise the next
+                // sync takes out and replays again.
+                vault.index.judgedHead = head != nil && head == vault.takenOutAgainst ? head : nil
                 // What the replay did not rebuild is held aside whole: gone from the vault, for the hygiene engine too.
                 hygieneRuntime?.takenOut = []
             }
@@ -921,7 +933,10 @@ extension VaultSession {
     func takeOutWhatNoLongerCounts(_ vaultID: UUID) async throws {
         guard let vault = sharing.vaults[vaultID], let syncSettings else { return }
         let head = vault.ledger.state.hash.bytes
-        guard vault.index.judgedHead != head else { return }
+        guard vault.index.judgedHead != head else {
+            sharing.vaults[vaultID]?.takenOutAgainst = head
+            return
+        }
         guard !vault.indexRebuilding else {
             // Never judged against an index being rebuilt: the replay rebuilds it first.
             sharing.vaults[vaultID]?.needsReconcile = true
@@ -937,6 +952,9 @@ extension VaultSession {
             }
         }
         sharing.vaults[vaultID]?.needsReconcile = true
+        // Only if the head did not move while the rows were judged (each judgement suspends).
+        let unmoved = sharing.vaults[vaultID]?.ledger.state.hash.bytes == head
+        sharing.vaults[vaultID]?.takenOutAgainst = unmoved ? head : nil
     }
 
     // MARK: - Taking a write cut

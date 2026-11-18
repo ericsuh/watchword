@@ -25,6 +25,9 @@ struct SharedVault: Sendable {
     /// The saved index was refused or missing, so it is being rebuilt from the log: what no longer counts is taken
     /// out only once the replay has rebuilt it, never judged against an empty index.
     var indexRebuilding = false
+    /// The head the store was last taken out against in this session (`takeOutWhatNoLongerCounts`), so that a replay
+    /// settles a head only if the take-out before it used the same one (review finding S65). In memory.
+    var takenOutAgainst: [UInt8]?
 }
 
 /// An account's device registry as one vault's chain anchors it: the account, and the signing key that chain lists

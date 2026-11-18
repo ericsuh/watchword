@@ -678,6 +678,32 @@ extension AdversarialSharedVaultTests {
         }
     }
 
+    /// Threat: review finding S65, a race any person can start (removing a member, or leaving, ingests membership
+    /// outside `syncAll`'s guard) and the store (A1) can time. A replay judges the vault against the head it began
+    /// with; if a record arrives while it is suspended, versions admitted before it were judged without it. The run
+    /// used to settle `judgedHead` with the head as it *ended*, so the next sync believed everything judged against
+    /// the new head and took nothing out: a version the new record no longer counts could stay, and a member who
+    /// joined later could take it on this device's word. The marker is the head the run began with, so the next sync
+    /// takes out and replays against the new one.
+    @Test("a replay that saw the head move settles the head it began with, and the next sync judges again")
+    func replaySettlesTheHeadItBeganWith() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite, .readWrite], seed: 3_600)
+        let (member, other) = (members[0], members[1])
+        try await Self.syncAll([owner, member, other])
+        let began = try #require(await member.session.beginReplayForTest(vaultID))
+
+        try await owner.session.changeRole(of: other.accountID, in: vaultID, to: .readOnly)
+        try await member.session.ingestMembershipForTest(vaultID)
+        let moved = try await member.session.sharedVaultStatus(vaultID).membership.hash.bytes
+        #expect(moved != began)
+        await member.session.endReplayForTest(vaultID, judgedAgainst: began)
+        #expect(await member.session.judgedHeadForTest(vaultID) != moved)
+
+        try await member.session.sync()
+        #expect(await member.session.judgedHeadForTest(vaultID) == moved)
+    }
+
     /// Threat: none beyond a store (A1) that delays one stream, as any slow provider does; the finding is a report
     /// that never clears (PR review of `resealSharedVault`, S60). Only an administrator's device seals the vault's
     /// description again after a rotation, so a read-write member's device skips it. If it still counted the
@@ -781,7 +807,29 @@ extension VaultSession {
         syncSettings?.configuration.maximumVersionJump
     }
 
-    /// The highest version this device's store holds in `vaultID`: what its engine's ceiling (U5) is measured from.
+    /// The start of a replay of `vaultID`, as `syncAll` begins one: asked for, what no longer counts taken out, and
+    /// the engine's options taken. Returns the head the run judges against.
+    func beginReplayForTest(_ vaultID: UUID) async throws -> [UInt8]? {
+        guard let account = try await loadAccount(), let syncSettings else { return nil }
+        sharing.vaults[vaultID]?.needsReconcile = true
+        try await takeOutWhatNoLongerCounts(vaultID)
+        return sharedEngineOptions(vaultID, base: syncSettings.configuration, account: account).head
+    }
+
+    func ingestMembershipForTest(_ vaultID: UUID) async throws {
+        _ = try await ingestMembership(vaultID)
+    }
+
+    /// The end of that replay, finished and settled.
+    func endReplayForTest(_ vaultID: UUID, judgedAgainst head: [UInt8]?) {
+        sharedEngineDidRun(vaultID, reconciled: true, judgedAgainst: head, report: SyncReport())
+    }
+
+    func judgedHeadForTest(_ vaultID: UUID) -> [UInt8]? {
+        sharing.vaults[vaultID]?.index.judgedHead
+    }
+
+    /// The highest version this device's store holds    /// The highest version this device's store holds in `vaultID`: what its engine's ceiling (U5) is measured from.
     func storedHighWaterForTest(_ vaultID: UUID) async throws -> UInt64 {
         var highest: UInt64 = 0
         for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {

@@ -127,7 +127,7 @@ extension VaultSession {
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 sharedEngineDidRun(
                     vaultID, reconciled: (reconcile || shared.reconcile) && !vaultReport.replayPostponed,
-                    report: vaultReport)
+                    judgedAgainst: shared.head, report: vaultReport)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
@@ -159,7 +159,8 @@ extension VaultSession {
                 await prepareSharedReplay(vaultID)
                 let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
                 let second = try await engine(vaultID).sync(reconcile: true, publishing: shared.publishing)
-                sharedEngineDidRun(vaultID, reconciled: !second.replayPostponed, report: second)
+                sharedEngineDidRun(
+                    vaultID, reconciled: !second.replayPostponed, judgedAgainst: shared.head, report: second)
                 report.vaults[vaultID] = Self.report(first, followedBy: second)
             }
             await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
