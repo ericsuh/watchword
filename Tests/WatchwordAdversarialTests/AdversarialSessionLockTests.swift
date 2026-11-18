@@ -53,6 +53,15 @@ extension AdversarialSessionInterchangeTests {
         }
     }
 
+    @Test("a lock while an import's entries are compared with the saved items takes effect at once")
+    func lockWinsDuringImportReview() async throws {
+        let (vault, personal) = try await Self.vault()
+        try await vault.session.save(Self.bank(personal))
+        try await Self.lockWins(at: .importReview, in: vault) {
+            try await vault.session.previewImport(Self.file, format: .passwordCSV, into: personal)
+        }
+    }
+
     @Test("a lock while an archive is parsed, or its key derived, takes effect at once, and the preview then fails")
     func lockWinsDuringArchivePreview() async throws {
         for step in [AwayWork.archiveParse, .archiveDerivation] {

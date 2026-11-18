@@ -130,6 +130,10 @@ enum AccessibilityID {
         static let passphrase = "restore.passphrase"
         static let secretKey = "restore.secretKey"
         static let uiTestArchive = "debug.restoreArchive"
+        static let addsApex = "import.addsApex"
+        static let includesTrash = "import.includesTrash"
+        static let concerns = "import.concerns"
+        static func concern(_ title: String) -> String { "import.concern.\(title)" }
         static func duplicate(_ title: String) -> String { "import.duplicate.\(title)" }
         static func choice(_ title: String) -> String { "import.choice.\(title)" }
         static func host(_ host: String) -> String { "merge.host.\(host)" }

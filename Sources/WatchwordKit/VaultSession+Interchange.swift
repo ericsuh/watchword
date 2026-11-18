@@ -41,6 +41,9 @@ public enum InterchangeSessionError: Error, Equatable, Sendable {
     /// this one was being read, and its drafts were dropped rather than kept.
     case noPendingImport
     /// An entry that duplicates an existing item has no decision: the person must choose skip, keep both or merge.
+    /// Also an entry the preview raised a concern about (`ImportPreview.concerns`): it would hide a saved account from
+    /// AutoFill, stand beside one, or scope a new item to a look-alike host, and is imported only if the person says
+    /// so (`keepBoth`) or skipped.
     case decisionRequired(importedID: UUID)
     /// A merge into an item the entry was not matched with, or a decision for an entry the preview does not hold.
     case unknownMatch(importedID: UUID)
@@ -66,6 +69,9 @@ public struct ImportPreview: Sendable, Equatable {
     public var entries: [ImportPreviewEntry]
     /// Entries that duplicate items already in `vaultID`; each needs a decision before `commitImport`.
     public var matches: [DuplicateMatch]
+    /// Entries that would change what AutoFill offers for a site already saved, in any vault, or that would scope a
+    /// new item to a look-alike host; each needs a decision too (review finding Z62).
+    public var concerns: [ImportConcern] = []
     /// For an encrypted Watchword archive, its identifier and when it was made, as sealed: set only once the archive
     /// has opened, so they are the authenticated values (the manifest covers the header). The restore screen shows
     /// the date, so that an older archive put in place of the newest (A1 can replace files in the cloud drive, and
@@ -82,6 +88,8 @@ public struct ImportPreviewEntry: Sendable, Hashable, Identifiable {
     public var state: ImportedState
     public var reference: ImportEntryReference
     public var hosts: [String]
+    /// The entry's scopes as the draft holds them: each host with how far it reaches, for the review to show.
+    public var scopes: [ServiceScope] = []
     public var loginNames: [String]
     /// The apex hosts the import added as scopes beside a `www` host the file named (`ImportOptions.matchApexOfWWWHosts`,
     /// on by default; owner decision, 2026-11-16), each also in `hosts`: the widening the preview must show. From the
@@ -89,8 +97,45 @@ public struct ImportPreviewEntry: Sendable, Hashable, Identifiable {
     public var apexScopesAdded: [String]
 }
 
-/// The person's choice for one imported entry. Entries without a decision and without a match are added as new
-/// items; an entry with a match must have one.
+/// What importing one entry as a new item would do to AutoFill, where that needs the person's decision (review
+/// finding Z62; adversary A7, whoever hands over the file).
+///
+/// A new entry was taken to hold only the file's own secrets, so only a merge was guarded. But an item is ranked
+/// against every other by its scopes: an entry scoped one label below a saved login outranks it, the extension then
+/// neither lists nor releases the saved login there, and the next password the person saves on that site is offered
+/// to the imported item, whose other scopes are the file's to choose. An entry the file marks archived does the same
+/// without ever being listed. So before anything is written the preview says, by the gate's own ranking
+/// (`SavedSites`), which saved accounts each entry would hide or stand beside, in every vault, and which of its hosts
+/// resemble a saved site without being it. The entry is imported only with an explicit decision.
+public struct ImportConcern: Sendable, Hashable, Identifiable {
+    public var importedID: UUID
+    /// Saved accounts the entry would outrank on a host they are offered on now: the extension would stop offering
+    /// them there.
+    public var hidden: [AffectedAccount]
+    /// Saved accounts it would be offered beside: the person would choose between them on every fill, and a saved
+    /// password could be offered to either.
+    public var beside: [AffectedAccount]
+    /// The entry's scopes cover more saved hosts than were examined: `hidden` and `beside` are not everything.
+    public var overlapIsTruncated: Bool
+    /// Hosts of the entry that resemble a saved site without being it, or cannot be verified by eye (PRD F11.7).
+    public var lookAlikeHosts: [HostConfirmation]
+    /// Hosts that were not compared with what is saved, because the import as a whole would have cost too many
+    /// comparisons (`VaultSession.maximumImportHostComparisons`). Not known to be ordinary, so they need the decision.
+    public var uncheckedHosts: [String]
+    /// The file marks the entry archived: it would rank, and hide what it outranks, without ever being offered.
+    public var isArchived: Bool
+    /// The file (an archive) marks the entry excluded from suggestions: the same as archived, for AutoFill.
+    public var isExcludedFromSuggestions: Bool = false
+
+    public var id: UUID { importedID }
+
+    public var isEmpty: Bool {
+        hidden.isEmpty && beside.isEmpty && !overlapIsTruncated && lookAlikeHosts.isEmpty && uncheckedHosts.isEmpty
+    }
+}
+
+/// The person's choice for one imported entry. Entries without a decision, without a match and without a concern
+/// are added as new items; an entry with a match or a concern must have one.
 public struct ImportDecision: Sendable, Hashable {
     public var resolution: DuplicateResolution
     /// The existing item a merge goes into: one of the entry's matches.
@@ -156,6 +201,31 @@ struct PendingImport: Sendable {
     let vaultID: UUID
     let result: ImportResult
     let matches: [DuplicateMatch]
+    /// Entries with an `ImportConcern`: each needs a decision as a match does.
+    let concerned: Set<UUID>
+}
+
+/// A draft's scopes and state: what the import's review compares with the saved items, and nothing secret.
+struct DraftScopes: Sendable {
+    let id: UUID
+    let scopes: [ServiceScope]
+    let state: ImportedState
+    /// Archived by the file's state or by the item itself (an archive restores the flag as it was).
+    var isArchived = false
+    var isExcludedFromSuggestions = false
+
+    init(id: UUID, scopes: [ServiceScope], state: ImportedState) {
+        self.id = id
+        self.scopes = scopes
+        self.state = state
+        isArchived = state == .archived
+    }
+
+    init(_ entry: ImportedEntry) {
+        self.init(id: entry.item.id, scopes: entry.item.scopes, state: entry.state)
+        isArchived = entry.state == .archived || entry.item.archived
+        isExcludedFromSuggestions = entry.item.excludedFromSuggestions
+    }
 }
 
 /// The long steps the session runs off its actor (`awayFromSession`), so that `lock()` never waits for them.
@@ -170,6 +240,9 @@ enum AwayWork: Sendable, Hashable {
     case passwordCheck
     /// A new archive's key derivation, under this account's parameters.
     case archiveKeyDerivation
+    /// An import's drafts compared with what is saved: which accounts each would hide, and which hosts are
+    /// look-alikes. Linear in the file for a fixed vault, but the file and the vault are both large.
+    case importReview
 }
 
 /// What an archive entry holds: the first byte of its plaintext.
@@ -320,6 +393,11 @@ extension VaultSession {
         }
         for importedID in matched.keys where decisions[importedID] == nil {
             throw InterchangeSessionError.decisionRequired(importedID: importedID)
+        }
+        // In the file's order, so the same entry is named every time.
+        for entry in pending.result.entries
+        where pending.concerned.contains(entry.item.id) && decisions[entry.item.id] == nil {
+            throw InterchangeSessionError.decisionRequired(importedID: entry.item.id)
         }
         pendingImport = nil
 
@@ -486,8 +564,20 @@ extension VaultSession {
         _ = try requireKeys(since: epoch)
         guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
         let matches = DuplicateDetector.matches(imported: result.entries.map(\.item), existing: existing)
+        // Against every vault, as the gate ranks: duplicates are a matter of one vault, AutoFill is not.
+        let sites = try await savedSites()
+        let targetIsShared = try await vaults(includingDeleted: true).first { $0.id == vaultID }?.isShared ?? true
+        _ = try requireKeys(since: epoch)
+        // Only what the comparison needs leaves the actor: no field of a draft.
+        let entries = result.entries.map(DraftScopes.init)
+        let concerns = try await awayFromSession(.importReview, since: epoch) {
+            Self.importConcerns(entries, among: sites, vaultID: vaultID, isOwnVault: !targetIsShared)
+        }
+        guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
         let id = UUID.random(using: &random)
-        pendingImport = PendingImport(id: id, epoch: epoch, vaultID: vaultID, result: result, matches: matches)
+        pendingImport = PendingImport(
+            id: id, epoch: epoch, vaultID: vaultID, result: result, matches: matches,
+            concerned: Set(concerns.map(\.importedID)))
         var apexAdded: [ImportEntryReference: [String]] = [:]
         for record in result.report.warnings {
             if case .apexScopeAdded(_, let apex) = record.warning { apexAdded[record.entry, default: []].append(apex) }
@@ -497,10 +587,55 @@ extension VaultSession {
             entries: result.entries.map {
                 ImportPreviewEntry(
                     id: $0.item.id, title: $0.item.title, kind: $0.kind, state: $0.state, reference: $0.reference,
-                    hosts: $0.item.scopes.map(\.host), loginNames: $0.item.loginNames,
+                    hosts: $0.item.scopes.map(\.host), scopes: $0.item.scopes, loginNames: $0.item.loginNames,
                     apexScopesAdded: apexAdded[$0.reference] ?? [])
             },
-            matches: matches, archiveID: archive?.id, archiveCreatedAt: archive?.createdAt)
+            matches: matches, concerns: concerns, archiveID: archive?.id, archiveCreatedAt: archive?.createdAt)
+    }
+
+    /// The comparisons of a host with a saved scope that one import preview makes at most. A host costs one per
+    /// saved scope; past the budget the remaining hosts are reported as unchecked, which needs the person's decision
+    /// like a look-alike: an import of tens of thousands of entries into a vault of thousands is then reviewed in
+    /// parts rather than waited for.
+    public nonisolated static var maximumImportHostComparisons: Int { 20_000_000 }
+
+    /// What each draft would do to AutoFill, by the gate's own view of what is saved. Pure; run off the actor.
+    ///
+    /// A host is judged against what is saved only, never beside the entry's other scopes: those are the file's too,
+    /// and vouch for nothing (and comparing each with the rest would cost the square of an entry's size).
+    nonisolated static func importConcerns(
+        _ entries: [DraftScopes], among sites: SavedSites, vaultID: UUID, isOwnVault: Bool,
+        budget comparisons: Int = maximumImportHostComparisons
+    ) -> [ImportConcern] {
+        let prepared = sites.prepared()
+        let cost = max(1, prepared.comparisonsPerHost)
+        var budget = comparisons
+        var concerns: [ImportConcern] = []
+        // An entry the source had in its trash is saved and trashed: it never ranks, and offers nothing.
+        for entry in entries where entry.state != .trashed && !entry.scopes.isEmpty {
+            let scopes = entry.scopes
+            let overlap = prepared.overlap(ofAdding: scopes, inVault: vaultID, isOwnVault: isOwnVault)
+            var lookAlikes: [HostConfirmation] = []
+            var unchecked: [String] = []
+            for scope in scopes {
+                guard budget >= cost else {
+                    unchecked.append(scope.host)
+                    continue
+                }
+                budget -= cost
+                if case .needsConfirmation(let resembles) = prepared.standing(
+                    ofNewHost: scope.host, inSharedVault: !isOwnVault)
+                {
+                    lookAlikes.append(HostConfirmation(host: scope.host, resembles: resembles))
+                }
+            }
+            let concern = ImportConcern(
+                importedID: entry.id, hidden: overlap.hidden, beside: overlap.beside,
+                overlapIsTruncated: overlap.isTruncated, lookAlikeHosts: lookAlikes, uncheckedHosts: unchecked,
+                isArchived: entry.isArchived, isExcludedFromSuggestions: entry.isExcludedFromSuggestions)
+            if !concern.isEmpty { concerns.append(concern) }
+        }
+        return concerns
     }
 
     /// Runs `work` off the session's actor, then requires that no `lock()` came meanwhile (CLAUDE.md: `lock()`

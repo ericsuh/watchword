@@ -247,6 +247,87 @@ struct InterchangeScreenTests {
         #expect(ExportKind.allCases.filter { !$0.isPlaintext } == [.archive])
         #expect(ExportKind.allCases.map(\.fileExtension) == ["wwarchive", "csv", "1pux"])
     }
+
+    /// A hostile file (A7) holds a new entry, a duplicate of nothing, scoped one label below the saved Library login.
+    /// It would hide that login from AutoFill on the sign-in host. The review names the login, its vault and the host,
+    /// and the import waits for a decision about it.
+    @Test("an entry that would hide a saved login is shown with what it hides, and waits for a decision")
+    func concernReview() async throws {
+        let (vault, library) = try await vaultWithLibrary()
+        let model = ImportModel(context: ContextProbe().context(vault.session))
+        await model.load()
+        await model.read(
+            Array(
+                """
+                Title,URL,Username,Password,Notes,OTPAuth
+                Library,https://login.citylibrary.org/,someone,bogus,,
+                """.utf8))
+        #expect(model.stage == .review, "\(model.errorMessage ?? "")")
+        #expect(model.duplicates.isEmpty)
+        let concern = try #require(model.concerns.first)
+        #expect(concern.hidden.map(\.host) == ["login.citylibrary.org"])
+        #expect(concern.hidden.first?.title == library.title)
+        #expect(concern.hidden.first?.vault.contains("Personal") == true, "\(concern.hidden)")
+        #expect(concern.explanation.first?.contains("stop offering") == true, "\(concern.explanation)")
+        #expect(model.entries.first?.needsDecision == true)
+        #expect(model.entries.first?.sites.first?.registrable == "citylibrary.org")
+        #expect(!model.canCommit)
+        await model.commit()
+        #expect(model.errorMessage?.contains("change AutoFill") == true)
+        model.choose(.merge(into: library.id), forConcern: concern.id)
+        #expect(!model.canCommit, "a merge is no answer: the entry duplicates nothing")
+        model.choose(.skip, forConcern: concern.id)
+        #expect(model.canCommit)
+        await model.commit()
+        #expect(model.stage == .done(ImportSummary(created: 0, merged: 0, skipped: 1, failed: 0)))
+    }
+
+    /// K6's opt-out was API-only (review finding Z68): the screen read every file with the apex widening on.
+    @Test("the www apex widening can be turned off before a file is read, and the review says which it was")
+    func apexOption() async throws {
+        let (vault, _) = try await vaultWithLibrary()
+        let model = ImportModel(context: ContextProbe().context(vault.session))
+        await model.load()
+        #expect(model.addsApexOfWWWHosts && !model.includesTrash, "the documented defaults")
+        await model.read(Array(sampleCSV.utf8))
+        #expect(model.entries.first?.apexScopesAdded == ["citylibrary.org"])
+        #expect(model.optionsLine.contains("without www"))
+        await model.cancel()
+
+        model.addsApexOfWWWHosts = false
+        await model.read(Array(sampleCSV.utf8))
+        #expect(model.stage == .review, "\(model.errorMessage ?? "")")
+        #expect(model.entries.first?.apexScopesAdded == [])
+        #expect(model.entries.first?.hosts == ["www.citylibrary.org"])
+        #expect(model.optionsLine == "Addresses are imported exactly as the file has them.")
+    }
+
+    /// A7's entry duplicates the saved Library login and carries a text field holding a sign-in link of the
+    /// attacker's and a note. A merge adds both without a per-field choice, by design; the review used to show only
+    /// the field's label and the word "notes" (review finding Z67). It shows the values now.
+    @Test("a merge's other fields and notes are shown with their values before the merge is chosen")
+    func mergeShowsValues() async throws {
+        let (vault, library) = try await vaultWithLibrary()
+        let file =
+            #"{"version":{"major":1,"minor":0},"exporterRpId":"x.example","exporterDisplayName":"X","timestamp":1,"#
+            + #""accounts":[{"id":"YQ","username":"","email":"","collections":[],"items":[{"id":"aQ","title":"Library","#
+            + #""scope":{"urls":["https://citylibrary.org/"],"androidApps":[]},"credentials":["#
+            + #"{"type":"basic-auth","username":{"fieldType":"string","value":"pat"}},"#
+            + #"{"type":"note","content":{"fieldType":"string","value":"The library moved its sign-in page."}},"#
+            + #"{"type":"custom-fields","fields":[{"fieldType":"string","label":"Sign-in page","#
+            + #""value":"https://secure-library.evil.example/login"}]}]}]}]}"#
+        let model = ImportModel(context: ContextProbe().context(vault.session))
+        await model.load()
+        model.format = .credentialExchange
+        await model.read(Array(file.utf8))
+        let duplicate = try #require(model.duplicates.first, "\(model.errorMessage ?? "") \(model.reportLines)")
+        await model.choose(.merge(into: library.id), for: duplicate.id)
+        let review = try #require(model.merges[duplicate.id])
+        let link = try #require(review.otherFieldValues.first { $0.label == "Sign-in page" })
+        #expect(link.value == "https://secure-library.evil.example/login" && !link.isSecret)
+        #expect(review.notes == "The library moved its sign-in page.")
+    }
+
 }
 
 @Suite("Screen models: security report")

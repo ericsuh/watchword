@@ -1,5 +1,6 @@
 import Foundation
 import WatchwordInterchange
+import WatchwordKit
 
 /// How the import and export screens word what the interchange core reports (PRD F8.1–F8.5). Every line names the
 /// entry or item it is about: a report is read before anything is deleted from the app being left.
@@ -94,5 +95,46 @@ public enum InterchangeWording {
         case .tagsOmitted(let id): return item(id) + ": its tags were left out."
         case .fieldDetailOmitted(let id, let label): return item(id) + ": part of \(label) was left out."
         }
+    }
+
+    /// What an entry the review raised a concern about would do, a sentence per effect (review finding Z62). The
+    /// words say what AutoFill would do afterwards, since that is what the person is deciding.
+    static func explanation(
+        of concern: ImportConcern, hidden: [AffectedAccountRow], beside: [AffectedAccountRow]
+    ) -> [String] {
+        var lines: [String] = []
+        if !hidden.isEmpty {
+            lines.append(
+                "It would take the place of " + hidden.map(\.text).joined(separator: "; ")
+                    + ". AutoFill would stop offering what you saved there, and a password you save there next would "
+                    + "be offered to this item instead.")
+        }
+        if !beside.isEmpty {
+            lines.append(
+                "It would be offered beside " + beside.map(\.text).joined(separator: "; ")
+                    + ". You would choose between them each time.")
+        }
+        if concern.overlapIsTruncated {
+            lines.append("It covers more of your saved sites than are listed here.")
+        }
+        for host in concern.lookAlikeHosts {
+            let ascii = HostText.ascii(host.host)
+            lines.append(
+                host.resembles.isEmpty
+                    ? "\(ascii) cannot be told apart by eye from other addresses."
+                    : "\(ascii) looks like \(host.resembles.joined(separator: ", ")) but is a different address.")
+        }
+        if !concern.uncheckedHosts.isEmpty {
+            lines.append(
+                "Its addresses were not compared with your saved sites, because the file is too large to check at "
+                    + "once. Import it in smaller parts to have them checked.")
+        }
+        if concern.isArchived {
+            lines.append("The file marks it archived: it would do this without ever appearing in AutoFill itself.")
+        } else if concern.isExcludedFromSuggestions {
+            lines.append(
+                "The file marks it as never suggested: it would do this without ever appearing in AutoFill itself.")
+        }
+        return lines
     }
 }

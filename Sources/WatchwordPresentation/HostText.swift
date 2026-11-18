@@ -1,4 +1,5 @@
 import Foundation
+import WatchwordKit
 import WatchwordMatching
 import WatchwordModel
 
@@ -133,14 +134,10 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
         _ scope: ServiceScope, among sites: SavedSites.Prepared, beside otherScopes: [ServiceScope] = [],
         inSharedVault: Bool = false
     ) {
-        host = scope.host
-        ascii = HostText.ascii(scope.host)
-        registrable = HostText.registrableDomain(of: ascii)
-        prefix = ascii.count > registrable.count ? String(ascii.dropLast(registrable.count)) : ""
-        includesSubdomains = scope.includeSubdomains
-        excludedHosts = scope.excludedHosts.map(HostText.ascii).sorted()
-        (warning, resembles) = Self.warning(
-            for: scope.host, ascii: ascii, among: sites, beside: otherScopes, inSharedVault: inSharedVault)
+        let (warning, resembles) = Self.warning(
+            for: scope.host, ascii: HostText.ascii(scope.host), among: sites, beside: otherScopes,
+            inSharedVault: inSharedVault)
+        self.init(scope, warning: warning, resembles: resembles)
     }
 
     /// Against items that are all the person's own, as stored: for tests and previews.
@@ -149,17 +146,29 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
             scope, among: SavedSites(stored: saved, ownVaults: Set(saved.map(\.vaultID))).prepared())
     }
 
+    /// A host the session has already judged (an import preview's `ImportConcern.lookAlikeHosts`): shown in ASCII,
+    /// with the warning when the session reported one and none otherwise.
+    public init(_ scope: ServiceScope, judged confirmation: HostConfirmation?) {
+        self.init(
+            scope, warning: confirmation.map { Self.wording(resembling: $0.resembles.sorted()) },
+            resembles: confirmation?.resembles.sorted() ?? [])
+    }
+
     /// A host the session reported as needing confirmation (`VaultError.hostsNeedConfirmation`), for the editor's
     /// dialog: shown in ASCII with the same words.
     public init(_ scope: ServiceScope, resembling names: [String]) {
+        self.init(scope, warning: Self.wording(resembling: names.sorted()), resembles: names.sorted())
+    }
+
+    private init(_ scope: ServiceScope, warning: String?, resembles: [String]) {
         host = scope.host
         ascii = HostText.ascii(scope.host)
         registrable = HostText.registrableDomain(of: ascii)
         prefix = ascii.count > registrable.count ? String(ascii.dropLast(registrable.count)) : ""
         includesSubdomains = scope.includeSubdomains
         excludedHosts = scope.excludedHosts.map(HostText.ascii).sorted()
-        resembles = names.sorted()
-        warning = Self.wording(resembling: resembles)
+        self.resembles = resembles
+        self.warning = warning
     }
 
     static let unreadable = "This address could not be checked. Do not accept it unless you are sure whose site it is."
