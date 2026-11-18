@@ -41,7 +41,7 @@ struct InviteView: View {
                 if let confirmation { ownCode(confirmation) }
                 issued(code)
             }
-            // On every step, both sides: what the other person compares with what their device names (L2).
+            // On every step, both sides: what the other person compares with what their device names (V34).
             if let check = model.ownAccountCheck {
                 Section {
                     Text(SharingCodeWording.ownAccountLine(check)).font(.footnote).foregroundStyle(.secondary)
@@ -421,7 +421,7 @@ struct AcceptInvitationView: View {
             case .compareOwner(let comparison):
                 compareOwner(comparison)
             }
-            // On every step, both sides: what the other person compares with what their device names (L2).
+            // On every step, both sides: what the other person compares with what their device names (V34).
             if let check = model.ownAccountCheck {
                 Section {
                     Text(SharingCodeWording.ownAccountLine(check)).font(.footnote).foregroundStyle(.secondary)
@@ -556,7 +556,7 @@ struct AcceptInvitationView: View {
     }
 
     /// A scan names the account it is for before anything is pinned (ADR 0010, Scans): the person compares it with
-    /// the account check the other screen shows on every step (L2) and says yes, or stops. Decided by the session; this
+    /// the account check the other screen shows on every step (V34) and says yes, or stops. Decided by the session; this
     /// only asks.
     private func confirmScan(_ accountID: UUID) -> some View {
         Section {
@@ -730,7 +730,7 @@ struct MemberVerificationView: View {
                     Banner(text: message).accessibilityIdentifier(AccessibilityID.MemberCheck.failed)
                 }
             }
-            // On every step, both sides: what the other person compares with what their device names (L2).
+            // On every step, both sides: what the other person compares with what their device names (V34).
             if let check = model.ownAccountCheck {
                 Section {
                     Text(SharingCodeWording.ownAccountLine(check)).font(.footnote).foregroundStyle(.secondary)

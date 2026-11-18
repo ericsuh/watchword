@@ -1437,7 +1437,12 @@ invitee:  begin ─► awaitingVerification ─confirm─► verified ─accept�
   a member **with its own keys** (an administrator who was handed a substituted key for the invitee is caught here:
   `ownKeySubstituted`), and opens the grant of the current key (§8.5).
 - An invitation to a vault ID the device already holds under another owner is refused (`vaultOwnerConflict`): vault
-  IDs are not secret, and accepting it would let the sender stand in as the owner of someone else's vault.
+  IDs are not secret, and accepting it would let the sender stand in as the owner of someone else's vault. In the
+  session the owner it must name comes from what is authenticated (`knownOwner`, V31): the loaded ledger, then the
+  account's shared marker, then, for a vault in the account's directory none of whose keys arrived by grant, the
+  account itself; a vault holding a granted key with no ledger and no marker accepts no invitation (`ownerUnknown`).
+  The owner's own second device, which holds the genesis key from the account's directory and no grant of it,
+  accepts an invitation naming itself with that key (`accept(…, holding:)`), and nothing else does.
 - A member who was removed and is **invited back** continues the ledger their device already holds
   (`accept(…, continuing:)`); it is not rebuilt from what the store offers. Their earlier membership and the old
   key's grant are a valid prefix of the chain, so a store that hid everything from their removal onwards would
@@ -1493,9 +1498,13 @@ public**, and S reveals **once, for the one reply it holds**, never again: a bun
 public could be searched for. A scan replaces typing in its direction and authenticates by the whole fingerprint
 (`.scannedCode`); a starter scans the joiner's `FingerprintCode` in place of typing their code. The scanner hands over
 only the code the person taps among those in view. A joiner's scan is evidence only once the starter's reveal has
-opened its commitment, so the scanned account's device is known to have taken part; the screen then names that account
-(`confirmScannedAccount`) and pins it only on the person's yes (`confirmScannedSharingPartner`), and every session
-screen says which account the device is ("You are …"), so the two can be compared (V18).
+opened its commitment, so the session it names was live when it was scanned (commit and reveal are unsigned, so this does
+not show that the account's own device took part; V37); the screen then names the keys the scan read by their **account
+check** (`confirmScannedAccount`) and pins them only on the person's yes (`confirmScannedSharingPartner`). Every step of
+every session screen, on both sides, shows this device's own account check (`SharingCodeStatus.ownFingerprint`,
+`SharingCodeWording.accountCheck`: the first four groups of the fingerprint, twenty digits of SHA-512 over the account
+ID and both keys), so the two can be compared whichever step the other screen is on (V18, V34); an 8-hex prefix of an
+account ID, which its holder chooses, is no such check.
 
 What a completed direction yields is `SharingCodeEvidence`: the bundle it authenticated, the account it was made for,
 and the session. Only `SharingCodeStarter` and `SharingCodeJoiner` make one (the typing discipline of
@@ -1505,12 +1514,16 @@ the account named); evidence not pinned lives in the run and goes with it. A dif
 (`keysDifferFromPin`), and the person's explicit "use their new keys" replaces it only to keys a shared vault's chain
 lists for that account (`replacePinFromSharingCode(listedIn:)`), so a session with the wrong device cannot settle a
 "keys changed" warning to keys nobody listed; with no vault named, every shared vault is loaded first and none may list
-the account with other keys, and nothing is replaced while one cannot be restored (V28). After a session the starter invites as before (`invite`: the grant to the
+the account with other keys, and the owner of a shared vault that is unavailable here is not replaced at all (V28,
+scoped to that owner by V33; while such a vault's owner cannot be named, nobody's pin is). After a session the starter invites as before (`invite`: the grant to the
 pinned bundle and the record that adds them) and sends the `Invitation` as one more board object, `"WWVI"`, signed by
 its account key and bound to the session, its number and the joiner (`inviteThroughSharingCode`), under a name that
 carries the session (`vault-sharing/<number>/invitation/<session>`). Inviting is resumable: a retry delivers the same
 signed bytes and never invites again, and a slot someone else took leaves the invitation to hand over as text
-(`invitationNotDelivered`, V22). The joiner opens it
+(`invitationNotDelivered`, V22). An invitation `invite` has issued is kept by vault and invitee outside the run until it
+is delivered (memory only: it names only the vault and owner), so a run that ends meanwhile (Start Over, another
+window, a lock) still reports it with `invitationNotDelivered`, a later session with the same invitee delivers it
+without inviting again, and the fallback hands it over as text (`undeliveredInvitation`, V35). The joiner opens it
 only under the bundle the session authenticated (`sharingCodeInvitation`) and accepts with every existing check. **No
 vouching:** an invitation whose owner is not the starter is accepted only once the joiner has pinned the owner by a
 session (or the full code) of their own. The session lives in memory in the actor (`sharingCodeRun`), runs one step
@@ -1911,11 +1924,25 @@ entries are values too, S32 and S43, so an older index is refused and rebuilt by
 is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
 account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
 account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
-anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Such a vault is still shared: the load
-records it (`SharingRuntime.unanchored`), and it is unavailable on the device, never one of the account's own, until a
-load restores it. It has no key to seal under, its sync only downloads and verifies nothing, every write, rename,
-deletion, share and acceptance into it is refused (`SharedVaultError.sharedVaultUnavailable`), and the screens list it as
-shared and closed (`sharedVaultsAwaitingOwnerCheck`); a new pin loads the saved ledgers again (V19). Pins live behind
+anchors the ledger, and a ledger whose owner's pin is gone is not loaded. **Whether a vault is shared does not come
+from this state** (V31, the design of the security-audit branch's Z41, ported): a key opened from a grant is
+`arrivedByGrant`, which its wrap under the keyset authenticates (`VaultKey.grantedSchemaVersion` in the wrap's context),
+and the account signs a **shared marker** beside the vault's directory entry (`account/<id>/vault/<vault>/shared/<device>`,
+`AccountObjectLocation.vaultShared`, body `"WWVS1-shared" ‖ vault ‖ owner`, both signatures of a directory object),
+written when the vault is shared or a key is adopted, published, fetched and vouched for like the vault directory's
+other objects, stored at enrolment, and kept as a record-store row (tag `0x03`) that only the account key's signature
+makes count. A row of the sharing state marks nothing, so one planted there closes no vault, and the Personal vault is
+never shared (V32). A vault the marker, a granted key or a loaded ledger names (`isMarkedShared`; every vault but the
+Personal one until the markers are read) with no verified ledger loaded is **unavailable** on the device, never one of
+the account's own: it has no key to seal under (never the lowest key ID), its sync only downloads and verifies nothing,
+and every write, rename, deletion and share is refused (`SharedVaultError.ledgerUnavailable`). The screens list it as
+shared and closed with the reason (`unavailableSharedVaults`, V33): `ownerNotChecked` when the saved ledger's checkpoint
+carries this account's signature and only the owner's pin is missing (a new pin loads the saved ledgers again, V19; a
+load that began before the pin settles nothing, V36), otherwise `notSetUp`, whose way back is accepting the vault's
+invitation on this device (`setUpSharedVaultAgain`, from the marker's owner: `sharedVaultInvitation`), which verifies the
+chain on the transport back to the owner's pin and keeps every item. The same holds for a member's (or the owner's)
+second device, which never had a ledger. Accepting again rebuilds the ledger from the store, so a store that serves a
+stale chain prefix to a device whose saved ledger was removed is not caught (S26 needs that ledger). Pins live behind
 `VerifiedContactStore`.
 In-memory implementations serve tests; `SQLiteSharingStore` (`sharing.sqlite`, both ports) is the production one.
 A vault key received through a grant is stored like any other, as a `vaultKeyWrap` row under the keyset, with a

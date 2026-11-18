@@ -456,7 +456,20 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   `undeliveredInvitationAsText`). A joiner never answers one number twice, across Start Over and a lock, so a fresh
   commit buys the middle no second try (`noSecondAnswerToOneNumber`, V23). No pin is replaced from a session while a
   shared vault here cannot be restored (`noPinReplacedWhileAVaultIsUnrestored`, V28). With no member-key comparison on the current head
-  no other member's object verifies (`noComparisonNoVerification`, V29).
+  no other member's object verifies (`noComparisonNoVerification`, V29). A shared vault whose `.ledger` and `.owner`
+  rows are deleted (A8, after a rotation) stays shared and closed: no write, rename, deletion, move in, share, record
+  or publication, nothing sealed under any key, and set up again it seals under the chain's key
+  (`deletedLedgerRowsKeepTheVaultShared`, V31, the security-audit branch's Z41 ported); the owner's own deleted state
+  (`ownersDeletedSharingState`) and a member's second device (`newDeviceHoldsTheVaultClosed`) likewise; "crypto core"
+  `grantedKeyWrapClass` (the wrap authenticates whether a key arrived by grant). Rows planted in the sharing state close
+  no vault, the Personal one included (`plantedRowsCloseNothing`, V32). A ledger that does not verify is `notSetUp`
+  and set up again from the account's marker with every item kept, and only the owner of an unavailable vault is
+  refused a pin replacement (`damagedLedgerIsSetUpAgain`, `pinReplacementScopedToTheOwner`, V33; "Screen models:
+  sharing" `damagedSharedVaultSetUpAgainOnScreen`). A load that read the pins before a new pin settles nothing
+  (`staleLoadSettlesNothing`, V36). An invitation issued by a session that is then replaced is kept and delivered by a
+  later session (`invitationOutlivesItsRun`, V35). "Screen models: sharing" `accountCheckOnEveryStep`: the starter's
+  step at the joiner's scan confirmation shows the account check the scan names (V34). UI tests (drafted, not yet run
+  on a Mac): `testJoinByScanningTheirScreen` (iOS) reaches the joiner's scan confirmation (V37).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed

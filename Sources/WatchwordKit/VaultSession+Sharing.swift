@@ -45,7 +45,7 @@ struct SharingRuntime: Sendable {
     var loaded = false
     /// Bumped whenever what a load reads may have changed under it (a pin made: `retryUnrestoredVaults`). A load that
     /// began at another generation installs the ledgers it restored but settles nothing: it neither marks the
-    /// vaults loaded nor records what did not restore, so the next caller loads again (review finding L4: a load that
+    /// vaults loaded nor records what did not restore, so the next caller loads again (review finding V36: a load that
     /// read the pins before a new one was made would otherwise have left the vault unrestored for the session).
     var loadGeneration: UInt64 = 0
     /// Vaults the sharing state lists whose saved ledger could not be restored at the last load, and why (the owner's
@@ -271,7 +271,7 @@ extension VaultSession {
         for (vaultID, vault) in loaded where sharing.vaults[vaultID] == nil {
             sharing.vaults[vaultID] = vault
         }
-        // Stale: a pin was made while this load read, so what did not restore may restore now (L4).
+        // Stale: a pin was made while this load read, so what did not restore may restore now (V36).
         guard generation == sharing.loadGeneration else { return }
         // Listed and not restored. Whether such a vault is shared is the markers' and the keys' to say
         // (`isSharedUnavailable`, V31): a row of the sharing state closes nothing on its own (V32).
@@ -282,7 +282,7 @@ extension VaultSession {
     /// After a pin was made: a vault left unrestored because its owner was not pinned may restore now, so the next use
     /// loads the saved ledgers again (what is already loaded is kept).
     func retryUnrestoredVaults() {
-        // A load in flight read the pins before this one: it settles nothing (L4).
+        // A load in flight read the pins before this one: it settles nothing (V36).
         sharing.loadGeneration &+= 1
         if !sharing.unrestored.isEmpty { sharing.loaded = false }
     }

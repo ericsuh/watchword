@@ -43,8 +43,9 @@ Steps:
    screen."
 3. Tap one.
 4. **Expected**: "Waiting for their device…", never "You checked each other"; once that device has answered, "Your
-   camera read the code of the account …" with the same short account as that device's "You are the account …", and
-   "It Is Theirs" and "Not Them: Start Over".
+   camera read a code whose account check is …" with twenty digits that are the ones that device shows as "Your
+   account check: …" on whatever step it is on (including "Type the six digits from their screen"), and "It Is
+   Theirs" and "Not Them: Start Over".
 5. Choose "Not Them: Start Over".
 6. **Expected**: back at the start; the member list and a later invitation from that account show it as not checked.
 

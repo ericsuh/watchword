@@ -187,9 +187,15 @@ Built as decided (`docs/02-architecture.md` §8.4; review in `06-adversarial-rev
   account cannot be passed by copying the screen (V17, from the follow-up audit of the sharing surface).
 - The invitation's board name carries the session (`…/invitation/<session>`), and sending it is resumable: once
   issued it is delivered again, never issued twice, and if its slot was taken the starter hands it over as text (V22).
+  An issued invitation is kept outside the session until delivered, so a session that ends after `invite` returned
+  loses nothing: a later session with the same invitee delivers it, and the fallback shows it as text (V35).
 - A scan is the person's choice and is named before it is pinned (V18): the scanner hands over only the code tapped;
   a joiner's scan is evidence only after the starter's reveal opened its commitment, and the screen names the account
-  and pins it on a yes (`confirmScannedSharingPartner`). Nothing unpinned outlives the session.
+  and pins it on a yes (`confirmScannedSharingPartner`). Nothing unpinned outlives the session. What the person
+  compares is the **account check**, the first four groups of the scanned keys' fingerprint, which every step of the
+  other screen shows for its own keys (V34): an 8-hex prefix of an account ID, which its holder chooses, could be
+  ground in 2^32 tries; twenty fingerprint digits cost about 2^66. Reveal and commit are unsigned, so the reveal shows
+  a live session, not that the account's device took part (V37).
 - A start or a join ends the running session first and re-checks the lock and the session after every wait (V20),
   and each screen drives only the session it started, by its `runID` (V25): one session object serves every window.
 - A session never replaces a pin on its own. "Keys changed" is settled only by the person's explicit choice, and only

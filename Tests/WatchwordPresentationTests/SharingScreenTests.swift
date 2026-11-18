@@ -854,7 +854,7 @@ extension SharingScreenTests {
 }
 
 extension SharingScreenTests {
-    /// When a joiner's scan names an account (review finding L2), the starter is on "type their code", which showed no
+    /// When a joiner's scan names an account (review finding V34), the starter is on "type their code", which showed no
     /// account at all; and the comparison was of 8-hex prefixes of account IDs, which whoever makes an account chooses.
     /// Every step of either side now shows this device's account check, derived from its fingerprint, and the
     /// joiner's confirmation names the check of the keys it scanned: the two are the same for the real starter.

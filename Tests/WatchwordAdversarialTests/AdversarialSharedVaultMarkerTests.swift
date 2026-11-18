@@ -141,7 +141,7 @@ extension AdversarialSharedVaultTests {
 
 extension AdversarialSharedVaultTests {
     /// Threat: A8 plants `.owner` and `.ledger` rows in the sharing state for one of the account's own vaults and for
-    /// its Personal vault (review of the follow-up audit's fixes, L1). With V19's rule a listed ledger that did not
+    /// its Personal vault (V32). With V19's rule a listed ledger that did not
     /// restore closed the vault for good, the Personal vault included: no write, no sync of its objects, and no way
     /// back. Rows of the sharing state mark nothing (the security-audit branch's Z50): both vaults stay the account's
     /// own, writable and shareable, and nothing is reported unavailable.

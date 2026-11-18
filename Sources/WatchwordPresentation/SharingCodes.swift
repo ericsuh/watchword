@@ -176,7 +176,7 @@ public struct FingerprintConfirmation: Hashable, Sendable {
 /// stopped. The session decides; these only say it.
 public enum SharingCodeWording {
     /// The account check every sharing code screen shows for this device's own account, and the joiner's scan
-    /// confirmation shows for the account it read (review finding L2): the first four groups of the fingerprint, twenty
+    /// confirmation shows for the account it read (review finding V34): the first four groups of the fingerprint, twenty
     /// digits of a SHA-512 over the account ID and both keys, so a look-alike costs about 2^66 tries, where an 8-hex
     /// prefix of an account ID, which its holder chooses, cost 2^32. It names keys, not only an account.
     public static func accountCheck(_ fingerprint: Fingerprint) -> String {
@@ -188,7 +188,7 @@ public enum SharingCodeWording {
         "Your account check: \(check)"
     }
 
-    /// The joiner's question after a scan (V18, L2): the account check of the keys the scan named, to be found on the
+    /// The joiner's question after a scan (V18, V34): the account check of the keys the scan named, to be found on the
     /// other screen, which shows its own on every step.
     public static func scannedAccount(check: String) -> String {
         "Your camera read a code whose account check is \(check). It is theirs only if their screen shows \""

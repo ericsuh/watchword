@@ -78,6 +78,37 @@ Steps:
 9. Choose "Join Vault".
 10. **Expected**: "You joined the vault." After a sync the vault "Shared by the household member" is in the list.
 
+### Every step shows your account check
+
+Steps:
+1. Start Invite Someone with a vault sharing code, and on another device (or the UI-test household) Accept an
+   Invitation by scanning it.
+2. **Expected**: on every step of both screens (the number, "Type the six digits from their screen", choosing a role,
+   the invitation sent; on the other side waiting, the codes, the scan's confirmation, waiting for the invitation) a
+   line "Your account check: " and four groups of five digits, the same on every step of one device.
+3. **Expected**: the scanning device's "Your camera read a code whose account check is …" names exactly the digits the
+   other device shows as its own.
+
+### A shared vault that is not set up on this device
+
+Steps (a debug build with a second device of an account that is a member of a shared vault, or a device whose
+`sharing.sqlite` was removed while the app was closed):
+1. Open Settings, Vaults.
+2. **Expected**: the vault is listed as "Shared · not set up here" (or "Shared · check its owner" when only the
+   owner's pin is missing), read-only, with no rename; its items can be read.
+3. Open the vault. **Expected**: the banner says why, and offers "Set Up on This Device" (not for "check its owner");
+   no "Share This Vault…".
+4. Choose "Set Up on This Device". **Expected**: the vault is shared again with its members listed, and every item it
+   held is still there.
+
+### An invitation survives a session that ends before it is sent
+
+Steps:
+1. Start Invite Someone, check each other, choose a role and Send; before it finishes, choose Start Over (or let the
+   device lock).
+2. Invite the same person again with a new session. **Expected**: the invitation arrives on their device; they are not
+   added twice. With "Use the Full Code Instead" the invitation is shown as text.
+
 ### An administrator's invitation waits while you check the owner
 
 Steps (once the production board exists, or with a second account in a `--uitest` build that offers one):

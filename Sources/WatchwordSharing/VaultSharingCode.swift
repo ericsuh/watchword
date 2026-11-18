@@ -672,7 +672,7 @@ public struct SharingCodeJoiner: Sendable {
             // the commitment. Neither is signed, so this does not show that that account's device took part (A1 with
             // the board can make both); it shows that the session was live when the scan was made, so a code held up
             // by someone nearby (A4) has to belong to a session that answered this device. The scan is evidence of
-            // the keys the camera read, which the person confirms by the account check on the other screen (V18, L2).
+            // the keys the camera read, which the person confirms by the account check on the other screen (V18, V34).
             evidence = SharingCodeEvidence(
                 contact: starter, pinningAccount: account.accountID, method: .scannedCode, session: session)
             phase = .verified

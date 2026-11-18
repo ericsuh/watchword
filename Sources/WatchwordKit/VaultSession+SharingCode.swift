@@ -101,7 +101,7 @@ public struct SharingCodeStatus: Sendable, Hashable {
     public let ownAccount: UUID
     /// This device's own fingerprint (its account ID and keys), which every step of either side shows as the account
     /// check, so that a person whose camera read a code can compare what the scan names with the other screen
-    /// (review finding L2: an 8-hex prefix of an account ID, which anyone may choose, can be ground; this cannot
+    /// (review finding V34: an 8-hex prefix of an account ID, which anyone may choose, can be ground; this cannot
     /// without breaking SHA-512).
     public let ownFingerprint: Fingerprint
     /// The other account's fingerprint as this device holds its bundle, once it knows which it is: a joiner's from
@@ -318,14 +318,14 @@ extension VaultSession {
             guard issued.vaultID == vaultID else { throw SharingError.invitationAlreadyCompleted }
             invitation = issued
         } else if let issued = issuedSharingInvitations[kept] {
-            // Issued by an earlier run that ended before delivering it (L3): delivered now, never issued again.
+            // Issued by an earlier run that ended before delivering it (V35): delivered now, never issued again.
             invitation = issued
             sharingCodeRun?.issued = issued
         } else {
             invitation = try await invite(partner, to: vaultID, as: role)
             // The chain has changed: remember what was issued before anything else can fail, outside the run too.
             issuedSharingInvitations[kept] = invitation
-            // A run replaced meanwhile cannot deliver it, and the screen is told so with the invitation (L3).
+            // A run replaced meanwhile cannot deliver it, and the screen is told so with the invitation (V35).
             guard sharingCodeRun?.generation == generation else {
                 throw SharedVaultError.invitationNotDelivered(invitation)
             }
@@ -354,7 +354,7 @@ extension VaultSession {
         return invitation
     }
 
-    /// An invitation `inviteThroughSharingCode` issued to `invitee` for `vaultID` and could not deliver (L3), for a
+    /// An invitation `inviteThroughSharingCode` issued to `invitee` for `vaultID` and could not deliver (V35), for a
     /// screen to hand over as text (`SharingCodes.text(for:)`): the invitee is added and holds a grant, and inviting
     /// them again is refused. `nil` when there is none.
     public func undeliveredInvitation(to vaultID: UUID, for invitee: UUID) -> Invitation? {

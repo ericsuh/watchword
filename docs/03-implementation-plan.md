@@ -410,7 +410,15 @@ VaultSession", the screen models in "Screen models: sharing", and the adversaria
 - A macOS run of all of it against CryptoKit, and of `SQLiteSharingStore` at all.
 - The sharing board's production adapter, beside the key directory's (neither exists): until then a vault sharing
   code session runs only in tests and a `--uitest` launch, and a release build offers none.
-- Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself.
+- Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself. Since
+  V31 (the security-audit branch's Z41, ported) such a device knows the vault is shared from the account's marker or the
+  granted key, holds it closed, and offers "Set Up on This Device" (`setUpSharedVaultAgain`); the rest of that branch's
+  design (owner disputes, `withholdUnvouchedKeys`, re-sharing from a genesis on the transport) arrives when the two
+  branches are reconciled.
+- A shared vault this account was removed from whose ledger is lost on a device (V33): it stays readable and closed,
+  and no invitation can set it up again. Whether the person gets "Stop using this vault on this device" (dropping the
+  local copies) is an owner decision. An unavailable vault is also downloaded and refused again at every sync (V37,
+  bandwidth only).
 - An erasure summary claims what a late writer had seen when the deleting device had merged its version (S45), and a
   late version's claims about current members' future edits are carried on (S46).
 - A member invited after a demotion with no rotation since holds aside what only vouching could attribute (S42):

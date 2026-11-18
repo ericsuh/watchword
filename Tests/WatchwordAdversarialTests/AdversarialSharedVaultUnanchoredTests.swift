@@ -226,7 +226,7 @@ actor HeldPinRead: VerifiedContactStore {
 }
 
 extension AdversarialSharedVaultTests {
-    /// Threat: none from outside; review finding L4 against V19's recovery. A load of the shared vaults that read the
+    /// Threat: none from outside; review finding V36 against V19's recovery. A load of the shared vaults that read the
     /// owner's pin (missing, A8) before the person checked the owner again, and finished after, marked the vaults
     /// loaded with the vault unrestored: the pin's request to load again was lost, and the vault stayed closed for the
     /// session though its owner was checked. A load that began before a pin settles nothing.

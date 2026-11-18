@@ -170,7 +170,7 @@ public actor VaultSession: SharesExecutor {
     /// cannot turn one starter session into several tries (docs/06-adversarial-review.md, V23). Public values only.
     var answeredSharingNumbers: [String: Date] = [:]
     /// Invitations `inviteThroughSharingCode` issued (the invitee added, the grant published) and has not delivered,
-    /// by vault and invitee, outside any one run (review finding L3): a run replaced or dropped after `invite` returned
+    /// by vault and invitee, outside any one run (review finding V35): a run replaced or dropped after `invite` returned
     /// (Start Over, another window, a lock) must not lose the invitation, or the invitee is added with no way to join
     /// and a retry is refused (`memberAlreadyPresent`). An invitation names only the vault and its owner: nothing
     /// secret, and kept in memory only.

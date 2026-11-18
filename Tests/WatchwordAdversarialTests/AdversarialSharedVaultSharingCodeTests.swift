@@ -512,7 +512,7 @@ extension AdversarialSharedVaultTests {
 }
 
 extension AdversarialSharedVaultTests {
-    /// Threat: no outside adversary; review finding L3 against V22. After `invite` returned (the invitee added, the
+    /// Threat: no outside adversary; review finding V35 against V22. After `invite` returned (the invitee added, the
     /// grant published), the run was replaced before the invitation was kept (Start Over, another window, an
     /// auto-lock; here the store, A1, stretches a listing to give the person time): `notReady` was thrown, the
     /// invitation was gone, and a retry was refused because the invitee is a member already. The invitation is now

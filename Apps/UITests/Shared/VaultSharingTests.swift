@@ -124,7 +124,7 @@ final class VaultSharingTests: XCTestCase {
     #endif
 
     #if os(iOS)
-        /// The joiner's scan (ADR 0010, Scans; V18, L2): this device reads the other person's screen, which names
+        /// The joiner's scan (ADR 0010, Scans; V18, V34): this device reads the other person's screen, which names
         /// nothing until their device has revealed; the screen then names the account check of the keys it read, which
         /// their screen shows on every step, and pins it only on the person's yes. iPhone and iPad only, as above.
         @MainActor

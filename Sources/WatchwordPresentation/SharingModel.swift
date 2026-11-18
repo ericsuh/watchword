@@ -356,7 +356,7 @@ public final class InvitationModel {
     /// the other person reading them off this screen.
     public private(set) var status: SharingCodeStatus?
     /// This device's account check (`SharingCodeWording.accountCheck`), shown on every step of the session, so the
-    /// other person can compare it with what their device names (L2). `nil` before a session runs.
+    /// other person can compare it with what their device names (V34). `nil` before a session runs.
     public var ownAccountCheck: String? { status.map { SharingCodeWording.accountCheck($0.ownFingerprint) } }
     /// The other account's check, as this device holds its keys, once it knows which account it is.
     public var partnerAccountCheck: String? {
@@ -530,7 +530,7 @@ public final class InvitationModel {
                 do {
                     issued = try await context.session.invite(contact.accountID, to: vaultID, as: role)
                 } catch MembershipError.memberAlreadyPresent(let member) {
-                    // Added by a session that ended before it could send the invitation (L3): this is that invitation.
+                    // Added by a session that ended before it could send the invitation (V35): this is that invitation.
                     guard let kept = await context.session.undeliveredInvitation(to: vaultID, for: member) else {
                         throw MembershipError.memberAlreadyPresent(member)
                     }
@@ -671,7 +671,7 @@ public final class AcceptInvitationModel {
     /// The session as it stands, for the UI-test household that stands in for the other person.
     public private(set) var status: SharingCodeStatus?
     /// This device's account check (`SharingCodeWording.accountCheck`), shown on every step of the session, so the
-    /// other person can compare it with what their device names (L2). `nil` before a session runs.
+    /// other person can compare it with what their device names (V34). `nil` before a session runs.
     public var ownAccountCheck: String? { status.map { SharingCodeWording.accountCheck($0.ownFingerprint) } }
     /// The other account's check, as this device holds its keys, once it knows which account it is.
     public var partnerAccountCheck: String? {
@@ -963,7 +963,7 @@ public final class MemberVerificationModel {
     public var errorMessage: String?
     public private(set) var status: SharingCodeStatus?
     /// This device's account check (`SharingCodeWording.accountCheck`), shown on every step of the session, so the
-    /// other person can compare it with what their device names (L2). `nil` before a session runs.
+    /// other person can compare it with what their device names (V34). `nil` before a session runs.
     public var ownAccountCheck: String? { status.map { SharingCodeWording.accountCheck($0.ownFingerprint) } }
     /// The other account's check, as this device holds its keys, once it knows which account it is.
     public var partnerAccountCheck: String? {

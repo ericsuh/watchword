@@ -568,7 +568,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the board (`beforeReveal`, `beforeReply`), and `lock()` drops it. A session never replaces a pin on its own; the
   person's choice replaces one only to keys a chain lists (`replacePinFromSharingCode`). An invitation through a
   session is accepted only once its owner is pinned by the invitee's own check: nobody vouches for an owner. A scanned
-  code reaches the session only through the screens' `cameraScanned`, from the live camera.
+  code reaches the session only through the screens' `cameraScanned`, from the live camera. People compare accounts by
+  the **account check** (`SharingCodeWording.accountCheck`, four groups of the fingerprint) that every step of every
+  session screen shows for its own keys, never by a short prefix of an account ID, which its holder chooses (V34). An
+  invitation `invite` issued is kept outside the run until delivered (`issuedSharingInvitations`, V35).
 - Nothing is wrapped to, and no chain is anchored on, a bundle that is not a `VerifiedContact`; only
   `VerifiedContacts` makes one. Keep that typing, as with `NormalizedHost`. Wrapping to the bundles a chain lists
   (a rotation, `makeGrant`) takes a `MemberKeyCheck` made on the current head, which only
