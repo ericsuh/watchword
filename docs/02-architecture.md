@@ -597,10 +597,13 @@ it for good. Now the transport says what it holds and the engine decides, as for
   remembers per name the number of copies it has examined, and looks again only when the provider's count changes,
   or at every sync while one of them could not be read (`unread`); its author does not collect a name of its own
   whose copies it has not examined in full (R11), since `delete` removes every copy. A name whose copies were unread
-  at the count listed now (`SyncState.unreadCopies`) is examined after every other name, so copies that never become
-  readable, honestly or because A1 withholds them, cannot spend the bound ahead of a late fork (R17); the iCloud
-  adapter asks for a conflict version's contents once the copies' read has ended (a detached coordinated read of the
-  version's URL, bounded by the coordination deadline).
+  when last examined (`SyncState.unreadCopies`), at whatever count is listed now, is examined after every other name,
+  so copies that never become readable, honestly or because A1 withholds them, cannot spend the bound ahead of a late
+  fork (R17); those names take turns, least recently examined first (`unreadCopiesExamined`), so each is examined
+  again within a number of syncs bounded by how many there are (R19). The iCloud adapter asks for a conflict
+  version's contents once the copies' read has ended (a detached coordinated read of the version's URL, bounded by
+  its own download deadline), once per version while that request waits and at most `PendingDownloads.capacity` at a
+  time (R20).
   The copies go when the object goes: its author collects it under the usual rule (every other stream acknowledges
   the position, a listed snapshot covers it, and it is not the stream's newest), after its hand-on snapshot, and the
   transport's `delete` then removes every copy under the name. Junk copies beside another device's object stay until
@@ -1089,9 +1092,14 @@ or runs between the two steps. Then:
 1. `SyncTransport.startStoreAgain()`: the one call that may recreate a store this device has seen and found missing.
    CloudKit saves the zone again (deleting it first where CloudKit says its key was reset, and taking a deletion
    answered "no such zone" as done), keeps the marker, and leaves a zone that exists exactly as it is. It learns
-   which by fetching the zone and then reading one record with a listing's own `name BEGINSWITH` query, never a
-   `TRUEPREDICATE` one (SR20): a zone's metadata is not encrypted and fetches after a key reset, and only its records
-   answer the reset (SR26); a transport with no notion of a reset does nothing. Before it,
+   which by fetching the zone and then reading one record under each of the layout's top-level prefixes with a
+   listing's own `name BEGINSWITH` query, never a `TRUEPREDICATE` one (SR20), asking for the encrypted payload and
+   fetching the record it lists whole: a zone's metadata is not encrypted and fetches after a key reset, only its
+   records answer the reset (SR26), and whether a query for plain fields does, or whether the answer comes per record,
+   is not documented (SR29). Only CloudKit's explicit reset deletes, never an empty zone or a transient failure, and
+   only if a second look just before the deletion says so too, so a zone another device has started again by then is
+   left alone (SR30; CloudKit has no conditional zone deletion, so the window narrows and does not close). A
+   transport with no notion of a reset does nothing. Before it,
    each of the account's own vaults that has synced is marked `storeResetSuspected`, which only its hand-on or a
    store standing for everything it holds clears, so an upload stopped part-way (a lock, the network, the app
    killed) asks again; after it, the lock epoch is checked again (SR21).
@@ -1202,7 +1210,7 @@ known to another (SR16).
 **Adapters.** `CloudKitTransport.startStoreAgain` is drafted with the rest of that transport (not compiled, not run
 against CloudKit; that a zone whose key was reset must be deleted before it is saved again follows Apple's
 documentation and is unverified, as are saving a zone again after `userDeletedZone` and a zone fetch succeeding
-after a key reset while its records answer the reset, SR26). `CoordinatedFileSyncTransport`
+after a key reset while its records answer the reset, SR26, and how a query reports the reset, SR29). `CoordinatedFileSyncTransport`
 needs nothing: its folder is created by the first write, and an emptied folder is the second signal. The Devices
 screen shows the notice, an "Upload Again…" button and the question as an alert (`DevicesModel.askToUploadAgain`,
 `confirmUpload`, `declineUpload`; the SwiftUI in `Apps/Shared/DevicesView.swift` is drafted, unbuilt). It says the

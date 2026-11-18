@@ -138,8 +138,9 @@ imports CryptoKit, milestone 3 becomes Mac-only. `WatchwordStore`'s port, `InMem
 policies and ports are portable too, and so are `WatchwordCrypto`, `WatchwordSharing`, `VaultSession` and `WatchwordAutoFill` through
 swift-crypto (ADR 0006);
 `SQLiteRecordStore` (`#if canImport(SQLite3)`, which is false on Linux, so guard test helpers that name it) and
-`WatchwordPlatform` are not, except `FileDeviceLocalStore` (its backup flag and protection class aside) and
-`AutoSyncDriver`, which build and test on Linux; every other file there is guarded (`#if canImport(Darwin)`,
+`WatchwordPlatform` are not, except `FileDeviceLocalStore` (its backup flag and protection class aside),
+`AutoSyncDriver` and `PendingDownloads` (the iCloud adapter's record of version downloads asked for), which build and
+test on Linux; every other file there is guarded (`#if canImport(Darwin)`,
 `canImport(CloudKit)`, ...), so on Linux its suites are absent, not green. nor is `Apps/` (SwiftUI), so keep views thin and put screen logic in
 `WatchwordPresentation`, which is portable like `WatchwordKit`. `WatchwordHygiene` is wholly portable: it imports `Foundation`, `Crypto`, `SecureMemory`
 and `WatchwordModel`, and its only way to the network is the `HTTPClient` port, so the day it imports `URLSession`

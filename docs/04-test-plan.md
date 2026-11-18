@@ -992,7 +992,7 @@ other does, and reported as not required on Linux, where they cannot compile.
   (`.N 2.wwe.icloud`) is counted once, with or without its downloaded file, and read as unread, and an inexact one is
   nothing (R18, `duplicatePlaceholder`, `duplicatePlaceholderAlone`, `inexactDuplicatePlaceholders`). *State* ("… what is staged and remembered"): staged
   copies round-trip and a hostile row is no object; "Collecting a device's own objects": a deletion refused for one
-  object is reported and tried again, never the sync's end (SR23, `refusedDeletionIsOneObjectsFailure`); the state's new fields (`unreadCopies` among them, R17) survive encoding and an older row.
+  object is reported and tried again, never the sync's end (SR23, `refusedDeletionIsOneObjectsFailure`); the state's new fields (`unreadCopies` and their turns among them, R17, R19) survive encoding and an older row.
   *Engine* ("… the engine"): junk beside an object; the object behind a junk current file; no copy verifying refused
   alone; two verifying copies merged, in either order to the same items; a late copy; the forked author's hand-on;
   acknowledgements by minimum; snapshot copies; both bounds; a judge refusing a fork, at download and from an edited
@@ -1002,7 +1002,9 @@ other does, and reported as not required on Linux, where they cannot compile.
   that cannot be read yet, read once it can be and never collected before, R11, `unreadableCopyReadLater`; junk under
   names a device waits on, which no longer keeps a late copy from being read, R13,
   `junkUnderWantedNamesStarvesNothing`; copies that never become readable under many merged names, which no longer
-  keep a late fork from being read and are still looked at, R17, `unreadableCopiesStarveNothing`) and "sync
+  keep a late fork from being read and are still looked at, R17, `unreadableCopiesStarveNothing`; more such names than
+  the bound covers, which take turns so a fork under the last of them is read, and whose changing counts bring none
+  forward, R19, `unreadNamesTakeTurns`) and "sync
   with real keys" (planted copies while locked and after unlock; a really signed fork merged by every device and
   handed on). `LongRunningSyncSimulationTests` plants junk copies and forked copies of a device's newest segment and
   still converges, loses nothing, and leaves no hand-on owed.
@@ -1044,8 +1046,14 @@ other does, and reported as not required on Linux, where they cannot compile.
   resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone
   recreated by `startStoreAgain` alone, left alone when it exists and found by a zone fetch and a one-record
   `BEGINSWITH` query, never `TRUEPREDICATE` (SR20), deleted first after a key reset that only the records answer, the
-  zone's metadata still fetching as the fake now models it (SR26), saved even when that deletion finds no zone (SR20),
-  nothing created offline) and its adversarial suite (a faked reset repeated; no deletion of a zone that answers). Not covered: a
+  zone's metadata still fetching as the fake now models it (SR26), under each of three readings of how a query reports
+  the reset, for every query, only one asking for encrypted fields, or per record (`ResetReporting`, SR29), saved even
+  when that deletion finds no zone (SR20), nothing decided on a probe query that fails after the zone fetched or on an
+  empty zone (SR29), nothing created offline) and its adversarial suite (a faked reset repeated; no deletion of a zone
+  that answers; a zone another device started again between the two looks, and a reset flag the second look
+  contradicts, are not deleted, SR30; a reset reported per record stops a listing, SR29). "Pending downloads"
+  (`PendingDownloadsTests`, portable, runs on Linux): a version download is asked for once while it waits and at most
+  the capacity at once (R20). Not covered: a
   vault too large for one snapshot (`ReuploadRefusal.tooLarge` needs 64 MiB of records), CloudKit itself, and the
   SwiftUI alert.
 - **"Adversarial: Apple adapters: CloudKit transport"** (`AdversarialCloudKitTransportTests`, Mac, over the fake
