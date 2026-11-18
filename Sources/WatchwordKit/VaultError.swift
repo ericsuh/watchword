@@ -51,6 +51,10 @@ public enum VaultError: Error, Equatable, Sendable {
     /// written. The UI shows a confirmation naming each host and the item, and saves again with
     /// `save(_:confirmingHosts:)`.
     case hostsNeedConfirmation([HostConfirmation])
+    /// A copy or move out of a shared vault would bring a member's scopes into another vault, where they would hide
+    /// or stand beside the person's accounts, or name a look-alike host (review finding Z72). Nothing was written.
+    /// The UI shows the concern and calls again with `confirming:` naming it.
+    case transferNeedsConfirmation(TransferConcern)
     /// A decrypted record's own identity disagrees with where it was stored. Authentication already binds the
     /// location, so this means a writer holding the vault key lied in the plaintext.
     case recordMismatch(UUID)
@@ -120,4 +124,31 @@ public struct HostConfirmation: Hashable, Sendable {
         self.host = host
         self.resembles = resembles
     }
+}
+
+/// What copying or moving an item out of a shared vault would do to AutoFill (review finding Z72): the questions an
+/// import entry raises (`ImportConcern`), asked of an item a member wrote. In the shared vault its scopes were a
+/// member's word, shadowing nothing outside the vault and vouching for no look-alike (Z60); in the destination they
+/// become the person's.
+public struct TransferConcern: Hashable, Sendable {
+    /// Saved accounts the copy would outrank on a host they are offered on now.
+    public var hidden: [AffectedAccount]
+    /// Saved accounts it would be offered beside.
+    public var beside: [AffectedAccount]
+    /// The item's scopes cover more saved hosts than were examined.
+    public var overlapIsTruncated: Bool
+    /// Hosts of the item that resemble a saved site without being it, or cannot be verified by eye.
+    public var lookAlikeHosts: [HostConfirmation]
+
+    public init(
+        hidden: [AffectedAccount] = [], beside: [AffectedAccount] = [], overlapIsTruncated: Bool = false,
+        lookAlikeHosts: [HostConfirmation] = []
+    ) {
+        self.hidden = hidden
+        self.beside = beside
+        self.overlapIsTruncated = overlapIsTruncated
+        self.lookAlikeHosts = lookAlikeHosts
+    }
+
+    public var isEmpty: Bool { hidden.isEmpty && beside.isEmpty && !overlapIsTruncated && lookAlikeHosts.isEmpty }
 }

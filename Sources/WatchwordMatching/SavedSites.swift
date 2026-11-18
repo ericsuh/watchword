@@ -143,6 +143,21 @@ extension SavedSites {
         public func standing(
             ofNewHost host: String, beside otherScopes: [ServiceScope] = [], inSharedVault: Bool = false
         ) -> NewHostStanding {
+            standing(ofNewHost: host, beside: otherScopes, vouching: true, inSharedVault: inSharedVault)
+        }
+
+        /// As `standing(ofNewHost:beside:)`, for scopes that are not the person's word (an import file's, a member's):
+        /// `otherScopes` are compared with the host for resemblance only, so `amaz0n.com` beside `amazon.com` in one
+        /// entry needs a confirmation, and a host they cover is not thereby recognised (review findings Z72, Z74).
+        public func standing(
+            ofNewHost host: String, resemblingOnly otherScopes: [ServiceScope], inSharedVault: Bool = false
+        ) -> NewHostStanding {
+            standing(ofNewHost: host, beside: otherScopes, vouching: false, inSharedVault: inSharedVault)
+        }
+
+        private func standing(
+            ofNewHost host: String, beside otherScopes: [ServiceScope], vouching: Bool, inSharedVault: Bool
+        ) -> NewHostStanding {
             guard let normalized = try? HostNormalizer.normalize(ServiceIdentifier(host, kind: .domain)) else {
                 return .needsConfirmation(resembles: [])
             }
@@ -150,6 +165,7 @@ extension SavedSites {
             let others = PhishingDetector.ScopeIndex(otherScopes.filter(ScopePolicy.isAcceptable))
             if others.count > 0 {
                 if others.matches(normalized) {
+                    guard vouching else { return Self.standing(of: assessment, host: host, normalized: normalized) }
                     // Covered by the item's own scopes. In a shared vault that is a member's word, which stands unless
                     // the host resembles something outside the item.
                     if !inSharedVault || !assessment.isSuspicious { assessment = .recognized }
@@ -163,6 +179,12 @@ extension SavedSites {
                     assessment = .suspicious(signals: all, impersonating: merged.sorted())
                 }
             }
+            return Self.standing(of: assessment, host: host, normalized: normalized)
+        }
+
+        private static func standing(
+            of assessment: PhishingAssessment, host: String, normalized: NormalizedHost
+        ) -> NewHostStanding {
             switch assessment {
             case .recognized:
                 return .ordinary

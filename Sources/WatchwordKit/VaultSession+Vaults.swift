@@ -538,9 +538,58 @@ extension VaultSession {
     }
 
     /// Copies an item into another vault of the account, as a new item with its own ID. The original is untouched.
+    ///
+    /// Out of a shared vault, the copy is judged like an import entry (review finding Z72): if it would hide or stand
+    /// beside an account AutoFill offers, or names a look-alike host, the call is refused with
+    /// `VaultError.transferNeedsConfirmation` unless `confirming` is that concern, as the person was shown it.
     @discardableResult
-    public func copy(itemID: UUID, to vaultID: UUID) async throws -> Item {
-        try await transfer(itemID: itemID, to: vaultID, removingOriginal: false)
+    public func copy(itemID: UUID, to vaultID: UUID, confirming: TransferConcern? = nil) async throws -> Item {
+        try await transfer(itemID: itemID, to: vaultID, removingOriginal: false, confirming: confirming)
+    }
+
+    /// What copying or moving `itemID` to `vaultID` would need the person to confirm: empty when it goes through as
+    /// it is (always, for an item that is not in a shared vault). What `copy` and `move` refuse with.
+    public func transferConcern(itemID: UUID, to vaultID: UUID) async throws -> TransferConcern {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        guard let row = try await store.record(RecordKey(recordID: itemID, kind: .item)) else {
+            throw VaultError.itemNotFound(itemID)
+        }
+        let item = try openItem(row, keys: try requireKeys(since: epoch))
+        return try await transferConcern(of: item, to: vaultID, since: epoch)
+    }
+
+    /// The concern of bringing `item` into `destination`. An item of a vault this account alone writes is the
+    /// person's word already, and moving it between such vaults asks nothing, as it never did.
+    func transferConcern(of item: Item, to destination: UUID, since epoch: UInt64) async throws -> TransferConcern {
+        guard item.vaultID != destination else { return TransferConcern() }
+        let listed = try await vaults(includingDeleted: true)
+        _ = try requireKeys(since: epoch)
+        // A vault the listing does not describe is taken to be shared, as AutoFill takes it.
+        guard listed.first(where: { $0.id == item.vaultID })?.isShared ?? true else { return TransferConcern() }
+        let isOwnDestination = !(listed.first { $0.id == destination }?.isShared ?? true)
+        let saved = try await savedSites()
+        _ = try requireKeys(since: epoch)
+        // The item is judged against everything but itself, as the import judges an entry not yet saved.
+        let rest = saved.items.filter { $0.id != item.id }
+        let sites = SavedSites(
+            stored: rest, ownVaults: Set(rest.map(\.vaultID)).subtracting(saved.sharedVaults)
+        ).prepared()
+        let scopes = item.scopes.filter(ScopePolicy.isAcceptable)
+        let overlap = sites.overlap(ofAdding: scopes, inVault: destination, isOwnVault: isOwnDestination)
+        var concern = TransferConcern(
+            hidden: overlap.hidden, beside: overlap.beside, overlapIsTruncated: overlap.isTruncated)
+        for scope in scopes {
+            // The item's other scopes are the member's too: they vouch for nothing, and a host resembling one of them
+            // is a look-alike of it.
+            let others = scopes.filter { $0.host != scope.host }
+            if case .needsConfirmation(let resembles) = sites.standing(
+                ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnDestination)
+            {
+                concern.lookAlikeHosts.append(HostConfirmation(host: scope.host, resembles: resembles))
+            }
+        }
+        return concern
     }
 
     /// Moves an item to another vault of the account (PRD F2.2).
@@ -559,12 +608,17 @@ extension VaultSession {
     ///
     /// An item holding values kept for the person to choose between is refused (`itemHasUnresolvedValues`): the copy
     /// would not carry them and the deletion would discard them, which only the person may do (F7.7).
+    ///
+    /// Out of a shared vault it is judged as `copy` is (`confirming`, Z72); a deleted vault's leftovers moved out to
+    /// restore them included.
     @discardableResult
-    public func move(itemID: UUID, to vaultID: UUID) async throws -> Item {
-        try await transfer(itemID: itemID, to: vaultID, removingOriginal: true)
+    public func move(itemID: UUID, to vaultID: UUID, confirming: TransferConcern? = nil) async throws -> Item {
+        try await transfer(itemID: itemID, to: vaultID, removingOriginal: true, confirming: confirming)
     }
 
-    private func transfer(itemID: UUID, to destination: UUID, removingOriginal: Bool) async throws -> Item {
+    private func transfer(
+        itemID: UUID, to destination: UUID, removingOriginal: Bool, confirming: TransferConcern?
+    ) async throws -> Item {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
@@ -592,6 +646,10 @@ extension VaultSession {
                 throw VaultError.scopeRejected(error)
             }
         }
+        // A member's scopes become the person's in the destination: judged before anything is written (Z72).
+        let concern = try await transferConcern(of: original, to: destination, since: epoch)
+        guard concern.isEmpty || concern == confirming else { throw VaultError.transferNeedsConfirmation(concern) }
+        _ = try requireKeys(since: epoch)
 
         var newID = UUID.random(using: &random)
         if removingOriginal {

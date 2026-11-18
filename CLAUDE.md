@@ -688,7 +688,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   permanent deletion. Never move by changing a row's vault, and never move an item with unresolved values. It writes
   in both vaults, so both keys come from `writableVaultKey`; and every deletion the session makes (`deletePermanently`,
   the purge, a vault's deletion) asks `checkSharedWrite` or `checkSharedDeletion` first (Z44). A new path that
-  commits through `writer(for:)` asks too.
+  commits through `writer(for:)` asks too. A copy or move out of a shared vault brings a member's scopes into the
+  destination as the person's, so `transfer` judges it like an import entry (`transferConcern`: overlap and
+  look-alikes by `SavedSites`) and refuses (`transferNeedsConfirmation`) unless `confirming` names that concern (Z72).
 - A sync publishes no vault's deletions while any vault holds an item that exists nowhere else
   (`holdsUnpublishedWork`): the copy half of a move that was not published, or was held aside (Z44, PRD F7.6). Held
   aside means what this device's own take-out noted in its own signed row (`OwnTakenOutRow`, never in the stream

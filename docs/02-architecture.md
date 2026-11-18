@@ -756,6 +756,12 @@ and not another's (offline, locked midway, `ownStreamConflict`) leaves the other
 was until a later sync publishes the copy and then the deletion. An item that holds
 values kept for the person to choose between is not moved until they have chosen (`itemHasUnresolvedValues`): the
 copy would not carry them and the deletion would discard them, which only the person may do (F7.7).
+A copy or move **out of a shared vault** is judged like an import entry (review finding Z72): in the shared vault
+the item's scopes were a member's word, shadowing nothing outside it and vouching for no look-alike (§9.2); in the
+destination they become the person's. So `transferConcern(itemID:to:)` reports, by `SavedSites`, the accounts the
+copy would hide or stand beside and its hosts that resemble a saved site (compared with the item's other scopes for
+resemblance only), and `copy` and `move` refuse with `transferNeedsConfirmation` unless `confirming` is that
+concern. Between the person's own vaults nothing is asked.
 
 **Deleting a vault** is explicit, confirmed, signed and never inferred from absence. The caller names how many
 items the vault holds (`itemCount(in:)`, shown to the person); if that is no longer true, nothing is deleted. In
