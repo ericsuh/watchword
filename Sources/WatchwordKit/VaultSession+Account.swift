@@ -573,6 +573,8 @@ extension VaultSession {
     /// each of the old ID's pending deletions is recorded again as the new ID's (PRD F7.7).
     func registerThisDevice(account: AccountRecord, keys: UnlockedKeys, asNewDevice: Bool) async throws {
         let epoch = lockEpoch
+        // Before a current key is picked for any row carried over.
+        await loadSharedMarkersIfNeeded()
         let view = try await registry(account)
         var updated = account
         if asNewDevice { updated.deviceID = UUID.random(using: &random) }
@@ -976,6 +978,9 @@ extension VaultSession {
             rows.append(
                 deleted[vaultID] ?? Self.directoryRow(vaultID: vaultID, accountID: accountID, deviceID: deviceID))
         }
+        // Which of those vaults are shared, as the account's other devices marked them: a new device knows from its
+        // first moment, and holds them closed until it has their ledgers (V31).
+        rows += directory.markers
 
         // Keychain first, as in `createAccount`: an orphaned Secret Key is harmless.
         try await keychain.store(
@@ -1002,6 +1007,9 @@ extension VaultSession {
         registryView = nil
         install(newKeys, at: now)
         try? await refreshSigningKey(account: account, keys: newKeys)
+        // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
+        // Personal one is held closed.
+        await loadSharedMarkersIfNeeded(force: true)
     }
 
     // MARK: - Account objects on the transport (docs/02-architecture.md §7.7)
@@ -1122,10 +1130,12 @@ extension VaultSession {
     /// keyset, a wrap is kept only if it also opens for the vault and key its name says.
     func fetchDirectory(
         transport: any SyncTransport, accountID: UUID, view: RegistryView, keyset: Keyset?, knownKeys: Set<UUID>,
-        deletedVaults: Set<UUID>, personalVaultID: UUID, report: inout AccountObjectsReport
-    ) async throws -> (keys: [StoredRecord], deletions: [StoredRecord], listed: Set<String>) {
+        deletedVaults: Set<UUID>, markedVaults: Set<UUID> = [], personalVaultID: UUID,
+        report: inout AccountObjectsReport
+    ) async throws -> (keys: [StoredRecord], deletions: [StoredRecord], markers: [StoredRecord], listed: Set<String>) {
         var keys: [UUID: StoredRecord] = [:]
         var deletions: [UUID: StoredRecord] = [:]
+        var markers: [UUID: StoredRecord] = [:]
         let listed = Set(try await transport.list(prefix: AccountObjectLocation.vaultsPrefix(accountID)))
         for name in listed.sorted() {
             guard let location = AccountObjectLocation(name: name), location.accountID == accountID else {
@@ -1145,6 +1155,12 @@ extension VaultSession {
                     continue
                 }
                 author = device
+            case .vaultShared(_, let vaultID, let device):
+                // A marker this device holds already is not fetched again; the Personal vault is never shared.
+                guard !markedVaults.contains(vaultID), markers[vaultID] == nil, vaultID != personalVaultID else {
+                    continue
+                }
+                author = device
             default:
                 report.ignoredNames += 1
                 continue
@@ -1161,10 +1177,8 @@ extension VaultSession {
                 switch location {
                 case .vaultKey(_, let vaultID, let keyID, _):
                     let header = try EnvelopeHeader.parse(object.envelope, expecting: .vaultKeyWrap).header
-                    _ = try Envelope.parse(
-                        object.envelope,
-                        expecting: VaultKey.wrapContext(vaultID: vaultID, keyID: keyID, keysetKeyID: header.keyID),
-                        maximumLength: 1024)
+                    // Of either class: the account's own key, or one that arrived by grant (`VaultKey`).
+                    try VaultKey.checkWrapForm(object.envelope, vaultID: vaultID, keyID: keyID)
                     if let keyset {
                         // The session's keyset may have been zeroised by a `lock()` during the fetch: reading it
                         // would trap. The rest of this sync is then a download.
@@ -1178,6 +1192,12 @@ extension VaultSession {
                     guard object.envelope == Self.deletionMarker else { throw SyncFormatError.malformedEntry }
                     deletions[vaultID] = Self.directoryRow(
                         vaultID: vaultID, accountID: accountID, deviceID: author, deletion: object)
+                case .vaultShared(_, let vaultID, _):
+                    guard let marker = Self.parseSharedMarkerBody(object.envelope), marker.vaultID == vaultID else {
+                        throw SyncFormatError.malformedEntry
+                    }
+                    markers[vaultID] = Self.sharedMarkerRow(
+                        vaultID: vaultID, accountID: accountID, author: author, object: object)
                 default:
                     break
                 }
@@ -1189,7 +1209,7 @@ extension VaultSession {
                 report.rejected.append(name)
             }
         }
-        return (Array(keys.values), Array(deletions.values), listed)
+        return (Array(keys.values), Array(deletions.values), Array(markers.values), listed)
     }
 
     /// What a directory object's signatures cover: its name and its body.
@@ -1372,9 +1392,21 @@ extension VaultSession {
             }
         }
         let deleted = Set(directory.filter { $0.value.isDeleted }.keys)
+        // The markers this device holds, read from the store now: a row removed from the file since (A8) is fetched
+        // again here, before any vault's log is touched (V31).
+        await loadSharedMarkersIfNeeded(force: true)
+        var markedLocally: Set<UUID> = []
+        if let signingKey = await trustedAccountSigningKey(account) {
+            for row in try await store.records(in: accountID, kind: .vaultDirectory) {
+                if let marker = Self.verifiedSharedMarker(row, accountID: accountID, accountSigningKey: signingKey) {
+                    markedLocally.insert(marker.vaultID)
+                }
+            }
+        }
         let fetched = try await fetchDirectory(
             transport: transport, accountID: accountID, view: view, keyset: keys?.keyset, knownKeys: knownKeys,
-            deletedVaults: deleted, personalVaultID: account.personalVaultID, report: &report)
+            deletedVaults: deleted, markedVaults: markedLocally, personalVaultID: account.personalVaultID,
+            report: &report)
 
         var change = StoreChange()
         var indexed = Set(directory.keys)
@@ -1400,7 +1432,19 @@ extension VaultSession {
             change.upserts.append(deletion)
             report.vaultDeletionsFetched += 1
         }
+        for var marker in fetched.markers {
+            // Over whatever the row held: only a row that marks nothing can be there (a marker held is not fetched).
+            if let existing = try await store.record(marker.key) {
+                guard existing.version < UInt64.max else { continue }
+                marker.version = existing.version + 1
+                change.expectations[marker.key] = .version(existing.version)
+            } else {
+                change.expectations[marker.key] = .absent
+            }
+            change.upserts.append(marker)
+        }
         if !change.upserts.isEmpty { try await store.commit(change) }
+        if !fetched.markers.isEmpty { await loadSharedMarkersIfNeeded(force: true) }
         if report.vaultKeysFetched > 0 { try await adoptNewVaultKeys(account: account) }
         if report.vaultDeletionsFetched > 0 { try? await adoptVerifiedDeletions(account: account) }
 
@@ -1427,6 +1471,22 @@ extension VaultSession {
             {
                 report.vaultKeysPublished += 1
             }
+        }
+        // The markers this device holds, each vouched for under its own name, so that one does not rest on the
+        // device that first wrote it. A shared vault held without one (shared before markers existed) gets one.
+        await ensureSharedMarkers(account: account)
+        for (vaultID, owner) in sharing.markers.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            let name = AccountObjectLocation.vaultShared(
+                accountID: accountID, vaultID: vaultID, author: account.deviceID
+            )
+            .name
+            guard !fetched.listed.contains(name) else { continue }
+            let keys = try requireSyncKeys(since: epoch)
+            let body = Self.sharedMarkerBody(vaultID: vaultID, owner: owner)
+            let signature = try await dualSignature(
+                Self.directoryMessage(name: name, body: body), domain: .vaultDirectory, keys: keys, account: account)
+            _ = try await create(
+                name, contents: SignedObject(signature: signature, envelope: body).serialized(), on: transport)
         }
         for (vaultID, entry) in try await vaultDirectory(account) where entry.isDeleted {
             let name = AccountObjectLocation.vaultDeletion(

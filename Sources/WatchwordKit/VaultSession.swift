@@ -329,6 +329,9 @@ public actor VaultSession: SharesExecutor {
         }
         install(newKeys, at: now)
         try? await refreshSigningKey(account: record, keys: newKeys)
+        // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
+        // Personal one is held closed.
+        await loadSharedMarkersIfNeeded(force: true)
         return kit
     }
 
@@ -448,6 +451,9 @@ public actor VaultSession: SharesExecutor {
         } catch {
             // Sync says why (`deviceRegistryUnavailable`); the person keeps access to their vault.
         }
+        // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
+        // Personal one is held closed.
+        await loadSharedMarkersIfNeeded(force: true)
         try? await purgeExpiredTrash()
     }
 
@@ -664,6 +670,9 @@ public actor VaultSession: SharesExecutor {
         } catch {
             // As after a password unlock: sync reports a registry it cannot use.
         }
+        // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
+        // Personal one is held closed.
+        await loadSharedMarkersIfNeeded(force: true)
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).
@@ -697,7 +706,7 @@ public actor VaultSession: SharesExecutor {
         do {
             var rows = try await store.records(in: account.personalVaultID, kind: .vaultKeyWrap)
             for index in try await store.records(in: account.accountID, kind: .vaultDirectory)
-            where index.recordID != account.personalVaultID {
+            where index.recordID != account.personalVaultID && index.envelope.first != Self.sharedMarkerTag {
                 rows += try await store.records(in: index.recordID, kind: .vaultKeyWrap)
             }
             var vaultKeys: [UUID: VaultKey] = [:]

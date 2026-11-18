@@ -219,6 +219,7 @@ struct AccountObjectLocationTests {
         .registryEntry(accountID: account, id: entryID),
         .vaultKey(accountID: account, vaultID: vault, keyID: key, author: device),
         .vaultDeletion(accountID: account, vaultID: vault, author: device),
+        .vaultShared(accountID: account, vaultID: vault, author: device),
     ]
 
     @Test("every location round-trips through its name", arguments: locations)

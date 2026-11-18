@@ -672,6 +672,10 @@ extension AdversarialSharedVaultTests {
         // For the vault's current key. Its engine reads the owner's stream as its own, and what it makes of that is not
         // what this test is about.
         _ = try? await impostor.session.syncAll()
+        // A new device of a member holds the vault's keys from the account's directory and no ledger, so the vault is
+        // shared and closed there (V31) until it is set up on that device, as on any device of a member.
+        let invitation = try #require(try await impostor.session.sharedVaultInvitation(vaultID))
+        try await impostor.session.acceptInvitation(invitation, ownerEvidence: .safetyNumber(owner.safetyNumber))
         let ownStream = SyncObjectLocation.vaultPrefix(vaultID) + "log/\(ownerDevice.uuidString)/"
         let next = UInt64(await household.transport.list(prefix: ownStream).count) + 1
         let forged = try await impostor.session.sealDescriptionAsAModifiedClient(

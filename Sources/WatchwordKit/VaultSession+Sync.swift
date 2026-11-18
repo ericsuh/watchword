@@ -67,6 +67,8 @@ extension VaultSession {
         } catch SyncKeyringError.locked {
             // Locked while vouching for the directory: the rest of the sync is a download.
         }
+        // Which vaults are shared, before any vault's key is picked or its engine set up (V31).
+        await loadSharedMarkersIfNeeded()
         // A device whose registration no longer counts registers again, now that it has seen why.
         if let keys, let view = try? await registry(record), view.state.pendingCredentials.isEmpty,
             view.state.standing(of: record.deviceID) == .unknown
@@ -382,9 +384,11 @@ extension VaultSession {
         guard try await vaultDirectory(record)[location.vaultID] != nil else {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
-        // A shared vault this device could not restore is no vault of this account's alone: nothing in it verifies
-        // until it is restored (V19).
-        if isUnanchoredSharedVault(location.vaultID) { throw SyncKeyringError.untrustedAuthor(location.author) }
+        // A shared vault with no ledger here is no vault of this account's alone: nothing in it verifies until a
+        // ledger is loaded for it (V19, V31).
+        if isSharedUnavailable(location.vaultID, keys: keys, personalVaultID: record.personalVaultID) {
+            throw SyncKeyringError.untrustedAuthor(location.author)
+        }
         if sharing.vaults[location.vaultID] != nil {
             // A writer from another account (VaultSession+SharingSync.swift).
             return try sharedVerify(signature, over: envelope, at: location, ownView: view, account: record)

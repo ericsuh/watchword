@@ -675,6 +675,18 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - A shared vault's records are sealed under the key its chain names (`currentVaultKey` asks `sharedCurrentKey`), and
   every write the person makes asks `writePermission` (in `writableVaultKey`). Keys from grants are stored as
   `vaultKeyWrap` rows like any other; their identity comes from where the grant is filed.
+- **"Shared" does not depend on the sharing state a device happens to hold** (V31, ported from the security-audit
+  branch's Z41; `VaultSession+SharedMarker.swift`). A key opened from a grant is `arrivedByGrant`, which its wrap's
+  context authenticates on every device of the account; the account signs a marker beside the vault's directory
+  entry (`AccountObjectLocation.vaultShared`) naming the chain's owner. Nothing in the sharing state marks a vault:
+  its rows are not all signed (V32). A vault either names with no verified ledger loaded is **unavailable**:
+  `sharedCurrentKey` gives it no key (never the lowest key ID), its engine only downloads, `syncVerify` refuses its
+  objects, and `checkSharedWrite`/`checkSharedRename`/`checkSharedDeletion` and `shareVault` throw
+  `ledgerUnavailable`. Never add a path that asks only `sharing.vaults[vaultID]` to decide a vault is private; ask
+  `isMarkedShared`. Until the markers are read every vault but the Personal one is held closed, so call
+  `loadSharedMarkersIfNeeded()` before a path that picks a key. The way out is `acceptInvitation` (the invitation from
+  `sharedVaultInvitation`, whose owner is the marker's; `knownOwner` throws `ownerUnknown` for a granted key with no
+  marker); the held-key fallback in `IncomingInvitation.accept` is for an invitation whose owner is this account.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds

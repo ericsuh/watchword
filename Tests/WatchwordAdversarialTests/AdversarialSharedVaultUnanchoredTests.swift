@@ -29,8 +29,8 @@ extension AdversarialSharedVaultTests {
     /// to being one of the account's own: synced with no judge and with snapshots and collection on, written and
     /// renamed by a member who may not, sealed under the smallest key ID held (perhaps one from before a rotation), and
     /// offered for sharing, which minted a new genesis over the saved owner. The vault is now shared and unavailable:
-    /// nothing is written, renamed, published, verified, shared again or accepted into it, and it comes back once the
-    /// owner is checked again.
+    /// nothing is written, renamed, published, verified or shared again, an invitation is not accepted without the
+    /// owner checked, and it comes back once the owner is checked again.
     @Test("a shared vault whose ledger does not restore is unavailable, never one of the member's own vaults")
     func unrestoredSharedVaultIsUnavailable() async throws {
         let household = SharedVaultHousehold()
@@ -45,16 +45,17 @@ extension AdversarialSharedVaultTests {
         #expect(try await session.sharedVaultIDs().contains(vaultID) == false)
         #expect(try await session.sharedVaultsAwaitingOwnerCheck() == [vaultID])
         // A read-only member's device writes nothing, renames nothing and shares nothing again.
-        await #expect(throws: SharedVaultError.sharedVaultUnavailable(vaultID)) {
+        await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
             _ = try await session.save(Self.bank(in: vaultID))
         }
-        await #expect(throws: SharedVaultError.sharedVaultUnavailable(vaultID)) {
+        await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
             _ = try await session.renameVault(id: vaultID, to: "Ours now")
         }
-        await #expect(throws: SharedVaultError.sharedVaultUnavailable(vaultID)) {
+        await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
             try await session.shareVault(vaultID)
         }
-        await #expect(throws: SharedVaultError.sharedVaultUnavailable(vaultID)) {
+        // Accepting the vault's invitation again is the way back (V31), and it needs the owner checked first.
+        await #expect(throws: SharingError.fingerprintNotVerified) {
             try await session.acceptInvitation(Invitation(vaultID: vaultID, ownerAccountID: owner.accountID))
         }
         #expect(await member.state.value(.owner, vaultID: vaultID) == ownerRow, "the saved owner is untouched")

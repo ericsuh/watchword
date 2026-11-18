@@ -130,8 +130,11 @@ public enum ErrorWording {
             return "Vault sharing codes are not available here. Use the full vault sharing code instead."
         case .sharingCodeKeysNotListed:
             return keysNotListed
-        case .sharedVaultUnavailable:
+        case .ledgerUnavailable:
             return sharedVaultUnavailable
+        case .ownerUnknown:
+            return "This device does not know yet who owns that vault, so the invitation was not accepted. Sync, "
+                + "then try again."
         case .invitationNotDelivered:
             return invitationNotDelivered
         }

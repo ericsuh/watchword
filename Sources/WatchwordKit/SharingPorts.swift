@@ -113,11 +113,18 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// A vault sharing code session authenticated keys for an account that a shared vault here lists with other keys:
     /// the pin is not replaced on the session's word against the chain's (`replacePinFromSharingCode`).
     case sharingCodeKeysNotListed
-    /// The sharing state lists this vault as shared, and its saved ledger could not be restored on this device: the
-    /// owner's pin is gone or no longer the chain's, or the saved state is damaged (A8). The vault is shared whatever
-    /// this device can verify, so nothing is written, renamed, deleted, shared again or accepted into it until its owner
-    /// is checked again (docs/06-adversarial-review.md, V19).
-    case sharedVaultUnavailable(UUID)
+    /// The vault is shared and this device holds no verified membership ledger for it: its account's marker or a key
+    /// that arrived by grant says it is shared (another device of the account shared or joined it; or the saved
+    /// ledger, or the owner's pin that anchors it, is gone or damaged: A8). Nothing is written, renamed, sealed,
+    /// published, deleted or shared again there until this device accepts the vault's invitation itself, or the
+    /// owner's pin it lacks is made again (docs/06-adversarial-review.md, V19 and V31, the security-audit branch's
+    /// Z41): a shared vault is never run as one of the account's own.
+    case ledgerUnavailable(UUID)
+    /// An invitation for a vault this device holds keys of, which arrived by grant, without knowing whose the vault
+    /// is: it has no ledger for it and the account's marker has not reached it. The vault has an owner, and an
+    /// invitation is accepted only if it names them; one this device cannot check is not accepted, whoever it names.
+    /// It waits for the marker, which the next sync brings (V31; the security-audit branch's Z48).
+    case ownerUnknown(UUID)
     /// The invitation was issued (the joiner is added and holds a grant) but could not be delivered inside the vault
     /// sharing code session: something else is in its slot (anyone who heard the number may take it). Hand it over as
     /// text (`SharingCodes.text(for:)`); the joiner, who checked this device, pastes it (docs/06-adversarial-review.md,

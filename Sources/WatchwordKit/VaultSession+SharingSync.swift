@@ -77,8 +77,8 @@ extension VaultSession {
             head: [UInt8]?
         )
     {
-        if isUnanchoredSharedVault(vaultID) {
-            // Shared and not restored (V19): never run as an own vault. It has no key to seal under, so the sync
+        if isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+            // Shared with no ledger here (V19, V31): never run as an own vault. It has no key to seal under, so the sync
             // only downloads, and `syncVerify` refuses its objects; nothing is published, snapshotted or collected.
             var configuration = base
             configuration.maintainsLog = false
