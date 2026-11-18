@@ -248,6 +248,7 @@ extension VaultSession {
         guard let syncState, let base = syncSettings?.state else { return false }
         let state = try? await syncState.loadState(vaultID: vaultID)
         let known = state?.known ?? [:]
+        let pending = (try? await syncState.pendingDeletions(vaultID: vaultID)) ?? [:]
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): an edit of its own in a row it holds is unpublished whatever its state says, such as a
         // move's copy published by a build from before this was refused.
@@ -261,7 +262,13 @@ extension VaultSession {
             // ahead of it (review finding Z148). Such a row holds the deletions back while it holds an edit of this
             // device's above what it published, as `unsharedWorkCount` measures it: a version a merge kept after a
             // deletion holds none, and holds nothing back.
-            if stamp.deleted, holdsUnpublishedEdit(row, published: state?.published[row.key], account: account) {
+            // Not a row this device's own pending deletion of the same record is queued with: that row is a version
+            // kept after the deletion (an edit it had not seen), which goes out right behind its tombstone in the
+            // vault's deferred pass. Counted, the deletion waited for the row and the row for the deletion, for good
+            // (found by the long vault simulation after the merge with the branch that made Z148; V38).
+            if stamp.deleted, pending[row.key] == nil,
+                holdsUnpublishedEdit(row, published: state?.published[row.key], account: account)
+            {
                 return true
             }
         }
