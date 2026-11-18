@@ -1049,8 +1049,12 @@ public actor VaultSession: SharesExecutor {
             return nil
         }
         defer { bytes.zeroise() }
-        // Not secret, and decoded from a device-only Keychain item; a malformed one is treated as absent.
-        return try? JSONDecoder().decode(QuickUnlockState.self, from: Data(bytes.unprotectedCopy()))
+        // Not secret (the AUK in it is sealed under the Local Unlock Key), and decoded from a device-only Keychain
+        // item; a malformed one is treated as absent. One copy, straight from protected storage, wiped once decoded
+        // (review §Z, Z98).
+        var data = Data(bytes)
+        defer { data.resetBytes(in: data.startIndex..<data.endIndex) }
+        return try? JSONDecoder().decode(QuickUnlockState.self, from: data)
     }
 
     private func saveQuickUnlockState(_ state: QuickUnlockState, accountID: UUID) async throws {
