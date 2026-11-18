@@ -479,14 +479,16 @@ public actor SyncEngine {
         }
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         let examined = state.examinedCopies
+        let unread = state.unreadCopies
         do {
             let listing = try await list(retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
             try await fetch(listing, state: &state, report: &report)
         } catch let error as SyncTransportError where error.stopsSync {
             report.noteTransportFailure(error)
         }
-        // Which copies were looked at and found to be junk is remembered while locked too, so they are not read again.
-        if state.examinedCopies != examined { try await syncState.saveState(state) }
+        // Which copies were looked at and found to be junk is remembered while locked too, so they are not read again,
+        // and which could not be read, so they wait behind the rest (R17).
+        if state.examinedCopies != examined || state.unreadCopies != unread { try await syncState.saveState(state) }
         return report
     }
 
@@ -532,6 +534,7 @@ public actor SyncEngine {
     private func fetch(_ listing: Listing, state: inout SyncState, report: inout SyncReport) async throws {
         // What was decided about copies is remembered only for names that still have them.
         state.examinedCopies = state.examinedCopies.filter { listing.copies[$0.key] != nil }
+        state.unreadCopies = state.unreadCopies.filter { listing.copies[$0.key] != nil }
 
         // Every snapshot not yet merged, not only the newest: which one is newest is not which one covers most, and a
         // device's own garbage collection may rely on any of them.
@@ -580,13 +583,21 @@ public actor SyncEngine {
             }
         }
         // Copies under a name this device has already merged (a second copy that appeared since, or junk planted
-        // beside the object): looked at once per count the transport gives, and what verifies is applied late.
+        // beside the object): looked at once per count the transport gives, and what verifies is applied late. A
+        // name whose copies could not all be read at the count listed now goes after every other (R17): read again,
+        // since it may be readable now, but never ahead of a copy that is.
         budget = max(0, budget) + allowance / 2
         let wantedNames = Set(wanted)
-        for (location, count) in listing.copies.sorted(by: { $0.key.name < $1.key.name })
-        where !wantedNames.contains(location) && !alreadyStaged.contains(location)
-            && state.examinedCopies[location] != count
-        {
+        let examined = state.examinedCopies
+        let unread = state.unreadCopies
+        let late = listing.copies.filter { location, count in
+            !wantedNames.contains(location) && !alreadyStaged.contains(location) && examined[location] != count
+        }.sorted { lhs, rhs in
+            let left = unread[lhs.key] == lhs.value
+            let right = unread[rhs.key] == rhs.value
+            return left != right ? right : lhs.key.name < rhs.key.name
+        }
+        for (location, count) in late {
             guard budget > 0 else {
                 report.copiesNotExamined += 1
                 continue
@@ -690,8 +701,10 @@ public actor SyncEngine {
         // Deleted since the listing: no object.
         guard !found.copies.isEmpty || found.omitted > 0 || found.unread > 0 else { return }
         // A copy that cannot be read now may be read later: the name is not examined in full, so nothing about it is
-        // remembered and the next sync looks again (review finding R11). Its author does not collect it meanwhile.
+        // remembered as examined and the next sync looks again (review finding R11), after the names whose copies
+        // could be read (R17). Its author does not collect it meanwhile.
         let whole = found.unread == 0
+        state.unreadCopies[location] = whole ? nil : count
         report.fetched += found.copies.count
         var seen: Set<[UInt8]> = []
         var verified: [(bytes: [UInt8], object: SignedObject)] = []

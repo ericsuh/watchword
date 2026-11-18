@@ -596,7 +596,11 @@ it for good. Now the transport says what it holds and the engine decides, as for
   so no device removes another device's copies, ever, and no device "picks a winner" on the provider. Each device
   remembers per name the number of copies it has examined, and looks again only when the provider's count changes,
   or at every sync while one of them could not be read (`unread`); its author does not collect a name of its own
-  whose copies it has not examined in full (R11), since `delete` removes every copy.
+  whose copies it has not examined in full (R11), since `delete` removes every copy. A name whose copies were unread
+  at the count listed now (`SyncState.unreadCopies`) is examined after every other name, so copies that never become
+  readable, honestly or because A1 withholds them, cannot spend the bound ahead of a late fork (R17); the iCloud
+  adapter asks for a conflict version's contents once the copies' read has ended (a detached coordinated read of the
+  version's URL, bounded by the coordination deadline).
   The copies go when the object goes: its author collects it under the usual rule (every other stream acknowledges
   the position, a listed snapshot covers it, and it is not the stream's newest), after its hand-on snapshot, and the
   transport's `delete` then removes every copy under the name. Junk copies beside another device's object stay until

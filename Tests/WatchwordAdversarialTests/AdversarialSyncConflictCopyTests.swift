@@ -206,6 +206,59 @@ extension AdversarialSyncTests {
         #expect(try await writer.item(forked.id).title == "Only in the fork")
     }
 
+    /// Threat: A1 (review finding R17), or no adversary at all in a long-lived vault: copies that are listed and can
+    /// never be read (conflict versions whose contents never reach this device, which A1 can arrange by withholding
+    /// them) under many names this device has already merged. Nothing about such a name is remembered as examined
+    /// (R11, rightly: it may be readable later), so each one cost part of the late half of the per-sync bound at
+    /// every sync, in name order; enough of them sorting first kept a late fork of the writer's own stream from ever
+    /// being read. A name whose copies were unread at the count listed now goes after the rest, so the fork is read
+    /// at the latest in the sync after the unreadable copies were first seen, and they are still looked at again.
+    @Test("copies that are never readable cannot keep a late fork from being read")
+    func unreadableCopiesStarveNothing() async throws {
+        let f = try await Self.fixture()
+        for index in 1...12 {
+            try await f.writer.save(Self.login("Item \(index)", password: "item-\(index)"))
+            try await f.writer.sync()
+        }
+        var configuration = SyncTestClient.configuration
+        configuration.maximumCopiesPerSync = 8
+        await f.keys.trust(device: Self.b)
+        let reader = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        #expect(try await reader.sync().applied == 12)
+
+        for sequence in 1...11 {
+            await f.transport.plantUnreadableCopy(f.segmentName(UInt64(sequence)), contents: [UInt8(sequence)])
+        }
+        // The restored installation writes positions 1 to 12 of its own; the provider keeps its 12th beside the first.
+        let elsewhere = InMemorySyncTransport()
+        let restored = SyncTestClient(deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: elsewhere)
+        for index in 1...11 {
+            try await restored.save(Self.login("Fork \(index)", password: "fork-\(index)"))
+            try await restored.sync()
+        }
+        let forked = try await restored.save(Self.login("Only in the fork", password: "fork-secret"))
+        try await restored.sync()
+        let name = f.segmentName(12)
+        await f.transport.plantCopy(name, contents: try #require(await elsewhere.allObjects[name]))
+
+        var forkRead = false
+        for _ in 0..<2 where !forkRead {
+            forkRead = try await reader.sync().forkedObjects == [name]
+        }
+        #expect(forkRead, "the late fork is read by the second sync at the latest")
+        #expect(try await reader.item(forked.id).title == "Only in the fork")
+        // The unreadable copies are still looked at, after the rest, and once readable are examined like any other.
+        #expect(try await reader.sync().copiesNotExamined >= 1)
+        for sequence in 1...11 { await f.transport.makeCopiesReadable(f.segmentName(UInt64(sequence))) }
+        var settled = false
+        for _ in 0..<4 where !settled {
+            let report = try await reader.sync()
+            settled = report.copiesExamined == 0 && report.copiesNotExamined == 0
+        }
+        #expect(settled, "once readable, every copy is examined, and then not read again")
+    }
+
     /// Threat: A1 (review finding R13) plants junk under names no device will ever merge, snapshot names of a real
     /// device with junk as the current file and a full set of junk copies beside it. A name a device waits on is
     /// examined again at every sync, and nothing is remembered about junk that never verifies, so before this the

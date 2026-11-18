@@ -987,7 +987,7 @@ other does, and reported as not required on Linux, where they cannot compile.
   (`.N 2.wwe.icloud`) is counted once, with or without its downloaded file, and read as unread, and an inexact one is
   nothing (R18, `duplicatePlaceholder`, `duplicatePlaceholderAlone`, `inexactDuplicatePlaceholders`). *State* ("… what is staged and remembered"): staged
   copies round-trip and a hostile row is no object; "Collecting a device's own objects": a deletion refused for one
-  object is reported and tried again, never the sync's end (SR23, `refusedDeletionIsOneObjectsFailure`); the state's new fields survive encoding and an older row.
+  object is reported and tried again, never the sync's end (SR23, `refusedDeletionIsOneObjectsFailure`); the state's new fields (`unreadCopies` among them, R17) survive encoding and an older row.
   *Engine* ("… the engine"): junk beside an object; the object behind a junk current file; no copy verifying refused
   alone; two verifying copies merged, in either order to the same items; a late copy; the forked author's hand-on;
   acknowledgements by minimum; snapshot copies; both bounds; a judge refusing a fork, at download and from an edited
@@ -996,7 +996,8 @@ other does, and reported as not required on Linux, where they cannot compile.
   reaching devices past the position, a flood, a shared vault's fork, a copy planted in the staging area, a copy
   that cannot be read yet, read once it can be and never collected before, R11, `unreadableCopyReadLater`; junk under
   names a device waits on, which no longer keeps a late copy from being read, R13,
-  `junkUnderWantedNamesStarvesNothing`) and "sync
+  `junkUnderWantedNamesStarvesNothing`; copies that never become readable under many merged names, which no longer
+  keep a late fork from being read and are still looked at, R17, `unreadableCopiesStarveNothing`) and "sync
   with real keys" (planted copies while locked and after unlock; a really signed fork merged by every device and
   handed on). `LongRunningSyncSimulationTests` plants junk copies and forked copies of a device's newest segment and
   still converges, loses nothing, and leaves no hand-on owed.

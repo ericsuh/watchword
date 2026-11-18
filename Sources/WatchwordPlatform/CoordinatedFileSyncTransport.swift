@@ -111,15 +111,17 @@
             }
             let base = base
             do {
-                return try await coordinated(.read([.withoutChanges]), at: url) {
+                let (found, notHere) = try await coordinated(.read([.withoutChanges]), at: url) {
+                    () throws -> (SyncObjectCopies, [URL]) in
                     if try Self.availability(of: url) == .notDownloaded {
                         _ = Self.requestDownload(url)
-                        return SyncObjectCopies()
+                        return (SyncObjectCopies(), [])
                     }
                     // The file and its renamed duplicates. One iCloud has not downloaded is asked for and counted
                     // as unread, never read: reading a dataless file is not assumed to block or to fail (review
                     // finding R11, adapter assumptions). The file itself was found here just above.
                     var found = SyncObjectCopies()
+                    var notHere: [URL] = []
                     for copy in [url] + (try base.duplicateURLs(for: name)) {
                         switch try Self.availability(of: copy) {
                         case .absent: continue
@@ -146,12 +148,11 @@
                     }
                     for version in Self.conflictVersions(of: url) {
                         // A version whose contents are not here yet is unread, never omitted: the engine looks again
-                        // at every sync, and the author does not collect the object meanwhile (R11). Nothing here
-                        // asks for it: no documented call fetches a conflict version without a blocking coordinated
-                        // read of its URL, which this read must not wait on. It is read once iCloud has it (assumed,
-                        // not verified on a Mac: docs/06-adversarial-review.md §R, R11).
+                        // at every sync, after the names it can read (R17), and the author does not collect the object
+                        // meanwhile (R11). Its download is asked for once this read has ended (R17).
                         if !version.hasLocalContents {
                             found.unread += 1
+                            notHere.append(version.url)
                             continue
                         }
                         // One over the limit, or past the count: omitted. One whose read failed: unread.
@@ -171,11 +172,30 @@
                             found.unread += 1
                         }
                     }
-                    return found
+                    return (found, notHere)
                 }
+                requestVersionDownloads(notHere)
+                return found
             } catch is CoordinationFailure {
                 // One name whose read was not granted in time: that object alone waits, the sync goes on.
                 throw SyncTransportError.objectUnreadable(name)
+            }
+        }
+
+        /// Asks iCloud for conflict versions whose contents are not on this device (review finding R17): without this,
+        /// a version nobody had asked for could stay unread for good, re-examined at every sync. Apple documents a
+        /// coordinated read of a version's `url` as what downloads its contents when `hasLocalContents` is false (the
+        /// documentation of `NSFileVersion.hasLocalContents`; unverified until a Mac run), so each is one coordinated
+        /// read in a detached task, after the copies' own read has ended, bounded by the coordination deadline and
+        /// never awaited: no sync waits for the network. Its body reads nothing; the next sync reads the version.
+        func requestVersionDownloads(_ urls: [URL]) {
+            guard !urls.isEmpty else { return }
+            let deadline = deadline
+            Task.detached(priority: .utility) {
+                for url in urls {
+                    let attempt = CoordinationAttempt<Bool>()
+                    _ = try? await attempt.run(.read([.withoutChanges]), at: url, deadline: deadline) { true }
+                }
             }
         }
 

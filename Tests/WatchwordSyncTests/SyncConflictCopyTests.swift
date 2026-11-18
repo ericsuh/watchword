@@ -220,25 +220,29 @@ struct ConflictCopyStateTests {
         #expect(StagedObject(location: Self.location, storageBytes: []) == nil)
     }
 
-    @Test("the state remembers examined copies and an owed hand-on across encoding; an older row has neither")
+    @Test("the state remembers examined and unread copies and an owed hand-on across encoding; an older row has none")
     func encoding() throws {
         var state = SyncState(vaultID: SyncFixtures.vault)
         state.examinedCopies[Self.location] = 3
+        state.unreadCopies[Self.location] = 4
         state.handOnOwed = true
         let data = try JSONEncoder().encode(EncodedState(state))
         #expect(try JSONDecoder().decode(EncodedState.self, from: data).state == state)
         var older = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         older["examinedCopies"] = nil
+        older["unreadCopies"] = nil
         older["handOnOwed"] = nil
         let decoded = try JSONDecoder().decode(
             EncodedState.self, from: try JSONSerialization.data(withJSONObject: older))
-        #expect(decoded.state?.examinedCopies == [:])
+        #expect(decoded.state?.examinedCopies == [:] && decoded.state?.unreadCopies == [:])
         #expect(decoded.state?.handOnOwed == false)
-        var bad = older
-        bad["examinedCopies"] = ["not a name": 2]
-        #expect(
-            try JSONDecoder().decode(EncodedState.self, from: try JSONSerialization.data(withJSONObject: bad)).state
-                == nil)
+        for field in ["examinedCopies", "unreadCopies"] {
+            var bad = older
+            bad[field] = ["not a name": 2]
+            #expect(
+                try JSONDecoder().decode(EncodedState.self, from: try JSONSerialization.data(withJSONObject: bad))
+                    .state == nil)
+        }
     }
 }
 
