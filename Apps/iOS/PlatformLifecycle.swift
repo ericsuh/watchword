@@ -37,17 +37,16 @@ extension PlatformLifecycle {
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
             watchCapture(of: scene, privacy)
         }
+        // The scene is taken out of the notification before the main-actor region: a `Notification` is not
+        // `Sendable`, and a `UIScene` (main-actor isolated) is.
         center.addObserver(forName: UIScene.willConnectNotification, object: nil, queue: .main) { notification in
-            MainActor.assumeIsolated {
-                guard let scene = notification.object as? UIWindowScene else { return }
-                watchCapture(of: scene, privacy)
-            }
+            guard let scene = notification.object as? UIWindowScene else { return }
+            MainActor.assumeIsolated { watchCapture(of: scene, privacy) }
         }
         center.addObserver(forName: UIScene.didDisconnectNotification, object: nil, queue: .main) { notification in
-            MainActor.assumeIsolated {
-                guard let scene = notification.object as? UIScene else { return }
-                privacy.sceneDisconnected(AnyHashable(ObjectIdentifier(scene)))
-            }
+            guard let scene = notification.object as? UIScene else { return }
+            let id = ObjectIdentifier(scene)
+            MainActor.assumeIsolated { privacy.sceneDisconnected(AnyHashable(id)) }
         }
     }
 
