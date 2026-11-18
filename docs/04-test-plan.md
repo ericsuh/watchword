@@ -1028,8 +1028,8 @@ other does, and reported as not required on Linux, where they cannot compile.
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
   revoked device cannot answer and stays revoked; a password change survives). `LongRunningSyncSimulationTests`
   resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone
-  recreated by `startStoreAgain` alone, left alone when it exists,
-  deleted first after a key reset, nothing created offline) and its adversarial suite (a faked reset repeated; no deletion of a zone that answers). Not covered: a
+  recreated by `startStoreAgain` alone, left alone when it exists and found by a zone fetch rather than a query,
+  deleted first after a key reset, saved even when that deletion finds no zone (SR20), nothing created offline) and its adversarial suite (a faked reset repeated; no deletion of a zone that answers). Not covered: a
   vault too large for one snapshot (`ReuploadRefusal.tooLarge` needs 64 MiB of records), CloudKit itself, and the
   SwiftUI alert.
 - **"Adversarial: Apple adapters: CloudKit transport"** (`AdversarialCloudKitTransportTests`, Mac, over the fake

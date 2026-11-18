@@ -184,8 +184,10 @@
             let name = SyncTransportContract.name
             try await transport.create(name, contents: [1])
             let zoneSaves = database.savedZones
+            let queries = database.queriedKeys.count
             try await transport.startStoreAgain()
             #expect(database.savedZones == zoneSaves && database.deletedZones.isEmpty)
+            #expect(database.queriedKeys.count == queries, "the zone is fetched, not queried (SR20)")
             #expect(try await transport.fetch(name, maximumLength: 10) == [1])
         }
 
@@ -204,6 +206,24 @@
             database.injectFailure(reset)
             try await transport.startStoreAgain()
             #expect(database.deletedZones == ["Watchword"] && database.zoneNames == ["Watchword"])
+            #expect(try await transport.list(prefix: "").isEmpty)
+        }
+
+        /// Review finding SR20: after a key reset the zone may already be gone by the time it is deleted, and CloudKit
+        /// then answers the deletion with `zoneNotFound` (or `userDeletedZone`, `unknownItem`). Taken as a failure,
+        /// every retry would repeat it and the store could never be started again. Taken as done, the zone is saved.
+        @Test(
+            "a key reset whose zone is already gone when deleted is still started again",
+            arguments: [CKError.Code.zoneNotFound, .userDeletedZone, .unknownItem])
+        func startingAgainAfterAKeyResetWithTheZoneGone(_ answer: CKError.Code) async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            try await transport.create(SyncTransportContract.name, contents: [1])
+            database.purgeZone("Watchword")
+            database.injectFailure(CKError(.zoneNotFound, userInfo: [CKErrorUserDidResetEncryptedDataKey: true]))
+            database.injectFailure(CKError(answer))
+            try await transport.startStoreAgain()
+            #expect(database.zoneNames == ["Watchword"])
             #expect(try await transport.list(prefix: "").isEmpty)
         }
 

@@ -170,6 +170,13 @@
             }
         }
 
+        func fetchZone(_ zoneID: CKRecordZone.ID) async throws {
+            try takeInjected()
+            try lock.withLock {
+                guard zones.contains(zoneID.zoneName) else { throw CKError(.zoneNotFound) }
+            }
+        }
+
         func deleteZone(_ zoneID: CKRecordZone.ID) async throws {
             try takeInjected()
             lock.withLock {

@@ -30,6 +30,12 @@
         /// Creates the zone, or does nothing if it exists.
         func saveZone(_ zone: CKRecordZone) async throws
 
+        /// Returns if the zone exists; otherwise throws CloudKit's error (`zoneNotFound`, with
+        /// `CKErrorUserDidResetEncryptedDataKey` when its key was reset, or `userDeletedZone`). Asked only by
+        /// `CloudKitTransport.startStoreAgain`: a zone fetch needs no queryable index, where a query for every record
+        /// needs one on `recordName` that no other call needs (review finding SR20).
+        func fetchZone(_ zoneID: CKRecordZone.ID) async throws
+
         /// Deletes the zone and every record in it. Called only by `CloudKitTransport.startStoreAgain`, for a zone
         /// whose encryption key CloudKit reset: nothing in it can be read any more.
         func deleteZone(_ zoneID: CKRecordZone.ID) async throws
@@ -88,6 +94,10 @@
         public func deleteZone(_ zoneID: CKRecordZone.ID) async throws {
             let results = try await database.modifyRecordZones(saving: [], deleting: [zoneID])
             if let result = results.deleteResults[zoneID] { try result.get() }
+        }
+
+        public func fetchZone(_ zoneID: CKRecordZone.ID) async throws {
+            _ = try await database.recordZone(for: zoneID)
         }
     }
 
@@ -212,15 +222,17 @@
         /// CloudKit says the person deleted, is saved again. A zone whose encryption key CloudKit reset still exists
         /// on the server with records nobody can read, so it is deleted first and then saved, which is what Apple
         /// prescribes for `CKErrorUserDidResetEncryptedDataKey` (unverified against CloudKit: this file has not been
-        /// run there). The marker is set, never forgotten. Any other failure is the transport's typed error, and the
-        /// zone stays as it was.
+        /// run there). A deletion answered as already done (`zoneNotFound`, `userDeletedZone`, `unknownItem`) is
+        /// taken as done, or a reset zone that is really gone could never be started again (review finding SR20).
+        /// The marker is set, never forgotten. Any other failure is the transport's typed error, and the zone stays
+        /// as it was.
+        ///
+        /// The probe is a fetch of the zone, not a query: a query for every record needs a queryable `recordName`
+        /// index in production, which no other call needs, and would otherwise be refused (SR20).
         public func startStoreAgain() async throws {
-            let query = CKQuery(recordType: Self.recordType, predicate: NSPredicate(value: true))
             var keyWasReset = false
             do {
-                _ = try await database.records(
-                    matching: query, inZoneWith: zoneID, desiredKeys: [Self.nameField], resultsLimit: 1,
-                    continuing: nil)
+                try await database.fetchZone(zoneID)
                 // The zone is there: nothing to recreate, and nothing in it is touched.
                 try? await marker.markSeen(markerName)
                 return
@@ -232,12 +244,24 @@
                 throw CloudKitErrors.transportError(for: error, name: zoneName)
             }
             do {
-                if keyWasReset { try await database.deleteZone(zoneID) }
+                if keyWasReset {
+                    do {
+                        try await database.deleteZone(zoneID)
+                    } catch let error where Self.zoneAlreadyGone(error) {
+                        // Gone already: what the deletion was for.
+                    }
+                }
                 try await database.saveZone(CKRecordZone(zoneID: zoneID))
             } catch {
                 throw CloudKitErrors.transportError(for: error, name: zoneName)
             }
             try? await marker.markSeen(markerName)
+        }
+
+        /// Whether a zone deletion failed only because there is no zone to delete.
+        static func zoneAlreadyGone(_ error: any Error) -> Bool {
+            if CloudKitErrors.zoneNotFound(in: error) != nil || CloudKitErrors.isUnknownItem(error) { return true }
+            return (error as? CKError)?.code == .userDeletedZone
         }
 
         // MARK: - SyncTransport
