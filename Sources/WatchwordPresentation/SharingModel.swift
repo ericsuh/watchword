@@ -481,7 +481,7 @@ public final class InvitationModel {
             }
         case .failed(let error):
             step = .failed(message: SharingCodeWording.failure(error))
-        case .waiting, .showCodeAndTypeTheirs:
+        case .waiting, .showCodeAndTypeTheirs, .confirmScannedAccount:
             step = .failed(message: SharingCodeWording.failure(.notReady))
         }
     }
@@ -513,6 +513,10 @@ public final class AcceptInvitationModel {
         case waiting
         /// Show this device's six digits for them to type, and type the six on their screen.
         case showCodeAndType(code: String, scanPayload: String, attemptsLeft: Int)
+        /// The camera read their screen and their device has taken part (its reveal opened the commitment): the screen
+        /// names the account the scan is for, and nothing is pinned until the person says it is the person beside
+        /// them (`confirmScannedAccount`; ADR 0010, Scans). This device's own six digits are shown meanwhile.
+        case confirmScan(accountID: UUID, code: String?, scanPayload: String)
         /// They are checked and pinned; still showing this device's six digits (`code`, nil until the session can show
         /// them) for a device that types; waiting for their invitation.
         case awaitingInvitation(code: String?, scanPayload: String)
@@ -607,6 +611,13 @@ public final class AcceptInvitationModel {
         }
     }
 
+    /// The person said the account the scan named is the person beside them: pin it. "Don't" is `decline()`, which
+    /// ends the session and pins nothing.
+    public func confirmScannedAccount() async {
+        guard case .confirmScan(let accountID, _, _) = step else { return }
+        await perform { try await apply(try await context.session.confirmScannedSharingPartner(accountID)) }
+    }
+
     /// Joins the vault of the invitation that arrived, once the person has said yes.
     public func confirmJoin() async {
         guard case .confirmJoin = step, let invitation else { return }
@@ -676,6 +687,9 @@ public final class AcceptInvitationModel {
         case .showCodeAndTypeTheirs:
             step = .showCodeAndType(
                 code: status.ownCode ?? "", scanPayload: status.scanPayload ?? "", attemptsLeft: status.attemptsLeft)
+        case .confirmScannedAccount:
+            guard let partner = status.partner else { return }
+            step = .confirmScan(accountID: partner, code: status.ownCode, scanPayload: status.scanPayload ?? "")
         case .verified:
             if status.keysDifferFromPin, let partner = status.partner {
                 step = .keysChanged(accountID: partner)
@@ -814,7 +828,7 @@ public final class MemberVerificationModel {
             }
         case .failed(let error):
             step = .failed(message: SharingCodeWording.failure(error))
-        case .waiting, .showCodeAndTypeTheirs:
+        case .waiting, .showCodeAndTypeTheirs, .confirmScannedAccount:
             step = .failed(message: SharingCodeWording.failure(.notReady))
         }
     }

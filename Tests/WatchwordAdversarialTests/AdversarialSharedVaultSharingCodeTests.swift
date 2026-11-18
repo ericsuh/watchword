@@ -251,4 +251,63 @@ extension AdversarialSharedVaultTests {
         let status = try await owner.session.sharedVaultStatus(vaultID)
         #expect(status.substitutedMembers.isEmpty && status.verifiedMembers?.contains(member.accountID) == true)
     }
+
+    /// Threat: a nearby person (A4 at the table, with an ordinary account and a live session of their own) holds their
+    /// QR code where the joiner's camera reads it, or A1 withholds or spoils the reveal (ADR 0010, Scans: "the device
+    /// names what it is about to pin"; G2: nothing is pinned by a failed attempt). A joiner's scan is evidence only
+    /// once the scanned account's device has revealed the nonce it committed to, and is pinned only on the person's
+    /// yes to the account the screen names: until then the screen never says "verified", and an ending of any kind
+    /// (the session ended, a reveal that does not open, a lock) pins nothing.
+    @Test("a joiner's scan pins nothing before the starter's reveal and the person's yes to the account named")
+    func scannedJoinWaitsForRevealAndYes() async throws {
+        let household = SharedVaultHousehold()
+        let starter = try await household.account(seed: 1_261)
+        let joiner = try await household.account(seed: 1_262)
+        let pins = VerifiedContacts(store: joiner.contacts, account: joiner.bundle)
+
+        // Scanned, and the session ended before any reveal.
+        let first = try await starter.session.startSharingCodeSession()
+        let joined = try await joiner.session.joinSharingCodeSession(scanned: try #require(first.scanPayload))
+        #expect(joined.step == .waiting && !joined.pinned)
+        #expect(try await pins.pinned(starter.accountID) == nil)
+        await joiner.session.endSharingCodeSession()
+        #expect(try await pins.pinned(starter.accountID) == nil)
+
+        // A reveal that does not open the commitment.
+        let second = try await starter.session.startSharingCodeSession()
+        _ = try await joiner.session.joinSharingCodeSession(scanned: try #require(second.scanPayload))
+        _ = try await starter.session.refreshSharingCodeSession()
+        let revealName = SharingBoardName.reveal(try Self.number(second))
+        var spoiled = try #require(await household.board.allObjects[revealName])
+        spoiled[spoiled.count - 1] ^= 0x01
+        await household.board.tamper(revealName, contents: spoiled)
+        await #expect(throws: SharingCodeError.commitmentMismatch) {
+            _ = try await joiner.session.refreshSharingCodeSession()
+        }
+        #expect(try await pins.pinned(starter.accountID) == nil)
+
+        // An honest reveal: the account is named, nothing is pinned yet, and a lock drops it.
+        let third = try await starter.session.startSharingCodeSession()
+        _ = try await joiner.session.joinSharingCodeSession(scanned: try #require(third.scanPayload))
+        _ = try await starter.session.refreshSharingCodeSession()
+        let named = try await joiner.session.refreshSharingCodeSession()
+        #expect(named.step == .confirmScannedAccount && named.partner == starter.accountID && !named.pinned)
+        #expect(try await pins.pinned(starter.accountID) == nil)
+        await joiner.session.lock()
+        try await joiner.session.unlock(password: TestVault.password)
+        #expect(await joiner.session.sharingCodeStatus() == nil)
+        #expect(try await pins.pinned(starter.accountID) == nil)
+
+        // The person's yes, for the account named and no other, pins it as a scan.
+        let fourth = try await starter.session.startSharingCodeSession()
+        _ = try await joiner.session.joinSharingCodeSession(scanned: try #require(fourth.scanPayload))
+        _ = try await starter.session.refreshSharingCodeSession()
+        _ = try await joiner.session.refreshSharingCodeSession()
+        await #expect(throws: SharingCodeError.notReady) {
+            _ = try await joiner.session.confirmScannedSharingPartner(joiner.accountID)
+        }
+        let confirmed = try await joiner.session.confirmScannedSharingPartner(starter.accountID)
+        #expect(confirmed.step == .verified && confirmed.pinned)
+        #expect(try await pins.pinned(starter.accountID)?.method == .scannedCode)
+    }
 }

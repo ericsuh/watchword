@@ -92,6 +92,8 @@ enum AccessibilityID {
         static let typedCode = "accept.typedCode"
         static let confirmCode = "accept.confirmCode"
         static let awaitingInvitation = "accept.awaitingInvitation"
+        static let scannedAccount = "accept.scannedAccount"
+        static let confirmScan = "accept.confirmScan"
         static let ownerNotVerified = "accept.ownerNotVerified"
         static let useNewKeys = "accept.useNewKeys"
         static let failed = "accept.failed"

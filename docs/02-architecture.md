@@ -1487,12 +1487,17 @@ constant time; three wrong codes, ten minutes without progress (the injected clo
 session, and every ending is shown (G2). Each device looks the other's bundle up **once, before its own nonce is
 public**, and S reveals **once, for the one reply it holds**, never again: a bundle or a reply chosen after a nonce is
 public could be searched for. A scan replaces typing in its direction and authenticates by the whole fingerprint
-(`.scannedCode`); a starter scans the joiner's `FingerprintCode` in place of typing their code.
+(`.scannedCode`); a starter scans the joiner's `FingerprintCode` in place of typing their code. The scanner hands over
+only the code the person taps among those in view. A joiner's scan is evidence only once the starter's reveal has
+opened its commitment, so the scanned account's device is known to have taken part; the screen then names that account
+(`confirmScannedAccount`) and pins it only on the person's yes (`confirmScannedSharingPartner`), and every session
+screen says which account the device is ("You are …"), so the two can be compared (V18).
 
 What a completed direction yields is `SharingCodeEvidence`: the bundle it authenticated, the account it was made for,
 and the session. Only `SharingCodeStarter` and `SharingCodeJoiner` make one (the typing discipline of
 `VerifiedContact`), and `VerifiedContacts.verify(_:)` pins it as `VerificationMethod.sharingCode` (or `.scannedCode`)
-for that account alone. The session pins as soon as evidence exists; a different pin already there is not replaced
+for that account alone. The session pins as soon as evidence exists (for a joiner's scan, once the person said yes to
+the account named); evidence not pinned lives in the run and goes with it. A different pin already there is not replaced
 (`keysDifferFromPin`), and the person's explicit "use their new keys" replaces it only to keys a shared vault's chain
 lists for that account (`replacePinFromSharingCode(listedIn:)`), so a session with the wrong device cannot settle a
 "keys changed" warning to keys nobody listed. After a session the starter invites as before (`invite`: the grant to the

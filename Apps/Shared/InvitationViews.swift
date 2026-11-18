@@ -86,6 +86,9 @@ struct InviteView: View {
                     .accessibilityIdentifier(AccessibilityID.Invite.number)
                 QRCodeView(text: payload)
                     .accessibilityIdentifier(AccessibilityID.Invite.qr)
+                if let own = model.status?.ownAccount {
+                    Text("You are the account \(shortIdentifier(own)).").font(.footnote).foregroundStyle(.secondary)
+                }
             } header: {
                 Text("Your vault sharing code")
             } footer: {
@@ -349,6 +352,9 @@ struct AcceptInvitationView: View {
             case .showCodeAndType(let code, let payload, let attemptsLeft):
                 ownCode(code, payload: payload)
                 typeTheirCode(attemptsLeft: attemptsLeft)
+            case .confirmScan(let accountID, let code, let payload):
+                confirmScan(accountID)
+                if let code { ownCode(code, payload: payload) }
             case .awaitingInvitation(let code, let payload):
                 if let code { ownCode(code, payload: payload) }
                 awaitingInvitation
@@ -523,6 +529,27 @@ struct AcceptInvitationView: View {
         }
     }
 
+    /// A scan names the account it is for before anything is pinned (ADR 0010, Scans): the person compares it with
+    /// what the other screen says ("You are …") and says yes, or stops. Decided by the session; this only asks.
+    private func confirmScan(_ accountID: UUID) -> some View {
+        Section {
+            Text(
+                "Your camera read the code of the account \(shortIdentifier(accountID)). Their screen says \"You are "
+                    + "the account \(shortIdentifier(accountID))\" if it is theirs."
+            )
+            .accessibilityIdentifier(AccessibilityID.Accept.scannedAccount)
+            Button("It Is Theirs") { Task { await model.confirmScannedAccount() } }
+                .disabled(model.isWorking)
+                .accessibilityIdentifier(AccessibilityID.Accept.confirmScan)
+            Button("Not Them: Start Over", role: .cancel) { Task { await model.decline() } }
+                .accessibilityIdentifier(AccessibilityID.Accept.startOver)
+        } header: {
+            Text("Whose code you scanned")
+        } footer: {
+            Text("Nothing is kept until you say it is theirs. If two codes were in view, start over and tap theirs.")
+        }
+    }
+
     private var awaitingInvitation: some View {
         Section {
             Label("You checked each other. Waiting for their invitation…", systemImage: "checkmark.shield")
@@ -617,6 +644,9 @@ struct MemberVerificationView: View {
                 Section {
                     SharingDigits(code: number).accessibilityIdentifier(AccessibilityID.MemberCheck.number)
                     QRCodeView(text: payload)
+                    if let own = model.status?.ownAccount {
+                        Text("You are the account \(shortIdentifier(own)).").font(.footnote).foregroundStyle(.secondary)
+                    }
                 } header: {
                     Text("Your vault sharing code")
                 }

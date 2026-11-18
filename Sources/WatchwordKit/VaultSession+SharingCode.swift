@@ -23,6 +23,17 @@ struct SharingCodeRun: Sendable {
     var pinConflict = false
     /// The starter sent its invitation in this run.
     var invitationSent = false
+    /// Joiner: the person said yes to the account a scan named (`confirmScannedSharingPartner`). A scan is pinned
+    /// only then, and only once the starter's reveal has made it evidence (ADR 0010, Scans: "the device names what it
+    /// is about to pin"; docs/06-adversarial-review.md, V18).
+    var scanConfirmed = false
+
+    /// Whether the run's evidence may be pinned now: always for a typed code or a starter's scan, which authenticate
+    /// the account the screen already named; for a joiner's scan, only on the person's yes.
+    var mayPin: Bool {
+        if case .joiner(let joiner) = side, joiner.scanned { return scanConfirmed }
+        return true
+    }
 
     var evidence: SharingCodeEvidence? {
         switch side {
@@ -50,14 +61,22 @@ public struct SharingCodeStatus: Sendable, Hashable {
         case waiting
         /// Joiner: show this device's six digits, and type the six on the starter's screen.
         case showCodeAndTypeTheirs
-        /// The other account was authenticated by this device (typed or scanned). The starter now shows its own
-        /// code; a joiner that scanned still shows its own, for a starter that types.
+        /// Joiner: the scanned code is evidence (the starter's reveal opened its commitment), and the screen names the
+        /// account it is about to pin (`partner`); nothing is pinned until the person says yes
+        /// (`confirmScannedSharingPartner`). This device's own code is shown meanwhile, for a starter that types.
+        case confirmScannedAccount
+        /// The other account was authenticated by this device (typed or scanned) and the person's yes, where one is
+        /// asked, was given. The starter now shows its own code; a joiner that scanned still shows its own, for a
+        /// starter that types.
         case verified
         case failed(SharingCodeError)
     }
 
     public let role: Role
     public let step: Step
+    /// This device's own account, for the screens to show ("You are …"), so each person can compare it with the
+    /// account the other screen names.
+    public let ownAccount: UUID
     /// Starter: the vault sharing code, "1234 5678".
     public let number: String?
     /// What this device shows as a QR code: the starter's `ScannedSharingCode`, or the joiner's `FingerprintCode`.
@@ -194,7 +213,21 @@ extension VaultSession {
         return Self.status(of: run)
     }
 
-    /// Ends the session, wherever it is. Nothing it pinned is undone.
+    /// Joiner: the person said yes to pinning the account a scan named (`SharingCodeStatus.Step.confirmScannedAccount`,
+    /// whose `partner` must be `account`). Pins it, or records that it conflicts with the pin already there.
+    public func confirmScannedSharingPartner(_ account: UUID) async throws -> SharingCodeStatus {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        guard let run = sharingCodeRun, !run.busy, case .joiner(let joiner) = run.side, joiner.scanned,
+            case .verified = joiner.phase, joiner.evidence != nil, joiner.starter.accountID == account
+        else { throw SharingCodeError.notReady }
+        sharingCodeRun?.scanConfirmed = true
+        try await pinSharingCodeEvidence(epoch: epoch)
+        return try sharingCodeStatusOrThrow()
+    }
+
+    /// Ends the session, wherever it is. Nothing it pinned is undone; evidence it had not pinned (a scan the person
+    /// had not said yes to) goes with it.
     public func endSharingCodeSession() {
         sharingCodeRun = nil
         sharingCodeGeneration &+= 1
@@ -317,6 +350,7 @@ extension VaultSession {
         run.pinned = current.pinned
         run.pinConflict = current.pinConflict
         run.invitationSent = current.invitationSent
+        run.scanConfirmed = current.scanConfirmed
         sharingCodeRun = run
         if let thrown { throw thrown }
         try await pinSharingCodeEvidence(epoch: epoch)
@@ -326,7 +360,9 @@ extension VaultSession {
     /// records the conflict for the person (`keysDifferFromPin`). The pin is signed with the keyset as it is after
     /// the last suspension, so `lock()` wins.
     private func pinSharingCodeEvidence(epoch: UInt64) async throws {
-        guard let run = sharingCodeRun, !run.pinned, !run.pinConflict, let evidence = run.evidence else { return }
+        guard let run = sharingCodeRun, !run.pinned, !run.pinConflict, run.mayPin, let evidence = run.evidence else {
+            return
+        }
         let settings = try sharingSettings()
         let contacts = try verifiedContacts(settings)
         let now = await clock.now()
@@ -372,19 +408,23 @@ extension VaultSession {
             case .failed(let error): step = .failed(error)
             }
             return SharingCodeStatus(
-                role: .starter, step: step, number: starter.number.grouped, scanPayload: starter.scanPayload,
+                role: .starter, step: step, ownAccount: starter.account.accountID, number: starter.number.grouped,
+                scanPayload: starter.scanPayload,
                 ownCode: starter.code, attemptsLeft: starter.attemptsLeft, partner: starter.joiner?.accountID,
                 pinned: run.pinned, keysDifferFromPin: run.pinConflict, scanned: false)
         case .joiner(let joiner):
             let step: SharingCodeStatus.Step
             switch joiner.phase {
-            case .awaitingReveal: step = joiner.scanned && run.pinned ? .verified : .waiting
+            // A scan is never "verified" before the starter's reveal made it evidence and the person said yes (V18).
+            case .awaitingReveal: step = .waiting
             case .awaitingStarterCode: step = .showCodeAndTypeTheirs
-            case .verified: step = .verified
+            case .verified:
+                step = joiner.scanned && !run.pinned && !run.pinConflict ? .confirmScannedAccount : .verified
             case .failed(let error): step = .failed(error)
             }
             return SharingCodeStatus(
-                role: .joiner, step: step, number: nil, scanPayload: joiner.scanPayload, ownCode: joiner.code,
+                role: .joiner, step: step, ownAccount: joiner.account.accountID, number: nil,
+                scanPayload: joiner.scanPayload, ownCode: joiner.code,
                 attemptsLeft: joiner.attemptsLeft, partner: joiner.starter.accountID, pinned: run.pinned,
                 keysDifferFromPin: run.pinConflict, scanned: joiner.scanned)
         }

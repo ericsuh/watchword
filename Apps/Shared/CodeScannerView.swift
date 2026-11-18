@@ -6,8 +6,12 @@ import WatchwordSharing
     import Vision
     import VisionKit
 
-    /// The camera, reading one QR code from the other person's screen at a vault sharing code session (ADR 0010,
-    /// Scanning). iPhone and iPad only: every device shows a code, and only these scan one.
+    /// The camera, reading the one QR code the person taps on the other person's screen at a vault sharing code session
+    /// (ADR 0010, Scanning). iPhone and iPad only: every device shows a code, and only these scan one.
+    ///
+    /// The person chooses: every QR code in view is highlighted, and only the one tapped is handed over. A scanner that
+    /// took the first code it recognised let a code held up nearby (A4 at the table, with a live session of their own)
+    /// answer for the person (docs/06-adversarial-review.md, V18).
     ///
     /// The live camera is the only source: `DataScannerViewController` reads what the camera sees, never the photo
     /// library or the pasteboard, because a code that arrived in a message names an account and proves nothing (review
@@ -29,6 +33,12 @@ import WatchwordSharing
                         }
                         .ignoresSafeArea()
                         .accessibilityIdentifier(AccessibilityID.Scanner.view)
+                        .overlay(alignment: .bottom) {
+                            Text("Tap the code on their screen.")
+                                .padding(10)
+                                .background(.regularMaterial, in: Capsule())
+                                .padding(.bottom, 24)
+                        }
                     } else {
                         ContentUnavailableView(
                             "Scanning Is Not Available", systemImage: "camera",
@@ -51,7 +61,8 @@ import WatchwordSharing
         }
     }
 
-    /// `DataScannerViewController` for QR codes alone, delivering the first one it reads and then stopping.
+    /// `DataScannerViewController` for QR codes alone, highlighting every one in view and delivering the one tapped,
+    /// then stopping.
     private struct LiveQRScanner: UIViewControllerRepresentable {
         let onScan: @MainActor (String) -> Void
 
@@ -62,7 +73,7 @@ import WatchwordSharing
         func makeUIViewController(context: Context) -> DataScannerViewController {
             let scanner = DataScannerViewController(
                 recognizedDataTypes: [.barcode(symbologies: [.qr])], qualityLevel: .balanced,
-                recognizesMultipleItems: false, isHighFrameRateTrackingEnabled: false, isPinchToZoomEnabled: true,
+                recognizesMultipleItems: true, isHighFrameRateTrackingEnabled: false, isPinchToZoomEnabled: true,
                 isGuidanceEnabled: true, isHighlightingEnabled: true)
             scanner.delegate = context.coordinator
             return scanner
@@ -86,21 +97,15 @@ import WatchwordSharing
                 self.onScan = onScan
             }
 
-            func dataScanner(
-                _ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem],
-                allItems: [RecognizedItem]
-            ) {
-                guard !delivered else { return }
-                for item in addedItems {
-                    guard case .barcode(let barcode) = item, let payload = barcode.payloadStringValue,
-                        // Longer than either code Watchword shows: not one of them, and not worth handing on.
-                        payload.utf8.count <= ScannedSharingCode.payloadLength
-                    else { continue }
-                    delivered = true
-                    dataScanner.stopScanning()
-                    onScan(payload)
-                    return
-                }
+            /// Only a tap hands a code over: recognising one is not choosing it.
+            func dataScanner(_ dataScanner: DataScannerViewController, didTapOn item: RecognizedItem) {
+                guard !delivered, case .barcode(let barcode) = item, let payload = barcode.payloadStringValue,
+                    // Longer than either code Watchword shows: not one of them, and not worth handing on.
+                    payload.utf8.count <= ScannedSharingCode.payloadLength
+                else { return }
+                delivered = true
+                dataScanner.stopScanning()
+                onScan(payload)
             }
         }
     }

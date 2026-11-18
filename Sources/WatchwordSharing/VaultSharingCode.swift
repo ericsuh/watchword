@@ -544,14 +544,18 @@ public struct SharingCodeStarter: Sendable {
 /// ```
 ///
 /// The starter's bundle is looked up once, before the reply goes out, and is the one evidenced. A scan of the
-/// starter's QR code authenticates that bundle at once (`.scannedCode`), and this device then types nothing.
+/// starter's QR code authenticates that bundle by its whole fingerprint (`.scannedCode`), and this device then types
+/// nothing; but the scan is evidence only once the starter's reveal has opened its commitment, so that the device
+/// whose code was scanned is known to have taken part in this session. Until then there is no evidence, and a session
+/// that ends before it (no reveal, a reveal that does not open, ten minutes, a lock) leaves none behind (G2;
+/// docs/06-adversarial-review.md, V18).
 public struct SharingCodeJoiner: Sendable {
     public enum Phase: Sendable, Hashable {
         /// Answered; waiting for the starter's reveal.
         case awaitingReveal
         /// Revealed and checked: show this device's code, and type the starter's.
         case awaitingStarterCode
-        /// The starter is evidenced (their code matched, or the scan did).
+        /// The starter is evidenced: their code matched, or the scan did and their reveal opened the commitment.
         case verified
         case failed(SharingCodeError)
     }
@@ -598,14 +602,10 @@ public struct SharingCodeJoiner: Sendable {
         } catch SharingBoardError.taken {
             throw SharingCodeError.sessionTaken
         }
-        var joiner = SharingCodeJoiner(
+        // A scan's evidence waits for the reveal (`poll`): nothing is evidenced by a code alone.
+        return SharingCodeJoiner(
             number: number, account: account, session: commit.session, starter: candidate,
             commitment: commit.value, nonce: nonce.bytes, scanned: scanned != nil, lastProgress: now)
-        if scanned != nil {
-            joiner.evidence = SharingCodeEvidence(
-                contact: candidate, pinningAccount: account.accountID, method: .scannedCode, session: commit.session)
-        }
-        return joiner
     }
 
     private init(
@@ -653,7 +653,15 @@ public struct SharingCodeJoiner: Sendable {
         transcript = SharingTranscript.transcript(
             session: session, number: number, starter: starter, joiner: account, commitment: commitment,
             starterNonce: reveal.value, joinerNonce: nonce)
-        phase = scanned ? .verified : .awaitingStarterCode
+        if scanned {
+            // The scanned code matched the directory's bundle for the account the commit names, and that account's
+            // device has now revealed the nonce it committed to: the scan is evidence.
+            evidence = SharingCodeEvidence(
+                contact: starter, pinningAccount: account.accountID, method: .scannedCode, session: session)
+            phase = .verified
+        } else {
+            phase = .awaitingStarterCode
+        }
         lastProgress = now
         return true
     }

@@ -62,10 +62,14 @@ struct SharingCodeSessionTests {
         let joiner = try await household.account(seed: 1_112)
         let started = try await starter.session.startSharingCodeSession()
         let joined = try await joiner.session.joinSharingCodeSession(scanned: try #require(started.scanPayload))
-        #expect(joined.scanned && joined.pinned && joined.step == .verified, "\(joined)")
+        #expect(joined.scanned && !joined.pinned && joined.step == .waiting, "\(joined)")
         _ = try await starter.session.refreshSharingCodeSession()
+        let revealed = try await joiner.session.refreshSharingCodeSession()
+        #expect(revealed.step == .confirmScannedAccount && revealed.partner == starter.accountID && !revealed.pinned)
         let scanned = try await starter.session.scanSharingPartnerCode(try #require(joined.scanPayload))
         #expect(scanned.step == .verified && scanned.pinned)
+        let confirmed = try await joiner.session.confirmScannedSharingPartner(starter.accountID)
+        #expect(confirmed.step == .verified && confirmed.pinned)
         #expect(
             try await VerifiedContacts(store: starter.contacts, account: starter.bundle).pinned(joiner.accountID)?
                 .method == .scannedCode)

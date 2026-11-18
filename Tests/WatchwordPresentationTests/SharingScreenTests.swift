@@ -552,3 +552,42 @@ extension SharingScreenTests {
         #expect(ownerComparison.own.safetyNumber == invitee.safetyNumber)
     }
 }
+
+extension SharingScreenTests {
+    /// A joiner's scan through the screen (V18): the scan waits for the starter's device, then names the account it is
+    /// for and pins it only on the person's yes; "not them" ends the session with nothing pinned.
+    @Test("a scanned code names its account and is pinned only on the person's yes")
+    func scanNamesTheAccountFirst() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 681)
+        let invitee = try await household.account(seed: 682)
+        let pins = VerifiedContacts(store: invitee.contacts, account: invitee.bundle)
+
+        let declined = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        let first = try await owner.session.startSharingCodeSession()
+        #expect(first.ownAccount == owner.accountID)
+        await declined.cameraScanned(try #require(first.scanPayload))
+        #expect(declined.step == .waiting, "\(declined.errorMessage ?? "")")
+        _ = try await owner.session.refreshSharingCodeSession()
+        await declined.refresh()
+        guard case .confirmScan(let named, let code, _) = declined.step else {
+            Issue.record("expected the account to be named, got \(declined.step)")
+            return
+        }
+        #expect(named == owner.accountID && code != nil)
+        await declined.decline()
+        #expect(try await pins.pinned(owner.accountID) == nil)
+
+        let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        let second = try await owner.session.startSharingCodeSession()
+        await accept.cameraScanned(try #require(second.scanPayload))
+        _ = try await owner.session.refreshSharingCodeSession()
+        await accept.refresh()
+        await accept.confirmScannedAccount()
+        guard case .awaitingInvitation = accept.step else {
+            Issue.record("expected to wait for the invitation, got \(accept.step) \(accept.errorMessage ?? "")")
+            return
+        }
+        #expect(try await pins.pinned(owner.accountID)?.method == .scannedCode)
+    }
+}

@@ -443,7 +443,9 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   (`oneStepAtATime`); an administrator's invitation accepted only once the owner is checked by the invitee
   (`noVouching`); a directory that changes the invitee's keys after the session (`directoryChangesAfterTheSession`);
   an invitation planted in a session's slot (`plantedInvitation`); a "keys changed" warning settled only to keys the
-  chain lists (`keysChangedSettledOnlyToListedKeys`).
+  chain lists (`keysChangedSettledOnlyToListedKeys`); a joiner's scan pinned only after the starter's reveal and the
+  person's yes to the account named, and nothing pinned by an ending, a spoiled reveal or a lock
+  (`scannedJoinWaitsForRevealAndYes`, V18; "Screen models: sharing" `scanNamesTheAccountFirst`).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed

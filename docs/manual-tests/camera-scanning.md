@@ -34,12 +34,26 @@ Steps:
 4. **Expected**: the code is read as any code on a screen would be (a camera cannot tell); nothing on this device
    offered the saved image itself.
 
+### The scanner takes only the code you tap, and names it before keeping it
+
+Steps:
+1. On Accept an Invitation, choose "Scan Their Screen" with two Watchword QR codes in view (two devices showing
+   "Show Vault Sharing Code").
+2. **Expected**: both codes are highlighted and nothing happens until you tap one; the hint says "Tap the code on their
+   screen."
+3. Tap one.
+4. **Expected**: "Waiting for their device…", never "You checked each other"; once that device has answered, "Your
+   camera read the code of the account …" with the same short account as that device's "You are the account …", and
+   "It Is Theirs" and "Not Them: Start Over".
+5. Choose "Not Them: Start Over".
+6. **Expected**: back at the start; the member list and a later invitation from that account show it as not checked.
+
 ### A code that is not Watchword's does nothing
 
 Steps:
 1. On the invitation screen's step "Their confirmation code", choose "Scan Their Screen" and point the camera at any
-   other QR code (a website's, a Wi-Fi network's).
-2. **Expected**: the scanner closes after reading it, the screen says "Type the digits exactly as the other screen
+   other QR code (a website's, a Wi-Fi network's), and tap it.
+2. **Expected**: the scanner closes after the tap, the screen says "Type the digits exactly as the other screen
    shows them.", and the number of tries left is unchanged.
 3. On the Accept an Invitation screen, scan the same code.
 4. **Expected**: the same sentence, and the screen still asks for the eight digits.

@@ -148,7 +148,9 @@ authentic and public.
   else can be done in the protocol.
 - **Scans.** A scan's strength is the fingerprint's (full digest), independent of the session; mixing a scan one way
   with typed digits the other way composes, because each direction's check stands alone. A code shown by the wrong
-  person is that person's account: the device names what it is about to pin, and membership lists show it.
+  person is that person's account: the device names what it is about to pin, and membership lists show it. (As built:
+  the person taps the code to scan among those in view, a joiner's scan counts only once the starter's reveal opened
+  its commitment, and it is pinned on the person's yes to the account named; V18.)
 - **A4, A5.** A member or former member gains nothing here that A1 does not have; `MemberKeyCheck` still refuses a
   member whose listed keys differ from the pin, however the pin was made.
 - **Lock.** A session holds nonces and public values, no key material; pinning signs with the account key, so a
@@ -179,6 +181,9 @@ Built as decided (`docs/02-architecture.md` §8.4; review in `06-adversarial-rev
 - The full-code fallback's screens show this device's own sixty digits and none of the directory's for the other
   account: the person types the code the other device shows, so a directory that publishes its own keys under that
   account cannot be passed by copying the screen (V17, from the follow-up audit of the sharing surface).
+- A scan is the person's choice and is named before it is pinned (V18): the scanner hands over only the code tapped;
+  a joiner's scan is evidence only after the starter's reveal opened its commitment, and the screen names the account
+  and pins it on a yes (`confirmScannedSharingPartner`). Nothing unpinned outlives the session.
 - A session never replaces a pin on its own. "Keys changed" is settled only by the person's explicit choice, and only
   to keys a vault's chain lists for that account (V13, an owner decision still open).
 - No production board adapter exists yet, as none exists for the directory, and a release build configures no sharing
