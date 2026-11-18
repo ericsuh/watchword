@@ -896,10 +896,15 @@ extension VaultSession {
         var awaited: Set<UUID> = []
         var admitted = true
         let key = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
+        // A segment's tombstone is its author's own (`validate` holds every entry of a segment to the stream's device),
+        // so its claims about that device's own edits are not asked about, as for a version its stream carried. A
+        // snapshot's entry names whichever device its signer chose: nobody is exempt, the named device included, and
+        // a claim about this device's own edits beyond what it published is refused (review finding Z34).
+        let author = location.kind == .segment ? entry.device : nil
         for erasure in ItemErasures(summary: entry.erasure).elements where erasure != .void {
             guard
                 Self.knowledgeCounts(
-                    erasure.seen, of: key, author: entry.device, judgedBy: account.deviceID, in: vault,
+                    erasure.seen, of: key, author: author, judgedBy: account.deviceID, in: vault,
                     vouched: vouched, listing: listing, awaited: &awaited)
             else {
                 admitted = false

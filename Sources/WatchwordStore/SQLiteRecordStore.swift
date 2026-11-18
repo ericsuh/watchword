@@ -347,4 +347,8 @@
             return try real(value)
         }
     }
+
+    /// A failure of the database itself: it stops a sync rather than refusing the object being merged (review finding
+    /// Z39).
+    extension SQLiteConnection.Failure: StorageFailure {}
 #endif

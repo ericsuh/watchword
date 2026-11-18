@@ -74,6 +74,8 @@ enum StateStoreFixtures {
         state.snapshotCoverage = [SyncFixtures.deviceA: 5, SyncFixtures.deviceB: 2]
         state.stashUnsaved = true
         state.stashGeneration = 4
+        state.retryUnfinished = true
+        state.quarantineDropped = [SyncFixtures.deviceB]
         state.authenticator = [0xA1, 0xA2, 0xA3]
         return state
     }
@@ -111,6 +113,9 @@ struct SyncStateAuthenticationTests {
             changed("snapshotCoverage") { $0.snapshotCoverage[SyncFixtures.deviceA] = 6 },
             changed("stashUnsaved") { $0.stashUnsaved = false },
             changed("stashGeneration") { $0.stashGeneration = 5 },
+            changed("retryUnfinished") { $0.retryUnfinished = false },
+            changed("quarantineDropped") { $0.quarantineDropped.insert(SyncFixtures.deviceA) },
+            changed("quarantineDropped, emptied") { $0.quarantineDropped = [] },
         ]
     }
 
@@ -126,8 +131,21 @@ struct SyncStateAuthenticationTests {
         #expect(resigned.authenticatedBytes == signed)
         // A field added to the state must be added to `authenticatedBytes` and to `variants`: this count is the
         // reminder.
-        #expect(Mirror(reflecting: base).children.count == 14)
+        #expect(Mirror(reflecting: base).children.count == 16)
         #expect(Set(Self.variants.map(\.1.authenticatedBytes)).count == Self.variants.count)
+    }
+
+    /// The two fields added after the state was first signed (review findings Z33, Z38) are written only when set,
+    /// so a row saved before them, in which neither can be set, still verifies and costs no replay.
+    @Test("a state with neither later field set is signed as it was before they existed")
+    func laterFieldsOnlyWhenSet() {
+        var state = StateStoreFixtures.state()
+        state.retryUnfinished = false
+        state.quarantineDropped = []
+        let before = state.authenticatedBytes
+        state.retryUnfinished = true
+        #expect(state.authenticatedBytes.count == before.count + 1 + 8)
+        #expect(Array(state.authenticatedBytes.prefix(before.count)) == before)
     }
 
     @Test("what is signed does not depend on the order a dictionary happens to iterate in")
@@ -162,7 +180,11 @@ struct SyncStateEncodingTests {
         var state = StateStoreFixtures.state()
         var encoded = EncodedState(state)
         encoded.stashUnsaved = nil
+        encoded.retryUnfinished = nil
+        encoded.quarantineDropped = nil
         state.stashUnsaved = false
+        state.retryUnfinished = false
+        state.quarantineDropped = []
         let bytes = try JSONEncoder().encode(encoded)
         #expect(try JSONDecoder().decode(EncodedState.self, from: bytes).state == state)
     }

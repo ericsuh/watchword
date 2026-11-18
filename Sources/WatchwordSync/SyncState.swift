@@ -73,6 +73,18 @@ public struct SyncState: Sendable, Hashable {
     /// The generation of the last stash row saved (`SyncStash.generation`). A row of another generation, or none while
     /// this is above zero, is not trusted to hold what this state says was merged, and the log is replayed.
     public var stashGeneration: UInt64 = 0
+    /// A merge pass refused versions as beyond the version-jump ceiling, to be tried again once it had merged
+    /// everything else (`SyncEngine.retryOutOfReach`, Z25), and had not done so when this state was saved: set when
+    /// the first is refused, cleared once the retry has run. The list of them lives in memory, and nothing merges
+    /// from the quarantine, so a sync that finds this set (a lock or a crash part-way through the pass) replays the
+    /// log, which offers them again (review finding Z33).
+    public var retryUnfinished = false
+    /// The devices whose versions were to be kept aside and were not, the quarantine being full (Z27): past the
+    /// vault's cap or that device's share. While a trusted one is here this device writes no ordinary snapshot, as
+    /// while one is kept (Z26), because its snapshot would cover the segment without carrying the version; and once
+    /// the quarantine has room for every one of them again, the log is replayed to offer those versions again
+    /// (review finding Z38).
+    public var quarantineDropped: Set<UUID> = []
     /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
     /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
     /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the

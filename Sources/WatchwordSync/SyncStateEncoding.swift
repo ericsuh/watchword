@@ -39,6 +39,9 @@ struct EncodedState: Codable {
     /// Absent in a row written before ADR 0009.
     var stashUnsaved: Bool?
     var stashGeneration: UInt64?
+    /// Absent in a row written before review findings Z33 and Z38.
+    var retryUnfinished: Bool?
+    var quarantineDropped: [String]?
     /// Absent in a row written before the state was signed (review finding Z20): such a row does not verify.
     var authenticator: Data?
 
@@ -65,6 +68,8 @@ struct EncodedState: Codable {
         snapshotCoverage = Self.strings(state.snapshotCoverage)
         stashUnsaved = state.stashUnsaved
         stashGeneration = state.stashGeneration
+        retryUnfinished = state.retryUnfinished
+        quarantineDropped = state.quarantineDropped.map(\.uuidString).sorted()
         authenticator = Data(state.authenticator)
     }
 
@@ -103,6 +108,11 @@ struct EncodedState: Codable {
         }
         state.stashUnsaved = stashUnsaved ?? false
         state.stashGeneration = stashGeneration ?? 0
+        state.retryUnfinished = retryUnfinished ?? false
+        for device in quarantineDropped ?? [] {
+            guard let id = UUID(uuidString: device) else { return nil }
+            state.quarantineDropped.insert(id)
+        }
         state.authenticator = authenticator.map { Array($0) } ?? []
         return state
     }

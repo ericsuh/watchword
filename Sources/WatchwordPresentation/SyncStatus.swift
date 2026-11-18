@@ -17,6 +17,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
     case snapshotWithheld(by: [String])
+    /// This device was due to write a snapshot and held it back because it holds versions aside, or could not keep
+    /// one for want of room (`SyncReport.snapshotWithheldForQuarantine`, review findings Z26, Z37): until the person
+    /// has looked at them, it does not let the sync storage be tidied past them.
+    case snapshotWithheldForReview
     /// Versions kept aside for the person to look at (`quarantined` and `heldAside`).
     case keptAside(Int)
     /// This device's deletions are not going out, because an item it moved or made has reached nobody else: it is in
@@ -32,6 +36,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .deviceNotRegistered: return "deviceNotRegistered"
         case .registryUnavailable: return "registryUnavailable"
         case .snapshotWithheld: return "snapshotWithheld"
+        case .snapshotWithheldForReview: return "snapshotWithheldForReview"
         case .keptAside: return "keptAside"
         case .deletionsHeldBack: return "deletionsHeldBack"
         }
@@ -55,6 +60,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .snapshotWithheld(let names):
             return "Older devices need updating before this one can tidy the shared storage: "
                 + names.joined(separator: ", ") + "."
+        case .snapshotWithheldForReview:
+            return "This device is not tidying the sync storage while changes are held aside for you, so that none "
+                + "of them is lost. Review them under Held-Aside Changes."
         case .keptAside(let count):
             return "\(count) change(s) were held aside for you to review. See Held-Aside Changes."
         case .deletionsHeldBack:
@@ -95,6 +103,7 @@ public struct SyncSummary: Hashable, Sendable {
             }
             notices.append(.snapshotWithheld(by: named.sorted()))
         }
+        if combined.snapshotWithheldForQuarantine { notices.append(.snapshotWithheldForReview) }
         let kept = combined.quarantined.count + combined.heldAside.count + combined.collided.count
         if kept > 0 { notices.append(.keptAside(kept)) }
         if !report.deletionsHeldBack.isEmpty { notices.append(.deletionsHeldBack) }

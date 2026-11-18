@@ -219,6 +219,7 @@ extension VaultSession {
         total.unknownEntriesProcessed += first.unknownEntriesProcessed
         total.snapshotWithheld = total.snapshotWithheld || first.snapshotWithheld
         total.snapshotWithheldBy.formUnion(first.snapshotWithheldBy)
+        total.snapshotWithheldForQuarantine = total.snapshotWithheldForQuarantine || first.snapshotWithheldForQuarantine
         // Either run's: a stop the second did not reach (it replayed instead, say) is still a stop to report.
         total.requiresNewerVersion = total.requiresNewerVersion || first.requiresNewerVersion
         total.replayNeeded = total.replayNeeded || first.replayNeeded
@@ -860,6 +861,8 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.unknownEntriesProcessed += report.unknownEntriesProcessed
             total.snapshotWithheld = total.snapshotWithheld || report.snapshotWithheld
             total.snapshotWithheldBy.formUnion(report.snapshotWithheldBy)
+            total.snapshotWithheldForQuarantine =
+                total.snapshotWithheldForQuarantine || report.snapshotWithheldForQuarantine
             total.replayNeeded = total.replayNeeded || report.replayNeeded
             total.ownStreamExhausted = total.ownStreamExhausted || report.ownStreamExhausted
             total.ownStreamUnverified = total.ownStreamUnverified ?? report.ownStreamUnverified

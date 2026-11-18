@@ -42,6 +42,13 @@ extension SyncState {
         writer.append(vector: snapshotCoverage)
         writer.append(stashUnsaved)
         writer.append(stashGeneration)
+        // Fields added after the state was first signed (review findings Z33, Z38), written only when one is set, so
+        // a row saved before them still verifies; their length tells the two forms apart.
+        if retryUnfinished || !quarantineDropped.isEmpty {
+            writer.append(retryUnfinished)
+            writer.append(UInt64(quarantineDropped.count))
+            for device in quarantineDropped.sorted(by: { $0.precedes($1) }) { writer.append(device) }
+        }
         return writer.bytes
     }
 

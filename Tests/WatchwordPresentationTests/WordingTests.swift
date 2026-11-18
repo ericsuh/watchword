@@ -76,6 +76,22 @@ struct WordingTests {
         #expect(notice.text.contains("Pat's iPad"))
     }
 
+    /// Review finding Z37: a device that holds snapshots back for what it keeps aside said nothing, and the summary
+    /// read "Up to date." while the stall lasted.
+    @Test("a snapshot withheld for what is held aside is a notice, whichever vault said so")
+    func snapshotWithheldForReview() {
+        var vault = SyncReport()
+        vault.snapshotWithheld = true
+        vault.snapshotWithheldForQuarantine = true
+        var report = AccountSyncReport()
+        report.vaults[UUID()] = SyncReport()
+        report.vaults[UUID()] = vault
+        #expect(report.combined.snapshotWithheldForQuarantine)
+        let summary = SyncSummary(report)
+        #expect(summary.notices.contains(.snapshotWithheldForReview))
+        #expect(SyncNotice.snapshotWithheldForReview.text.contains("Held-Aside Changes"))
+    }
+
     @Test("a password changed elsewhere is a notice, not a promise that changes will be applied at unlock")
     func awaitingNewPassword() {
         var vault = SyncReport()

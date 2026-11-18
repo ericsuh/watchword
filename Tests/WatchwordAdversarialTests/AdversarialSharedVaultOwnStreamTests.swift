@@ -128,3 +128,49 @@ extension AdversarialSharedVaultTests {
         #expect(try await owner.session.items(in: vaultID).items.map(\.title).contains(genuine.title))
     }
 }
+
+// Review finding Z34: a snapshot's tombstone was judged as if it were its named device's own, as a segment's is.
+extension AdversarialSharedVaultTests {
+    /// Threat: the owner's account as the insider (its keys in other hands, or the owner's own device), the one
+    /// account whose snapshots a shared vault reads. Its snapshot carries a tombstone for a member's item that names
+    /// the *member's* device as its writer, and claims to have seen that device's edits far beyond any it has
+    /// published. A tombstone's claims about its own writer's edits are not asked about, which is right for a
+    /// segment, whose entries are all its stream's device's; in a snapshot the signer chooses the device. So the
+    /// tombstone was admitted on every device, the member's own included: it erased the member's unpublished edit
+    /// there, and the item everywhere else. In a snapshot nobody is exempt, and a claim about this device's own edits
+    /// that it never published is refused.
+    @Test("a tombstone in the owner's snapshot naming a member's device is judged against that device's stream")
+    func ownerSnapshotTombstoneNamingAMember() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 3040)
+        let member = members[0]
+        let bank = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+        // An edit the member has not published yet.
+        _ = try await member.session.save(
+            Self.setting(.password, to: "not-yet-published", in: try await member.session.item(id: bank.id)))
+
+        let memberDevice = try await Self.deviceID(of: member)
+        let high: UInt64 = 5000
+        let summary = try ItemErasure(
+            seen: VersionVector([memberDevice: high]), row: high, device: memberDevice, date: nil
+        )
+        .summary()
+        let tombstone = SyncEntry.tombstone(
+            RecordKey(recordID: bank.id, kind: .item),
+            stamp: RecordStamp(version: high + 1, device: memberDevice, deleted: true), erasure: summary)
+        try await Self.plantSnapshot(
+            by: owner, in: vaultID, on: household.transport, lamport: high + 1, vector: [:], entries: [tombstone])
+
+        let report = try await member.session.syncAll()
+        #expect(report.vaults[vaultID]?.heldAside.contains(RecordKey(recordID: bank.id, kind: .item)) == true)
+        #expect(
+            try await member.session.item(id: bank.id).field(.password)?.value == "not-yet-published",
+            "the member's unpublished edit was erased by a deletion claiming to be theirs")
+        try await owner.session.syncAll()
+        #expect(
+            try await owner.session.items(in: vaultID).items.map(\.id) == [bank.id],
+            "the item was erased on the owner's device")
+        #expect(try await owner.session.item(id: bank.id).field(.password)?.value == "not-yet-published")
+    }
+}

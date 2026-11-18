@@ -137,6 +137,9 @@
             [.text("index"), .text("sqlite_autoindex_stash_1"), .text("stash"), .null],
         ]
 
+        /// Rows of the earlier quarantine carried to schema version 3 per query.
+        static let migrationPage = 16
+
         private func migrate() throws {
             try connection.transaction {
                 guard case .integer(let version) = try connection.query("PRAGMA user_version").first?.first else {
@@ -161,21 +164,33 @@
                     // Every row of the earlier table is carried over: the quarantine holds what no replay rebuilds.
                     // One that does not read as an entry keeps its columns under digest zero, and is reported as
                     // malformed when the quarantine is listed, as before.
-                    let rows = try connection.query(
-                        """
-                        SELECT vault_id, record_id, kind, key_id, version, device_id, erasure, envelope
-                        FROM quarantine ORDER BY rowid
-                        """)
-                    for row in rows {
-                        guard row.count == 8 else { throw RecordStoreError.malformedRow("quarantine") }
-                        var digest: UInt64 = 0
-                        var length = 0
-                        if case .blob(let erasure) = row[6] { length += erasure.count }
-                        if case .blob(let envelope) = row[7] { length += envelope.count }
-                        if let entry = try? Self.entry(Array(row[1...])) { digest = entry.quarantineDigest }
-                        try connection.query(
-                            Self.quarantineInsert,
-                            [row[0], .integer(Int64(bitPattern: digest)), .integer(Int64(length))] + row[1...])
+                    // A page at a time, by rowid: the earlier table was unbounded, envelopes included, and one query
+                    // for all of it would hold all of it in memory at once (review finding Z39).
+                    var after: Int64 = -1
+                    while true {
+                        let rows = try connection.query(
+                            """
+                            SELECT rowid, vault_id, record_id, kind, key_id, version, device_id, erasure, envelope
+                            FROM quarantine WHERE rowid > ? ORDER BY rowid LIMIT \(Self.migrationPage)
+                            """,
+                            [.integer(after)])
+                        guard !rows.isEmpty else { break }
+                        for row in rows {
+                            guard row.count == 9, case .integer(let rowid) = row[0] else {
+                                throw RecordStoreError.malformedRow("quarantine")
+                            }
+                            after = rowid
+                            let columns = Array(row[1...])
+                            var digest: UInt64 = 0
+                            var length = 0
+                            if case .blob(let erasure) = columns[6] { length += erasure.count }
+                            if case .blob(let envelope) = columns[7] { length += envelope.count }
+                            if let entry = try? Self.entry(Array(columns[1...])) { digest = entry.quarantineDigest }
+                            try connection.query(
+                                Self.quarantineInsert,
+                                [columns[0], .integer(Int64(bitPattern: digest)), .integer(Int64(length))]
+                                    + columns[1...])
+                        }
                     }
                     try connection.execute("DROP TABLE quarantine")
                     try connection.execute("PRAGMA user_version = 3")
@@ -327,10 +342,32 @@
                 AND device_id = ? AND erasure = ? AND envelope IS ?
             """
 
+        /// The most kept entries one digest may name (review finding Z39). FNV-1a is not keyed, so a writer can make
+        /// entries that share one; each lookup then compares, and reads, every row under it. Sixty-four bits collide
+        /// by chance with odds that never arise in a quarantine of thousands, so a digest named more often than this
+        /// is someone's doing: nothing more is kept under it, and a lookup reads no more than this many rows.
+        static let maximumEntriesPerDigest = 16
+
+        /// Whether the digest of `entry` already names `maximumEntriesPerDigest` kept entries. Reads the index only.
+        private func digestCrowded(_ entry: SyncEntry, vaultID: UUID) throws -> Bool {
+            let rows = try connection.query(
+                """
+                SELECT COUNT(*) FROM (SELECT 1 FROM quarantine_entries WHERE vault_id = ? AND digest = ? LIMIT ?)
+                """,
+                [
+                    SQLiteRecordStore.value(vaultID), .integer(Int64(bitPattern: entry.quarantineDigest)),
+                    .integer(Int64(Self.maximumEntriesPerDigest)),
+                ])
+            guard case .integer(let count) = rows.first?.first else { throw RecordStoreError.malformedRow("count") }
+            return count >= Int64(Self.maximumEntriesPerDigest)
+        }
+
         @discardableResult
         public func quarantine(_ entry: SyncEntry, vaultID: UUID) throws -> Bool {
             try connection.transaction {
                 guard try !holdsQuarantined(entry, vaultID: vaultID) else { return false }
+                // A crowded digest keeps nothing more: reported to the engine as already held, so not counted.
+                guard try !digestCrowded(entry, vaultID: vaultID) else { return false }
                 try connection.query(
                     Self.quarantineInsert,
                     [
@@ -371,6 +408,9 @@
             }
         }
 
+        /// What one device's share of the quarantine is counted as at most: well past every cap, far below `Int.max`.
+        static let maximumCountedBytes = 1 << 40
+
         public func quarantineUsage(vaultID: UUID) throws -> QuarantineUsage {
             let rows = try connection.query(
                 """
@@ -383,9 +423,13 @@
                 guard row.count == 3, case .integer(let entries) = row[1], case .integer(let bytes) = row[2] else {
                     throw RecordStoreError.malformedRow("quarantine")
                 }
-                // A length the file made negative or huge counts as full rather than as room.
+                // A length the file made negative or huge counts as full rather than as room, and is held far below
+                // `Int.max`, so that adding to it cannot overflow (review finding Z39; the engine adds without
+                // overflow too).
+                let ceiling = Int64(Self.maximumCountedBytes)
                 usage.devices[try Self.uuid(row[0])] = QuarantineUsage.Share(
-                    entries: Int(clamping: entries), bytes: bytes < 0 ? .max / 2 : Int(clamping: bytes))
+                    entries: Int(clamping: min(max(entries, 0), ceiling)),
+                    bytes: Int(clamping: bytes < 0 ? ceiling : min(bytes, ceiling)))
             }
             return usage
         }

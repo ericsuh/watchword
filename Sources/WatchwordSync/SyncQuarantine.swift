@@ -21,17 +21,26 @@ public struct QuarantineUsage: Sendable, Hashable {
         self.devices = devices
     }
 
+    /// Sums saturate: the counts come from a local file (A8), and a total that would overflow reads as full rather
+    /// than trapping (review finding Z39).
     public var entries: Int {
-        devices.values.reduce(0) { $0 + $1.entries }
+        devices.values.reduce(0) { Self.adding($0, $1.entries) }
     }
 
     public var bytes: Int {
-        devices.values.reduce(0) { $0 + $1.bytes }
+        devices.values.reduce(0) { Self.adding($0, $1.bytes) }
     }
 
     public mutating func add(_ entry: SyncEntry) {
-        devices[entry.device, default: Share()].entries += 1
-        devices[entry.device, default: Share()].bytes += entry.storedLength
+        var share = devices[entry.device] ?? Share()
+        share.entries = Self.adding(share.entries, 1)
+        share.bytes = Self.adding(share.bytes, entry.storedLength)
+        devices[entry.device] = share
+    }
+
+    static func adding(_ a: Int, _ b: Int) -> Int {
+        let (sum, overflow) = a.addingReportingOverflow(b)
+        return overflow ? .max : sum
     }
 }
 
