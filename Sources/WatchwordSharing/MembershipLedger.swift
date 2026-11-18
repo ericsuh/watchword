@@ -125,9 +125,12 @@ public struct MembershipLedger: Sendable {
     }
 
     /// Whether the accepted chain has never listed anyone but the vault's owner: the vault has been made shareable
-    /// and nobody has been let in. Only the owner's account can then sign anything that verifies in the vault, as in
-    /// a vault that is not shared at all, and an integration has nobody's writes to judge against anybody's standing
-    /// (review finding Z56). A function of the accepted chain alone, so it changes only when the head does.
+    /// and nobody has been let in. On the owner's own devices only the owner's account can then sign anything that
+    /// verifies in the vault, as in a vault that is not shared at all, and an integration has nobody's writes to judge
+    /// against anybody's standing (review finding Z56). Not on another account's device: a member whose addition lost
+    /// a fork accepts a chain that lists only the owner, and its own account's signatures verify there (Z124), so an
+    /// integration asks this together with whether its account is the owner. A function of the accepted chain alone,
+    /// so it changes only when the head does.
     public var isOwnersAlone: Bool {
         chain.allSatisfy { $0.state.members.count == 1 }
     }

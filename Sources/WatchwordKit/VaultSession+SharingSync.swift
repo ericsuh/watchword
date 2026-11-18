@@ -758,9 +758,9 @@ extension VaultSession {
         guard let current = sharing.vaults[location.vaultID],
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account)
         else { return .holdAside }
-        // Nobody but the owner has ever been listed: every object that verifies is the owner's account's, and the
-        // vault is judged as that account's other vaults are, which is not at all (Z56).
-        if current.ledger.isOwnersAlone { return .apply }
+        // Nobody but the owner has ever been listed, on the owner's own device: every object that verifies is the
+        // owner's account's, and the vault is judged as that account's other vaults are, which is not at all (Z56).
+        if Self.isOwnersAloneHere(current.ledger, account: account.accountID) { return .apply }
         guard Self.streamAdmits(signer, at: location, in: current, account: account) else { return .holdAside }
         switch current.ledger.writeStanding(of: signer) {
         case .mayWrite:
@@ -806,7 +806,7 @@ extension VaultSession {
         // A chain that has never listed anyone but its owner has one account's devices for writers, and nothing
         // they wrote is held against anything (Z56): what follows weighs one account's work against another's
         // standing. The first record that lists someone else changes the head, and everything is judged then.
-        if vault.ledger.isOwnersAlone { return true }
+        if Self.isOwnersAloneHere(vault.ledger, account: account.accountID) { return true }
         let listing = { (device: UUID) in
             self.accountsListing(device, in: record.vaultID, ownView: ownView, account: account)
         }
@@ -917,7 +917,7 @@ extension VaultSession {
         guard let account = try await loadAccount() else { return false }
         let ownView = try? await registry(account)
         guard let vault = sharing.vaults[location.vaultID] else { return true }
-        if vault.ledger.isOwnersAlone { return true }
+        if Self.isOwnersAloneHere(vault.ledger, account: account.accountID) { return true }
         let listing = { (device: UUID) in
             self.accountsListing(device, in: location.vaultID, ownView: ownView, account: account)
         }
@@ -945,6 +945,16 @@ extension VaultSession {
             sharing.vaults[location.vaultID]?.indexChanged = true
         }
         return admitted
+    }
+
+    /// Whether a shared vault is exempt from judging on this device (Z56): its accepted chain has never listed anyone
+    /// but its owner, **and this account is that owner** (review finding Z124). Only then is every object that
+    /// verifies the owner's account's. On another account's device (a member whose addition lost a fork to records
+    /// of the owner's, so that the chain it accepts lists only the owner) this device's own account's signatures
+    /// verify first, and its writes, which count nowhere now, would stay; there the vault is judged as any other.
+    /// A function of the accepted chain and the device's own account, so it changes only with the head.
+    static func isOwnersAloneHere(_ ledger: MembershipLedger, account: UUID) -> Bool {
+        ledger.isOwnersAlone && ledger.owner.accountID == account
     }
 
     /// Whether some of the account's work can count here: it may write, or could once.

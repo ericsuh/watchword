@@ -74,3 +74,47 @@ extension AdversarialSharedVaultTests {
         #expect(!(try await owner.session.items(in: vaultID).items.map(\.id).contains(planted.id)))
     }
 }
+
+// Review finding Z124: "never listed anyone but its owner" was read on a device whose account is not the owner.
+extension AdversarialSharedVaultTests {
+    /// Threat: none beyond a store (A1) that keeps one record from one device, or lag. The owner's stale second
+    /// device, not shown the record that added a member, rotates the key twice on the chain it has; the branch with
+    /// more of the owner's records wins, and the member's addition is set aside, so on the member's own device the
+    /// accepted chain lists only the owner. A chain that has only ever listed its owner is not judged, on the ground
+    /// that only the owner's account can sign what verifies there; on this device that is false (its own account's
+    /// signatures verify first), so at that change of head nothing was taken out and the member's own writes, which
+    /// count nowhere now, stayed in its vault while every other device held them aside. The exemption is the owner's
+    /// devices' alone.
+    @Test("a chain that lists only its owner is judged on a device whose account is not the owner")
+    func ownersAloneOnAMembersDevice() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 12400)
+        let member = try await household.account(seed: 12401)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.session.sync()
+        let view = WithholdingTransport(base: household.transport)
+        let stale = try await owner.enrolledDevice(over: view, directory: household.directory)
+        try await stale.session.shareVault(vaultID)
+        try await stale.session.sync()
+
+        let before = Set(await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID)))
+        try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        let added = Set(await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID)))
+        await view.withhold(added.subtracting(before))
+        var written = Self.bank(in: vaultID)
+        written.title = "The member's, written while a member"
+        written = try await member.session.save(written)
+        try await member.session.sync()
+
+        // The stale device rotates twice on the chain it has: two of the owner's records beat one.
+        try await stale.session.rotateVaultKey(vaultID)
+        try await stale.session.rotateVaultKey(vaultID)
+        try await member.session.sync()
+        let status = try await member.session.sharedVaultStatus(vaultID)
+        try #require(status.membership.members.count == 1, "the addition was not set aside: the test proves nothing")
+        #expect(
+            !(try await member.session.items(in: vaultID).items.map(\.id).contains(written.id)),
+            "the member's writes, which count nowhere now, stayed in the vault on its own device")
+    }
+}
