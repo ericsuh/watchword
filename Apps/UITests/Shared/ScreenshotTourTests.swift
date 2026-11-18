@@ -183,7 +183,8 @@ final class ScreenshotTourTests: XCTestCase {
         Screens.attachIndex()
     }
 
-    /// Vaults, sharing one and inviting the other person, who accepts (PRD F2.1, F4.1, F4.2).
+    /// Vaults, sharing one and inviting the other person with a vault sharing code, who joins; the full code as the
+    /// fallback; and joining the other person's vault (PRD F2.1, F4.1, F4.2; ADR 0010).
     @MainActor
     private func tourVaultsAndSharing(_ app: XCUIApplication) {
         app.backToList()
@@ -200,23 +201,34 @@ final class ScreenshotTourTests: XCTestCase {
         app.tap(AccessibilityID.Vault.share)
         app.confirm("Share")
         app.tap(AccessibilityID.Vault.invite)
-        app.tap(AccessibilityID.Invite.uiTestFill)
-        app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).appears(within: 15))
-        app.element(AccessibilityID.Invite.safetyNumber).click()
+        XCTAssertTrue(app.element(AccessibilityID.Invite.startSession).appears(within: 10), app.debugDescription)
+        Screens.capture("invite-start", in: app, showing: "Inviting: what a vault sharing code session asks of both")
+        app.tap(AccessibilityID.Invite.startSession)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.number).appears(within: 15), app.debugDescription)
+        app.element(AccessibilityID.Invite.number).click()
         Screens.capture(
-            "invite-fingerprint", in: app, showing: "Inviting: the other person's safety number, to compare first")
-        app.reveal(AccessibilityID.Invite.comparedByEye)
-        app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
-        app.tap(AccessibilityID.Invite.confirm)
+            "invite-sharing-code", in: app, showing: "The vault sharing code and its QR code, for them to type or scan")
+        app.tap(AccessibilityID.Debug.memberJoins)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.typedCode).appears(within: 15), app.debugDescription)
+        app.element(AccessibilityID.Invite.typedCode).click()
+        Screens.capture(
+            "invite-their-code", in: app, showing: "Their device answered: type the six digits on their screen")
+        app.tap(AccessibilityID.Debug.fillMemberCode)
+        app.tapWhenEnabled(AccessibilityID.Invite.confirmCode)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.ownCode).appears(within: 15), app.debugDescription)
+        app.element(AccessibilityID.Invite.ownCode).click()
+        Screens.capture(
+            "invite-own-code", in: app, showing: "Their code matched: this device's code for them, and the role")
+        app.tap(AccessibilityID.Debug.memberTypes)
         app.tap(AccessibilityID.Invite.send)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.code).appears(within: 15), app.debugDescription)
-        app.element(AccessibilityID.Invite.code).click()
-        Screens.capture("invite-code", in: app, showing: "The invitation to send, once the numbers were compared")
+        XCTAssertTrue(app.element(AccessibilityID.Invite.sent).appears(within: 15), app.debugDescription)
+        app.element(AccessibilityID.Invite.sent).click()
+        Screens.capture("invite-sent", in: app, showing: "The invitation went to their device inside the session")
+        app.tap(AccessibilityID.Debug.memberAcceptsSession)
+        app.waitForText("accepted the invitation", in: "debug.peerStatus", timeout: 20)
         // Done closes the whole screen from here; the invitation screen's own Done only goes back a step.
         app.closeScreen()
 
-        app.runPeerHook(AccessibilityID.Debug.householdAccept, expecting: "accepted the invitation")
         app.syncNow(expecting: ".")
         app.openScreen(AccessibilityID.Settings.vaults)
         app.tap(AccessibilityID.Vaults.row("Household"))
@@ -227,20 +239,52 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(member.appears(within: 15), app.debugDescription)
         Screens.capture(
             "vault-members", in: app, showing: "The shared vault's members: the owner and the person invited")
+        // The full code, behind the start screen's secondary action.
+        app.tap(AccessibilityID.Vault.invite)
+        app.tap(AccessibilityID.Invite.fullCode)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.account).appears(within: 10), app.debugDescription)
+        app.tap(AccessibilityID.Invite.uiTestFill)
+        app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.invitee).appears(within: 15), app.debugDescription)
         app.closeScreen()
 
         app.openScreen(AccessibilityID.Settings.vaults)
         app.tap(AccessibilityID.Vault.ownSafetyNumber)
         XCTAssertTrue(app.element(AccessibilityID.Vault.fingerprint).appears(within: 10))
         app.element(AccessibilityID.Vault.fingerprint).click()
-        Screens.capture("own-safety-number", in: app, showing: "This account's own safety number and QR code")
+        Screens.capture(
+            "own-full-code", in: app, showing: "This account's full vault sharing code and QR code, the fallback")
         app.closeScreen()
 
+        // Joining the other person's vault.
         app.openScreen(AccessibilityID.Settings.vaults)
         app.tap(AccessibilityID.Vaults.accept)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.number).appears(within: 10), app.debugDescription)
+        app.tap(AccessibilityID.Debug.memberStarts)
+        app.element(AccessibilityID.Accept.number).click()
+        Screens.capture("accept-number", in: app, showing: "Accepting: their vault sharing code, typed or scanned")
+        app.tapWhenEnabled(AccessibilityID.Accept.joinWithNumber)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.ownCode).appears(within: 20), app.debugDescription)
+        app.element(AccessibilityID.Accept.ownCode).click()
+        Screens.capture(
+            "accept-codes", in: app, showing: "This device's six digits for them, and a field for theirs")
+        app.tap(AccessibilityID.Debug.memberTypes)
+        app.tap(AccessibilityID.Debug.fillMemberCode)
+        app.tapWhenEnabled(AccessibilityID.Accept.confirmCode)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.awaitingInvitation).appears(within: 15), app.debugDescription)
+        app.tap(AccessibilityID.Debug.memberInvites)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.confirmText).appears(within: 20), app.debugDescription)
+        app.element(AccessibilityID.Accept.confirmText).click()
+        Screens.capture("accept-confirm", in: app, showing: "Their invitation arrived: join only on a yes")
+        app.tap(AccessibilityID.Accept.join)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.joined).appears(within: 20), app.debugDescription)
+        app.closeScreen()
+        app.openScreen(AccessibilityID.Settings.vaults)
+        app.tap(AccessibilityID.Vaults.accept)
+        app.tap(AccessibilityID.Accept.fullCode)
         XCTAssertTrue(app.element(AccessibilityID.Accept.code).appears(within: 10), app.debugDescription)
         app.element(AccessibilityID.Accept.code).click()
-        Screens.capture("accept-invitation", in: app, showing: "Accepting an invitation: pasting it comes first")
+        Screens.capture("accept-invitation", in: app, showing: "The fallback: pasting an invitation sent as text")
         app.closeScreen()
     }
 

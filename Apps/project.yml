@@ -101,6 +101,9 @@ targets:
       base:
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        # iPhone and iPad scan the other person's screen at a vault sharing code session (ADR 0010); the camera is used
+        # on that screen alone. The Mac shows codes and scans none, so its target asks for no camera.
+        INFOPLIST_KEY_NSCameraUsageDescription: Watchword uses the camera only to scan the code on another person's screen when you share a vault with them.
     dependencies:
       - target: AutoFillExtension-iOS
         embed: true

@@ -49,20 +49,34 @@ enum AccessibilityID {
         static let fingerprint = "vault.fingerprint"
         static let ownSafetyNumber = "vault.ownSafetyNumber"
         static func member(_ name: String) -> String { "vault.member.\(name)" }
+        /// Outside `member(_:)`'s prefix, so a query for member rows never finds the button.
+        static func memberCheck(_ name: String) -> String { "vault.memberCheck.\(name)" }
         static func memberRole(_ name: String) -> String { "vault.member.\(name).role" }
         static func pending(_ index: Int) -> String { "vault.pending.\(index)" }
     }
 
     enum Invite {
+        static let startSession = "invite.startSession"
+        static let number = "invite.number"
+        static let qr = "invite.qr"
+        static let checkAgain = "invite.checkAgain"
+        static let typedCode = "invite.typedCode"
+        static let confirmCode = "invite.confirmCode"
+        static let scan = "invite.scan"
+        static let ownCode = "invite.ownCode"
+        static let useNewKeys = "invite.useNewKeys"
+        static let failed = "invite.failed"
+        static let startOver = "invite.startOver"
+        static let fullCode = "invite.fullCode"
         static let account = "invite.account"
         static let lookUp = "invite.lookUp"
         static let safetyNumber = "invite.safetyNumber"
         static let typedNumber = "invite.typedNumber"
-        static let comparedByEye = "invite.comparedByEye"
         static let confirm = "invite.confirm"
         static let role = "invite.role"
         static let invitee = "invite.invitee"
         static let send = "invite.send"
+        static let sent = "invite.sent"
         static let code = "invite.code"
         static let copy = "invite.copy"
         static let done = "invite.done"
@@ -70,15 +84,47 @@ enum AccessibilityID {
     }
 
     enum Accept {
+        static let number = "accept.number"
+        static let joinWithNumber = "accept.joinWithNumber"
+        static let scan = "accept.scan"
+        static let waiting = "accept.waiting"
+        static let ownCode = "accept.ownCode"
+        static let typedCode = "accept.typedCode"
+        static let confirmCode = "accept.confirmCode"
+        static let awaitingInvitation = "accept.awaitingInvitation"
+        static let ownerNotVerified = "accept.ownerNotVerified"
+        static let useNewKeys = "accept.useNewKeys"
+        static let failed = "accept.failed"
+        static let startOver = "accept.startOver"
+        static let fullCode = "accept.fullCode"
         static let code = "accept.code"
         static let read = "accept.read"
         static let ownerNumber = "accept.ownerNumber"
         static let typedNumber = "accept.typedNumber"
-        static let comparedByEye = "accept.comparedByEye"
         static let join = "accept.join"
         static let confirmText = "accept.confirmText"
         static let joined = "accept.joined"
         static let done = "accept.done"
+    }
+
+    /// Checking a member of a shared vault with a vault sharing code session (`MemberVerificationView`).
+    enum MemberCheck {
+        static let start = "memberCheck.start"
+        static let number = "memberCheck.number"
+        static let typedCode = "memberCheck.typedCode"
+        static let confirm = "memberCheck.confirm"
+        static let scan = "memberCheck.scan"
+        static let ownCode = "memberCheck.ownCode"
+        static let verified = "memberCheck.verified"
+        static let useNewKeys = "memberCheck.useNewKeys"
+        static let failed = "memberCheck.failed"
+    }
+
+    /// The camera scanner (`CodeScannerView`, iPhone and iPad).
+    enum Scanner {
+        static let view = "scanner.view"
+        static let unavailable = "scanner.unavailable"
+        static let cancel = "scanner.cancel"
     }
 
     enum Devices {
@@ -164,6 +210,15 @@ enum AccessibilityID {
         static let peerPassword = "debug.peerPassword"
         static let peerImplausible = "debug.peerImplausible"
         static let householdAccept = "debug.householdAccept"
+        /// Stand-ins for the other person at a vault sharing code session (`UITestPeer`): they type what this screen
+        /// shows, read out what theirs shows, scan this screen, or are scanned.
+        static let memberJoins = "debug.memberJoins"
+        static let fillMemberCode = "debug.fillMemberCode"
+        static let scanMember = "debug.scanMember"
+        static let memberTypes = "debug.memberTypes"
+        static let memberAcceptsSession = "debug.memberAcceptsSession"
+        static let memberStarts = "debug.memberStarts"
+        static let memberInvites = "debug.memberInvites"
         static let lockNow = "debug.lockNow"
     }
 }

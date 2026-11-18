@@ -9,7 +9,9 @@
     import WatchwordSync
 
     /// The rest of the UI-test household, in the same process: another device of the app's account, and another
-    /// person's account that a vault can be shared with (docs/04-test-plan.md §5). Each is a `VaultSession` with its
+    /// person's account that a vault can be shared with (docs/04-test-plan.md §5). At a vault sharing code session
+    /// (ADR 0010) the other person is driven step by step from the sharing screens' Debug-only buttons, standing in
+    /// for a person reading digits off a screen, typing them, or holding up their phone to be scanned. Each is a `VaultSession` with its
     /// own in-memory store, Keychain and sync state, syncing over the transport the app syncs over, so an XCUITest can
     /// make a change "elsewhere" (a rename, a password change, an implausible version, accepting an invitation) and see
     /// it arrive through the real UI, the real keyring and the real sharing protocol. Debug builds launched with
@@ -34,18 +36,22 @@
         let transport: InMemorySyncTransport
         /// The key directory both accounts publish their bundles in (the account record on a real transport).
         let directory: InMemoryKeyBundleDirectory
+        /// Where both accounts' vault sharing code sessions meet.
+        let board: InMemorySharingBoard
         private var session: VaultSession?
         private var member: VaultSession?
 
-        init(transport: InMemorySyncTransport, directory: InMemoryKeyBundleDirectory) {
+        init(transport: InMemorySyncTransport, directory: InMemoryKeyBundleDirectory, board: InMemorySharingBoard) {
             self.transport = transport
             self.directory = directory
+            self.board = board
         }
 
-        /// The app session's sharing settings: its own state and pins, over the household's directory.
-        static func appSharing(directory: InMemoryKeyBundleDirectory) -> SharingSettings {
+        /// The app session's sharing settings: its own state and pins, over the household's directory and board.
+        static func appSharing(directory: InMemoryKeyBundleDirectory, board: InMemorySharingBoard) -> SharingSettings {
             SharingSettings(
-                state: InMemorySharingStateStore(), contacts: InMemoryVerifiedContactStore(), directory: directory)
+                state: InMemorySharingStateStore(), contacts: InMemoryVerifiedContactStore(), directory: directory,
+                board: board)
         }
 
         private var password: String {
@@ -115,12 +121,79 @@
             return try await member.publicKeyBundle().accountID
         }
 
-        /// The other person accepts `invitation`, having compared the owner's safety number with the app's by eye.
-        func acceptInvitation(_ invitation: Invitation) async throws {
+        /// The other person accepts `invitation` (sent as text), having typed the owner's full vault sharing code,
+        /// as they would read it off the app's screen.
+        func acceptInvitation(_ invitation: Invitation, appBundle: PublicKeyBundle) async throws {
             let member = try await householdMember()
-            try await member.acceptInvitation(invitation, ownerEvidence: .comparedByEye)
+            try await member.acceptInvitation(
+                invitation, ownerEvidence: .safetyNumber(appBundle.fingerprint.safetyNumber))
             try await member.sync()
         }
+
+        // MARK: The other person at a vault sharing code session
+
+        /// They type the vault sharing code the app shows.
+        func memberJoins(number: String, appBundle: PublicKeyBundle) async throws {
+            await directory.publish(appBundle)
+            _ = try await householdMember().joinSharingCodeSession(number: number)
+        }
+
+        /// What their screen shows for the app to scan: their fingerprint code as a joiner, the session's code as a
+        /// starter.
+        func memberScanPayload(appBundle: PublicKeyBundle) async throws -> String? {
+            await directory.publish(appBundle)
+            let member = try await householdMember()
+            if let status = await member.sharingCodeStatus() { return status.scanPayload }
+            return FingerprintCode(bundle: try await member.publicKeyBundle()).payload
+        }
+
+        /// The six digits their screen shows now, after looking for the app's next message.
+        func memberCode() async throws -> String? {
+            let member = try await householdMember()
+            guard await member.sharingCodeStatus() != nil else { return nil }
+            return try await member.refreshSharingCodeSession().ownCode
+        }
+
+        /// They type the six digits the app's screen shows.
+        func memberTypes(code: String) async throws {
+            let member = try await householdMember()
+            _ = try await member.refreshSharingCodeSession()
+            _ = try await member.enterSharingCode(code)
+        }
+
+        /// They accept the invitation the app sent inside the session, and sync.
+        func memberAcceptsSessionInvitation() async throws {
+            let member = try await householdMember()
+            guard let invitation = try await member.sharingCodeInvitation() else { return }
+            try await member.acceptInvitation(invitation)
+            try await member.sync()
+        }
+
+        /// They share a vault of their own and start a session for the app to join: the number and their screen's
+        /// QR code.
+        func memberStartsSession(appBundle: PublicKeyBundle) async throws -> (number: String, payload: String) {
+            await directory.publish(appBundle)
+            let member = try await householdMember()
+            if memberVaultID == nil {
+                let vaultID = try await member.createVault(name: Self.memberVaultName).id
+                try await member.shareVault(vaultID)
+                memberVaultID = vaultID
+            }
+            let status = try await member.startSharingCodeSession()
+            return (status.number ?? "", status.scanPayload ?? "")
+        }
+
+        /// They invite the app's account to their vault inside the session, and sync.
+        func memberInvites() async throws {
+            guard let memberVaultID else { return }
+            let member = try await householdMember()
+            _ = try await member.inviteThroughSharingCode(to: memberVaultID, as: .readWrite)
+            try await member.sync()
+        }
+
+        /// The vault the other person shares with the app's account.
+        static let memberVaultName = "Shared by the household member"
+        private var memberVaultID: UUID?
 
         private func householdMember() async throws -> VaultSession {
             if let member { return member }
@@ -133,7 +206,8 @@
             try await created.confirmEmergencyKitSaved()
             await created.configureSharing(
                 SharingSettings(
-                    state: InMemorySharingStateStore(), contacts: InMemoryVerifiedContactStore(), directory: directory))
+                    state: InMemorySharingStateStore(), contacts: InMemoryVerifiedContactStore(), directory: directory,
+                    board: board))
             await directory.publish(try await created.publicKeyBundle())
             // Publishes the account's registry, which the owner checks this account's signatures against.
             try await created.sync()

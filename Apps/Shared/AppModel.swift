@@ -401,16 +401,82 @@ final class AppModel {
             }
         }
 
-        /// The other person accepts the last invitation the app issued.
+        /// The other person accepts the last invitation the app issued as text.
         func householdAcceptsInvitation() async {
-            guard let uiTestPeer, let invitation = uiTestInvitation else { return }
+            guard let uiTestPeer, let session, let invitation = uiTestInvitation else { return }
             uiTestPeerStatus = nil
             await perform {
-                try await uiTestPeer.acceptInvitation(invitation)
+                try await uiTestPeer.acceptInvitation(invitation, appBundle: session.publicKeyBundle())
                 self.uiTestPeerStatus = "The other person accepted the invitation."
             }
         }
+
+        // MARK: The other person at a vault sharing code session (`UITestPeer`)
+
+        func uiTestMemberJoins(number: String) async {
+            guard let uiTestPeer, let session else { return }
+            await perform { try await uiTestPeer.memberJoins(number: number, appBundle: session.publicKeyBundle()) }
+        }
+
+        func uiTestMemberScanPayload() async -> String? {
+            guard let uiTestPeer, let session else { return nil }
+            do {
+                return try await uiTestPeer.memberScanPayload(appBundle: session.publicKeyBundle())
+            } catch {
+                show(error)
+                return nil
+            }
+        }
+
+        func uiTestMemberCode() async -> String? {
+            guard let uiTestPeer else { return nil }
+            do {
+                return try await uiTestPeer.memberCode()
+            } catch {
+                show(error)
+                return nil
+            }
+        }
+
+        func uiTestMemberTypes(code: String) async {
+            guard let uiTestPeer else { return }
+            await perform { try await uiTestPeer.memberTypes(code: code) }
+        }
+
+        func uiTestMemberAcceptsSessionInvitation() async {
+            guard let uiTestPeer else { return }
+            uiTestPeerStatus = nil
+            await perform {
+                try await uiTestPeer.memberAcceptsSessionInvitation()
+                self.uiTestPeerStatus = "The other person accepted the invitation."
+            }
+        }
+
+        func uiTestMemberStartsSession() async -> (number: String, payload: String)? {
+            guard let uiTestPeer, let session else { return nil }
+            do {
+                return try await uiTestPeer.memberStartsSession(appBundle: session.publicKeyBundle())
+            } catch {
+                show(error)
+                return nil
+            }
+        }
+
+        func uiTestMemberInvites() async {
+            guard let uiTestPeer else { return }
+            await perform { try await uiTestPeer.memberInvites() }
+        }
     #endif
+
+    /// What the scanner stand-in reads in a `--uitest` launch (the household member's screen); `nil` in every other
+    /// build, where only the camera scans.
+    func uiTestScanPayload() async -> String? {
+        #if DEBUG
+            return await uiTestMemberScanPayload()
+        #else
+            return nil
+        #endif
+    }
 
     func emergencyKit() async -> EmergencyKit? {
         guard let session else { return nil }

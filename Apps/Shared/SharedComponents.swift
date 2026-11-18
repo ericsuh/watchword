@@ -3,8 +3,8 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 import WatchwordPresentation
 
-/// A safety number as twelve groups of five digits, three to a row, for two people to read to each other (PRD F4.2).
-/// Monospaced and not selectable: it is compared, not copied.
+/// The full vault sharing code (the 60-digit fingerprint) as twelve groups of five digits, three to a row, for two
+/// people to read to each other (PRD F4.2; ADR 0010's fallback). Monospaced and not selectable: it is typed, not copied.
 struct SafetyNumberGrid: View {
     let groups: [String]
 
@@ -21,13 +21,14 @@ struct SafetyNumberGrid: View {
         .font(.system(.title3, design: .monospaced))
         .textSelection(.disabled)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(groups.joined(separator: " "))
+        .accessibilityLabel(groups.map { SharingCodeWording.spoken($0) }.joined(separator: ", "))
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
     }
 }
 
-/// A QR code of `text`: a fingerprint code (`FingerprintCode.payload`), which is not a secret.
+/// A QR code of `text`: a fingerprint code (`FingerprintCode.payload`) or a vault sharing code session's
+/// (`ScannedSharingCode.payload`), neither of which is a secret.
 struct QRCodeView: View {
     let text: String
 
@@ -39,7 +40,7 @@ struct QRCodeView: View {
                 .scaledToFit()
                 .frame(maxWidth: 220, maxHeight: 220)
                 .frame(maxWidth: .infinity)
-                .accessibilityLabel("QR code of your fingerprint")
+                .accessibilityLabel("QR code for the other person to scan")
         }
     }
 
@@ -52,7 +53,8 @@ struct QRCodeView: View {
     }
 }
 
-/// This account's safety number and QR code, for someone inviting this account to compare (PRD F4.2).
+/// This account's full vault sharing code (the 60-digit fingerprint) and its QR code: the fallback, for someone who
+/// cannot be at their device at the same time to type (PRD F4.2; ADR 0010).
 struct OwnFingerprintView: View {
     let fingerprint: OwnFingerprint
 
@@ -60,12 +62,13 @@ struct OwnFingerprintView: View {
         Form {
             Section {
                 Text(
-                    "Someone inviting you to a shared vault compares this number with the one their device shows for "
-                        + "you, in person or on a call. If any digit differs, they should not invite you."
+                    "When you cannot be together, someone inviting you to a shared vault types these sixty digits, "
+                        + "read out by you on a call they know is you. Their device checks them. When you can be "
+                        + "together, use a vault sharing code instead: it is shorter."
                 )
                 .foregroundStyle(.secondary)
             }
-            Section("Your safety number") {
+            Section("Your full vault sharing code") {
                 SafetyNumberGrid(groups: fingerprint.groups)
                     .accessibilityIdentifier(AccessibilityID.Vault.fingerprint)
             }
@@ -80,7 +83,7 @@ struct OwnFingerprintView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Your Safety Number")
+        .navigationTitle("Your Full Vault Sharing Code")
         .closesSheet()
     }
 }

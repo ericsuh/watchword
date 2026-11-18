@@ -77,7 +77,8 @@ enum AppEnvironment {
                 let keychain = InMemoryKeychainStore()
                 let transport = InMemorySyncTransport()
                 let directory = InMemoryKeyBundleDirectory()
-                let peer = UITestPeer(transport: transport, directory: directory)
+                let board = InMemorySharingBoard()
+                let peer = UITestPeer(transport: transport, directory: directory, board: board)
                 // A version more than this far above anything seen is held aside (review finding U5). The default is
                 // 2^20; a UI test cannot make a jump that large, and `UITestPeer.makeImplausibleEdit` makes one of 40,
                 // so the quarantine screen can be reached through the real sync path.
@@ -99,7 +100,7 @@ enum AppEnvironment {
                             localStore: InMemoryDeviceLocalStore())),
                     sync: sync
                 )
-                return .uiTest(session, peer, UITestPeer.appSharing(directory: directory))
+                return .uiTest(session, peer, UITestPeer.appSharing(directory: directory, board: board))
             }
         #endif
         let info = Bundle.main.infoDictionary ?? [:]

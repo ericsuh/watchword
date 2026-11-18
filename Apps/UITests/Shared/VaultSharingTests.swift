@@ -1,9 +1,11 @@
 import XCTest
 
-/// Milestone 2–4 UI test, run on iOS and macOS (docs/04-test-plan.md §5): a vault is created, renamed, shared, and
-/// another person invited to it after their safety number is compared (PRD F2.1, F4.1, F4.2). The other person is
-/// `UITestPeer`'s second account, which accepts in the same process over the shared in-memory transport, so the
-/// membership chain, the grant and both fingerprint checks are the real ones.
+/// Milestone 2–4 UI tests, run on iOS and macOS (docs/04-test-plan.md §5): a vault is created, renamed, shared, and
+/// another person invited to it with a vault sharing code (PRD F2.1, F4.1, F4.2; ADR 0010); the same with a scan in
+/// each direction; and this account joining the other person's vault. The other person is `UITestPeer`'s second
+/// account, driven from the sharing screens' Debug-only buttons, which stand in for a person reading digits off a
+/// screen, typing them, or holding up their phone; it runs in the same process over the shared in-memory transport,
+/// directory and board, so the session, the pins, the membership chain and the grant are the real ones.
 final class VaultSharingTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -11,8 +13,49 @@ final class VaultSharingTests: XCTestCase {
         executionTimeAllowance = 600
     }
 
+    /// The members list, once the other person is on it, with the role they were given.
     @MainActor
-    func testCreateRenameShareAndInvite() throws {
+    private func expectMember(in app: XCUIApplication, vault: String, role: String) {
+        app.syncNow(expecting: ".")
+        app.openScreen(AccessibilityID.Settings.vaults)
+        app.tap(AccessibilityID.Vaults.row(vault))
+        let member = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@ AND NOT identifier ENDSWITH %@", "vault.member.Member ", ".role")
+        ).firstMatch
+        XCTAssertTrue(member.appears(within: 15), app.debugDescription)
+        let shown = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "vault.member.Member ", ".role")
+        ).firstMatch
+        XCTAssertEqual(shown.displayedText, role)
+        app.closeScreen()
+    }
+
+    /// Creates, renames and shares a vault, and opens its invitation screen.
+    @MainActor
+    private func sharedVault(_ app: XCUIApplication, named name: String) {
+        app.openScreen(AccessibilityID.Settings.vaults)
+        XCTAssertTrue(app.element(AccessibilityID.Vaults.row("Personal")).appears(within: 10))
+        app.tap(AccessibilityID.Vaults.add)
+        app.enter("Household", into: AccessibilityID.Vaults.newName)
+        app.tap(AccessibilityID.Vaults.create)
+        app.tap(AccessibilityID.Vaults.row("Household"))
+        if name != "Household" {
+            app.tap(AccessibilityID.Vault.rename)
+            let field = app.reveal(AccessibilityID.Vault.renameField)
+            field.click()
+            field.clearAndType(name)
+            app.tap(AccessibilityID.Vault.renameSave)
+            app.waitForText(name, in: AccessibilityID.Vault.name, timeout: 10)
+        }
+        app.tap(AccessibilityID.Vault.share)
+        app.confirm("Share")
+        XCTAssertTrue(app.element(AccessibilityID.Vault.member("You")).appears(within: 10))
+        app.tap(AccessibilityID.Vault.invite)
+    }
+
+    @MainActor
+    func testCreateRenameShareAndInviteWithAVaultSharingCode() throws {
         step("launch")
         let app = XCUIApplication.launchedWithAccount()
         // The household member checks the owner's signatures against its registry, which the first sync publishes.
@@ -20,57 +63,97 @@ final class VaultSharingTests: XCTestCase {
         // With nothing to send yet, the first sync's line may say only "Up to date."; every line ends in a full stop.
         app.syncNow(expecting: ".")
 
-        // Create and rename.
-        step("vaults: create and rename")
-        app.openScreen(AccessibilityID.Settings.vaults)
-        XCTAssertTrue(app.element(AccessibilityID.Vaults.row("Personal")).appears(within: 10))
-        app.tap(AccessibilityID.Vaults.add)
-        app.enter("Household", into: AccessibilityID.Vaults.newName)
-        app.tap(AccessibilityID.Vaults.create)
-        app.tap(AccessibilityID.Vaults.row("Household"))
-        app.tap(AccessibilityID.Vault.rename)
-        let name = app.reveal(AccessibilityID.Vault.renameField)
-        name.click()
-        name.clearAndType("Family")
-        app.tap(AccessibilityID.Vault.renameSave)
-        app.waitForText("Family", in: AccessibilityID.Vault.name, timeout: 10)
+        step("vaults: create, rename, share")
+        sharedVault(app, named: "Family")
 
-        // Share, then invite: the safety number is shown and must be confirmed before a role can be chosen.
-        step("share")
-        app.tap(AccessibilityID.Vault.share)
-        app.confirm("Share")
-        XCTAssertTrue(app.element(AccessibilityID.Vault.member("You")).appears(within: 10))
-        step("invite")
-        app.tap(AccessibilityID.Vault.invite)
-        app.tap(AccessibilityID.Invite.uiTestFill)
-        app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).appears(within: 15))
-        XCTAssertFalse(app.element(AccessibilityID.Invite.send).isPresent, "a role offered before the comparison")
-        app.reveal(AccessibilityID.Invite.comparedByEye)
-        app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
-        app.tap(AccessibilityID.Invite.confirm)
-        // The role step names who is invited, and claims no comparison beyond the one made.
+        // The vault sharing code: nothing to choose before both codes are checked.
+        step("invite: show the code")
+        app.tap(AccessibilityID.Invite.startSession)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.number).appears(within: 15), app.debugDescription)
+        XCTAssertFalse(app.element(AccessibilityID.Invite.send).isPresent, "a role offered before the check")
+        app.tap(AccessibilityID.Debug.memberJoins)
+        step("invite: type their code, one wrong first")
+        XCTAssertTrue(app.element(AccessibilityID.Invite.typedCode).appears(within: 15), app.debugDescription)
+        app.enter("000000", into: AccessibilityID.Invite.typedCode)
+        app.tap(AccessibilityID.Invite.confirmCode)
+        app.waitForText("tries left", in: "error", timeout: 10)
+        app.tap(AccessibilityID.Debug.fillMemberCode)
+        app.tapWhenEnabled(AccessibilityID.Invite.confirmCode)
+        step("invite: their code matched; they type this one")
+        XCTAssertTrue(app.element(AccessibilityID.Invite.ownCode).appears(within: 15), app.debugDescription)
         app.waitForText("Inviting the account", in: AccessibilityID.Invite.invitee, timeout: 10)
+        app.tap(AccessibilityID.Debug.memberTypes)
         app.tap(AccessibilityID.Invite.send)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.code).appears(within: 15))
-        // Done closes the whole screen from here; the invitation screen's own Done only goes back a step.
+        XCTAssertTrue(app.element(AccessibilityID.Invite.sent).appears(within: 15), app.debugDescription)
+        step("the other person joins")
+        app.tap(AccessibilityID.Debug.memberAcceptsSession)
+        app.waitForText("accepted the invitation", in: "debug.peerStatus", timeout: 20)
         app.closeScreen()
 
-        // The other person accepts; after a sync the owner lists them, verified, with the role they were given.
-        step("the other person accepts")
-        app.runPeerHook(AccessibilityID.Debug.householdAccept, expecting: "accepted the invitation")
+        expectMember(in: app, vault: "Family", role: "Can edit")
+    }
+
+    /// The scan in each direction (ADR 0010, Scanning): this device reads the other person's screen in place of
+    /// typing their code, through the scanner stand-in a `--uitest` launch has in place of the camera, and the other
+    /// person types this device's code.
+    @MainActor
+    func testInviteByScanningTheirScreen() throws {
+        step("launch")
+        let app = XCUIApplication.launchedWithAccount()
+        app.openSettings()
+        app.syncNow(expecting: ".")
+        sharedVault(app, named: "Household")
+
+        app.tap(AccessibilityID.Invite.startSession)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.qr).appears(within: 15), app.debugDescription)
+        app.tap(AccessibilityID.Debug.memberJoins)
+        step("scan their screen")
+        XCTAssertTrue(app.element(AccessibilityID.Debug.scanMember).appears(within: 15), app.debugDescription)
+        app.tap(AccessibilityID.Debug.scanMember)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.ownCode).appears(within: 15), app.debugDescription)
+        app.tap(AccessibilityID.Debug.memberTypes)
+        app.tap(AccessibilityID.Invite.send)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.sent).appears(within: 15), app.debugDescription)
+        app.tap(AccessibilityID.Debug.memberAcceptsSession)
+        app.waitForText("accepted the invitation", in: "debug.peerStatus", timeout: 20)
+        app.closeScreen()
+
+        expectMember(in: app, vault: "Household", role: "Can edit")
+    }
+
+    /// This account joins a vault the other person shares: their number typed here (or their screen scanned), each
+    /// types the other's six digits, and their invitation arrives inside the session.
+    @MainActor
+    func testJoinAnotherPersonsVaultWithAVaultSharingCode() throws {
+        step("launch")
+        let app = XCUIApplication.launchedWithAccount()
+        app.openSettings()
         app.syncNow(expecting: ".")
         app.openScreen(AccessibilityID.Settings.vaults)
-        app.tap(AccessibilityID.Vaults.row("Family"))
-        let member = app.descendants(matching: .any).matching(
-            NSPredicate(
-                format: "identifier BEGINSWITH %@ AND NOT identifier ENDSWITH %@", "vault.member.Member ", ".role")
-        ).firstMatch
-        XCTAssertTrue(member.appears(within: 15), app.debugDescription)
-        let role = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "vault.member.Member ", ".role")
-        ).firstMatch
-        XCTAssertEqual(role.displayedText, "Can edit")
+        app.tap(AccessibilityID.Vaults.accept)
+
+        step("their code, typed")
+        XCTAssertTrue(app.element(AccessibilityID.Accept.number).appears(within: 10), app.debugDescription)
+        app.tap(AccessibilityID.Debug.memberStarts)
+        app.tapWhenEnabled(AccessibilityID.Accept.joinWithNumber)
+        step("their device reveals; each types the other's code")
+        XCTAssertTrue(app.element(AccessibilityID.Accept.ownCode).appears(within: 20), app.debugDescription)
+        app.tap(AccessibilityID.Debug.memberTypes)
+        app.tap(AccessibilityID.Debug.fillMemberCode)
+        app.tapWhenEnabled(AccessibilityID.Accept.confirmCode)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.awaitingInvitation).appears(within: 15), app.debugDescription)
+        step("their invitation arrives; join")
+        app.tap(AccessibilityID.Debug.memberInvites)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.confirmText).appears(within: 20), app.debugDescription)
+        app.tap(AccessibilityID.Accept.join)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.joined).appears(within: 20), app.debugDescription)
+        app.closeScreen()
+
+        app.syncNow(expecting: ".")
+        app.openScreen(AccessibilityID.Settings.vaults)
+        XCTAssertTrue(
+            app.element(AccessibilityID.Vaults.row("Shared by the household member")).appears(within: 20),
+            app.debugDescription)
         app.closeScreen()
     }
 }
