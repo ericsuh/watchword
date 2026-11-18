@@ -62,6 +62,27 @@ struct SharedStreamIndexTests {
         }
     }
 
+    /// Round 6's L3: a stream recorded while one registry listed its device ID, which a second counted registry then
+    /// lists too, is forgotten; the index is then the one a device that saw both registries first holds, which never
+    /// recorded it, whichever order the streams arrived in.
+    @Test("a stream forgotten leaves the index a device that never recorded it holds")
+    func forgottenStream() {
+        let other = UUID()
+        var reference = SharedStreamIndex()
+        reference.record(device: other, sequence: 1, segment: Self.segment(9, by: Self.insider))
+        for streamFirst in [true, false] {
+            var index = SharedStreamIndex()
+            if !streamFirst { index.record(device: other, sequence: 1, segment: Self.segment(9, by: Self.insider)) }
+            index.record(device: Self.device, sequence: 1, segment: Self.segment(1, by: Self.victim))
+            index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.victim))
+            if streamFirst { index.record(device: other, sequence: 1, segment: Self.segment(9, by: Self.insider)) }
+            index.forget(stream: Self.device)
+            #expect(index.account(ofStream: Self.device) == nil)
+            #expect(index.valueCarriers[Self.value(1)] == nil)
+            #expect(index == reference, "something of the forgotten stream is still recorded")
+        }
+    }
+
     @Test("a segment that does not open is in the chain, and is completed when it opens")
     func unopenedSegments() {
         var index = SharedStreamIndex()

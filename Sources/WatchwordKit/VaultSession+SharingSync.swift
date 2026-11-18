@@ -57,6 +57,7 @@ extension VaultSession {
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString })
         where !isOwnerDisputed(vaultID) {
             do {
+                await forgetStreamsListedTwice(vaultID, account: account)
                 try await takeOutWhatNoLongerCounts(vaultID)
                 try await saveSharedVault(vaultID)
             } catch {
@@ -362,6 +363,43 @@ extension VaultSession {
         ownView?.state.committedDevicesOnly
     }
 
+    /// The registries `vaultID` counts: this account's own (`committedOwnState`) and the members' (`memberRegistries`),
+    /// each less every device ID two of them list (`DeviceRegistryState.listedMoreThanOnce`, round 6's L3). Two
+    /// accounts acting together can find colliding committed IDs (a birthday search); kept by whichever registry
+    /// arrived first, the stream's account and cut chain differed between devices. Counted as neither's, the same
+    /// everywhere. What the judge and `sharedVerify` read, never the two halves alone.
+    func countedRegistries(_ vaultID: UUID, ownView: RegistryView?, account: UUID) -> (
+        own: DeviceRegistryState?, members: [(accountID: UUID, state: DeviceRegistryState)]
+    ) {
+        let own = Self.committedOwnState(ownView)
+        let members = memberRegistries(vaultID, account: account)
+        let twice = DeviceRegistryState.listedMoreThanOnce((own.map { [$0] } ?? []) + members.map(\.state))
+        guard !twice.isEmpty else { return (own, members) }
+        return (own?.removingDevices(twice), members.map { ($0.accountID, $0.state.removingDevices(twice)) })
+    }
+
+    /// The device IDs two of the registries `vaultID` counts list (`countedRegistries`).
+    func devicesListedTwice(_ vaultID: UUID, ownView: RegistryView?, account: UUID) -> Set<UUID> {
+        let own = Self.committedOwnState(ownView)
+        let members = memberRegistries(vaultID, account: account)
+        return DeviceRegistryState.listedMoreThanOnce((own.map { [$0] } ?? []) + members.map(\.state))
+    }
+
+    /// Forgets what the index recorded of a stream whose device ID two counted registries now list (round 6's L3):
+    /// recorded while only one registry listing it was here, under whichever account's arrived first. Nothing of it
+    /// verifies now, so a device that saw both registries first never recorded it; forgetting it and asking for a
+    /// replay (which takes out what counted through it) leaves this device as that one.
+    func forgetStreamsListedTwice(_ vaultID: UUID, account: AccountRecord) async {
+        let ownView = try? await registry(account)
+        guard let vault = sharing.vaults[vaultID] else { return }
+        let recorded = devicesListedTwice(vaultID, ownView: ownView, account: account.accountID).filter {
+            vault.index.firstSequence(ofStream: $0) != nil
+        }
+        guard !recorded.isEmpty else { return }
+        for device in recorded { sharing.vaults[vaultID]?.index.forget(stream: device) }
+        requestReplay(vaultID)
+    }
+
     /// Password changes replayed side by side when another account's registry forks at the one followed; more than
     /// this many competing changes are not replayed at all, and every device of the account is held in question.
     static let maximumMemberBranches = 8
@@ -581,11 +619,11 @@ extension VaultSession {
     /// devices whose IDs commit to its account (Z157), so the list is empty or names the one account the device is.
     func accountsListing(_ device: UUID, in vaultID: UUID, ownView: RegistryView?, account: AccountRecord) -> [UUID] {
         var accounts: [UUID] = []
-        if let own = Self.committedOwnState(ownView), own.devices[device] != nil || own.revoked[device] != nil {
+        let counted = countedRegistries(vaultID, ownView: ownView, account: account.accountID)
+        if let own = counted.own, own.devices[device] != nil || own.revoked[device] != nil {
             accounts.append(account.accountID)
         }
-        for (accountID, state) in memberRegistries(vaultID, account: account.accountID)
-        where state.devices[device] != nil || state.revoked[device] != nil {
+        for (accountID, state) in counted.members where state.devices[device] != nil || state.revoked[device] != nil {
             accounts.append(accountID)
         }
         return accounts
@@ -600,14 +638,15 @@ extension VaultSession {
         ownView: RegistryView?, account: AccountRecord
     ) -> UUID? {
         let message = Self.syncSignedMessage(envelope, at: location)
-        if let ownView, Self.committedOwnState(ownView)?.devices[location.author] != nil,
+        let counted = countedRegistries(location.vaultID, ownView: ownView, account: account.accountID)
+        if let ownView, counted.own?.devices[location.author] != nil,
             (try? Self.verifyDual(
                 signature, over: message, domain: .logSegment, author: location.author, view: ownView)) != nil
         {
             return account.accountID
         }
         guard let parts = DualSignature.decode(signature) else { return nil }
-        for (accountID, state) in memberRegistries(location.vaultID, account: account.accountID) {
+        for (accountID, state) in counted.members {
             guard let device = state.devices[location.author],
                 (try? Signatures.verify(
                     parts.account, for: message, domain: .logSegment, signingKey: state.accountSigningKey)) != nil,
@@ -1125,10 +1164,9 @@ extension VaultSession {
         guard sharing.vaults[vaultID] != nil else {
             return devices.union(ownView.map { Set($0.state.revoked.keys) } ?? [])
         }
-        if let own = Self.committedOwnState(ownView) { devices.formUnion(own.revoked.keys) }
-        for (_, state) in memberRegistries(vaultID, account: account.accountID) {
-            devices.formUnion(state.revoked.keys)
-        }
+        let counted = countedRegistries(vaultID, ownView: ownView, account: account.accountID)
+        if let own = counted.own { devices.formUnion(own.revoked.keys) }
+        for (_, state) in counted.members { devices.formUnion(state.revoked.keys) }
         return devices
     }
 

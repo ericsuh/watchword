@@ -56,4 +56,27 @@ extension DeviceRegistryState {
         state.revoked = revoked.filter { DeviceIdentifier.commits($0.key, to: accountID, key: $0.value.key) }
         return state
     }
+
+    /// The device IDs, registered or revoked, that more than one of `states` lists (round 6's L3). Committed
+    /// registries of two accounts list one ID only if the two found keys whose IDs under their own accounts collide:
+    /// 122 bits, so about 2^61 work for two accounts acting together (a birthday search), never one account against
+    /// another's existing device (a second preimage). Such an ID is either account's by arrival order alone, so a
+    /// shared vault counts it as neither's (`removingDevices`): it decides the same on every device whatever arrived
+    /// first, and costs only the two accounts that made it.
+    public static func listedMoreThanOnce(_ states: [DeviceRegistryState]) -> Set<UUID> {
+        var listings: [UUID: Int] = [:]
+        for state in states {
+            for id in Set(state.devices.keys).union(state.revoked.keys) { listings[id, default: 0] += 1 }
+        }
+        return Set(listings.filter { $0.value > 1 }.keys)
+    }
+
+    /// The registry without `ids`, registered or revoked.
+    public func removingDevices(_ ids: Set<UUID>) -> DeviceRegistryState {
+        guard !ids.isEmpty else { return self }
+        var state = self
+        state.devices = devices.filter { !ids.contains($0.key) }
+        state.revoked = revoked.filter { !ids.contains($0.key) }
+        return state
+    }
 }

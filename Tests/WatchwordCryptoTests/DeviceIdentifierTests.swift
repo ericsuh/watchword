@@ -58,4 +58,33 @@ struct DeviceIdentifierTests {
         #expect(Set(otherState.committedDevicesOnly.devices.keys) == [author])
         #expect(otherState.committedDevicesOnly.revoked.isEmpty)
     }
+
+    /// Round 6's L3: two accounts acting together can find device keys whose committed IDs collide (a birthday search
+    /// over 122 bits). Kept by whichever registry arrived first, the ID's stream and cut chain differed between
+    /// devices. An ID two registries list counts in neither, whatever their order. The two registries here list the
+    /// same ID without committing (a real collision cannot be made in a test); the rule asks nothing of commitment.
+    @Test("a device ID two registries list counts in neither, whatever their order")
+    func listedTwiceCountsNowhere() throws {
+        var f = RegistryFixture(seed: 165)
+        let shared = RegistryFixture.deviceID(0xC3)
+        let first = f.committedDevice()
+        let genesis = f.genesis(device: first)
+        let addShared = f.add(shared, by: first, parents: [genesis])
+        let state = try f.evaluate([genesis, addShared], genesis: genesis)
+        var other = RegistryFixture(seed: 166, accountID: UUID(uuidString: "AC000000-0000-4000-8000-0000000000BE")!)
+        let second = other.committedDevice()
+        let otherGenesis = other.genesis(device: second)
+        let otherShared = other.add(shared, by: second, parents: [otherGenesis])
+        let revocation = other.revoke(shared, by: second, parents: [otherShared])
+        let otherState = try other.evaluate([otherGenesis, otherShared, revocation], genesis: otherGenesis)
+
+        let forward = DeviceRegistryState.listedMoreThanOnce([state, otherState])
+        let backward = DeviceRegistryState.listedMoreThanOnce([otherState, state])
+        #expect(forward == [shared] && backward == forward)
+        let counted = state.removingDevices(forward)
+        let otherCounted = otherState.removingDevices(backward)
+        #expect(Set(counted.devices.keys) == [first] && counted.revoked.isEmpty)
+        #expect(Set(otherCounted.devices.keys) == [second] && otherCounted.revoked.isEmpty)
+        #expect(DeviceRegistryState.listedMoreThanOnce([state]).isEmpty, "one registry lists each of its IDs once")
+    }
 }

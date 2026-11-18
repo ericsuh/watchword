@@ -128,6 +128,19 @@ struct SharedStreamIndex: Sendable, Hashable {
         file(segment, device: device, sequence: sequence)
     }
 
+    /// Forgets everything recorded of `device`'s stream (round 6's L3: an ID two counted registries list, recorded
+    /// before the second arrived), so that the index is the one a device that never recorded it holds.
+    mutating func forget(stream device: UUID) {
+        streams[device] = nil
+        lowest[device] = nil
+        firstCarrier[device] = nil
+        collected[device] = nil
+        for value in Array(valueCarriers.keys) where valueCarriers[value]?[device] != nil {
+            valueCarriers[value]?[device] = nil
+            if valueCarriers[value]?.isEmpty == true { valueCarriers[value] = nil }
+        }
+    }
+
     private mutating func file(_ segment: Segment, device: UUID, sequence: UInt64) {
         for entry in segment.entries where (firstCarrier[device]?[entry] ?? .max) > sequence {
             firstCarrier[device, default: [:]][entry] = sequence
