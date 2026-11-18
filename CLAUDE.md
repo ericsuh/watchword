@@ -656,7 +656,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - Imports are preview then commit (§14.1). The drafts stay in the actor (`pendingImport`) and `lock()` drops them;
   what leaves the actor before a commit holds no secret but what `importAdditions` hands the duplicate screen. The
   preview judges every entry against `SavedSites`, in every vault (`ImportConcern`, Z62): one that would hide or
-  stand beside a saved account, or name a look-alike host, needs a decision like a duplicate. A
+  stand beside a saved account, or name a look-alike host (of a saved site, or of another host of the same entry,
+  compared for resemblance only, Z74), needs a decision like a duplicate; an entry from the source's trash is judged
+  too and created in the trash in its one write (Z73). A
   commit checks every decision before writing, saves new items through `ItemMerge.stamped`, `ScopePolicy` and
   `commitItem` (keeping the file's history and times, never its IDs, vault or sync metadata), and merges over the
   item as the write reads it. Never add a path that writes an imported item another way.

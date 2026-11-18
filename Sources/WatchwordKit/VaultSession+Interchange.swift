@@ -126,6 +126,9 @@ public struct ImportConcern: Sendable, Hashable, Identifiable {
     public var isArchived: Bool
     /// The file (an archive) marks the entry excluded from suggestions: the same as archived, for AutoFill.
     public var isExcludedFromSuggestions: Bool = false
+    /// The file has the entry in its trash: it is saved into the trash, where it ranks for nothing until the person
+    /// restores it, and a restore asks nothing, so the decision is made here (review finding Z73).
+    public var isTrashed: Bool = false
 
     public var id: UUID { importedID }
 
@@ -385,7 +388,7 @@ extension VaultSession {
     /// condition that no row has its ID, keeping the history and the creation and modification times the file
     /// gave it and none of its sync metadata; a merge is an edit of the existing item (`DuplicateDetector.merged`
     /// over the item as it is now, with only the hosts and fields in `MergeChoices`). An entry the source had in its
-    /// trash is saved and then moved to the trash.
+    /// trash is saved into the trash, in the one write that creates it (review finding Z73).
     ///
     /// Every decision is checked before anything is written. The preview is consumed whatever happens.
     public func commitImport(_ preview: UUID, decisions: [UUID: ImportDecision]) async throws -> ImportOutcome {
@@ -424,10 +427,11 @@ extension VaultSession {
                 case .skip:
                     outcome.skipped.append(importedID)
                 case .keepBoth:
-                    let created = try await createImported(entry.item, in: pending.vaultID, since: pending.epoch)
+                    // An entry from the source's trash is created in the trash: never live, not even between two
+                    // writes a lock or an error could separate (Z73).
+                    let created = try await createImported(
+                        entry.item, in: pending.vaultID, trashed: entry.state == .trashed, since: pending.epoch)
                     outcome.created.append(created)
-                    // Saved even if this fails; the failure is listed beside it.
-                    if entry.state == .trashed { try await trash(id: created) }
                 case .merge:
                     // Checked above.
                     guard let existingID = decision.existingID else { continue }
@@ -628,8 +632,12 @@ extension VaultSession {
 
     /// What each draft would do to AutoFill, by the gate's own view of what is saved. Pure; run off the actor.
     ///
-    /// A host is judged against what is saved only, never beside the entry's other scopes: those are the file's too,
-    /// and vouch for nothing (and comparing each with the rest would cost the square of an entry's size).
+    /// A host is judged against what is saved, and compared with the entry's other scopes for resemblance only
+    /// (`standing(ofNewHost:resemblingOnly:)`): those are the file's too and vouch for nothing, but `amaz0n.com`
+    /// beside `amazon.com` in one entry is a look-alike of it (review finding Z74). An entry holds at most
+    /// `maximumURLsPerItem` (32) scopes, so that is at most 32 × 31 comparisons an entry, linear in the file, and
+    /// they are charged to the budget with the rest. An entry the source had in its trash is reviewed like any other
+    /// (Z73): a restore from the trash asks nothing.
     nonisolated static func importConcerns(
         _ entries: [DraftScopes], among sites: SavedSites, vaultID: UUID, isOwnVault: Bool,
         budget comparisons: Int = maximumImportHostComparisons
@@ -638,20 +646,20 @@ extension VaultSession {
         let cost = max(1, prepared.comparisonsPerHost)
         var budget = comparisons
         var concerns: [ImportConcern] = []
-        // An entry the source had in its trash is saved and trashed: it never ranks, and offers nothing.
-        for entry in entries where entry.state != .trashed && !entry.scopes.isEmpty {
+        for entry in entries where !entry.scopes.isEmpty {
             let scopes = entry.scopes
             let overlap = prepared.overlap(ofAdding: scopes, inVault: vaultID, isOwnVault: isOwnVault)
             var lookAlikes: [HostConfirmation] = []
             var unchecked: [String] = []
             for scope in scopes {
-                guard budget >= cost else {
+                let others = scopes.filter { $0.host != scope.host }
+                guard budget >= cost + others.count else {
                     unchecked.append(scope.host)
                     continue
                 }
-                budget -= cost
+                budget -= cost + others.count
                 if case .needsConfirmation(let resembles) = prepared.standing(
-                    ofNewHost: scope.host, inSharedVault: !isOwnVault)
+                    ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnVault)
                 {
                     lookAlikes.append(HostConfirmation(host: scope.host, resembles: resembles))
                 }
@@ -659,7 +667,8 @@ extension VaultSession {
             let concern = ImportConcern(
                 importedID: entry.id, hidden: overlap.hidden, beside: overlap.beside,
                 overlapIsTruncated: overlap.isTruncated, lookAlikeHosts: lookAlikes, uncheckedHosts: unchecked,
-                isArchived: entry.isArchived, isExcludedFromSuggestions: entry.isExcludedFromSuggestions)
+                isArchived: entry.isArchived, isExcludedFromSuggestions: entry.isExcludedFromSuggestions,
+                isTrashed: entry.state == .trashed)
             if !concern.isEmpty { concerns.append(concern) }
         }
         return concerns
@@ -698,8 +707,11 @@ extension VaultSession {
     }
 
     /// Saves an imported draft as a new item of `vaultID`: a write of this device's like any other, but keeping the
-    /// draft's history and times (which `save` would replace) and none of its sync metadata.
-    private func createImported(_ draft: Item, in vaultID: UUID, since epoch: UInt64) async throws -> UUID {
+    /// draft's history and times (which `save` would replace) and none of its sync metadata. `trashed` puts it in
+    /// the trash in the same write, as the person's own trash from now (Z73).
+    private func createImported(
+        _ draft: Item, in vaultID: UUID, trashed: Bool, since epoch: UInt64
+    ) async throws -> UUID {
         for scope in draft.scopes {
             do {
                 try ScopePolicy.validate(scope)
@@ -710,10 +722,11 @@ extension VaultSession {
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
         let keys = try requireKeys(since: epoch)
         let vaultKey = try await writableVaultKey(vaultID, keys: keys, account: record)
+        let now = await clock.now()
         _ = try requireKeys(since: epoch)
         var item = draft
         item.vaultID = vaultID
-        item.trashedAt = nil
+        item.trashedAt = trashed ? now : nil
         item.keptAfterDeletion = false
         let revision = try nextRevision(in: vaultID, above: nil, account: record)
         item.version = revision.version

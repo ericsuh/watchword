@@ -3197,7 +3197,10 @@ while offering nothing. So the preview judges every entry, duplicate or not, aga
 that would hide a saved account on a host it is offered on (`hidden`), stand beside one (`beside`: a tie, or an item
 of a shared vault next to the person's own), or name a host that resembles a saved site or cannot be verified by eye
 (`lookAlikeHosts`, by `SavedSites.Prepared.standing`; an entry's own other hosts vouch for nothing, being the file's
-too). Hosts past the preview's comparison budget (`VaultSession.maximumImportHostComparisons`) are `uncheckedHosts`
+too, and each is compared with them for resemblance only, so `amaz0n.com` beside `amazon.com` in one entry needs the
+decision: at most 32 × 31 comparisons an entry, charged to the budget, review finding Z74). An entry the source had in
+its trash is judged like any other (`isTrashed`): it is saved into the trash in the one write that creates it, never
+live in between, and a later restore from the trash asks nothing, so the decision is made here (Z73). Hosts past the preview's comparison budget (`VaultSession.maximumImportHostComparisons`) are `uncheckedHosts`
 and need the decision as well. `commitImport` refuses without a decision for every such entry (`decisionRequired`):
 `keepBoth` imports it, knowing what it does, `skip` leaves it out. The import screen lists them with the accounts
 they would hide, named with their vaults, and shows every entry's hosts through `MergeHost` (ASCII, registrable

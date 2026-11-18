@@ -173,17 +173,19 @@ extension AdversarialSessionInterchangeTests {
         let sites = SavedSites(stored: saved, ownVaults: [vault])
         let perHost = sites.prepared().comparisonsPerHost
         #expect(perHost == 10)
-        // The budget is a parameter so that the test need not make twenty million comparisons to pass it.
-        let budget = 5 * perHost
+        // The budget is a parameter so that the test need not make twenty million comparisons to pass it. A host
+        // costs its comparisons with the saved scopes and with the entry's two other hosts (Z74).
+        let budget = 5 * (perHost + 2)
+        let names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
         let drafts = [
-            DraftScopes(id: UUID(), scopes: (0..<3).map { ServiceScope(host: "host\($0).test") }, state: .active),
-            DraftScopes(id: UUID(), scopes: (3..<6).map { ServiceScope(host: "host\($0).test") }, state: .active),
+            DraftScopes(id: UUID(), scopes: names[0..<3].map { ServiceScope(host: "\($0).test") }, state: .active),
+            DraftScopes(id: UUID(), scopes: names[3..<6].map { ServiceScope(host: "\($0).test") }, state: .active),
         ]
         let concerns = VaultSession.importConcerns(
             drafts, among: sites, vaultID: vault, isOwnVault: true, budget: budget)
         #expect(concerns.count == 1, "the first entry fits the budget and is ordinary")
         #expect(concerns.first?.importedID == drafts[1].id)
-        #expect(concerns.first?.uncheckedHosts == ["host5.test"])
+        #expect(concerns.first?.uncheckedHosts == ["foxtrot.test"])
         #expect(VaultSession.maximumImportHostComparisons >= 1_000_000)
     }
 }

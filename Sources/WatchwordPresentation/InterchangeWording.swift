@@ -156,7 +156,9 @@ public enum InterchangeWording {
                 "Its addresses were not compared with your saved sites, because the file is too large to check at "
                     + "once. Import it in smaller parts to have them checked.")
         }
-        if concern.isArchived {
+        if concern.isTrashed {
+            lines.append("The file has it in its trash: it goes into the trash here, and would do this once restored.")
+        } else if concern.isArchived {
             lines.append("The file marks it archived: it would do this without ever appearing in AutoFill itself.")
         } else if concern.isExcludedFromSuggestions {
             lines.append(
