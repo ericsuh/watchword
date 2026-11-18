@@ -165,6 +165,8 @@ public final class DevicesModel: LockSensitive {
     public var revocation = RevocationForm()
 
     private let context: ScreenContext
+    /// How many locks this model has been told of: a sync notes it first, and stores nothing it made across one.
+    private var lockGeneration = 0
 
     public init(context: ScreenContext) {
         self.context = context
@@ -173,6 +175,7 @@ public final class DevicesModel: LockSensitive {
     }
 
     public func dropOnLock() {
+        lockGeneration &+= 1
         revocation = RevocationForm()
         // The last sync's summary names items and vaults by title (Z171): it does not outlast the keys (Z176).
         sync = nil
@@ -191,10 +194,15 @@ public final class DevicesModel: LockSensitive {
 
     public func syncNow() async {
         guard isSyncConfigured else { return }
+        // The summary is stored after the sync's awaits, and a lock that landed during them has cleared it already
+        // (Z176): one made across a lock is dropped, not stored on a locked screen (review of round 10, Z183).
+        let generation = lockGeneration
         await perform {
             let report = try await context.session.syncAll()
             try await reload()
-            sync = await SyncSummary.loading(report, deviceNames: names, from: context.session)
+            let summary = await SyncSummary.loading(report, deviceNames: names, from: context.session)
+            guard generation == lockGeneration else { return }
+            sync = summary
         }
     }
 

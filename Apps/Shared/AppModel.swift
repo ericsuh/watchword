@@ -362,12 +362,17 @@ final class AppModel {
     func syncNow() async {
         guard let session, session.isSyncConfigured else { return }
         lastSync = nil
+        // `didLock` clears the summary (Z176), and a lock that lands during the awaits below has done so already: a
+        // summary made across a lock is dropped, never stored after it (review of round 10, Z183).
+        let generation = lockSignal.generation
         await perform {
             let report = try await session.syncAll()
             let devices = (try? await session.devices()) ?? []
             let names = Dictionary(
                 devices.map { ($0.id, DeviceRow.reference($0)) }, uniquingKeysWith: { first, _ in first })
-            self.lastSync = await SyncSummary.loading(report, deviceNames: names, from: session)
+            let summary = await SyncSummary.loading(report, deviceNames: names, from: session)
+            guard generation == self.lockSignal.generation else { return }
+            self.lastSync = summary
             if self.phase == .unlocked { try await self.reload() }
         }
     }
