@@ -158,6 +158,90 @@ extension AdversarialSyncTests {
         }
     }
 
+    /// Threat: no adversary (review finding R11), the normal state of a fresh iCloud conflict on iOS: a restored
+    /// device writes again under a sequence number it had published, and the provider keeps the second copy as a
+    /// conflict version whose contents are not on this device yet. The transport lists it and cannot hand it over.
+    /// A reader that took the name as examined would never read the copy once it arrived, and the author, which never
+    /// saw two copies either, would collect the name once a snapshot covered it and every device had acknowledged it,
+    /// deleting the unread copy with it: the restored device's edits would then exist nowhere else. A name with a
+    /// copy not read is looked at again at every sync and never collected by its author meanwhile; once the copy
+    /// can be read it is merged everywhere and the author hands both on.
+    @Test("a copy that cannot be read yet is read once it can be, and its name is not collected before")
+    func unreadableCopyReadLater() async throws {
+        let f = try await Self.fixture()
+        var eager = SyncTestClient.configuration
+        eager.snapshotThreshold = 1
+        let writer = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: eager)
+        let first = try await writer.save(Self.login("First", password: "first-secret"))
+        try await writer.sync()
+        try await writer.save(Self.login("Second", password: "second-secret"))
+        try await writer.sync()
+        // The restored installation writes its own position 1, which the provider keeps beside the first.
+        let elsewhere = InMemorySyncTransport()
+        let restored = SyncTestClient(deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: elsewhere)
+        let forked = try await restored.save(Self.login("Only in the fork", password: "fork-secret"))
+        try await restored.sync()
+        let name = f.segmentName(1)
+        await f.transport.plantUnreadableCopy(name, contents: try #require(await elsewhere.allObjects[name]))
+
+        let reader = await f.reader()
+        let read = try await reader.sync()
+        #expect(read.applied == 2 && read.forkedObjects.isEmpty && read.copiesNotExamined == 1)
+        // The writer snapshots its stream; the reader acknowledges it; the writer would now collect position 1.
+        try await writer.sync()
+        try await reader.sync()
+        let collecting = try await writer.sync()
+        #expect(await f.transport.allObjects[name] != nil, "a name with a copy never read is not collected")
+        #expect(collecting.copiesNotExamined >= 1)
+        #expect(try await reader.sync().copiesNotExamined == 1, "and is looked at again")
+
+        await f.transport.makeCopiesReadable(name)
+        let late = try await reader.sync()
+        #expect(late.forkedObjects == [name] && late.rejected.isEmpty)
+        #expect(try await reader.item(forked.id).title == "Only in the fork")
+        #expect(try await reader.item(first.id).title == "First")
+        let handedOn = try await writer.sync()
+        #expect(handedOn.forkedObjects == [name])
+        #expect(try await writer.item(forked.id).title == "Only in the fork")
+    }
+
+    /// Threat: A1 (review finding R13) plants junk under names no device will ever merge, snapshot names of a real
+    /// device with junk as the current file and a full set of junk copies beside it. A name a device waits on is
+    /// examined again at every sync, and nothing is remembered about junk that never verifies, so before this the
+    /// whole per-sync bound went on them, ahead of every name the device had already merged: a fork of its stream
+    /// that arrived late was never read, and a forked author never learnt of its own fork. Half of the bound is kept
+    /// for copies found late, so the late fork is read in the first sync after it appears.
+    @Test("junk under names a device waits on cannot keep a late copy from being read")
+    func junkUnderWantedNamesStarvesNothing() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("First", password: "first-secret"))
+        try await f.writer.sync()
+        var configuration = SyncTestClient.configuration
+        configuration.maximumCopiesPerSync = 64
+        await f.keys.trust(device: Self.b)
+        let reader = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        try await reader.sync()
+
+        for lamport in 900..<904 {
+            let name = SyncObjectLocation.snapshot(vaultID: Self.vault, author: Self.a, lamport: UInt64(lamport)).name
+            await f.transport.tamper(name, contents: [UInt8(lamport & 0xFF)])
+            for index in 0..<16 { await f.transport.plantCopy(name, contents: [UInt8(lamport & 0xFF), UInt8(index)]) }
+        }
+        let elsewhere = InMemorySyncTransport()
+        let restored = SyncTestClient(deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: elsewhere)
+        let forked = try await restored.save(Self.login("Only in the fork", password: "fork-secret"))
+        try await restored.sync()
+        let name = f.segmentName(1)
+        await f.transport.plantCopy(name, contents: try #require(await elsewhere.allObjects[name]))
+
+        let report = try await reader.sync()
+        #expect(report.forkedObjects == [name], "\(report.copiesExamined) examined")
+        #expect(try await reader.item(forked.id).title == "Only in the fork")
+        #expect(report.copiesExamined < configuration.maximumCopiesPerSync + 2 * configuration.maximumCopiesPerObject)
+    }
+
     /// Threat: A1 floods the store with copies — hundreds under one name, and some under every name of a long
     /// stream — to make each sync read and check without end, or to keep a device from ever getting through a
     /// stream or publishing. Each sync reads a bounded number of copies; the stream is merged from its current files

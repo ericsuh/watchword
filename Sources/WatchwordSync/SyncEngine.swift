@@ -41,7 +41,10 @@ public struct SyncConfiguration: Sendable {
     /// Once a sync has fetched this many copies of such names, it looks at no further name's copies (the name it is
     /// on is finished, so a name is never half examined): a name the stream needs is fetched as its current file
     /// alone, and the rest wait for a later sync. A flood of copies so costs a bounded number of reads and signature
-    /// checks, fewer than this plus `maximumCopiesPerObject`, and stalls nothing.
+    /// checks, fewer than this plus `maximumCopiesPerObject`, and stalls nothing. Half of it is kept for copies under
+    /// names this device has already merged, so that junk under names it is still waiting for, which is examined
+    /// again at every sync, cannot keep a late copy, a fork of its own stream included, from ever being read (review
+    /// finding R13).
     public var maximumCopiesPerSync = 512
 
     public init(schemaVersions: [EnvelopeKind: UInt64]) {
@@ -547,7 +550,9 @@ public actor SyncEngine {
         let listedSnapshots = Set(listing.snapshots)
         let collected = alreadyStaged.filter { $0.kind == .snapshot && !listedSnapshots.contains($0) }
         if !collected.isEmpty { try await syncState.unstage(Array(collected)) }
-        var budget = max(0, configuration.maximumCopiesPerSync)
+        // Half for the names this sync waits on, the rest (and whatever they left) for copies found late (R13).
+        let allowance = max(0, configuration.maximumCopiesPerSync)
+        var budget = allowance - allowance / 2
         for location in wanted where !alreadyStaged.contains(location) {
             do {
                 // Several copies under one name: each is checked alone, and what verifies is staged together. With
@@ -576,6 +581,7 @@ public actor SyncEngine {
         }
         // Copies under a name this device has already merged (a second copy that appeared since, or junk planted
         // beside the object): looked at once per count the transport gives, and what verifies is applied late.
+        budget = max(0, budget) + allowance / 2
         let wantedNames = Set(wanted)
         for (location, count) in listing.copies.sorted(by: { $0.key.name < $1.key.name })
         where !wantedNames.contains(location) && !alreadyStaged.contains(location)
@@ -613,13 +619,21 @@ public actor SyncEngine {
     /// Keeps `collectedThrough` up to date: this device's own segments up to what a listed snapshot covers need not
     /// be listed (it may have collected them). A state from before this was kept takes the stream as whole at its
     /// first listing: everything below the lowest segment listed was collected.
+    ///
+    /// Never the newest segment it published, which it never collects (`collectGarbage`), so an honest store always
+    /// lists it: a snapshot of another device's that covers this device's whole stream says nothing about whether the
+    /// store still holds it. Only the snapshot this device hands everything on in after a reset stands for its newest
+    /// segment (`writeSnapshotIfElected`). Without that bound every device that was not the snapshot writer lost its
+    /// own sign of a reset (review finding SR19).
     private func noteCovered(_ state: inout SyncState, listing: Listing) {
+        let newest = state.lastPublishedSequence
+        let belowNewest = newest > 0 ? newest - 1 : 0
         var through = state.collectedThrough
         if through == nil {
-            let lowest = listing.segments[deviceID]?.min() ?? (state.lastPublishedSequence &+ 1)
-            through = lowest > 0 ? lowest - 1 : 0
+            let lowest = listing.segments[deviceID]?.min() ?? (newest &+ 1)
+            through = min(lowest > 0 ? lowest - 1 : 0, belowNewest)
         }
-        let covered = min(listedCoverage(state, listing: listing)[deviceID] ?? 0, state.lastPublishedSequence)
+        let covered = min(listedCoverage(state, listing: listing)[deviceID] ?? 0, belowNewest)
         state.collectedThrough = max(through ?? 0, covered)
     }
 
@@ -672,9 +686,12 @@ public actor SyncEngine {
             name, maximumLength: configuration.maximumObjectLength,
             maximumCopies: max(1, configuration.maximumCopiesPerObject))
         budget -= max(1, found.copies.count)
-        report.copiesNotExamined += found.omitted
+        report.copiesNotExamined += found.omitted + found.unread
         // Deleted since the listing: no object.
-        guard !found.copies.isEmpty || found.omitted > 0 else { return }
+        guard !found.copies.isEmpty || found.omitted > 0 || found.unread > 0 else { return }
+        // A copy that cannot be read now may be read later: the name is not examined in full, so nothing about it is
+        // remembered and the next sync looks again (review finding R11). Its author does not collect it meanwhile.
+        let whole = found.unread == 0
         report.fetched += found.copies.count
         var seen: Set<[UInt8]> = []
         var verified: [(bytes: [UInt8], object: SignedObject)] = []
@@ -708,25 +725,27 @@ public actor SyncEngine {
         verified.sort { $0.bytes.lexicographicallyPrecedes($1.bytes) }
         var failure: (any Error)?
         if verified.isEmpty {
-            failure = refusal ?? SyncTransportError.objectTooLarge(name)
+            failure =
+                refusal ?? (whole ? SyncTransportError.objectTooLarge(name) : SyncTransportError.objectUnreadable(name))
         } else if judge != nil, verified.count > 1 {
             failure = SyncTransportError.conflictingVersions(name)
         }
         if let failure {
             guard late else { throw failure }
-            if conclusive { state.examinedCopies[location] = count }
+            if conclusive, whole { state.examinedCopies[location] = count }
             report.rejected.append(SyncRejection(name: name, reason: Self.reason(failure)))
             return
         }
         if late, judge != nil {
             // One verifying copy at a position already merged and judged: nothing to apply.
-            if conclusive { state.examinedCopies[location] = count }
+            if conclusive, whole { state.examinedCopies[location] = count }
             return
         }
+        // `copies` is what `noteExamined` remembers; zero remembers nothing.
         try await syncState.stage(
             StagedObject(
                 location: location, object: verified[0].object, alternates: verified.dropFirst().map(\.object),
-                copies: count))
+                copies: whole ? count : 0))
     }
 
     // MARK: - Merge
@@ -1633,14 +1652,13 @@ public actor SyncEngine {
         for (key, erasure) in state.erasures where !present.contains(key) {
             entries.append(.tombstone(key, stamp: erasure.stamp, erasure: erasure.summary))
         }
+        // Never a name this device has used for a snapshot, whatever kind of snapshot this is: after a reset the store
+        // no longer refuses a second create of it, and a device that merged the earlier snapshot under that name would
+        // not read this one (SR4 for the hand-on; review finding R15 for one owed for a revoked device or a fork).
         var lamport = max(entries.map(\.version).max() ?? 0, 1)
-        if handingOn {
-            // Never a name this device has used for a snapshot: after a reset the store no longer refuses a second
-            // create of it, and a device that merged the earlier snapshot under that name would not read this one.
-            let used = state.snapshots.keys.filter { $0.author == deviceID }.map(\.number)
-            let highest = max(state.highestOwnSnapshot, used.max() ?? 0, state.handedOn?.snapshot.number ?? 0)
-            lamport = max(lamport, min(highest, configuration.maximumVersion) + 1)
-        }
+        let used = state.snapshots.keys.filter { $0.author == deviceID }.map(\.number)
+        let highest = max(state.highestOwnSnapshot, used.max() ?? 0, state.handedOn?.snapshot.number ?? 0)
+        if highest > 0 { lamport = max(lamport, min(highest, configuration.maximumVersion) + 1) }
         // A snapshot this device owes must be written even if it already wrote one at this Lamport time (nothing
         // newer has been stored since): the next free number is as good a name.
         for _ in 0..<(owed ? 16 : 1) {
@@ -1668,9 +1686,12 @@ public actor SyncEngine {
             // Handed on: what this device merged from revoked devices is now in a snapshot of its own.
             state.snapshots = state.snapshots.filter { !retired.contains($0.key.author) }
             state.handOnOwed = false
-            // Its own segments up to what this snapshot covers need not be listed any more.
+            // Its own segments up to what this snapshot covers need not be listed any more, but for the newest, which
+            // is kept, unless this is the hand-on after a reset, which stands for every segment it published (SR19).
+            let newest = state.lastPublishedSequence
             state.collectedThrough = max(
-                state.collectedThrough ?? 0, min(vector[deviceID] ?? 0, state.lastPublishedSequence))
+                state.collectedThrough ?? 0,
+                min(vector[deviceID] ?? 0, handingOn ? newest : newest > 0 ? newest - 1 : 0))
             if handingOn {
                 // It holds everything this device had merged, whatever it could claim to cover.
                 state.handedOn = HandedOn(snapshot: location, holding: state.merged)
@@ -1709,12 +1730,20 @@ public actor SyncEngine {
         let limit = min(covered, acknowledged)
         let own = listing.segments[deviceID] ?? []
         let newest = own.max() ?? 0
+        // A name of its own under which the store holds copies this device has not examined in full is never
+        // collected: deleting it removes every copy (`SyncTransport.delete`), and one it has not read may be a fork
+        // that no other device has read either (review finding R11).
+        let examined = state.examinedCopies
+        let unexamined = { (location: SyncObjectLocation) in
+            listing.copies[location].map { examined[location] != $0 } ?? false
+        }
         for sequence in own where sequence <= limit && sequence < newest {
-            try await transport.delete(
-                SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence).name)
+            let location = SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence)
+            guard !unexamined(location) else { continue }
+            guard try await collect(location.name, report: &report) else { continue }
             report.collected += 1
         }
-        for (location, written) in state.snapshots where location.author == deviceID {
+        for (location, written) in state.snapshots where location.author == deviceID && !unexamined(location) {
             // The snapshot that handed everything on after a reset stands for all it holds (§7.10), so only a
             // snapshot covering that much supersedes it.
             var coverage = written
@@ -1725,11 +1754,23 @@ public actor SyncEngine {
                 other != location && !retired.contains(other.author) && Self.covers(otherCoverage, coverage)
                     && (!Self.covers(coverage, otherCoverage) || Self.snapshotOrder(location, other))
             }
-            guard superseded else { continue }
-            try await transport.delete(location.name)
+            guard superseded, try await collect(location.name, report: &report) else { continue }
             state.snapshots[location] = nil
             if state.handedOn?.snapshot == location { state.handedOn = nil }
             report.collected += 1
+        }
+    }
+
+    /// Deletes one object of this device's own; `false` if the transport refused that object alone (its conflict
+    /// versions could not be removed, say), which is reported and tried again at a later collection rather than
+    /// failing the sync (review finding SR23). An error that stops the sync still does.
+    private func collect(_ name: String, report: inout SyncReport) async throws -> Bool {
+        do {
+            try await transport.delete(name)
+            return true
+        } catch let error as SyncTransportError where !error.stopsSync {
+            report.rejected.append(SyncRejection(name: name, reason: Self.reason(error)))
+            return false
         }
     }
 

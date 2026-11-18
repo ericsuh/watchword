@@ -90,9 +90,11 @@ public protocol SyncTransport: Sendable {
     /// it holds in all. Metadata only: nothing is read. The default is `list` with no such names.
     func listWithCopies(prefix: String) async throws -> SyncListing
     /// Every copy the provider holds under `name`, the current one first: at most `maximumCopies`, each at most
-    /// `maximumLength` bytes. A copy over either bound, or one that cannot be read, is counted in `omitted` and never
-    /// fails the call, so a planted copy cannot hide the others. No copies and none omitted means there is no object.
-    /// The default is the one `fetch` returns.
+    /// `maximumLength` bytes. A copy over either bound is counted in `omitted`, and one that cannot be read *now* (its
+    /// contents not downloaded yet, a read that failed) in `unread`, after asking the provider for it where it can;
+    /// neither fails the call, so a planted copy cannot hide the others. The engine looks at a name with unread copies
+    /// again at its next sync, and its author does not collect it meanwhile (review finding R11). No copies and none
+    /// omitted or unread means there is no object. The default is the one `fetch` returns.
     func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) async throws -> SyncObjectCopies
     /// Starts a store again that was reset (`storeReset`): the one call that may recreate a store this device has
     /// seen and then found missing. Called only on the person's confirmed decision to upload again
@@ -119,12 +121,16 @@ public struct SyncListing: Sendable, Hashable {
 /// does not say which is genuine, and the engine does not ask.
 public struct SyncObjectCopies: Sendable, Hashable {
     public var copies: [[UInt8]]
-    /// Copies not returned: past the caller's count, over its size limit, or unreadable.
+    /// Copies not returned for good: past the caller's count, over its size limit, or not a file at all.
     public var omitted: Int
+    /// Copies not returned because they cannot be read now and may be later: not downloaded yet, or a read that
+    /// failed. Never taken as examined (review finding R11).
+    public var unread: Int
 
-    public init(copies: [[UInt8]] = [], omitted: Int = 0) {
+    public init(copies: [[UInt8]] = [], omitted: Int = 0, unread: Int = 0) {
         self.copies = copies
         self.omitted = omitted
+        self.unread = unread
     }
 }
 
@@ -152,17 +158,21 @@ public actor InMemorySyncTransport: SyncTransport {
     /// Copies beside (or without) the current object of a name, as iCloud Drive keeps a conflict version or a
     /// renamed second create.
     private var otherCopies: [String: [[UInt8]]] = [:]
+    /// Copies the store lists under a name and cannot hand over yet, as iCloud Drive lists a conflict version whose
+    /// contents are not downloaded: counted, and returned as `unread`, until `makeCopiesReadable`.
+    private var unreadableCopies: [String: [[UInt8]]] = [:]
 
     public init() {}
 
     public func list(prefix: String) -> [String] {
-        Set(objects.keys).union(otherCopies.keys).filter { $0.hasPrefix(prefix) }.sorted()
+        Set(objects.keys).union(otherCopies.keys).union(unreadableCopies.keys).filter { $0.hasPrefix(prefix) }.sorted()
     }
 
     public func listWithCopies(prefix: String) -> SyncListing {
         var listing = SyncListing(names: list(prefix: prefix))
-        for (name, copies) in otherCopies where name.hasPrefix(prefix) {
-            listing.copied[name] = copies.count + (objects[name] == nil ? 0 : 1)
+        for name in Set(otherCopies.keys).union(unreadableCopies.keys) where name.hasPrefix(prefix) {
+            listing.copied[name] =
+                (otherCopies[name]?.count ?? 0) + (unreadableCopies[name]?.count ?? 0) + (objects[name] == nil ? 0 : 1)
         }
         return listing
     }
@@ -176,6 +186,7 @@ public actor InMemorySyncTransport: SyncTransport {
                 found.omitted += 1
             }
         }
+        found.unread = unreadableCopies[name]?.count ?? 0
         return found
     }
 
@@ -193,6 +204,7 @@ public actor InMemorySyncTransport: SyncTransport {
     public func delete(_ name: String) {
         objects[name] = nil
         otherCopies[name] = nil
+        unreadableCopies[name] = nil
     }
 
     // MARK: - Test seams: what anyone with write access to the store (A1) can do.
@@ -217,9 +229,22 @@ public actor InMemorySyncTransport: SyncTransport {
         otherCopies[name] ?? []
     }
 
+    /// Adds a copy beside whatever is under `name` that is listed and cannot be read yet: a conflict version whose
+    /// contents iCloud has not downloaded.
+    public func plantUnreadableCopy(_ name: String, contents: [UInt8]) {
+        unreadableCopies[name, default: []].append(contents)
+    }
+
+    /// The copies `plantUnreadableCopy` left under `name` can be read from now on.
+    public func makeCopiesReadable(_ name: String) {
+        otherCopies[name, default: []] += unreadableCopies[name] ?? []
+        unreadableCopies[name] = nil
+    }
+
     /// Removes every object and copy: a store that was reset, or a folder that was emptied.
     public func removeEverything() {
         objects = [:]
         otherCopies = [:]
+        unreadableCopies = [:]
     }
 }

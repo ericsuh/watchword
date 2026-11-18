@@ -162,17 +162,27 @@ public struct FileSyncTransport: SyncTransport {
     }
 
     /// The file of `name` and its renamed duplicates, in that order, as bytes: at most `maximumCopies`, each within
-    /// `maximumLength`. Anything else under those names (a link, a directory, a file over the limit or unreadable)
-    /// is counted as omitted, so one planted entry cannot hide the copies after it.
+    /// `maximumLength`. Anything else under those names (a link, a directory, a file over the limit) is counted as
+    /// omitted, and a file whose read failed as unread (`SyncObjectCopies.unread`: it may be readable at the next
+    /// sync, review finding R11), so one planted entry cannot hide the copies after it.
     public func fetchCopiesNow(_ name: String, maximumLength: Int, maximumCopies: Int) throws -> SyncObjectCopies {
         var found = SyncObjectCopies()
         for url in [try fileURL(for: name)] + (try duplicateURLs(for: name)) {
             switch try Self.kind(of: url) {
             case .missing: continue
             case .file:
-                guard found.copies.count < maximumCopies,
-                    let bytes = try? Self.read(url, maximumLength: maximumLength)
-                else {
+                guard found.copies.count < maximumCopies else {
+                    found.omitted += 1
+                    continue
+                }
+                let bytes: [UInt8]?
+                do {
+                    bytes = try Self.read(url, maximumLength: maximumLength)
+                } catch {
+                    found.unread += 1
+                    continue
+                }
+                guard let bytes else {
                     found.omitted += 1
                     continue
                 }

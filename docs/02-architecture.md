@@ -536,7 +536,9 @@ it for good. Now the transport says what it holds and the engine decides, as for
 - *The port.* `SyncTransport.listWithCopies` is `list` plus, for each name the provider holds anything besides the one
   current object under, how many copies it holds in all; `fetchCopies` returns their bytes, the current one first, at
   most `maximumCopies` of them and each within `maximumLength` (a copy over either bound is counted in `omitted`, not
-  returned, and never fails the call). Both default to `list` and `fetch`, so a transport that cannot hold two copies
+  returned, and never fails the call; one that cannot be read *now*, a conflict version or renamed file iCloud has not
+  downloaded or a read that failed, is counted in `unread`, asked for where the provider allows it, and never taken
+  for examined: R11). Both default to `list` and `fetch`, so a transport that cannot hold two copies
   (CloudKit saves only new records) implements nothing. `delete` removes every copy under the name. There is still no
   "update", and no call that resolves a conflict.
 - *Each copy is checked alone, in the existing order.* Identical bytes are one copy. At download: the container, the
@@ -591,7 +593,9 @@ it for good. Now the transport says what it holds and the engine decides, as for
 - *Nothing is resolved on the provider; the decision is remembered locally.* Removing a copy deletes bytes another
   device may not have read, and only the engine of a device that has merged a copy knows it is safe to lose there;
   so no device removes another device's copies, ever, and no device "picks a winner" on the provider. Each device
-  remembers per name the number of copies it has examined, and looks again only when the provider's count changes.
+  remembers per name the number of copies it has examined, and looks again only when the provider's count changes,
+  or at every sync while one of them could not be read (`unread`); its author does not collect a name of its own
+  whose copies it has not examined in full (R11), since `delete` removes every copy.
   The copies go when the object goes: its author collects it under the usual rule (every other stream acknowledges
   the position, a listed snapshot covers it, and it is not the stream's newest), after its hand-on snapshot, and the
   transport's `delete` then removes every copy under the name. Junk copies beside another device's object stay until
@@ -599,7 +603,8 @@ it for good. Now the transport says what it holds and the engine decides, as for
 - *Bounds* (`SyncConfiguration.maximumCopiesPerObject`, 16; `maximumCopiesPerSync`, 512). At most 16 copies of one
   name are fetched, each within the object size limit; more are counted (`SyncReport.copiesNotExamined`) and not
   read. Once one sync has fetched 512 copies of flagged names it looks at no further name's copies (the name it is on
-  is finished, so the most is 527): a flagged name the stream needs is fetched as its current file alone, as before
+  is finished, so the most is 527), and half of that is kept for names already merged, so that junk under names a
+  device still waits for, examined again at every sync, cannot keep a late copy from being read (R13): a flagged name the stream needs is fetched as its current file alone, as before
   this was built (its other copies are examined by a later sync, late), and already-merged names wait for a later
   sync. So a flood of copies costs a bounded number of reads and signature
   checks per sync, stalls no stream whose current file is genuine, and cannot stop this device publishing: rejections
@@ -1041,7 +1046,8 @@ that has something to add, because the person on another device may have deleted
    remembers doing, not by what the store shows: a device that has never published or merged a log publishes as ever.
 3. *The engine sees it* (`SyncReport.storeLacksObjects`, `SyncState.storeResetSuspected`): at a listing, before
    anything listed is merged, an object this device wrote and did not delete is missing — a segment past what it may
-   have collected (`SyncState.collectedThrough`), or a snapshot it remembers writing; a device sees its own objects
+   have collected (`SyncState.collectedThrough`, which never reaches the newest segment it published, since it never
+   collects that one, except after its own hand-on snapshot: SR19), or a snapshot it remembers writing; a device sees its own objects
    at once and nobody else deletes them, so an honest store lists them all — *and* it has merged something of some
    stream that nothing listed stands for (a segment past what the listed snapshots it has merged cover is missing).
    This is what a device that was offline during a reset finds when it returns to a store another device has
@@ -1095,8 +1101,8 @@ or runs between the two steps. Then:
 - *Sequence numbers are never restarted, and no snapshot name is used twice.* The device's stream continues at its
   next number. A number once used was read by other devices under other bytes; using it again is the fork of §7.5.
   The snapshot's coverage of the device's own stream is what lets every reader, new or old, pass the gap where its
-  segments were. A snapshot is named by a number above any this device has used for one
-  (`SyncState.highestOwnSnapshot`): an emptied store would accept an old name again, and a device that had merged
+  segments were. Every snapshot, the hand-on and one owed for a revoked device or a fork alike (R15), is named by a
+  number above any this device has used for one (`SyncState.highestOwnSnapshot`): an emptied store would accept an old name again, and a device that had merged
   the earlier snapshot under it would never read the new one.
 - *`published`, `known`, `merged`, the erasures and the acknowledgements are kept as they are.* `published` still
   says "on the transport in something this device wrote": the snapshot carries every row. Nothing is forgotten, so

@@ -218,6 +218,86 @@ struct SyncStoreResetTests {
         #expect(try await Self.titles(d).contains("From C, seen by B alone"))
     }
 
+    /// Review finding SR19. Not an attack: the normal resting state of every device that is not the snapshot
+    /// writer. A publishes; B merges all of it and writes a snapshot; A merges that snapshot, which covers A's whole
+    /// stream; C had merged A's stream only part of the way. Then the store is reset, B is gone, and C uploads what
+    /// it holds. A's newest edits are now in no store, so A must be asked. The snapshot of B's must not have told A
+    /// that its own newest segment need not be listed: a device never collects its newest segment, so an honest
+    /// store always lists it.
+    @Test("a device whose stream another device's snapshot covered still notices its own objects gone after a reset")
+    func coveredStreamStillNoticesAReset() async throws {
+        let transport = InMemorySyncTransport()
+        let keys = FakeAccountKeys(seed: 101)
+        await keys.addVaultKey(vaultID: Household.vault)
+        let (aID, bID, cID) = (Household.deviceIDs[0], Household.deviceIDs[1], Household.deviceIDs[2])
+        for id in [aID, bID, cID] { await keys.trust(device: id) }
+        var eager = SyncTestClient.configuration
+        eager.snapshotThreshold = 1
+        let a = SyncTestClient(deviceID: aID, vaultID: Household.vault, keys: keys, transport: transport)
+        let b = SyncTestClient(
+            deviceID: bID, vaultID: Household.vault, keys: keys, transport: transport, configuration: eager)
+        let c = SyncTestClient(deviceID: cID, vaultID: Household.vault, keys: keys, transport: transport)
+        for index in 0..<6 {
+            try await a.save(Household.login(title: "A \(index)"))
+            try await a.sync()
+            if index == 3 { try await c.sync() }
+        }
+        #expect(try await b.sync().snapshotsWritten == 1)
+        let merged = try await a.sync()
+        #expect(merged.snapshotsWritten == 0 && merged.storeLacksObjects == false)
+        #expect(await a.state()?.snapshots.keys.contains { $0.author == aID } == false, "A wrote no snapshot")
+
+        await transport.removeEverything()
+        try await c.engine.sync(handingOn: true)
+        let asked = try await a.sync()
+        #expect(asked.storeLacksObjects, "A holds edits nothing listed stands for")
+        #expect(asked.snapshotsWritten == 0 && asked.segmentsWritten == 0)
+        try await a.engine.sync(handingOn: true)
+        let d = await Self.newcomer(Household(keys: keys, devices: [a, b, c]), on: transport)
+        try await d.sync()
+        #expect(try await Self.titles(d) == Set((0..<6).map { "A \($0)" }))
+    }
+
+    /// Review finding R15. A snapshot was named by the highest version it holds, and only the hand-on after a
+    /// reset was named above every name this device had used. A snapshot it owes (for a fork of its own stream, as
+    /// here, or for a revoked device's work), written with no new version since its last one, took that one's name:
+    /// where the store had lost the earlier snapshot (A1 deleted it, or a reset), the name was free again, and a
+    /// device that had merged the earlier snapshot under it would not read the new one. Every snapshot of this
+    /// device's is named above every one it has written.
+    @Test("a snapshot a device owes never takes the name of one it wrote before")
+    func owedSnapshotNamesAreNotReused() async throws {
+        let transport = InMemorySyncTransport()
+        let keys = FakeAccountKeys(seed: 103)
+        await keys.addVaultKey(vaultID: Household.vault)
+        let (aID, rID) = (Household.deviceIDs[0], Household.deviceIDs[1])
+        for id in [aID, rID] { await keys.trust(device: id) }
+        var eager = SyncTestClient.configuration
+        eager.snapshotThreshold = 1
+        let a = SyncTestClient(
+            deviceID: aID, vaultID: Household.vault, keys: keys, transport: transport, configuration: eager)
+        let r = SyncTestClient(deviceID: rID, vaultID: Household.vault, keys: keys, transport: transport)
+        for index in 0..<4 {
+            try await r.save(Household.login(title: "R \(index)"))
+            try await r.sync()
+        }
+        #expect(try await a.sync().snapshotsWritten == 1)
+        try await a.sync()
+        let snapshots = { await transport.allObjects.keys.filter { $0.contains("/snapshot/") } }
+        let first = try #require(await snapshots().first)
+
+        // The store loses the snapshot, and the device owes another (a fork of its own stream found since).
+        await transport.delete(first)
+        var state = try #require(await a.state())
+        state.handOnOwed = true
+        try await a.syncState.saveState(state)
+        #expect(try await a.sync().snapshotsWritten == 1)
+        let second = try #require(await snapshots().first)
+        #expect(second != first)
+        let fresh = await Self.newcomer(Household(keys: keys, devices: [a, r]), on: transport)
+        try await fresh.sync()
+        #expect(try await Self.titles(fresh) == Set((0..<4).map { "R \($0)" }))
+    }
+
     @Test("a second reset after an upload is noticed by the missing snapshot, and nothing is uploaded unasked")
     func secondReset() async throws {
         let (home, transport, _) = try await Self.settled()

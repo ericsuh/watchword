@@ -422,7 +422,8 @@ struct ConflictCopyEngineTests {
         }
         let report = try await fork.reader.sync()
         #expect(report.applied == 5 && report.rejected.isEmpty && report.waiting.isEmpty, "\(report)")
-        #expect(report.copiesExamined == 8, "the bound, and the name it was reached on finished")
+        // Half the bound (3) is for names this sync waits on (R13): the first name's four copies, finished.
+        #expect(report.copiesExamined == 4, "the bound, and the name it was reached on finished")
         var examined = report.copiesExamined
         for _ in 0..<6 { examined += try await fork.reader.sync().copiesExamined }
         #expect(examined == 20, "every copy is looked at in the end, a bounded number per sync")
@@ -540,5 +541,67 @@ struct ConflictCopyEngineTests {
         #expect(report.applied == 0 && report.waiting == [SyncFixtures.deviceA: 1])
         #expect(report.rejected.map(\.name) == [fork.name])
         #expect(try await fork.reader.items().isEmpty)
+    }
+}
+
+/// A store whose deletions of one name fail as the object's own failure, as the iCloud Drive adapter's do when the
+/// conflict versions of a file cannot be removed.
+actor RefusingDeletesTransport: SyncTransport {
+    let base = InMemorySyncTransport()
+    var refusing = true
+
+    func allow() { refusing = false }
+
+    func list(prefix: String) async throws -> [String] { await base.list(prefix: prefix) }
+
+    func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
+        try await base.fetch(name, maximumLength: maximumLength)
+    }
+
+    func create(_ name: String, contents: [UInt8]) async throws { try await base.create(name, contents: contents) }
+
+    func delete(_ name: String) async throws {
+        if refusing { throw SyncTransportError.objectUnreadable(name) }
+        await base.delete(name)
+    }
+}
+
+@Suite("Collecting a device's own objects")
+struct CollectionFailureTests {
+    /// Review finding SR23. A deletion that the transport refuses for that object alone used to end the whole sync
+    /// with the raw error, from the garbage collection after publishing; the account's next vaults never synced. It is
+    /// reported against the name, the object is kept, and it is collected at a later sync.
+    @Test("a deletion refused for one object is reported, the sync finishes, and a later sync collects it")
+    func refusedDeletionIsOneObjectsFailure() async throws {
+        let transport = RefusingDeletesTransport()
+        var eager = SyncTestClient.configuration
+        eager.snapshotThreshold = 1
+        let keys = FakeAccountKeys(seed: 107)
+        await keys.addVaultKey(vaultID: Household.vault)
+        let (aID, bID) = (Household.deviceIDs[0], Household.deviceIDs[1])
+        for id in [aID, bID] { await keys.trust(device: id) }
+        let a = SyncTestClient(
+            deviceID: aID, vaultID: Household.vault, keys: keys, transport: transport, configuration: eager)
+        let b = SyncTestClient(deviceID: bID, vaultID: Household.vault, keys: keys, transport: transport)
+        var reports: [SyncReport] = []
+        for index in 0..<4 {
+            try await a.save(Household.login(title: "A \(index)"))
+            reports.append(try await a.sync())
+            try await b.sync()
+        }
+        for _ in 0..<3 {
+            reports.append(try await a.sync())
+            try await b.sync()
+        }
+        #expect(reports.allSatisfy { $0.collected == 0 })
+        #expect(reports.contains { !$0.rejected.isEmpty }, "the refused deletions are reported")
+        await transport.allow()
+        var collected = 0
+        for _ in 0..<3 {
+            collected += try await a.sync().collected
+            try await b.sync()
+        }
+        #expect(collected > 0)
+        #expect(try await b.items().count == 4)
     }
 }

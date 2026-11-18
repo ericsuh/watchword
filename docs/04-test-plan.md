@@ -983,26 +983,32 @@ other does, and reported as not required on Linux, where they cannot compile.
   `SyncTransportContract.singleCopies` on every transport and `heldCopies` on the in-memory, directory and simulated
   ones; only an exact `<name> <n>` (2 to 64) is a copy; a copy whose object is gone is still listed; a link or
   directory under a copy's name is counted and never followed. *State* ("… what is staged and remembered"): staged
-  copies round-trip and a hostile row is no object; the state's new fields survive encoding and an older row.
+  copies round-trip and a hostile row is no object; "Collecting a device's own objects": a deletion refused for one
+  object is reported and tried again, never the sync's end (SR23, `refusedDeletionIsOneObjectsFailure`); the state's new fields survive encoding and an older row.
   *Engine* ("… the engine"): junk beside an object; the object behind a junk current file; no copy verifying refused
   alone; two verifying copies merged, in either order to the same items; a late copy; the forked author's hand-on;
   acknowledgements by minimum; snapshot copies; both bounds; a judge refusing a fork, at download and from an edited
   staging row; a copy that verifies and does not open stopping the position whole. *Adversarial*: "sync log"
   (`AdversarialSyncConflictCopyTests`: planted junk of five kinds, the genuine object hidden, two verifying forks
-  reaching devices past the position, a flood, a shared vault's fork, a copy planted in the staging area) and "sync
+  reaching devices past the position, a flood, a shared vault's fork, a copy planted in the staging area, a copy
+  that cannot be read yet, read once it can be and never collected before, R11, `unreadableCopyReadLater`; junk under
+  names a device waits on, which no longer keeps a late copy from being read, R13,
+  `junkUnderWantedNamesStarvesNothing`) and "sync
   with real keys" (planted copies while locked and after unlock; a really signed fork merged by every device and
   handed on). `LongRunningSyncSimulationTests` plants junk copies and forked copies of a device's newest segment and
   still converges, loses nothing, and leaves no hand-on owed.
 - **Starting again after a reset** (architecture §7.10; portable, Linux). *Engine* ("Store reset: the engine",
   over the fakes): no sync, replay included, uploads again what the store held; a store never set up is not a
   reset; one device hands on everything and a new device reads all of it, with sequence numbers and state kept;
-  asked twice it hands on once; an offline device that holds more is asked, and its new edits wait behind a gap
+  asked twice it hands on once; a device whose stream another device's snapshot covered still notices its own
+  newest segment gone (SR19, `coveredStreamStillNoticesAReset`); an offline device that holds more is asked, and its new edits wait behind a gap
   until it answers; two devices in either order, and at once without seeing each other's snapshot, converge; a
   device whose own stream another device's upload stands for is still asked about a third stream; a second reset is
   noticed by the missing snapshot, and no snapshot name is used twice; a pending deletion and a merged erasure
   travel; the quarantine and the stash stay (a stash narrows the snapshot's coverage to the uploader's own stream);
   a vault that keeps its whole log refuses; an honest store with snapshots, collection and a restored state file
-  never raises the question; a replay is postponed offline and rebuilds from the snapshot afterwards; the state's
+  never raises the question; a snapshot a device owes is never named like one it wrote before (R15,
+  `owedSnapshotNamesAreNotReused`); a replay is postponed offline and rebuilds from the snapshot afterwards; the state's
   new fields survive encoding and an older row. *Session* ("Store reset: the session", real sessions, both kinds of
   reset — the transport saying so, and a store merely emptied): nothing uploaded unasked, locked or not, new edits
   included; a store that never held the account publishes; after the call a brand-new device enrols and reads every
@@ -1022,8 +1028,8 @@ other does, and reported as not required on Linux, where they cannot compile.
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
   revoked device cannot answer and stays revoked; a password change survives). `LongRunningSyncSimulationTests`
   resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone
-  recreated by `startStoreAgain` alone, left alone when it exists, deleted first after a key reset, nothing created
-  offline) and its adversarial suite (a faked reset repeated; no deletion of a zone that answers). Not covered: a
+  recreated by `startStoreAgain` alone, left alone when it exists,
+  deleted first after a key reset, nothing created offline) and its adversarial suite (a faked reset repeated; no deletion of a zone that answers). Not covered: a
   vault too large for one snapshot (`ReuploadRefusal.tooLarge` needs 64 MiB of records), CloudKit itself, and the
   SwiftUI alert.
 - **"Adversarial: Apple adapters: CloudKit transport"** (`AdversarialCloudKitTransportTests`, Mac, over the fake
