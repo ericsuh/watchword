@@ -1500,7 +1500,8 @@ for that account alone. The session pins as soon as evidence exists (for a joine
 the account named); evidence not pinned lives in the run and goes with it. A different pin already there is not replaced
 (`keysDifferFromPin`), and the person's explicit "use their new keys" replaces it only to keys a shared vault's chain
 lists for that account (`replacePinFromSharingCode(listedIn:)`), so a session with the wrong device cannot settle a
-"keys changed" warning to keys nobody listed. After a session the starter invites as before (`invite`: the grant to the
+"keys changed" warning to keys nobody listed; with no vault named, every shared vault is loaded first and none may list
+the account with other keys, and nothing is replaced while one cannot be restored (V28). After a session the starter invites as before (`invite`: the grant to the
 pinned bundle and the record that adds them) and sends the `Invitation` as one more board object, `"WWVI"`, signed by
 its account key and bound to the session, its number and the joiner (`inviteThroughSharingCode`), under a name that
 carries the session (`vault-sharing/<number>/invitation/<session>`). Inviting is resumable: a retry delivers the same

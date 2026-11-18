@@ -11,12 +11,14 @@ import WatchwordTestSupport
 /// the suite "shared vaults through the session"; the adversaries are those of §2.
 extension AdversarialSharedVaultTests {
     /// A member's device whose sharing state still lists `vaultID`, relaunched over `contacts`, unlocked.
-    static func relaunch(_ member: SharingAccount, directory: InMemoryKeyBundleDirectory) async throws -> TestVault {
+    static func relaunch(
+        _ member: SharingAccount, directory: InMemoryKeyBundleDirectory, board: (any SharingBoard)? = nil
+    ) async throws -> TestVault {
         let relaunched = member.vault.relaunched()
         await relaunched.session.configureSharing(
             SharingSettings(
                 state: member.state, contacts: member.contacts, directory: directory,
-                shareAccess: member.shareAccess))
+                shareAccess: member.shareAccess, board: board))
         try await relaunched.session.unlock(password: TestVault.password)
         return relaunched
     }
@@ -76,5 +78,40 @@ extension AdversarialSharedVaultTests {
         #expect(try await session.sharedVaultIDs().contains(vaultID))
         #expect(try await session.sharedVaultsAwaitingOwnerCheck().isEmpty)
         #expect(try await session.sharedVaultStatus(vaultID).role == .readOnly)
+    }
+
+    /// Threat: A8 damages a shared vault's saved ledger (it no longer restores) while the owner's pin stays, A1 serves
+    /// impostor keys for the owner, and an attacker nearby runs a session as the owner's account; the person types the
+    /// attacker's digits (V14) and chooses "use their new keys" after the warning (V28). With no vault loaded that lists
+    /// the owner, the guard found nothing to object to and replaced the owner's pin, after which an invitation from the
+    /// attacker for the vault would pass the owner check. Every shared vault is loaded first, and while one cannot be
+    /// restored nothing replaces a pin on a session's word.
+    @Test("no pin is replaced from a session while a shared vault here cannot be restored")
+    func noPinReplacedWhileAVaultIsUnrestored() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 1_340)
+        let member = members[0]
+        await member.state.tamper(.ledger, vaultID: vaultID, value: Array(repeating: 0x57, count: 64))
+        let device = try await Self.relaunch(member, directory: household.directory, board: household.board)
+
+        let impostor = try SharingParty(accountID: owner.accountID, seed: 1_349)
+        await household.directory.publish(impostor.bundle)
+        var generator = SeededGenerator(seed: 1_350)
+        var fake = SharingCodeStarter.draw(as: impostor.bundle, using: &generator, at: Date())
+        try await fake.publish(on: household.board, at: Date())
+        let joined = try await device.session.joinSharingCodeSession(number: fake.number.digits)
+        #expect(joined.partner == owner.accountID)
+        try await fake.poll(board: household.board, directory: household.directory, at: Date())
+        let shown = try await device.session.refreshSharingCodeSession()
+        _ = try fake.enterJoinerCode(try #require(shown.ownCode), at: Date())
+        let typed = try await device.session.enterSharingCode(try #require(fake.code))
+        #expect(typed.keysDifferFromPin && !typed.pinned)
+
+        await #expect(throws: SharedVaultError.sharingCodeKeysNotListed) {
+            try await device.session.replacePinFromSharingCode()
+        }
+        let pins = VerifiedContacts(store: member.contacts, account: member.bundle)
+        let pin = try #require(try await pins.pinned(owner.accountID))
+        #expect(pin.bundle.hasSameKeys(as: owner.bundle), "the owner's pin is unchanged")
     }
 }

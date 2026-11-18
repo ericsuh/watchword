@@ -357,6 +357,35 @@ extension VaultSession {
             throw SharingCodeError.notReady
         }
         let contact = evidence.contact
+        // Every shared vault this device holds, loaded first: one not loaded yet, or not restorable (`unanchored`),
+        // could list the account with other keys, and this device cannot tell (V28).
+        await loadSharedVaultsIfNeeded()
+        try requirePinReplaceable(contact, listedIn: vaultID)
+        let contacts = try verifiedContacts(settings)
+        let now = await clock.now()
+        let keys = try requireKeys(since: epoch)
+        // Again after the last suspension: a load or an ingest may have landed meanwhile.
+        try requirePinReplaceable(contact, listedIn: vaultID)
+        guard sharingCodeRun?.generation == run.generation else { throw SharingCodeError.notReady }
+        _ = try await contacts.verify(evidence, signedBy: keys.keyset, at: now, replacingPin: true)
+        if sharingCodeRun?.generation == run.generation {
+            sharingCodeRun?.pinned = true
+            sharingCodeRun?.pinConflict = false
+        }
+        retryUnanchoredVaults()
+        await refreshMemberKeyChecks()
+    }
+
+    // MARK: - Internals
+
+    /// Whether nothing this device holds says otherwise about replacing the pin of `contact.accountID` with `contact`:
+    /// with `vaultID`, that vault's chain must list these keys for the account; without, no loaded shared vault may
+    /// list the account with other keys. Either way every shared vault the sharing state lists must be loaded: an
+    /// unrestored one is one whose chain this device cannot read, and refusing is the only answer it can check (V28).
+    func requirePinReplaceable(_ contact: PublicKeyBundle, listedIn vaultID: UUID?) throws {
+        guard sharing.loaded, sharing.unanchored.allSatisfy({ sharing.vaults[$0] != nil }) else {
+            throw SharedVaultError.sharingCodeKeysNotListed
+        }
         if let vaultID {
             guard let member = try sharedVault(vaultID).ledger.state.member(contact.accountID),
                 member.bundle.hasSameKeys(as: contact)
@@ -368,19 +397,7 @@ extension VaultSession {
                 }
             }
         }
-        let contacts = try verifiedContacts(settings)
-        let now = await clock.now()
-        let keys = try requireKeys(since: epoch)
-        _ = try await contacts.verify(evidence, signedBy: keys.keyset, at: now, replacingPin: true)
-        if sharingCodeRun?.generation == run.generation {
-            sharingCodeRun?.pinned = true
-            sharingCodeRun?.pinConflict = false
-        }
-        retryUnanchoredVaults()
-        await refreshMemberKeyChecks()
     }
-
-    // MARK: - Internals
 
     func rememberAnswered(_ number: SharingSessionNumber, at now: Date) {
         answeredSharingNumbers[number.digits] = now
