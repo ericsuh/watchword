@@ -150,10 +150,22 @@ public enum ErrorWording {
         "Someone else wrote where the invitation goes, so it could not be sent inside this session. They are added: "
         + "send them the invitation below, and they paste it."
 
-    /// A shared vault this device could not restore: shared, and closed here until its owner is checked again (V19).
+    /// A shared vault with no verified ledger on this device (`ledgerUnavailable`; V19, V31): shared, and closed here.
     public static let sharedVaultUnavailable =
-        "This shared vault cannot be used on this device until you check its owner again with a vault sharing code. "
-        + "Nothing in it was changed."
+        "This shared vault is not available on this device yet, so nothing in it was changed. Open it in Vaults to "
+        + "check its owner or set it up here again."
+
+    /// Why a shared vault is closed on this device, and the way back, which loses nothing (V33).
+    public static func unavailable(_ reason: SharedVaultUnavailability) -> String {
+        switch reason {
+        case .ownerNotChecked:
+            return "This shared vault cannot be used on this device until you check its owner again with a vault "
+                + "sharing code. Nothing in it was changed."
+        case .notSetUp:
+            return "This shared vault is not set up on this device, so it cannot be changed from here. Set it up "
+                + "again: your device checks it with its owner's keys, and every item in it stays."
+        }
+    }
 
     /// Why a member who may edit a shared vault cannot rename it (docs/02-architecture.md §8.7).
     public static let renameRefused = "Only this vault's owner or an administrator can rename it."

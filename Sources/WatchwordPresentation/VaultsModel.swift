@@ -46,11 +46,15 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     public let name: String
     public let isPersonal: Bool
     public let createdAt: Date?
-    /// `nil` for a vault that is not shared, or for one awaiting its owner's check (`awaitingOwnerCheck`).
+    /// `nil` for a vault that is not shared, or for one that is unavailable here (`unavailability`).
     public let sharing: VaultSharing?
-    /// A shared vault this device could not restore: shared, and unavailable here until the owner is checked again
-    /// (`VaultSession.sharedVaultsAwaitingOwnerCheck`; V19). Never shown as one of the account's own.
-    public let awaitingOwnerCheck: Bool
+    /// A shared vault with no verified ledger on this device, and why: shared, and closed here until the owner is
+    /// checked again or the vault is set up on this device again (`VaultSession.unavailableSharedVaults`; V19, V31,
+    /// V33). Never shown as one of the account's own.
+    public let unavailability: SharedVaultUnavailability?
+
+    /// Shared and unavailable on this device.
+    public var awaitingOwnerCheck: Bool { unavailability != nil }
 
     public var isReadOnly: Bool { awaitingOwnerCheck || sharing?.readOnlyReason != nil }
 
@@ -60,7 +64,7 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
 
     /// Why this account cannot rename the vault, worded; `nil` while it can.
     public var renameRefusal: String? {
-        awaitingOwnerCheck ? ErrorWording.sharedVaultUnavailable : sharing?.renameRefusal
+        unavailability.map(ErrorWording.unavailable) ?? sharing?.renameRefusal
     }
 
     /// Whose vault this is and this account's part in it, from the session's facts rather than the name: an
@@ -68,7 +72,11 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     /// can try (review of the account screens, finding 4). Shown wherever a vault is named, beside the name.
     public var badge: String {
         if isPersonal { return "Your own vault" }
-        if awaitingOwnerCheck { return "Shared · check its owner" }
+        switch unavailability {
+        case .ownerNotChecked?: return "Shared · check its owner"
+        case .notSetUp?: return "Shared · not set up here"
+        case nil: break
+        }
         guard let sharing else { return "Only you" }
         if sharing.role == .owner { return "Shared by you" }
         return "Shared with you · " + sharing.roleName
@@ -83,20 +91,26 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     /// What the row says under the name.
     public var detail: String {
         if isPersonal { return "Your own vault. It is never shared." }
-        if awaitingOwnerCheck { return "Shared. Check its owner again before it can be used here." }
+        switch unavailability {
+        case .ownerNotChecked?: return "Shared. Check its owner again before it can be used here."
+        case .notSetUp?: return "Shared. Set it up on this device before it can be used here."
+        case nil: break
+        }
         guard let sharing else { return "Only you" }
         if sharing.requiresNewerVersion { return "Read-only: update Watchword" }
         let members = sharing.memberCount == 1 ? "1 member" : "\(sharing.memberCount) members"
         return "Shared, \(members). You: \(sharing.roleName)"
     }
 
-    public init(_ info: VaultInfo, sharing: VaultSharing?, awaitingOwnerCheck: Bool = false) {
+    public init(_ info: VaultInfo, sharing: VaultSharing?, unavailability: SharedVaultUnavailability? = nil) {
         id = info.id
         name = info.name.isEmpty ? "Unnamed vault" : info.name
         isPersonal = info.isPersonal
         createdAt = info.createdAt
         self.sharing = sharing
-        self.awaitingOwnerCheck = awaitingOwnerCheck
+        // The session's word, from either source: a vault it lists as unavailable is never shown as the account's own.
+        self.unavailability =
+            unavailability ?? (info.isSharedUnavailable && sharing == nil ? .notSetUp(owner: nil) : nil)
     }
 }
 
@@ -110,8 +124,8 @@ extension VaultRow {
         for id in (try? await session.sharedVaultIDs()) ?? [] {
             if let status = try? await session.sharedVaultStatus(id) { shared[id] = VaultSharing(status) }
         }
-        let unavailable = Set((try? await session.sharedVaultsAwaitingOwnerCheck()) ?? [])
-        return vaults.map { VaultRow($0, sharing: shared[$0.id], awaitingOwnerCheck: unavailable.contains($0.id)) }
+        let unavailable = (try? await session.unavailableSharedVaults()) ?? [:]
+        return vaults.map { VaultRow($0, sharing: shared[$0.id], unavailability: unavailable[$0.id]) }
     }
 }
 
@@ -140,12 +154,12 @@ public final class VaultsModel {
             let session = context.session
             let vaults = try await session.vaults()
             var shared: [UUID: VaultSharing] = [:]
-            var unavailable: Set<UUID> = []
+            var unavailable: [UUID: SharedVaultUnavailability] = [:]
             do {
                 for id in try await session.sharedVaultIDs() {
                     shared[id] = VaultSharing(try await session.sharedVaultStatus(id))
                 }
-                unavailable = Set(try await session.sharedVaultsAwaitingOwnerCheck())
+                unavailable = try await session.unavailableSharedVaults()
                 sharingAvailable = true
                 if fingerprint == nil, let bundle = try? await session.publicKeyBundle() {
                     fingerprint = OwnFingerprint(bundle)
@@ -153,7 +167,7 @@ public final class VaultsModel {
             } catch is SharedVaultError {
                 sharingAvailable = false
             }
-            rows = vaults.map { VaultRow($0, sharing: shared[$0.id], awaitingOwnerCheck: unavailable.contains($0.id)) }
+            rows = vaults.map { VaultRow($0, sharing: shared[$0.id], unavailability: unavailable[$0.id]) }
         }
     }
 
@@ -193,14 +207,14 @@ public final class VaultsModel {
         let session = context.session
         let vaults = try await session.vaults()
         var shared: [UUID: VaultSharing] = [:]
-        var unavailable: Set<UUID> = []
+        var unavailable: [UUID: SharedVaultUnavailability] = [:]
         if sharingAvailable {
             for id in (try? await session.sharedVaultIDs()) ?? [] {
                 if let status = try? await session.sharedVaultStatus(id) { shared[id] = VaultSharing(status) }
             }
-            unavailable = Set((try? await session.sharedVaultsAwaitingOwnerCheck()) ?? [])
+            unavailable = (try? await session.unavailableSharedVaults()) ?? [:]
         }
-        rows = vaults.map { VaultRow($0, sharing: shared[$0.id], awaitingOwnerCheck: unavailable.contains($0.id)) }
+        rows = vaults.map { VaultRow($0, sharing: shared[$0.id], unavailability: unavailable[$0.id]) }
     }
 
     @discardableResult

@@ -138,3 +138,93 @@ extension AdversarialSharedVaultTests {
         _ = try await second.session.save(Self.bank(in: vaultID))
     }
 }
+
+extension AdversarialSharedVaultTests {
+    /// Threat: A8 plants `.owner` and `.ledger` rows in the sharing state for one of the account's own vaults and for
+    /// its Personal vault (review of the follow-up audit's fixes, L1). With V19's rule a listed ledger that did not
+    /// restore closed the vault for good, the Personal vault included: no write, no sync of its objects, and no way
+    /// back. Rows of the sharing state mark nothing (the security-audit branch's Z50): both vaults stay the account's
+    /// own, writable and shareable, and nothing is reported unavailable.
+    @Test("rows planted in the sharing state close no vault, the Personal one included")
+    func plantedRowsCloseNothing() async throws {
+        let household = SharedVaultHousehold()
+        let account = try await household.account(seed: 1_490)
+        let own = try await account.session.createVault(name: "Mine").id
+        let personal = try #require(try await account.session.vaults().first { $0.isPersonal }?.id)
+        for vaultID in [own, personal] {
+            await account.state.tamper(.owner, vaultID: vaultID, value: Array(repeating: 0x41, count: 16))
+            await account.state.tamper(.ledger, vaultID: vaultID, value: Array(repeating: 0x57, count: 96))
+        }
+        let device = try await Self.relaunch(account, directory: household.directory)
+        let session = device.session
+
+        #expect(try await session.unavailableSharedVaults().isEmpty)
+        for vaultID in [own, personal] {
+            _ = try await session.save(Self.bank(in: vaultID))
+        }
+        try await session.sync()
+        try await session.shareVault(own)
+        #expect(try await session.sharedVaultIDs() == [own])
+    }
+
+    /// Threat: A8 damages a shared vault's saved ledger on a member's device while the owner's pin stays. Nothing on
+    /// the device verifies the ledger, so checking the owner again (all V19's wording offered) could not restore it,
+    /// and the vault stayed closed for good. The session tells this apart from a missing pin (V33), and the person's
+    /// way back, setting the vault up again on this device from the account's marker, verifies the chain against the
+    /// owner's pin and keeps every item.
+    @Test("a shared vault whose ledger does not verify is set up again, and keeps every item")
+    func damagedLedgerIsSetUpAgain() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 1_500)
+        let member = members[0]
+        let saved = try await member.session.save(Self.bank(in: vaultID))
+        try await member.session.sync()
+        await member.state.tamper(.ledger, vaultID: vaultID, value: Array(repeating: 0x57, count: 96))
+        let device = try await Self.relaunch(member, directory: household.directory)
+        let session = device.session
+
+        let reason = try await session.unavailableSharedVaults()[vaultID]
+        #expect(reason == .notSetUp(owner: owner.accountID))
+        #expect(try await session.item(id: saved.id).title == saved.title, "readable while closed")
+        try await session.setUpSharedVaultAgain(vaultID)
+        #expect(try await session.unavailableSharedVaults().isEmpty)
+        #expect(try await session.sharedVaultStatus(vaultID).role == .readWrite)
+        #expect(try await session.item(id: saved.id).title == saved.title, "nothing was lost")
+        try await session.sync()
+        #expect(try await session.item(id: saved.id).title == saved.title, "nor taken out by the restored ledger")
+    }
+
+    /// Threat: as V28 (A8 damages a shared vault's ledger, A1 serves impostor keys, an attacker runs a session under
+    /// an account), but for an account that owns no vault this device cannot read. V28's guard refused every pin
+    /// replacement while any listed ledger did not restore, so one planted or damaged row blocked the person's
+    /// "use their new keys" for every contact. Only the pin of an unavailable vault's owner is refused now; the
+    /// owner's is (`noPinReplacedWhileAVaultIsUnrestored`), another contact's is not.
+    @Test("an unavailable shared vault blocks replacing its owner's pin and no other")
+    func pinReplacementScopedToTheOwner() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, _, members) = try await household.household(roles: [.readWrite], seed: 1_530)
+        let member = members[0]
+        let contact = try await household.account(seed: 1_590)
+        try await member.session.verifyContact(contact.accountID, evidence: .safetyNumber(contact.safetyNumber))
+        await member.state.tamper(.ledger, vaultID: vaultID, value: Array(repeating: 0x57, count: 64))
+        let device = try await Self.relaunch(member, directory: household.directory, board: household.board)
+        #expect(try await device.session.sharedVaultsAwaitingOwnerCheck() == [vaultID])
+
+        let replacement = try SharingParty(accountID: contact.accountID, seed: 1_549)
+        await household.directory.publish(replacement.bundle)
+        var generator = SeededGenerator(seed: 1_550)
+        var starter = SharingCodeStarter.draw(as: replacement.bundle, using: &generator, at: Date())
+        try await starter.publish(on: household.board, at: Date())
+        _ = try await device.session.joinSharingCodeSession(number: starter.number.digits)
+        try await starter.poll(board: household.board, directory: household.directory, at: Date())
+        let shown = try await device.session.refreshSharingCodeSession()
+        _ = try starter.enterJoinerCode(try #require(shown.ownCode), at: Date())
+        let typed = try await device.session.enterSharingCode(try #require(starter.code))
+        #expect(typed.keysDifferFromPin && !typed.pinned)
+
+        try await device.session.replacePinFromSharingCode()
+        let pins = VerifiedContacts(store: member.contacts, account: member.bundle)
+        let pin = try #require(try await pins.pinned(contact.accountID))
+        #expect(pin.bundle.hasSameKeys(as: replacement.bundle), "the person's choice was honoured")
+    }
+}

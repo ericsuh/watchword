@@ -43,11 +43,12 @@ struct SharingRuntime: Sendable {
     var settings: SharingSettings?
     var vaults: [UUID: SharedVault] = [:]
     var loaded = false
-    /// Vaults the sharing state lists whose saved ledger could not be restored at the last load (the owner's pin gone
-    /// or replaced, the ledger or owner row damaged: A8). Says nothing about whether a vault is shared, which only
-    /// the markers and granted keys say (`isMarkedShared`, V31): a pin made afterwards loads the saved ledgers again
-    /// (`retryUnanchoredVaults`). Kept across a lock, as `loaded` is, and recomputed by every load.
-    var unanchored: Set<UUID> = []
+    /// Vaults the sharing state lists whose saved ledger could not be restored at the last load, and why (the owner's
+    /// pin gone, or the ledger or owner row damaged: A8). Says nothing about whether a vault is shared, which only the
+    /// markers and granted keys say (`isMarkedShared`, V31, V32), and only words an unavailable one for the person
+    /// (`unavailableSharedVaults`, V33): a pin made afterwards loads the saved ledgers again (`retryUnrestoredVaults`).
+    /// Kept across a lock, as `loaded` is, and recomputed by every load.
+    var unrestored: [UUID: UnrestoredLedger] = [:]
     /// The owner each shared vault's marker names, as this device has read them from the record store
     /// (VaultSession+SharedMarker.swift). Only ever added to; public facts, kept across a lock.
     var markers: [UUID: UUID] = [:]
@@ -58,6 +59,31 @@ struct SharingRuntime: Sendable {
     var markerConflicts: Set<UUID> = []
     /// Other accounts' registries, evaluated from the transport, by the anchor a vault's chain gives them.
     var registries: [MemberRegistryAnchor: DeviceRegistryState] = [:]
+}
+
+/// Why a ledger the sharing state lists did not restore at the last load.
+struct UnrestoredLedger: Sendable, Hashable {
+    /// The owner the saved `.owner` row names, if it is a well-formed one. Unsigned: for wording and for refusing
+    /// more (V28), never for anything that opens.
+    var savedOwner: UUID?
+    /// The checkpoint carries this account's signature for this vault, and the owner it names is not pinned: the
+    /// ledger lacks only its anchor, and checking the owner again restores it (V33).
+    var lacksOnlyTheOwnersPin: Bool
+}
+
+/// Why a shared vault is unavailable on this device (`VaultSession.unavailableSharedVaults`; V31, V33). Either way it
+/// is shared and held closed (readable; nothing written, sealed, published, deleted or shared again), and the person's
+/// way back loses nothing: every item stays where it is, and what the restored ledger does not count is held aside.
+public enum SharedVaultUnavailability: Sendable, Hashable {
+    /// This device's saved ledger is intact (its own signature verifies) and names an owner it no longer has a pin
+    /// for: checking the owner again with a vault sharing code (or their full code) restores it.
+    case ownerNotChecked(owner: UUID)
+    /// No ledger here that verifies: none was ever saved on this device (another device of the account shared or
+    /// joined the vault), the saved one was deleted or damaged, or it is anchored to keys the owner's pin no longer
+    /// has. The vault is set up again by accepting its invitation on this device (`sharedVaultInvitation`, whose
+    /// owner is the account's marker's; `nil` while no marker has reached this device), which verifies the chain on
+    /// the transport back to that owner.
+    case notSetUp(owner: UUID?)
 }
 
 /// A contact as the key directory gives it, with what this device knows of it: the fingerprint to compare out of
@@ -154,7 +180,7 @@ extension VaultSession {
         let keys = try requireKeys(since: epoch)
         let pinned = try await contacts.verify(
             bundle, evidence: evidence, signedBy: keys.keyset, at: now, replacingPin: replacingPin)
-        retryUnanchoredVaults()
+        retryUnrestoredVaults()
         return pinned
     }
 
@@ -184,16 +210,28 @@ extension VaultSession {
         let epoch = lockEpoch
         guard let ids = try? await settings.state.sharedVaultIDs() else { return }
         var loaded: [UUID: SharedVault] = [:]
-        for vaultID in ids {
-            guard let ownerBytes = try? await settings.state.value(.owner, vaultID: vaultID), ownerBytes.count == 16,
-                let saved = try? await settings.state.value(.ledger, vaultID: vaultID),
+        var unrestored: [UUID: UnrestoredLedger] = [:]
+        let personalVaultID = account?.personalVaultID
+        // The Personal vault is never shared: a row naming it is not loaded, and closes nothing (V33).
+        for vaultID in ids where vaultID != personalVaultID {
+            let ownerBytes = try? await settings.state.value(.owner, vaultID: vaultID)
+            let savedOwner = ownerBytes.flatMap { $0.count == 16 ? Self.uuid($0) : nil }
+            unrestored[vaultID] = UnrestoredLedger(savedOwner: savedOwner, lacksOnlyTheOwnersPin: false)
+            guard let ownerID = savedOwner, let saved = try? await settings.state.value(.ledger, vaultID: vaultID),
                 let keys = try? requireKeys(since: epoch), let bundle = try? keys.keyset.publicKeyBundle()
             else { continue }
-            let ownerID = Self.uuid(ownerBytes)
             let contacts = VerifiedContacts(store: settings.contacts, account: bundle)
-            guard let owner = ownerID == bundle.accountID ? contacts.myself : try? await contacts.pinned(ownerID),
+            let owner = ownerID == bundle.accountID ? contacts.myself : try? await contacts.pinned(ownerID)
+            guard let owner,
                 let ledger = try? MembershipLedger.restore(saved, vaultID: vaultID, owner: owner, account: bundle)
-            else { continue }
+            else {
+                // Intact, signed by this account, and only the owner's pin missing: the owner check restores it.
+                let intact =
+                    MembershipLedger.savedOwnerDigest(saved, vaultID: vaultID, account: bundle) != nil
+                unrestored[vaultID]?.lacksOnlyTheOwnersPin = owner == nil && ownerID != bundle.accountID && intact
+                continue
+            }
+            unrestored[vaultID] = nil
             var vault = SharedVault(ledger: ledger)
             if let bytes = try? await settings.state.value(.proposals, vaultID: vaultID) {
                 vault.proposals = SharedBytes.decodeRecords(bytes).filter {
@@ -229,14 +267,14 @@ extension VaultSession {
         }
         // Listed and not restored. Whether such a vault is shared is the markers' and the keys' to say
         // (`isSharedUnavailable`, V31): a row of the sharing state closes nothing on its own (V32).
-        sharing.unanchored = Set(ids).filter { sharing.vaults[$0] == nil }
+        sharing.unrestored = unrestored.filter { sharing.vaults[$0.key] == nil }
         sharing.loaded = true
     }
 
     /// After a pin was made: a vault left unrestored because its owner was not pinned may restore now, so the next use
     /// loads the saved ledgers again (what is already loaded is kept).
-    func retryUnanchoredVaults() {
-        if !sharing.unanchored.isEmpty { sharing.loaded = false }
+    func retryUnrestoredVaults() {
+        if !sharing.unrestored.isEmpty { sharing.loaded = false }
     }
 
     /// Saves one vault's ledger, proposals, plan and index, each signed by the account (or verified again on load).
@@ -902,18 +940,45 @@ extension VaultSession {
         return sharing.vaults.keys.sorted { $0.uuidString < $1.uuidString }
     }
 
-    /// Shared vaults that are unavailable on this device (V19, V31): marked shared, or holding a key that arrived by
-    /// grant, with no verified ledger loaded. Shared, never one of the account's own, until this device sets the vault
-    /// up again (`acceptInvitation`) or, where only the owner's pin is gone, the owner is checked again. Not in
-    /// `sharedVaultIDs()`, which lists what this device can show.
-    public func sharedVaultsAwaitingOwnerCheck() async throws -> [UUID] {
+    /// Shared vaults that are unavailable on this device (V19, V31), and why (V33): marked shared, or holding a key that
+    /// arrived by grant, with no verified ledger loaded. Shared, never one of the account's own, until the owner is
+    /// checked again (`ownerNotChecked`: only the pin is gone) or this device sets the vault up again by accepting its
+    /// invitation (`notSetUp`). Not in `sharedVaultIDs()`, which lists what this device can show. The Personal vault
+    /// is never among them.
+    public func unavailableSharedVaults() async throws -> [UUID: SharedVaultUnavailability] {
         _ = try sharingSettings()
         await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
-        let directory = try await vaultDirectory(account)
-        return directory.keys.filter {
-            isSharedUnavailable($0, keys: keys, personalVaultID: account.personalVaultID)
-        }.sorted { $0.uuidString < $1.uuidString }
+        var result: [UUID: SharedVaultUnavailability] = [:]
+        for vaultID in try await vaultDirectory(account).keys
+        where isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+            let marked = sharing.markerConflicts.contains(vaultID) ? nil : sharing.markers[vaultID]
+            if let saved = sharing.unrestored[vaultID], saved.lacksOnlyTheOwnersPin, let owner = saved.savedOwner,
+                marked == nil || marked == owner
+            {
+                result[vaultID] = .ownerNotChecked(owner: owner)
+            } else {
+                result[vaultID] = .notSetUp(owner: marked)
+            }
+        }
+        return result
+    }
+
+    /// The unavailable shared vaults' IDs (`unavailableSharedVaults`), in order.
+    public func sharedVaultsAwaitingOwnerCheck() async throws -> [UUID] {
+        try await unavailableSharedVaults().keys.sorted { $0.uuidString < $1.uuidString }
+    }
+
+    /// Sets up again on this device a shared vault that is unavailable here (`SharedVaultUnavailability.notSetUp`,
+    /// V33): the person's way out when its ledger is missing or does not verify. Accepts the vault's invitation, whose
+    /// owner is the one the account's marker names (`sharedVaultInvitation`), verifying the chain on the transport
+    /// back to that owner, who must be pinned (or `ownerEvidence` given). Nothing held is discarded: the vault's
+    /// items stay, and the ledger that is set up judges them. Throws `ownerUnknown` while no marker names the owner.
+    public func setUpSharedVaultAgain(_ vaultID: UUID, ownerEvidence: VerificationEvidence? = nil) async throws {
+        guard let invitation = try await sharedVaultInvitation(vaultID) else {
+            throw SharedVaultError.ownerUnknown(vaultID)
+        }
+        try await acceptInvitation(invitation, ownerEvidence: ownerEvidence)
     }
 
     public func sharedVaultStatus(_ vaultID: UUID) async throws -> SharedVaultStatus {

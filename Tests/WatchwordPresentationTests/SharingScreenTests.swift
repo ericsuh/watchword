@@ -618,6 +618,33 @@ extension SharingScreenTests {
         #expect(detail.awaitingOwnerCheck && !detail.isShared)
         await detail.share()
         #expect(detail.errorMessage == ErrorWording.sharedVaultUnavailable)
+        #expect(!detail.maySetUpAgain, "only the owner's check restores a ledger that lacks only its pin")
+    }
+
+    /// A shared vault whose saved ledger does not verify (V33) says so, offers "Set Up on This Device", and is shared
+    /// and usable again once set up, with nothing lost.
+    @Test("a shared vault whose ledger does not verify is offered to be set up again on this device")
+    func damagedSharedVaultSetUpAgainOnScreen() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 711)
+        let member = home.members[0]
+        await member.state.tamper(.ledger, vaultID: home.vaultID, value: Array(repeating: 0x57, count: 96))
+        let relaunched = member.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+
+        let vaults = VaultsModel(context: ContextProbe().context(relaunched.session))
+        await vaults.load()
+        let row = try #require(vaults.row(home.vaultID))
+        #expect(row.badge == "Shared · not set up here")
+        #expect(row.isShared && row.isReadOnly && !row.mayRename)
+        let detail = SharedVaultModel(vaultID: home.vaultID, context: ContextProbe().context(relaunched.session))
+        await detail.load()
+        #expect(detail.maySetUpAgain)
+        await detail.setUpAgain()
+        #expect(detail.errorMessage == nil)
+        #expect(detail.isShared && !detail.awaitingOwnerCheck)
     }
 }
 

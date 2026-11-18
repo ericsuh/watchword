@@ -745,8 +745,14 @@ public struct MembershipLedger: Sendable {
     private static func checkpointContent(
         account: UUID, vaultID: UUID, owner: PublicKeyBundle, epoch: UInt64, hash: MembershipHash
     ) -> [UInt8] {
+        checkpointContent(account: account, vaultID: vaultID, ownerDigest: owner.keyDigest, epoch: epoch, hash: hash)
+    }
+
+    private static func checkpointContent(
+        account: UUID, vaultID: UUID, ownerDigest: [UInt8], epoch: UInt64, hash: MembershipHash
+    ) -> [UInt8] {
         checkpointMagic + [checkpointVersion] + account.sharingBytes + vaultID.sharingBytes
-            + owner.keyDigest + SharingBytes.littleEndian(epoch) + hash.bytes
+            + ownerDigest + SharingBytes.littleEndian(epoch) + hash.bytes
     }
 
     /// The ledger as one blob for local storage: a checkpoint (this account, the vault, the owner's bundle, the head)
@@ -781,6 +787,29 @@ public struct MembershipLedger: Sendable {
     /// names. A blob that was truncated, had records replaced or added, or was planted whole fails closed
     /// (`LedgerError`). What the signature cannot detect is an older blob of this device's own put back in place of a
     /// newer one; the next `ingest` from the transport moves it forward again.
+    /// Whether `bytes` begin with a checkpoint this account signed for `vaultID`, and which owner it names: the
+    /// owner's account ID is not in the checkpoint, only the digest of their account ID and keys, so the caller
+    /// compares it with `PublicKeyBundle.keyDigest`-style digests it can make. Nothing after the checkpoint is read.
+    /// For telling a saved ledger that only lacks its owner's pin from one that is damaged (V33): it verifies no
+    /// record, and a ledger is still restored only by `restore`.
+    public static func savedOwnerDigest(_ bytes: [UInt8], vaultID: UUID, account: PublicKeyBundle) -> [UInt8]? {
+        var reader = SharingReader(bytes)
+        guard (try? reader.header(magic: checkpointMagic, version: checkpointVersion)) != nil,
+            let savedAccount = try? reader.uuid(), let savedVault = try? reader.uuid(),
+            let ownerDigest = try? reader.read(32), let epoch = try? reader.uint64(),
+            epoch <= MembershipLimits.maximumEpoch, let hashBytes = try? reader.read(MembershipHash.byteCount),
+            let signature = try? reader.read(64), savedAccount == account.accountID, savedVault == vaultID
+        else { return nil }
+        let content = checkpointContent(
+            account: account.accountID, vaultID: vaultID, ownerDigest: ownerDigest, epoch: epoch,
+            hash: MembershipHash(unchecked: hashBytes))
+        guard
+            (try? Signatures.verify(signature, for: content, domain: .membership, signingKey: account.signingKey))
+                != nil
+        else { return nil }
+        return ownerDigest
+    }
+
     public static func restore(
         _ bytes: [UInt8], vaultID: UUID, owner: VerifiedContact, account: PublicKeyBundle
     ) throws -> MembershipLedger {

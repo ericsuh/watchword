@@ -1,6 +1,7 @@
 import Foundation
 import WatchwordCrypto
 import WatchwordSharing
+import WatchwordStore
 
 /// A board object a session made, kept so that a retry puts the same bytes there again (signing is randomised).
 struct SharingBoardObject: Sendable, Hashable {
@@ -357,8 +358,8 @@ extension VaultSession {
             throw SharingCodeError.notReady
         }
         let contact = evidence.contact
-        // Every shared vault this device holds, loaded first: one not loaded yet, or not restorable (`unanchored`),
-        // could list the account with other keys, and this device cannot tell (V28).
+        // Every shared vault this device holds, loaded first: one not loaded yet, or unavailable here, could list the
+        // account with other keys, and this device cannot tell (V28).
         await loadSharedVaultsIfNeeded()
         try requirePinReplaceable(contact, listedIn: vaultID)
         let contacts = try verifiedContacts(settings)
@@ -372,7 +373,7 @@ extension VaultSession {
             sharingCodeRun?.pinned = true
             sharingCodeRun?.pinConflict = false
         }
-        retryUnanchoredVaults()
+        retryUnrestoredVaults()
         await refreshMemberKeyChecks()
     }
 
@@ -380,10 +381,16 @@ extension VaultSession {
 
     /// Whether nothing this device holds says otherwise about replacing the pin of `contact.accountID` with `contact`:
     /// with `vaultID`, that vault's chain must list these keys for the account; without, no loaded shared vault may
-    /// list the account with other keys. Either way every shared vault the sharing state lists must be loaded: an
-    /// unrestored one is one whose chain this device cannot read, and refusing is the only answer it can check (V28).
+    /// list the account with other keys. Either way the shared vaults must have been loaded, and no shared vault that
+    /// is unavailable here may be owned by the account (V28): its chain is one this device cannot read, and a pin of
+    /// its owner replaced on a session's word would be what an invitation for it is accepted on. Scoped to that
+    /// owner (V33): one damaged or planted row does not stop every other pin being replaced. A vault whose owner this
+    /// device cannot name (a granted key, no marker, no saved owner) still refuses every replacement.
     func requirePinReplaceable(_ contact: PublicKeyBundle, listedIn vaultID: UUID?) throws {
-        guard sharing.loaded, sharing.unanchored.allSatisfy({ sharing.vaults[$0] != nil }) else {
+        guard sharing.loaded, sharing.markersLoaded, let account else {
+            throw SharedVaultError.sharingCodeKeysNotListed
+        }
+        for owner in unavailableVaultOwners(account: account) where owner == nil || owner == contact.accountID {
             throw SharedVaultError.sharingCodeKeysNotListed
         }
         if let vaultID {
@@ -396,6 +403,20 @@ extension VaultSession {
                     throw SharedVaultError.sharingCodeKeysNotListed
                 }
             }
+        }
+    }
+
+    /// The owner of each shared vault that is unavailable here, as far as this device can name them: the account's
+    /// marker, else the saved `.owner` row; `nil` where neither does, or where the account's markers disagree.
+    func unavailableVaultOwners(account: AccountRecord) -> [UUID?] {
+        let granted = keys?.vaultKeys.values.filter(\.arrivedByGrant).map(\.vaultID) ?? []
+        let candidates = Set(sharing.markers.keys).union(sharing.unrestored.keys).union(granted)
+        return candidates.sorted { $0.uuidString < $1.uuidString }.compactMap { vaultID -> UUID?? in
+            guard isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID) else {
+                return nil
+            }
+            if sharing.markerConflicts.contains(vaultID) { return .some(nil) }
+            return .some(sharing.markers[vaultID] ?? sharing.unrestored[vaultID]?.savedOwner)
         }
     }
 
@@ -480,7 +501,7 @@ extension VaultSession {
         sharingCodeRun?.pinned = pinned
         sharingCodeRun?.pinConflict = conflict
         if pinned {
-            retryUnanchoredVaults()
+            retryUnrestoredVaults()
             await refreshMemberKeyChecks()
         }
     }

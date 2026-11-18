@@ -44,6 +44,8 @@ extension AdversarialSharedVaultTests {
 
         #expect(try await session.sharedVaultIDs().contains(vaultID) == false)
         #expect(try await session.sharedVaultsAwaitingOwnerCheck() == [vaultID])
+        // Only the pin is missing, and the screen says so (V33).
+        #expect(try await session.unavailableSharedVaults()[vaultID] == .ownerNotChecked(owner: owner.accountID))
         // A read-only member's device writes nothing, renames nothing and shares nothing again.
         await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
             _ = try await session.save(Self.bank(in: vaultID))

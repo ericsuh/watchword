@@ -686,7 +686,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `isMarkedShared`. Until the markers are read every vault but the Personal one is held closed, so call
   `loadSharedMarkersIfNeeded()` before a path that picks a key. The way out is `acceptInvitation` (the invitation from
   `sharedVaultInvitation`, whose owner is the marker's; `knownOwner` throws `ownerUnknown` for a granted key with no
-  marker); the held-key fallback in `IncomingInvitation.accept` is for an invitation whose owner is this account.
+  marker; `setUpSharedVaultAgain` for the screens); the held-key fallback in `IncomingInvitation.accept` is for an
+  invitation whose owner is this account. `unavailableSharedVaults` says why a vault is closed (V33: `ownerNotChecked`
+  when only the owner's pin is missing from an intact saved ledger, otherwise `notSetUp`); the Personal vault is never
+  among them. A pin is refused replacement on a session's word only for the owner of a vault unavailable here (or for
+  everyone while such a vault's owner cannot be named), never for every contact.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
   key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds

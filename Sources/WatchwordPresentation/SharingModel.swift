@@ -59,8 +59,16 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
 public final class SharedVaultModel {
     public let vaultID: UUID
     public private(set) var isShared = false
-    /// Shared, and not restored on this device (V19): nothing is offered but checking the owner again; never "share".
-    public private(set) var awaitingOwnerCheck = false
+    /// Shared, and unavailable on this device (V19, V31), and why (V33): nothing is offered but the way back (checking
+    /// the owner again, or setting the vault up here again); never "share".
+    public private(set) var unavailability: SharedVaultUnavailability?
+    /// Shared and unavailable on this device.
+    public var awaitingOwnerCheck: Bool { unavailability != nil }
+    /// Whether "Set Up on This Device" is offered (`setUpAgain`): for a vault with no ledger here that verifies.
+    public var maySetUpAgain: Bool {
+        if case .notSetUp? = unavailability { return true }
+        return false
+    }
     public private(set) var sharingAvailable = true
     public private(set) var members: [MemberRow] = []
     public private(set) var sharing: VaultSharing?
@@ -115,6 +123,17 @@ public final class SharedVaultModel {
             try await context.session.shareVault(vaultID)
             try await reload()
             notice = "The vault can now be shared. Invite someone to it."
+        }
+    }
+
+    /// Sets the vault up again on this device (V33): accepts its invitation, from the account's marker, checked against
+    /// the owner's pin. Every item stays; the session refuses, and the screen words why, if the owner is not pinned or
+    /// not known yet.
+    public func setUpAgain() async {
+        await perform {
+            try await context.session.setUpSharedVaultAgain(vaultID)
+            try await reload()
+            notice = "The vault is set up on this device again."
         }
     }
 
@@ -186,10 +205,10 @@ public final class SharedVaultModel {
         guard shared.contains(vaultID) else {
             isShared = false
             members = []
-            awaitingOwnerCheck = try await session.sharedVaultsAwaitingOwnerCheck().contains(vaultID)
+            unavailability = try await session.unavailableSharedVaults()[vaultID]
             return
         }
-        awaitingOwnerCheck = false
+        unavailability = nil
         let status = try await session.sharedVaultStatus(vaultID)
         isShared = true
         sharing = VaultSharing(status)

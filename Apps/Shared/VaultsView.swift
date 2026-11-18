@@ -204,10 +204,15 @@ struct VaultDetailView: View {
             Section("Sharing") {
                 Text("Sharing vaults is not available in this version yet.").foregroundStyle(.secondary)
             }
-        } else if model.awaitingOwnerCheck {
+        } else if let reason = model.unavailability {
             Section("Sharing") {
-                Banner(text: ErrorWording.sharedVaultUnavailable, systemImage: "exclamationmark.triangle")
+                Banner(text: ErrorWording.unavailable(reason), systemImage: "exclamationmark.triangle")
                     .accessibilityIdentifier(AccessibilityID.Vault.awaitingOwnerCheck)
+                if model.maySetUpAgain {
+                    Button("Set Up on This Device") { Task { await model.setUpAgain() } }
+                        .disabled(model.isWorking)
+                        .accessibilityIdentifier(AccessibilityID.Vault.setUpAgain)
+                }
             }
         } else if !model.isShared {
             Section("Sharing") {
