@@ -1682,13 +1682,21 @@ public actor SyncEngine {
         let limit = min(covered, acknowledged)
         // Lowest first: while any segment of this stream is listed, none above it has been collected, which is what
         // lets a device whose state is older than its stream publish without reusing a number (`Listing.ownAnchored`,
-        // review finding Z31). A failed delete stops the loop, so a gap can never open below a listed segment.
+        // review finding Z31). A failed delete stops the loop, so a gap can never open below a listed segment; and so
+        // does a number missing from the listing (a provider's listing that left it out, or a store withholding it):
+        // deleting past it would leave it listed with higher numbers gone (review finding Z126). The newest kept is
+        // this device's own genuine head (what it published, or what verified as its own) or the highest listed number
+        // below it, never a listed name above it: anyone who can create a file can list one far ahead, and keeping
+        // that in place of the head deleted the anchor.
         let own = (listing.segments[deviceID] ?? []).sorted()
-        let newest = own.last ?? 0
-        for sequence in own where sequence <= limit && sequence < newest {
+        let newest = min(own.last ?? 0, max(state.lastPublishedSequence, listing.ownVerified))
+        var expected = own.first
+        for sequence in own {
+            guard sequence == expected, sequence <= limit, sequence < newest else { break }
             try await transport.delete(
                 SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence).name)
             report.collected += 1
+            expected = sequence + 1
         }
         for (location, coverage) in state.snapshots where location.author == deviceID {
             let superseded = state.snapshots.contains { other, otherCoverage in
