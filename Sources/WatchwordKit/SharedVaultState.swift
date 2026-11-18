@@ -372,6 +372,102 @@ struct SyncWriteCut: Sendable, Hashable {
     }
 }
 
+/// A set of fixed-length items this device keeps about one shared vault, as local state like the stream index:
+/// `magic 4 ‖ version u8 = 1 ‖ own account 16 ‖ vault 16 ‖ binding ‖ count u32 ‖ items, in ascending byte order with
+/// no repeats ‖ signature 64`, signed by the account's own key under `SignatureDomain.membership`. One that does not
+/// verify, names another account, vault or binding, or is not in that one form is refused whole (`nil`), which a
+/// caller treats as "not known" and never as "known to be empty" where that would open something (A8).
+enum SignedLocalSet {
+    static let formatVersion: UInt8 = 1
+    static let maximumItems = 1 << 16
+
+    static func signed(
+        magic: [UInt8], items: [[UInt8]], account: UUID, vaultID: UUID, binding: [UInt8] = [], keyset: Keyset
+    ) throws -> [UInt8] {
+        let ordered = Array(Set(items)).sorted { $0.lexicographicallyPrecedes($1) }.prefix(maximumItems)
+        var out = magic + [formatVersion] + SharedBytes.bytes(account) + SharedBytes.bytes(vaultID) + binding
+        out += SharedBytes.littleEndian32(UInt32(ordered.count))
+        for item in ordered { out += item }
+        return out + (try keyset.sign(out, domain: .membership))
+    }
+
+    static func parse(
+        _ bytes: [UInt8], magic: [UInt8], itemLength: Int, account: PublicKeyBundle, vaultID: UUID,
+        binding: [UInt8] = []
+    ) -> [[UInt8]]? {
+        guard bytes.count > 64 else { return nil }
+        let body = Array(bytes[..<(bytes.count - 64)])
+        guard
+            (try? Signatures.verify(
+                Array(bytes[(bytes.count - 64)...]), for: body, domain: .membership, signingKey: account.signingKey))
+                != nil
+        else { return nil }
+        var reader = SharedReader(body)
+        guard reader.read(magic.count) == magic, reader.read(1) == [formatVersion],
+            reader.uuid() == account.accountID, reader.uuid() == vaultID, reader.read(binding.count) == binding,
+            let count = reader.uint32(), Int(count) <= maximumItems, Int(count) * itemLength == reader.remaining
+        else { return nil }
+        var items: [[UInt8]] = []
+        for _ in 0..<count {
+            guard let item = reader.read(itemLength),
+                items.last.map({ $0.lexicographicallyPrecedes(item) }) ?? true
+            else { return nil }
+            items.append(item)
+        }
+        return items
+    }
+}
+
+/// Which keys of a shared vault this device has seen to be the ones its ledger hands this account (review finding
+/// Z59): each key that arrived by grant, by key ID, that this device opened from a grant the saved ledger entitles
+/// this account to, or found byte for byte equal to such a grant. Bound to the ledger's owner. A key of the vault the
+/// account's directory brings from another device is made resident only if it is listed here, or once a grant shows
+/// it: a key ID alone shows nothing, since key IDs are public and whoever signs a chain chooses the IDs it names.
+enum SharedKeyProvenance {
+    static let magic: [UInt8] = Array("WWVK".utf8)
+
+    static func signed(_ keyIDs: Set<UUID>, owner: UUID, account: UUID, vaultID: UUID, keyset: Keyset) throws
+        -> [UInt8]
+    {
+        try SignedLocalSet.signed(
+            magic: magic, items: keyIDs.map(SharedBytes.bytes), account: account, vaultID: vaultID,
+            binding: SharedBytes.bytes(owner), keyset: keyset)
+    }
+
+    static func parse(_ bytes: [UInt8], owner: UUID, account: PublicKeyBundle, vaultID: UUID) -> Set<UUID>? {
+        SignedLocalSet.parse(
+            bytes, magic: magic, itemLength: 16, account: account, vaultID: vaultID, binding: SharedBytes.bytes(owner)
+        ).map { Set($0.map(VaultSession.uuid)) }
+    }
+}
+
+/// `SharedStreamIndex.ownTakenOut` in a row of its own (review finding Z121): the take-out removed those versions
+/// from the store, so a rebuild of the index from the log cannot find them again, and the deletion gate
+/// (`holdsUnpublishedWork`) must not open because the index was refused, outgrew its bound, or was rebuilt.
+enum OwnTakenOutRow {
+    static let magic: [UInt8] = Array("WWTO".utf8)
+
+    static func signed(_ versions: Set<VersionKey>, account: UUID, vaultID: UUID, keyset: Keyset) throws -> [UInt8] {
+        try SignedLocalSet.signed(
+            magic: magic, items: versions.map(bytes), account: account, vaultID: vaultID, keyset: keyset)
+    }
+
+    static func parse(_ bytes: [UInt8], account: PublicKeyBundle, vaultID: UUID) -> Set<VersionKey>? {
+        SignedLocalSet.parse(bytes, magic: magic, itemLength: 25, account: account, vaultID: vaultID).map { items in
+            Set(
+                items.map { item in
+                    var reader = SharedReader(item)
+                    return VersionKey(
+                        recordID: reader.uuid()!, kind: reader.read(1)![0], version: reader.uint64()!)
+                })
+        }
+    }
+
+    static func bytes(_ version: VersionKey) -> [UInt8] {
+        SharedBytes.bytes(version.recordID) + [version.kind] + SharedBytes.littleEndian(version.version)
+    }
+}
+
 /// Little-endian encoding helpers for the session's own sharing formats.
 enum SharedBytes {
     static func bytes(_ id: UUID) -> [UInt8] {

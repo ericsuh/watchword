@@ -1599,6 +1599,17 @@ extension VaultSession {
             transport: transport, accountID: accountID, view: view, keyset: keys?.keyset, knownKeys: knownKeys,
             deletedVaults: deleted, markedVaults: markedLocally, personalVaultID: account.personalVaultID,
             report: &report)
+        // Which vaults the account's other devices know of, as far as the listing says: a device that holds nothing of
+        // one the listing names accepts no invitation for it naming just anyone (Z59, `knownOwner`).
+        sharing.directoryVaults = Set(
+            fetched.listed.compactMap { name -> UUID? in
+                switch AccountObjectLocation(name: name) {
+                case .vaultKey(let owner, let vaultID, _, _)? where owner == accountID: return vaultID
+                case .vaultDeletion(let owner, let vaultID, _)? where owner == accountID: return vaultID
+                case .vaultShared(let owner, let vaultID, _)? where owner == accountID: return vaultID
+                default: return nil
+                }
+            })
 
         var change = StoreChange()
         var indexed = Set(directory.keys)

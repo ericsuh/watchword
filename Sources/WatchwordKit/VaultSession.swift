@@ -886,6 +886,8 @@ public actor VaultSession: SharesExecutor {
     func install(_ newKeys: UnlockedKeys, at now: Date, withPassword: Bool) {
         keys = newKeys
         passwordEnteredEpoch = withPassword ? lockEpoch : nil
+        // Ledgers loaded before a lock stay loaded: the keys their vaults may use are chosen again (Z59).
+        withholdUnvouchedKeys()
         lastActivity = now
         backgroundedAt = nil
         startHygiene()

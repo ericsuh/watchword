@@ -29,6 +29,10 @@ public struct VaultInfo: Sendable, Hashable, Identifiable {
     /// unavailable vault too, and of every vault but the Personal one until the account's markers are read). The one
     /// fact AutoFill reads to tell a vault of the person's own from one a member writes (review finding Z60).
     public var isShared = false
+    /// The account's own devices disagree about whose this vault is (review finding Z59; `SharedVaultStatus`): held
+    /// closed (`isSharedUnavailable` is true too), on every device of the account, and nothing in this version ends
+    /// it. The items can be read and copied into a vault of the person's own.
+    public var isOwnerDisputed = false
 }
 
 /// A vault's own description, sealed under the vault key as a `.vaultMetadata` record whose record ID is the vault's
@@ -266,6 +270,9 @@ extension VaultSession {
             self.keys = UnlockedKeys(
                 accountUnlockKey: keys.accountUnlockKey, keyset: keys.keyset, vaultKeys: vaultKeys)
         }
+        // A key of a vault this device holds a ledger for is used only once that ledger hands it to this account
+        // (review finding Z59): the next sync's `admitVaultKeys` shows each from its grant.
+        withholdUnvouchedKeys()
     }
 
     // MARK: - Vault metadata
@@ -337,9 +344,11 @@ extension VaultSession {
             // A vault whose key this device does not hold (yet) is not one it can show. A shared vault with no
             // ledger here is shown, as shared and unavailable, if it holds any key for it: never hidden, and never
             // shown as one of the account's own (Z41).
+            // One whose owner the account's devices disagree about is held closed the same way, ledger or not (Z59).
+            let disputed = isOwnerDisputed(vaultID)
             let unavailable =
-                isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID)
-                && keys.vaultKeys.values.contains { $0.vaultID == vaultID }
+                (isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID) || disputed)
+                && (keys.vaultKeys.values.contains { $0.vaultID == vaultID } || sharing.vaults[vaultID] != nil)
             // A shared vault this account is no longer a member of has no current key here once the key was
             // rotated. It is still listed while this device holds items of it, so that they are shown as what they
             // are (`SharedVaultStatus.role` is `nil`) and can be removed (Z45).
@@ -354,7 +363,8 @@ extension VaultSession {
                     id: vaultID, name: metadata?.name ?? (isPersonal ? VaultInfo.defaultPersonalName : ""),
                     createdAt: metadata?.createdAt ?? (isPersonal ? account.createdAt : nil), isPersonal: isPersonal,
                     isDeleted: entry.isDeleted, isSharedUnavailable: unavailable,
-                    isShared: isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID)))
+                    isShared: isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID),
+                    isOwnerDisputed: disputed))
         }
         return result.sorted {
             if $0.isPersonal != $1.isPersonal { return $0.isPersonal }

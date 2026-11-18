@@ -34,9 +34,14 @@ extension VaultSession {
             do {
                 let before = try sharedVault(vaultID).ledger.state.hash
                 report.recordsRejected = try await ingestMembership(vaultID).rejected.count
-                if keys != nil {
+                // Held closed while the account's devices disagree about whose it is (Z59): membership is read, and
+                // nothing is proposed or taken up.
+                if keys != nil, !isOwnerDisputed(vaultID) {
                     if try await settleProposals(in: vaultID) { try await ingestMembership(vaultID) }
-                    report.keyReceived = try await fetchCurrentKey(vaultID)
+                    // Keys of the vault the account's directory brought, each taken up once a grant this ledger
+                    // entitles the account to shows it is the ledger's (Z59).
+                    if try await admitVaultKeys(vaultID) { report.keyReceived = true }
+                    if try await fetchCurrentKey(vaultID) { report.keyReceived = true }
                 }
                 report.membershipChanged = try sharedVault(vaultID).ledger.state.hash != before
                 report.requiresNewerVersion = try sharedVault(vaultID).ledger.continuesInLaterFormat
@@ -49,7 +54,8 @@ extension VaultSession {
         guard !reports.values.contains(where: { $0.transportFailure != nil }) else { return reports }
         await refreshMemberRegistries(account: account)
         guard keys != nil else { return reports }
-        for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+        for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString })
+        where !isOwnerDisputed(vaultID) {
             do {
                 try await takeOutWhatNoLongerCounts(vaultID)
                 try await saveSharedVault(vaultID)
@@ -88,6 +94,8 @@ extension VaultSession {
         }
         var configuration = base
         configuration.maintainsLog = false
+        // Disputed (Z59): downloaded only, like a vault with no ledger here.
+        if isOwnerDisputed(vaultID) { return (configuration, nil, false, false) }
         // A replay judges every version again, and notes again which devices' streams it is waiting on.
         if vault.needsReconcile { sharing.vaults[vaultID]?.index.awaiting = [] }
         return (
@@ -136,6 +144,13 @@ extension VaultSession {
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var report = reports[vaultID] ?? SharedVaultSyncReport()
             do {
+                // Held closed while the account's devices disagree about whose it is (Z59): no plan carried on or
+                // made, nothing sealed again.
+                if isOwnerDisputed(vaultID) {
+                    try await saveSharedVault(vaultID)
+                    reports[vaultID] = report
+                    continue
+                }
                 // Read-only past a later format (§8.9): no plan carried on or made, nothing sealed again.
                 if try sharedVault(vaultID).ledger.continuesInLaterFormat {
                     report.requiresNewerVersion = true

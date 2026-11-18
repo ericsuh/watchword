@@ -139,6 +139,8 @@ public enum ErrorWording {
         case .ownerUnknown:
             return "This device cannot yet tell whose shared vault that is, so it cannot accept an invitation to it. "
                 + "Sync, then try again."
+        case .ownerDisputed:
+            return VaultRow.ownerDisputedReason
         case .stillAMember:
             return "You are still a member of this vault. Leave it first; its items can be removed from this device "
                 + "once you are no longer a member."

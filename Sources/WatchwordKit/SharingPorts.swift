@@ -33,6 +33,13 @@ public enum SharingStateKey: String, Sendable, CaseIterable {
     /// account and signing key the vault's chain lists, the genesis entry and the credential entry it follows
     /// (review finding Z6).
     case memberDevices
+    /// The vault keys that arrived by grant which this device has checked against a grant its saved ledger entitles
+    /// this account to, byte for byte (`SharedKeyProvenance`, review finding Z59), signed: only those are made
+    /// resident for the vault.
+    case vaultKeys
+    /// The versions this device's own take-out held aside before they were published (`SharedStreamIndex.ownTakenOut`),
+    /// signed, in a row of their own so that they survive the index being refused or rebuilt (review finding Z121).
+    case ownTakenOut
 }
 
 public actor InMemorySharingStateStore: SharingStateStore {
@@ -127,6 +134,14 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// An invitation for a vault this device holds keys of, which arrived by grant, without knowing whose the vault
     /// is: it has no ledger for it and the account's marker has not reached it (review finding Z48). The vault has an
     /// owner, and an invitation is accepted only if it names them; one this device cannot check is not accepted,
-    /// whoever it names. It waits for the marker, or for the sync that brings it.
+    /// whoever it names. It waits for the marker, or for the sync that brings it. Also refused before this session has
+    /// listed the account's vault directory, and for a vault that listing names: the account's other devices know the
+    /// vault, and their marker is what names its owner (review finding Z59).
     case ownerUnknown(UUID)
+    /// The account's own devices disagree about whose the vault is: its markers name two owners, or this device's
+    /// ledger names an owner its account's marker does not (review finding Z59). Each side holds a chain verified to
+    /// someone the person compared a safety number with, and nothing on the device can tell which the person meant.
+    /// The vault is held closed on every device of the account, ledger or not: readable, and nothing written,
+    /// sealed again, published or proposed, and its keys given to nobody.
+    case ownerDisputed(UUID)
 }
