@@ -58,8 +58,8 @@ public struct RelyingPartyID: Hashable, Sendable, CustomStringConvertible {
         }
         // Both forms must pass: the embedded suffix list may name an internationalised suffix in either.
         do {
-            try ScopePolicy.validate(ServiceScope(host: raw))
-            try ScopePolicy.validate(ServiceScope(host: host.value))
+            try ScopePolicy.validate(ScopePolicy.newScope(forHost: raw))
+            try ScopePolicy.validate(ScopePolicy.newScope(forHost: host.value))
         } catch let error as ScopeValidationError {
             throw RelyingPartyIDError.scopeRejected(error)
         }
@@ -81,9 +81,12 @@ public struct RelyingPartyID: Hashable, Sendable, CustomStringConvertible {
     }
 
     /// The scope a new item created for a passkey of this relying party gets. Subdomains are included because that is
-    /// what a relying party ID means: the credential is usable from the ID's host and every host below it.
+    /// what a relying party ID means: the credential is usable from the ID's host and every host below it. The one
+    /// exception is a relying party at a shared-hosting suffix (`ScopePolicy.newScope`, review finding Z63): its
+    /// subdomains are other tenants, so the item is scoped to the host alone. The gate matches a passkey against the
+    /// relying party ID, never the page, so the passkey itself is unaffected.
     /// It is in the normalised form, so it matches `serviceIdentifier` whatever Foundation does with A-labels.
     public var scope: ServiceScope {
-        ServiceScope(host: host.value, includeSubdomains: true)
+        ScopePolicy.newScope(forHost: host.value)
     }
 }

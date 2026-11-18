@@ -282,6 +282,24 @@ struct SaveAndGenerateRequestTests {
         #expect(await harness.vault.saves.isEmpty)
     }
 
+    /// A sign-in site whose host the suffix list names (Z63): saved as a login for that host exactly, like any other.
+    @Test("a login at a suffix that is its operator's sign-in site is saved, scoped to that host alone")
+    func sharedHostingSuffix() async throws {
+        let harness = AutoFillHarness(items: Fixtures.all)
+        let request = Self.request("https://wordpress.com/log-in")
+        guard case .createItem(let proposal) = try await harness.model.savePasswordPlan(for: request).value else {
+            Issue.record("not a new item")
+            return
+        }
+        #expect(proposal.scopeHost == "wordpress.com" && !proposal.includesSubdomains)
+        let saved = try await harness.model.savePassword(request, to: .newItem).value
+        let item = try #require(await harness.vault.item(saved.itemID))
+        #expect(item.scopes == [ServiceScope(host: "wordpress.com", includeSubdomains: false)])
+        // A tenant's page is not the site.
+        let tenant = await harness.model.credentialList(for: [Fixtures.url("https://evil.wordpress.com/")])
+        if case .list(let list) = tenant { #expect(!list.passwords.contains { $0.itemID == item.id }) }
+    }
+
     @Test("an unusable identifier or malformed login is refused")
     func malformedRequests() async {
         let harness = AutoFillHarness(items: Fixtures.all)

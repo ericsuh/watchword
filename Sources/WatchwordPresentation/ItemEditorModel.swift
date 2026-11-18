@@ -67,7 +67,7 @@ public final class ItemEditorModel {
         for part in text.split(separator: ",") {
             let host = part.trimmingCharacters(in: .whitespaces)
             guard !host.isEmpty else { continue }
-            let scope = held[ServiceScope.canonicalHost(host)] ?? ServiceScope(host: host)
+            let scope = held[ServiceScope.canonicalHost(host)] ?? ScopePolicy.newScope(forHost: host)
             if seen.insert(scope.host).inserted { scopes.append(scope) }
         }
         return scopes
@@ -108,7 +108,7 @@ public final class ItemEditorModel {
             let scopes = Dictionary(draft.scopes.map { ($0.host, $0) }, uniquingKeysWith: { first, _ in first })
             prompts = needed.map {
                 HostConfirmationPrompt(
-                    $0, scope: scopes[$0.host] ?? ServiceScope(host: $0.host), itemTitle: draft.title)
+                    $0, scope: scopes[$0.host] ?? ScopePolicy.newScope(forHost: $0.host), itemTitle: draft.title)
             }
             awaiting = draft
             errorMessage = nil
