@@ -116,6 +116,20 @@ struct DevicesModelTests {
         locks.stop()
     }
 
+    /// The summary can name items and vaults by title (Z171), which a locked screen does not show (Z176).
+    @Test("the last sync's summary is cleared by a lock of the session")
+    func syncSummaryClearedOnLock() async throws {
+        let devices = try await TwoDevices.make()
+        let locks = await LockSignal.watching(devices.first.session)
+        let model = DevicesModel(context: ScreenContext(session: devices.first.session, locks: locks))
+        await model.syncNow()
+        #expect(model.sync != nil)
+        await devices.first.session.lock()
+        for _ in 0..<1000 where model.sync != nil { await Task.yield() }
+        #expect(model.sync == nil)
+        locks.stop()
+    }
+
     @Test("keeping the password needs both statements confirmed")
     func keepPasswordNeedsConfirmations() {
         var form = RevocationForm()

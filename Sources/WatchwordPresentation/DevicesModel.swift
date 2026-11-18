@@ -174,6 +174,8 @@ public final class DevicesModel: LockSensitive {
 
     public func dropOnLock() {
         revocation = RevocationForm()
+        // The last sync's summary names items and vaults by title (Z171): it does not outlast the keys (Z176).
+        sync = nil
     }
 
     /// How sentences name each device, by ID, for wording reports that name devices.

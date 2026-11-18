@@ -253,6 +253,8 @@ final class AppModel {
         items = []
         vaults = []
         unreadableCount = 0
+        // The last sync's summary names items and vaults by title (Z171): it does not outlast the keys (Z176).
+        lastSync = nil
         switch phase {
         case .unlocked, .emergencyKit: phase = .locked
         default: break
