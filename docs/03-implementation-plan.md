@@ -311,7 +311,9 @@ half delivered** on a Mac; the transports are open.
   (Z162 to Z166): re-enrolling a device of an account from before IDs committed as a new device from inside the app
   (today: erase and enrol again), and finding, at `shareVault`, values stamped by such a device, which members hold
   aside (Z162); the signed skip of Z24 (Z164); a bound on what a removed member's own streams add to the index
-  (Z166).
+  (Z166). From the review of the seventh round (Z167 to Z169): the in-app re-enrolment must park the old ID's pending
+  deletions while a shared vault holds an edit of the old ID that nobody received, as a restore onto other hardware
+  does (`holdsEditsNobodyReceived`, `releaseParkedDeletions`, Z167), and a Mac run of all three.
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
   screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
   `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,

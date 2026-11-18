@@ -887,7 +887,15 @@ the commit that registers it, every row of the old ID that the restored sync sta
 written again by the new ID, unchanged (`ItemMerge.written`, one version up), and each of the old ID's verified
 pending deletions is recorded again as the new ID's, stamped above it. A vault's name, being last-writer-wins, is
 carried over only when the sync state says it was unpublished, so a stale backup cannot override a later rename.
-Each vault's sync state then starts over: the old ID's stream is not this device's to continue.
+Each vault's sync state then starts over: the old ID's stream is not this device's to continue. One exception (review
+finding Z167): where a shared vault holds an edit of the old ID that nobody received (the old ID does not commit, Z162,
+so a copy it published there reached nobody), the old ID's pending deletions are not carried over but **parked**:
+signed by the session under an ID derived from the new one that names no device (`parkedDeletionDevice`), which the
+engine neither publishes nor applies, and which no other device's deletion copied into the file can carry; each sync reports the vault (`deletionsHeldBack`)
+and, once no such edit remains (the person moved the copy out from this device, or deleted it), records them again as
+the new ID's (`releaseParkedDeletions`). Carrying the copy over would not do: its values keep the old ID's stamps,
+which every member holds aside. Any future way of moving an installation to a new ID (the in-app re-enrolment of
+Z162) parks the same way.
 
 What a store that replays the account's *entire* earlier state can do: show a new device the account as it was
 (only with the password of that time, so the person has to type an old password for it to work). That device
@@ -2005,7 +2013,10 @@ vault counts a registry's device only if it commits to that registry's account, 
   registry arrived is forgotten and the log replayed, so arrival order decides nothing; only the colluders' device
   loses.
 - **This device takes part only if its own ID commits** (Z162): otherwise nothing it writes there reaches anyone, so it
-  writes and publishes nothing there, and its rows there never count as published for the deletion gate.
+  writes and publishes nothing there, and its rows there never count as published for the deletion gate. A key that
+  cannot be read is not one that does not commit (Z169): it refuses as `deviceKeyUnreadable`, worded as a retry, and
+  that sync publishes nothing there (`SharedVaultSyncReport.deviceKeyUnreadable`). Restored onto other hardware, such a
+  device's deletions stay parked while a shared vault holds an edit of its old ID (Z167).
 - **Nothing an account whose work cannot count signs is recorded** (`nothingCounts`, a member never let write): no
   cut runs over it, since a cut is taken only of an account that could write, and the change of head that lets the
   account write replays the log, which records it then. Its segments are passed over in sequence in its own devices'

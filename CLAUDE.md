@@ -723,7 +723,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   sync state knows only by a deletion counts while it holds an edit of this device's above what it published (a
   tombstone for a move's derivable copy ID can be in the log before the copy, Z148): never let a stamp in `known`
   alone release the gate. In a shared vault, every row of a device whose ID does not commit that holds an edit of its
-  own counts, whatever its state says: nothing it published there reached anyone (Z162). Every engine pass in
+  own counts, whatever its state says: nothing it published there reached anyone (Z162). Moving an installation to a
+  new device ID (a restore onto other hardware, and any re-enrolment) parks the old ID's pending deletions, stamped
+  for the new ID (`parkedDeletionDevice`, an ID naming no device), while a shared vault holds an edit of that ID nobody
+  received (`holdsEditsNobodyReceived`), and only `releaseParkedDeletions` records them as the new ID's, once none
+  remains (Z167): never carry them over unconditionally, and never release a deletion stamped by another device's ID. Every engine pass in
   `syncAll`, replays included, defers deletions; they go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
@@ -767,11 +771,14 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `sharing.registries` or the own view's `devices`/`revoked` directly in shared vault code, but in `ownStreamSigner`,
   which names who signed an object that counts nowhere and decides nothing (Z164).
 - **This device takes part in a shared vault only if its own ID commits** (`thisDeviceCommits`, Z162): otherwise
-  `checkSharedWrite`, `checkSharedDeletion`, `shareVault` and `acceptInvitation` throw `deviceIDDoesNotCommit`, the
+  `checkSharedWrite`, `checkSharedDeletion`, `shareVault` and `acceptInvitation` throw `deviceIDDoesNotCommit` (or
+  `deviceKeyUnreadable` when the key could not be read, a retry, never "enrol again", Z169), the
   engine publishes nothing there (`sharedEngineOptions(ownIDCommits:)`, reported), and `syncVerifyOwn` leaves its own
   objects there undecided. A device of an account from before IDs committed takes part once enrolled again as a new
   device (owner decision). `playModifiedClient` (package only) is for tests playing an adversary's device under another
-  device's ID; nothing in production sets it. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
+  device's ID; nothing in production sets it, and `assert-unsafe-confined.sh` refuses it, `enrol(…, assigningDeviceID:)`
+  and `MemberKeyCheck.unchecked(in:)` anywhere in `Sources/` or `Apps/` but their own file and
+  `WatchwordTestSupport` (Z168): a new `package` hook of that kind gets a line there. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
   (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever step over it. It is not
   recorded at all (no cut runs over it; the change of head that lets its account write replays the log, which records
   it then), so a never-writing member grows no index (Z146 and Z155, superseded by Z157).
@@ -1141,7 +1148,8 @@ directions are tested; keep both when adjusting constants.
 - **Script tests** (`Tests/ScriptTests`, Python `unittest`, `mise run test:scripts`) cover the scripts Swift tests
   cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, the inline steps of
   `screenshots.yml` and `ci.yml`'s `Required checks`, and the supply-chain gates themselves (`audit:actions`, the adversarial-suite check,
-  `audit:mise-pins`, `assert-no-dependencies.sh` with its `Apps/project.yml` allowlist, the app tasks' resolved-package
+  `audit:mise-pins`, `assert-no-dependencies.sh` with its `Apps/project.yml` allowlist, `assert-unsafe-confined.sh`'s
+  test-hook check, the app tasks' resolved-package
   check and `app:release`, `cloud-setup.sh`), each run
   as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun`, `sips`, `swift`, `xcodebuild` and `gpg`. Standard library
   only, Python 3.9 syntax (Xcode's `python3`), and bash that macOS's 3.2 runs. A change to one of those scripts needs

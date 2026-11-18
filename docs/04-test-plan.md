@@ -578,7 +578,11 @@ segments below it once a lagging listing shows them (`ownSegmentsBelowTheFloorMe
 object holds a device's next number is named, junk names nobody (`plantInAPromotedMembersStream`,
 `removedMemberRevokesANewDevice`, Z164). An ID two registries list counts in neither in either order
 (`listedTwiceCountsNowhere`), and a stream forgotten leaves the index of a device that never recorded it
-(`forgottenStream`, Z165).
+(`forgottenStream`, Z165). The review of the seventh round (Z167 to Z169): such a device restored onto other hardware
+keeps the move's deletion parked, reported, until the copy is moved out from the new ID, which then goes out first
+(`restoredNonCommittingMove`, Z167); the package's test hooks are refused outside their file and test support
+(`test_unsafe_tripwire.py`, Z168); a device key that cannot be read for a moment refuses as a retry and publishes
+nothing that sync (`unreadableDeviceKey`, `deviceKeyUnreadable`, Z169).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
