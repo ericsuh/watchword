@@ -594,7 +594,17 @@ then keeps the report (`lockWhileReporting`, `unreadableDirectoryWhileReporting`
 received, in the sync report", Z174, Z175); a lock clears the Devices screen's summary (`syncSummaryClearedOnLock`,
 Z176); parked deletions that cannot be read fail a restore's registration rather than stranding
 (`parkedDeletionsUnreadableAtRegistration`, Z177); a copy of an allowed line in its file is refused
-(`test_unsafe_tripwire.py`, Z178).
+(`test_unsafe_tripwire.py`, Z178). The review of the tenth round (Z179 to Z184): a writing member's version superseding,
+or deletion claiming, the values of a copy under this account's unreceived ID is held aside and the copy and its parked
+deletion stay (`supersedingClaimOverAnUnreceivedCopy`, `erasureClaimOverAnUnreceivedCopy`, Z179); a clock claim naming
+this device's own non-committing ID holds none of its deletions back (`clockClaimNamingThisDevice`, Z180); a restore's
+move of its old ID's deletions that fails once is made again at the next unlock, or at a sync, publishing nothing until
+it is complete, and a move record the session did not sign moves nothing (`interruptedDeviceMigration`,
+`incompleteMigrationPublishesNothing`, `plantedMigrationMovesNothing`, "account enrolment and device registry", Z181;
+`migrationRoundTrip`, store contract); a failed registration leaves no device key behind
+(`parkedDeletionsUnreadableAtRegistration`, Z182); a lock after the sync but before its summary is stored leaves none
+(`lockBeforeSummaryLeavesNone`, `lockSignalGeneration`, "Screen models: devices", Z183); the empty state the move saves
+verifies (`migratedStateIsSigned`, Z184).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
