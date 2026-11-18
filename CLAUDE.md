@@ -725,9 +725,13 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   alone release the gate. In a shared vault, every row of a device whose ID does not commit that holds an edit of its
   own counts, whatever its state says: nothing it published there reached anyone (Z162). Moving an installation to a
   new device ID (a restore onto other hardware, and any re-enrolment) parks the old ID's pending deletions, stamped
-  for the new ID (`parkedDeletionDevice`, an ID naming no device), while a shared vault holds an edit of that ID nobody
-  received (`holdsEditsNobodyReceived`), and only `releaseParkedDeletions` records them as the new ID's, once none
-  remains (Z167): never carry them over unconditionally, and never release a deletion stamped by another device's ID. Every engine pass in
+  for the new ID (`parkedDeletionDevice`, an ID naming no device), while a shared vault holds an edit nobody received
+  of that ID or of any non-committing ID of the registry, and only `releaseParkedDeletions` records them as the new
+  ID's, once none remains (Z167): never carry them over unconditionally, never release one at registration (what the
+  old ID had parked is parked again, Z170), and never release a deletion stamped by another device's ID. Registration,
+  the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
+  whichever device's, holding an edit of an ID `idsNobodyReceives` names), and while it finds a row no vault's
+  deletions go out, the new ID's own included (Z170); `copiesNobodyReceived` names those items for the summary (Z171). Every engine pass in
   `syncAll`, replays included, defers deletions; they go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
@@ -776,9 +780,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   engine publishes nothing there (`sharedEngineOptions(ownIDCommits:)`, reported), and `syncVerifyOwn` leaves its own
   objects there undecided. A device of an account from before IDs committed takes part once enrolled again as a new
   device (owner decision). `playModifiedClient` (package only) is for tests playing an adversary's device under another
-  device's ID; nothing in production sets it, and `assert-unsafe-confined.sh` refuses it, `enrol(…, assigningDeviceID:)`
-  and `MemberKeyCheck.unchecked(in:)` anywhere in `Sources/` or `Apps/` but their own file and
-  `WatchwordTestSupport` (Z168): a new `package` hook of that kind gets a line there. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
+  device's ID; nothing in production sets it, and `assert-unsafe-confined.sh` refuses it, `playsModifiedClient`,
+  `enrol(…, assigningDeviceID:)`, `MemberKeyCheck.unchecked(in:)` and `MemberKeyCheck`'s initialiser anywhere in
+  `Sources/` or `Apps/` but the lines it lists for them (`hook_lines`, file and whole line) and `WatchwordTestSupport`
+  (Z168, Z172): a new line naming one gets an entry there, and a new `package` hook of that kind one in `test_hooks`. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
   (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever step over it. It is not
   recorded at all (no cut runs over it; the change of head that lets its account write replays the log, which records
   it then), so a never-writing member grows no index (Z146 and Z155, superseded by Z157).

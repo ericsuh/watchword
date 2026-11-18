@@ -582,7 +582,12 @@ object holds a device's next number is named, junk names nobody (`plantInAPromot
 keeps the move's deletion parked, reported, until the copy is moved out from the new ID, which then goes out first
 (`restoredNonCommittingMove`, Z167); the package's test hooks are refused outside their file and test support
 (`test_unsafe_tripwire.py`, Z168); a device key that cannot be read for a moment refuses as a retry and publishes
-nothing that sync (`unreadableDeviceKey`, `deviceKeyUnreadable`, Z169).
+nothing that sync (`unreadableDeviceKey`, `deviceKeyUnreadable`, Z169). The review of the eighth round (Z170 to
+Z172): a second restore keeps the deletion parked (`twiceRestoredNonCommittingMove`, Z170); the original deleted again
+while its move's deletion is parked does not go out, and the report names the copy (`deletionWhileParked`, Z170,
+Z171); the notice names the copy, its vault and the way out (`copiesReachedNobody`, wording, Z171); the tripwire
+refuses a hook split over lines, backticked, unapplied, the session's state and the initialiser, and a new line in a
+defining file (`test_unsafe_tripwire.py`, Z172).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

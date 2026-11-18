@@ -313,7 +313,10 @@ half delivered** on a Mac; the transports are open.
   aside (Z162); the signed skip of Z24 (Z164); a bound on what a removed member's own streams add to the index
   (Z166). From the review of the seventh round (Z167 to Z169): the in-app re-enrolment must park the old ID's pending
   deletions while a shared vault holds an edit of the old ID that nobody received, as a restore onto other hardware
-  does (`holdsEditsNobodyReceived`, `releaseParkedDeletions`, Z167), and a Mac run of all three.
+  does (`vaultsHoldingEditsNobodyReceived`, `releaseParkedDeletions`, Z167, Z170), and a Mac run of all three. From
+  the review of the eighth round (Z170 to Z172): the Devices screen and Settings show the copies that hold deletions
+  back (`SyncNotice.copiesReachedNobody`) as text only; a button that moves each out of its vault, and a way out for a
+  copy this device may not move or delete (read-only, no key here), are open (an owner decision, Z170).
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
   screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
   `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,

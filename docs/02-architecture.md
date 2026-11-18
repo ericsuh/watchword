@@ -895,7 +895,15 @@ engine neither publishes nor applies, and which no other device's deletion copie
 and, once no such edit remains (the person moved the copy out from this device, or deleted it), records them again as
 the new ID's (`releaseParkedDeletions`). Carrying the copy over would not do: its values keep the old ID's stamps,
 which every member holds aside. Any future way of moving an installation to a new ID (the in-app re-enrolment of
-Z162) parks the same way.
+Z162) parks the same way. One predicate decides registration, release and the deletion gate (review finding Z170):
+any row of a shared vault, whichever device's, holding an edit of a device ID of the account's registry that does not
+commit, or of the ID being left (`vaultsHoldingEditsNobodyReceived`). Registration parks again, whatever it finds,
+what the old ID had itself parked, so a second restore (from a backup taken under the restored ID, which commits)
+releases nothing; and while such a row exists no vault's deletions go out at all, the new ID's own included, or a
+deletion made again of an original that came back would go out ahead of its only copy. The sync names the copies
+(`AccountSyncReport.copiesNobodyReceived`, Z171) and the summary says what releases them: moving each out of the
+shared vault from this device, or deleting it. Where this device may not do either (the account only reads the vault,
+or holds no key or ledger for it here) the deletions wait, in every vault, Personal included, until it may.
 
 What a store that replays the account's *entire* earlier state can do: show a new device the account as it was
 (only with the password of that time, so the person has to type an old password for it to work). That device
@@ -1652,7 +1660,9 @@ Not solved here, and to be decided with integration:
   entry naming this device that the sync state does not know holds the deletions back, as before Z54, until the
   quarantine holds none; a quarantine that cannot be read holds them back and forgets nothing. A shared
   vault's second replay in a sync defers deletions like every other pass, and deletions go out after the replays
-  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so.
+  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so;
+  where the cause is a copy nobody received (an edit of a non-committing device ID of the account's registry, Z170),
+  `copiesNobodyReceived` names the items, and the summary names each by title and vault with what releases it (Z171).
 - **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
   departed account's segments must not be collected while a device may still need them to judge a cut, or the cut
   must carry what is needed to judge without them.
@@ -2016,7 +2026,8 @@ vault counts a registry's device only if it commits to that registry's account, 
   writes and publishes nothing there, and its rows there never count as published for the deletion gate. A key that
   cannot be read is not one that does not commit (Z169): it refuses as `deviceKeyUnreadable`, worded as a retry, and
   that sync publishes nothing there (`SharedVaultSyncReport.deviceKeyUnreadable`). Restored onto other hardware, such a
-  device's deletions stay parked while a shared vault holds an edit of its old ID (Z167).
+  device's deletions stay parked while a shared vault holds an edit of its old ID (Z167), and while any row of a shared
+vault holds an edit of a non-committing ID of the account's registry, no vault's deletions go out (Z170).
 - **Nothing an account whose work cannot count signs is recorded** (`nothingCounts`, a member never let write): no
   cut runs over it, since a cut is taken only of an account that could write, and the change of head that lets the
   account write replays the log, which records it then. Its segments are passed over in sequence in its own devices'
