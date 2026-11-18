@@ -2205,8 +2205,8 @@ increments no counter (Apple's guidance for synced passkeys), supports `prf` (HM
 from a per-passkey 32-byte secret stored in the field) and `largeBlob` storage in the item. A
 relying party's largeBlob write replaces the field, whose earlier value stays in the item's history,
 so writes are bounded: one per field per `largeBlobInterval` (a day), and none that would take the item
-past `largeBlobItemBudget` (half the payload limit); a write refused is reported as not written and the
-assertion stands (review finding Z66).
+past `remoteWriteItemBudget` (half the payload limit, the budget of every write made for a remote
+party, Z71); a write refused is reported as not written and the assertion stands (review finding Z66).
 `PasskeyAuthenticator` (§9.2) is that authenticator, in software: ES256 only, attestation format
 `none`, credential IDs of 32 random bytes, the signature DER-encoded. The flags say what happened
 rather than what a relying party would like to hear: UP and UV come from what the extension
@@ -2365,7 +2365,11 @@ What holds across all of them:
 - **A remote party never deletes.** A report sets or clears a flag in `Field.meta`
   (`reportedUnusedAt`, `reportedUnknownAt`) or changes a passkey's account name, only on items the
   gate would release to the reporter, and at most once per field per day, because every change is
-  a version in a history that is never pruned (F1.4).
+  a version in a history that is never pruned (F1.4). Nor may it take the item past
+  `remoteWriteItemBudget` (half the payload limit), which every write the model makes for a remote
+  party has: a report (counted in `ReportResult.overBudget`), a largeBlob write, a conditional
+  upgrade (review finding Z71: a report a day, alternating a passkey's name, grew an item holding a
+  large blob past its payload limit in about three weeks).
 - **Locked is a state.** `vaultLocked`, or `requiresInteraction(.vaultLocked)` for a request made
   without UI. Each request reads the items once; each step of an interactive flow reads them
   again; writes are compare-and-swap. A lock that lands mid-request wins: a write fails in the

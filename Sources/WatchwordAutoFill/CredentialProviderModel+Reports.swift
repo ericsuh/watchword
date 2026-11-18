@@ -9,8 +9,9 @@ import WatchwordModel
 /// domain or relying party, and a passkey's stored relying party must equal the reporter exactly. What it can do is
 /// small on purpose: set or clear a flag on a field, or change a passkey's account name. It cannot remove a field,
 /// trash an item or touch a scope, and because every change is a new item version in a history that is never
-/// pruned (F1.4), a field accepts at most one report-made change per `reportInterval`, so a site cannot grow an item
-/// until it no longer saves.
+/// pruned (F1.4), a field accepts at most one report-made change per `reportInterval`, and no report is applied that
+/// would take the item past `remoteWriteItemBudget` (review finding Z71: a day apart, alternating names, reports grew
+/// an item holding a large blob past its payload limit), so a site cannot grow an item until it no longer saves.
 extension CredentialProviderModel {
     /// How often a report may change one field.
     public static let reportInterval: TimeInterval = 24 * 60 * 60
@@ -110,7 +111,7 @@ extension CredentialProviderModel {
     private typealias FieldEdit = (kind: ReportChange.Kind, edit: (inout Field, Date) -> Void)
 
     /// Applies `decide` to every field of every item in use that the gate authorises for `identifier`, at most one
-    /// report-made change per field per `reportInterval`, one save per item.
+    /// report-made change per field per `reportInterval`, one save per item, none past `remoteWriteItemBudget`.
     private func apply(
         to identifier: ServiceIdentifier, _ decide: (Item, Field) -> FieldEdit?
     ) async throws -> ReportResult {
@@ -131,6 +132,10 @@ extension CredentialProviderModel {
                 changes.append(ReportChange(itemID: item.id, fieldID: item.fields[position].id, kind: kind))
             }
             guard !changes.isEmpty else { continue }
+            guard Self.admitsRemoteWrite(updated, over: item) else {
+                result.overBudget += changes.count
+                continue
+            }
             do {
                 _ = try await save(updated, replacing: item)
                 result.changes.append(contentsOf: changes)

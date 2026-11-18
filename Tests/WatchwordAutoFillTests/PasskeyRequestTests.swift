@@ -836,6 +836,26 @@ struct PasskeyRequestTests {
         #expect(await harness.vault.saves.count == 1)
     }
 
+    /// Review finding Z71: a conditional upgrade is the relying party's write, so it has the budget every such
+    /// write has. An item whose history already holds about the budget is not upgraded without the person.
+    @Test("a conditional request does not upgrade an item it would take past the remote-write budget")
+    func conditionalUpgradeHasTheBudget() async throws {
+        var item = Fixtures.amazonRetail
+        let note = Field(kind: .text, label: "Note", value: String(repeating: "n", count: 16 * 1024))
+        item.history = (0..<32).map {
+            ItemHistoryEntry(replacedAt: Fixtures.now, version: UInt64($0 + 1), fields: item.fields + [note])
+        }
+        let harness = AutoFillHarness(items: [item])
+        let request = Self.registrationRequest("amazon.com", userName: Fixtures.email)
+        #expect(await harness.model.registerPasskeyWithoutInteraction(request) == .refused(.noItemToUpgrade))
+        #expect(await harness.vault.saves.isEmpty)
+        // With the person, on the registration sheet, it is theirs to do.
+        let chosen = try await harness.model.registerPasskey(
+            request, destination: .existingItem(item.id), presence: .verified
+        ).value
+        #expect(chosen.itemID == item.id)
+    }
+
     @Test("a conditional request never creates an item or guesses between accounts")
     func conditionalRefusals() async {
         var second = Fixtures.amazonRetail

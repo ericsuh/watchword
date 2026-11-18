@@ -158,9 +158,22 @@ extension CredentialProviderModel {
     /// change a field.
     public static let largeBlobInterval: TimeInterval = reportInterval
 
-    /// The most an item may hold, by `estimatedSize`, for a largeBlob write to be made: half the vault's payload
-    /// limit (`ItemCodec.maximumPayloadLength`, 1 MiB), leaving the person's own edits room whatever a site wrote.
-    public static let largeBlobItemBudget = 512 * 1024
+    /// The most an item may hold, by `estimatedSize`, after any write the model makes for a remote party (a
+    /// largeBlob write, a credential-update report, a conditional passkey upgrade): half the vault's payload limit
+    /// (`ItemCodec.maximumPayloadLength`, 1 MiB), leaving the person's own edits room whatever a site wrote (review
+    /// findings Z66, Z71).
+    public static let remoteWriteItemBudget = 512 * 1024
+
+    /// `remoteWriteItemBudget`, under the name Z66 gave it for largeBlob writes.
+    public static let largeBlobItemBudget = remoteWriteItemBudget
+
+    /// Whether a write a remote party asked for, turning `item` into `updated`, keeps the item within
+    /// `remoteWriteItemBudget`. Every change of a field keeps the fields as they were in a history entry that is
+    /// never pruned (F1.4), so the estimate is the item as written plus one entry holding `item`'s fields. A meta-only
+    /// change (a report's flag) counts like any other: the vault records it the same way.
+    static func admitsRemoteWrite(_ updated: Item, over item: Item) -> Bool {
+        estimatedSize(of: updated) + estimatedSize(of: item.fields) <= remoteWriteItemBudget
+    }
 
     /// Whether a relying party's write of `blob` into the passkey `fieldID` of `item` may be made. Every write keeps
     /// the field's earlier value in the item's history, which is never pruned (F1.4), so the number of writes is
@@ -169,9 +182,10 @@ extension CredentialProviderModel {
     static func admitsLargeBlobWrite(_ blob: Data, fieldID: UUID, in item: Item, now: Date) -> Bool {
         guard let field = item.fields.first(where: { $0.id == fieldID }) else { return false }
         if let last = field.lastLargeBlobWriteAt, now.timeIntervalSince(last) < largeBlobInterval { return false }
-        // The write adds a history entry holding every field as it is now, and the blob, as base64url, to the field.
+        // The write adds a history entry holding every field as it is now, and the blob, as base64url, to the field:
+        // counted on top of the old blob, so never less than `admitsRemoteWrite` would find.
         let afterWrite = estimatedSize(of: item) + estimatedSize(of: item.fields) + (blob.count * 4 + 2) / 3
-        return afterWrite <= largeBlobItemBudget
+        return afterWrite <= remoteWriteItemBudget
     }
 
     /// A lower bound on the bytes an item's encoding holds: its text, every field's and every history entry's.
@@ -388,6 +402,10 @@ extension CredentialProviderModel {
         if let existing {
             var updated = existing
             updated.fields.append(field)
+            // A conditional upgrade is the relying party's write: it may not take the item past the budget (Z71).
+            guard !withoutInteraction || Self.admitsRemoteWrite(updated, over: existing) else {
+                throw Blocked.refused(.noItemToUpgrade)
+            }
             stored = try await save(updated, replacing: existing)
         } else {
             var fields: [Field] = []

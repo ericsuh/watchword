@@ -689,10 +689,14 @@ public struct ReportResult: Hashable, Sendable {
     public var rateLimited: Int
     /// Items that changed underneath the report; the next report will find them.
     public var conflicts: Int
+    /// Fields a report would have changed, had the change not taken the item past
+    /// `CredentialProviderModel.remoteWriteItemBudget` (review finding Z71).
+    public var overBudget: Int
 
-    public init(changes: [ReportChange], rateLimited: Int, conflicts: Int) {
+    public init(changes: [ReportChange], rateLimited: Int, conflicts: Int, overBudget: Int = 0) {
         self.changes = changes
         self.rateLimited = rateLimited
         self.conflicts = conflicts
+        self.overBudget = overBudget
     }
 }

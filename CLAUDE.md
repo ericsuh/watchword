@@ -890,6 +890,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   most `maximumPasskeysPerItem`.
 - A remote party never deletes: reports set or clear `Field.meta` flags or rename a passkey's account, only on items
   the gate would release to the reporter, at most once per field per `reportInterval` (history is never pruned).
+  **Every write the model makes for a remote party** (a report, a largeBlob write, a conditional upgrade) is refused
+  if it would take the item past `remoteWriteItemBudget` (`admitsRemoteWrite`: the item as written plus one history
+  entry, Z71). A new such write asks it too.
 - Locked is a state the model reports (`vaultLocked`, `requiresInteraction(.vaultLocked)`). Each request reads the
   items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:)`); and every
   request that hands a secret back does so through `releasing(_:)`, which calls `CredentialVault.confirmUnlocked()`
@@ -900,7 +903,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - Everything a page can influence is bounded here (identifier count, allow-list length, `prf` input, blob, password
   rules, names), and `PasswordRules` cannot take a generated password outside the generator's 4 to 128 characters.
   A relying party's largeBlob writes are bounded in number too (Z66): one per field per `largeBlobInterval`, and none
-  that would take the item past `largeBlobItemBudget`, since each keeps the old blob in a history never pruned.
+  that would take the item past `remoteWriteItemBudget`, since each keeps the old blob in a history never pruned.
 
 ### The matching pipeline is the whole point of `WatchwordMatching`
 
