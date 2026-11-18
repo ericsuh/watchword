@@ -29,6 +29,7 @@ struct ItemDetailView: View {
                         Image(systemName: "globe")
                     }
                     .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(AccessibilityID.Detail.scope(scope.host))
                 }
             }
             Section("Fields") {

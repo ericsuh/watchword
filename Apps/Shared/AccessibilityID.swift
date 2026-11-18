@@ -115,6 +115,11 @@ enum AccessibilityID {
         static func row(_ kind: String, _ title: String) -> String { "hygiene.\(kind).\(title)" }
     }
 
+    enum Detail {
+        /// One of the item's websites: the host as it resolves and how far the scope reaches, read as one element.
+        static func scope(_ host: String) -> String { "detail.scope.\(host)" }
+    }
+
     enum Import {
         static let vault = "import.vault"
         static let format = "import.format"
