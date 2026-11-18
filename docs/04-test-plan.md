@@ -587,7 +587,14 @@ Z172): a second restore keeps the deletion parked (`twiceRestoredNonCommittingMo
 while its move's deletion is parked does not go out, and the report names the copy (`deletionWhileParked`, Z170,
 Z171); the notice names the copy, its vault and the way out (`copiesReachedNobody`, wording, Z171); the tripwire
 refuses a hook split over lines, backticked, unapplied, the session's state and the initialiser, and a new line in a
-defining file (`test_unsafe_tripwire.py`, Z172).
+defining file (`test_unsafe_tripwire.py`, Z172). The review of the ninth round (Z173 to Z178): a writing member's
+clock claim, or a value relabelled, naming another account's non-committing ID holds none of its deletions back
+(`clockClaimHoldsNothingBack`, Z173); a lock while the report is made names no copy, and a directory that cannot be read
+then keeps the report (`lockWhileReporting`, `unreadableDirectoryWhileReporting`, "Vault session: the copies nobody
+received, in the sync report", Z174, Z175); a lock clears the Devices screen's summary (`syncSummaryClearedOnLock`,
+Z176); parked deletions that cannot be read fail a restore's registration rather than stranding
+(`parkedDeletionsUnreadableAtRegistration`, Z177); a copy of an allowed line in its file is refused
+(`test_unsafe_tripwire.py`, Z178).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
