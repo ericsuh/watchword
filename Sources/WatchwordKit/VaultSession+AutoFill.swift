@@ -39,13 +39,35 @@ extension VaultSession: CredentialVault {
     private func autoFillContents() async throws -> CredentialSnapshot {
         let listing = try await items().items
         let withheld = try await vaultsWithheldFromAutoFill()
-        guard let personal = try await loadAccount()?.personalVaultID else { throw VaultError.noAccount }
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        let personal = account.personalVaultID
+        let writtenOutside = await vaultsWrittenOutsideTheAccount(listing, account: account)
         let described = try await vaults(includingDeleted: true).filter { !withheld.contains($0.id) }.map {
-            CredentialVaultInfo(id: $0.id, name: $0.name, isShared: $0.isShared)
+            CredentialVaultInfo(id: $0.id, name: $0.name, isShared: $0.isShared || writtenOutside.contains($0.id))
         }
         return CredentialSnapshot(
             items: withheld.isEmpty ? listing : listing.filter { !withheld.contains($0.vaultID) },
             vaults: described, defaultVaultID: personal)
+    }
+
+    /// The vaults, other than Personal, holding an item whose clock names a device that is not this account's (review
+    /// finding Z77). On the owner's devices a vault is shared by the account's marker row and the sharing state, which
+    /// whoever edits the App Group store while the app is locked (A8) can delete, and which the extension does not
+    /// sync back; an item's clock is inside its ciphertext, authenticated under the vault key, and a member's edit
+    /// carries their device there for as long as the item exists. So such a vault is shared for AutoFill whatever the
+    /// rows say. This account's devices are the registry's, revoked ones included; with no registry to read, only this
+    /// device counts as the account's, which errs towards shared.
+    func vaultsWrittenOutsideTheAccount(_ items: [Item], account: AccountRecord) async -> Set<UUID> {
+        var own: Set<UUID> = [account.deviceID]
+        if let view = try? await registry(account) {
+            own.formUnion(view.state.devices.keys)
+            own.formUnion(view.state.revoked.keys)
+        }
+        var vaults = Set<UUID>()
+        for item in items where item.vaultID != account.personalVaultID && !vaults.contains(item.vaultID) {
+            if item.clock.entries.keys.contains(where: { !own.contains($0) }) { vaults.insert(item.vaultID) }
+        }
+        return vaults
     }
 
     /// The saved items as the gate ranks among them, with the session's answer for which vaults are the person's

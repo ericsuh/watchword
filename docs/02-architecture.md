@@ -2403,7 +2403,11 @@ the vaults withheld from AutoFill (§8.10, Z45), with each vault described by `V
 arrived by grant, a sharing state that names the vault, or markers not read yet) and so the same fact
 every other sharing rule asks. The vaults are described after the items are read, and a vault is
 marked shared before another member's item can be merged into it. An extension process that was not
-given the sharing state sees every vault but the Personal one as withheld or shared. The
+given the sharing state sees every vault but the Personal one as withheld or shared. And a vault other
+than Personal holding an item whose clock names a device outside this account is described as shared
+whatever the rows say (`vaultsWrittenOutsideTheAccount`, review finding Z77): on the owner's devices the
+marker row and the sharing state are all that say so, and A8 can delete both, while the clock is inside
+the ciphertext. The
 store keeps one row per item ID whatever its vault and sync refuses a record naming an ID another
 vault holds, so an ID occurs once; a move is a copy under a derived ID and the original trashed in
 one commit, so the original is never fillable beside its copy. `saveCredentialItem` is a
