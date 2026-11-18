@@ -474,8 +474,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   counts as an erasure while merging. Its tombstone is signed *before* the deletion commits and recorded after
   (`SyncStateStore.prepared`, Z28): never add a step that needs keys between the commit and the record. The outbox
   compares rows with `SyncState.published`, not `known`, and a version found in the log under this device's name
-  counts as published only if it is the row the device holds, and a deletion only if no row is held or it is this
-  device's own (Z29, Z35).
+  counts as published only if it is the row the device holds, and a deletion only if it is this device's own, pending
+  or published at that stamp, never because no row is held (Z29, Z35, Z129).
 - A record can be erased more than once. A device remembers the join of every erasure of a record
   (`RecordMerger.joinErasureSummaries`; for items the union of `ItemErasures`, stamped with the later stamp) and
   judges versions against that, so arrival order decides nothing. A pending

@@ -114,4 +114,40 @@ extension AdversarialSyncTests {
             await f.transport.allObjects[f.segmentName(3)] != nil,
             "a segment above one still listed was collected")
     }
+
+    // MARK: - What this device published (Z129)
+
+    /// Threat: whoever can put a validly signed object in a device's own stream (a device of the account in any vault;
+    /// in a shared vault, Z46 holds another account's aside), before that device has a row of the record. Record IDs
+    /// can be predicted: a move's copy takes an ID derived from the original's ID, the destination, the device and
+    /// the version, all known to the source vault's readers. The plant is a tombstone naming this device for that ID,
+    /// with a stamp far above the vault's clock. With no row held, a deletion found in the log under this device's
+    /// name counted as published, so its stamp went into `SyncState.published` and `known`: the copy, written below
+    /// it, was never published, and the deletion gate saw it as known, so the original's deletion went out. A
+    /// deletion counts as published only if it is this device's pending one or the one it published at that stamp.
+    @Test("a planted deletion for a record this device does not hold yet does not mark its first version as sent")
+    func plantedDeletionBeforeTheRecordExists() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("First", password: "1"))
+        try await f.writer.sync()
+        let id = UUID()
+        let key = RecordKey(recordID: id, kind: .item)
+        let sequence = try #require(await f.writer.state()?.nextSequence)
+        let planted = SyncEntry.tombstone(
+            key, stamp: RecordStamp(version: 1000, device: Self.a, deleted: true), erasure: [])
+        try await f.plant(
+            SyncPayload(
+                kind: .segment, vaultID: Self.vault, author: Self.a, number: sequence, vector: [:],
+                entries: [planted]),
+            signedBy: f.writer.keyring)
+        try await f.writer.sync()
+        #expect(await f.writer.state()?.published[key] == nil, "a deletion this device never made is marked as sent")
+
+        try await f.writer.save(Self.login("The copy", password: "2", id: id))
+        let report = try await f.writer.sync()
+        #expect(report.pushedEntries == 1, "the new record was passed over as sent")
+        let reader = await f.reader()
+        try await reader.sync()
+        #expect(try await reader.items()[id] != nil, "the record never reached another device")
+    }
 }

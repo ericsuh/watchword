@@ -1196,17 +1196,19 @@ public actor SyncEngine {
     }
 
     /// Whether a version found in the log under this device's name is one it need not publish: exactly the row it
-    /// holds, or a deletion where it holds no row of the record or the deletion is its own (pending, or already
-    /// published at that stamp). The log is believed about what this device *published* only that far (review
-    /// findings Z29, Z35): an entry naming this device at a stamp above its row, whose content the row already
-    /// contains, changes nothing in the store, and marking its stamp as published would pass over a row that holds an
-    /// edit nobody else has, and every later edit below the stamp. A row that differs is published again, which costs
-    /// a segment and merges to nothing; a deletion of this device's published again is the same tombstone.
+    /// holds, or a deletion that is its own (pending, or already published at that stamp). The log is believed about
+    /// what this device *published* only that far (review findings Z29, Z35): an entry naming this device at a stamp
+    /// above its row, whose content the row already contains, changes nothing in the store, and marking its stamp as
+    /// published would pass over a row that holds an edit nobody else has, and every later edit below the stamp. A
+    /// row that differs is published again, which costs a segment and merges to nothing. A deletion where no row is
+    /// held is no exception (Z129): a record's ID can be predicted (a move's copy), and a planted tombstone for it,
+    /// counted as published, passed over the record's first version when this device wrote it, and a later genuine
+    /// deletion of it as already sent. One of this device's own that a replay meets again is not marked, and costs
+    /// nothing, there being no row to publish.
     private func isHeldAsPublished(_ entry: SyncEntry, pending: PendingDeletion?, state: SyncState) async throws
         -> Bool
     {
         if entry.isDeletion {
-            guard let row = try await store.record(entry.key), row.vaultID == vaultID else { return true }
             if let pending, pending.stamp == entry.stamp { return true }
             return state.published[entry.key] == entry.stamp
         }
