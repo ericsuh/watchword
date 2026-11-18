@@ -609,12 +609,17 @@ segment's acknowledgement that it merged this stream at or past the next number,
 claim (`SyncConfiguration.ownStreamWitnesses`, `push`; never saved unless published, so a claim a revocation discounts
 moves nothing for good). Its state is older than what it published (a restored backup, A8), and those numbers have been
 taken out of the store (a member with delete access): published there again, a device that merged them would never
-read it (round 5's L-M2, Z159). Another account's word moves nothing (Z154). A number beyond 2^48, which no reader
+read it (round 5's L-M2, Z159). The numbers between are not counted as merged: what this stream holds there is merged
+in sequence once it is listed (a listing that lagged, Z163), and the stream waits at the first missing one meanwhile.
+Another account's word moves nothing (Z154). A number beyond 2^48, which no reader
 lists, is never written at (`SyncReport.ownStreamExhausted`). An unsigned object squatting at exactly the next number
 stops this vault's publishing while it is there, reported at every sync (`ownStreamConflict`) with nothing marked as
 sent; passing it needs a skip the author signs and readers honour, which is open. In a shared vault the same holds of
 an object there that another member signed: device IDs commit to their account (Z157), so it verifies nowhere, like
-junk, and the device stops at it, reported, until it is gone. Z30 and Z137 used to stage such an object and step over
+junk, and the device stops at it, reported, with the account that signed it named
+(`SharedVaultSyncReport.ownStreamSquattedBy`, Z164), until it is gone. While it waits, any edit the device makes in
+that vault holds back the deletions it publishes in every vault, Personal included (Z44): nothing is lost, and nothing
+is deleted elsewhere. Z30 and Z137 used to stage such an object and step over
 it, which bought nothing against a member able to create files, who can write junk at that number as well, and cost
 the inference of Z46 to Z155 about whose a stream was; a member who can do it is an A1 there. A segment of a member
 whose writes never count, in that member's own device's stream, is still passed over in sequence keeping nothing
@@ -962,7 +967,12 @@ vault asks it of every registry, this account's own included (`DeviceRegistrySta
 counts there only if its ID commits to the registry's account under the key the registry lists. Any account can still
 put any device ID in its own registry, but for another account's device that is a second preimage of 122 bits, so no
 account can list, sign as or revoke another account's device where it matters; §8.10 says what that settles. No entry
-format changed; an installation whose device IDs predate this has devices that count in no shared vault.
+format changed; an installation whose device IDs predate this has devices that count in no shared vault, and such a
+device takes no part in one (review finding Z162): it shares, accepts, writes and publishes nothing there
+(`SharedVaultError.deviceIDDoesNotCommit`, `SharedVaultSyncReport.deviceIDDoesNotCommit`), and nothing it published
+there under an earlier build counts as published, so no vault's deletion goes out ahead of a copy it holds alone. It
+takes part once it is enrolled again as a new device (an owner decision). `approveDevice` and `enrol(as:)` refuse an
+identity whose ID does not commit (`VaultError.deviceIDDoesNotCommit`).
 
 **Rules** (`DeviceRegistry.evaluate`, a pure function; the merge is set union, so devices that hold the same
 entries and follow the same credentials compute the same registry). The entries are replayed in one order:
@@ -1989,6 +1999,13 @@ vault counts a registry's device only if it commits to that registry's account, 
   (`accountsListing`), so a claim about a device's edits is a claim about that account's.
 - **A revocation is its own account's** (`revokedDevices`): the revocations of every registry the chain anchors are
   unioned, since each lists only devices of its own account; no member can retire another's device.
+- **An ID two committed registries list counts in neither** (`countedRegistries`, Z165): two accounts acting together
+  can find colliding committed IDs (a birthday search over 122 bits), and whichever registry arrived first named the
+  stream. The ID is dropped from both, this account's own registry included, and a stream recorded before the second
+  registry arrived is forgotten and the log replayed, so arrival order decides nothing; only the colluders' device
+  loses.
+- **This device takes part only if its own ID commits** (Z162): otherwise nothing it writes there reaches anyone, so it
+  writes and publishes nothing there, and its rows there never count as published for the deletion gate.
 - **Nothing an account whose work cannot count signs is recorded** (`nothingCounts`, a member never let write): no
   cut runs over it, since a cut is taken only of an account that could write, and the change of head that lets the
   account write replays the log, which records it then. Its segments are passed over in sequence in its own devices'

@@ -497,7 +497,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   holds it: where the log is kept whole, a device of this account's own (`SyncConfiguration.ownStreamWitnesses`, not
   revoked) whose snapshot or acknowledgement says it merged this stream at or past the next number puts the next
   publication above that claim (`push`, `witnessedFloor`; saved only once published), since those numbers were used and
-  removed (round 5's L-M2, Z159); never take another account's word for it (Z154).
+  removed (round 5's L-M2, Z159); never take another account's word for it (Z154). It never counts the numbers between
+  as merged: `merged[self]` moves only with a publication that follows on from it, so what the stream holds there is
+  merged in sequence once listed (a lagging listing, Z163).
   `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
   every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that starts
   above what this device collected already (`SyncState.collectedThrough`, Z149) and stops at the first number the
@@ -720,8 +722,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   until that row loads, the rule before Z54 holds, and a quarantine that cannot be read holds deletions back. A row the
   sync state knows only by a deletion counts while it holds an edit of this device's above what it published (a
   tombstone for a move's derivable copy ID can be in the log before the copy, Z148): never let a stamp in `known`
-  alone release the gate. Every engine pass in `syncAll`, replays included, defers deletions; they go out once, last
-  (Z55).
+  alone release the gate. In a shared vault, every row of a device whose ID does not commit that holds an edit of its
+  own counts, whatever its state says: nothing it published there reached anyone (Z162). Every engine pass in
+  `syncAll`, replays included, defers deletions; they go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
 
@@ -759,8 +762,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   key from the chain (`sharedVerify`), whatever that account's standing, for segments; `writeStanding` decides, never
   the envelope's signer alone. **A registry counts there only the devices whose IDs commit to its account**
   (`DeviceRegistryState.committedDevicesOnly`, through `memberRegistries` and `committedOwnState`, this account's own
-  registry included; Z157): never read `sharing.registries` or the own view's `devices`/`revoked` directly in shared
-  vault code. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
+  registry included; Z157), less every device ID two of them list (`countedRegistries`, Z165: colluding accounts can
+  find colliding IDs, and a stream recorded before the second registry arrived is forgotten and replayed); never read
+  `sharing.registries` or the own view's `devices`/`revoked` directly in shared vault code, but in `ownStreamSigner`,
+  which names who signed an object that counts nowhere and decides nothing (Z164).
+- **This device takes part in a shared vault only if its own ID commits** (`thisDeviceCommits`, Z162): otherwise
+  `checkSharedWrite`, `checkSharedDeletion`, `shareVault` and `acceptInvitation` throw `deviceIDDoesNotCommit`, the
+  engine publishes nothing there (`sharedEngineOptions(ownIDCommits:)`, reported), and `syncVerifyOwn` leaves its own
+  objects there undecided. A device of an account from before IDs committed takes part once enrolled again as a new
+  device (owner decision). `playModifiedClient` (package only) is for tests playing an adversary's device under another
+  device's ID; nothing in production sets it. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
   (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever step over it. It is not
   recorded at all (no cut runs over it; the change of head that lets its account write replays the log, which records
   it then), so a never-writing member grows no index (Z146 and Z155, superseded by Z157).
@@ -835,7 +846,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   for a replay (Z151). Never exempt a version's writer from `knowledgeCounts` unless its own stream carried the version
   or this device wrote it. An object anyone can create (junk, or signed by any key that does not commit) at a device's
   next number stops that device's stream there, reported (`ownStreamConflict`), losing nothing, until it is removed:
-  the A1 residual, which a member with write access to the folder has too.
+  the A1 residual, which a member with write access to the folder has too. Another member's signed object there is
+  named (`SharedVaultSyncReport.ownStreamSquattedBy`, Z164); the author-signed skip is open (Z24).
 - A segment sealed under a key that only a losing branch introduced is passed over, not waited for (Z47).
 - Once the chain no longer lists this account, the vault's items are withheld from `credentialItems()`
   (`vaultsWithheldFromAutoFill`, which also withholds a vault with no ledger), the vault stays listed while items of
@@ -872,8 +884,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   key); a credential entry also the previous generation's enrolment key. A revoked ID or key never returns.
 - A device's ID is derived from the account and its key (`DeviceIdentifier.derive`, Z157): make the key first
   (`DeviceKeyStore.createDevice`) and take the ID it gives. `create(accountID:deviceID:)` is for an ID already chosen
-  (an account from before, a test naming a device): such a device counts in no shared vault. The registry's own rules
-  do not ask (a private vault has no other account); a shared vault does, for every registry.
+  (an account from before, a test naming a device): such a device counts in no shared vault and takes no part in one
+  (Z162). `approveDevice` and `enrol(as:)` refuse an identity whose ID does not commit (`VaultError.deviceIDDoesNotCommit`).
+  The registry's own rules do not ask (a private vault has no other account); a shared vault does, for every registry.
 - What a device trusts is in the Keychain (`deviceRegistryAnchor`, `accountSigningKey`), never in the database.
   The local store must still hold everything the anchor names, or the registry is unavailable and nothing verifies.
   The anchor also names the pending password changes seen (`RegistryAnchor.pending`, Z3), kept until the device

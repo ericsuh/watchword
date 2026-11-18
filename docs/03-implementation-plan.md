@@ -307,7 +307,11 @@ half delivered** on a Mac; the transports are open.
   to Z161): reading a revoked device's segments for the index alone, up to its account's cut, so that a device that
   built its index after the revocation of a device of an account that may no longer write judges as the others do
   (Z158); and an author-signed skip that readers honour, so that an object at a device's next number (junk, or since
-  Z157 another member's signed object) stops nothing (Z24, Z157's owner decision).
+  Z157 another member's signed object) stops nothing (Z24, Z157's owner decision). From the review of the sixth round
+  (Z162 to Z166): re-enrolling a device of an account from before IDs committed as a new device from inside the app
+  (today: erase and enrol again), and finding, at `shareVault`, values stamped by such a device, which members hold
+  aside (Z162); the signed skip of Z24 (Z164); a bound on what a removed member's own streams add to the index
+  (Z166).
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
   screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
   `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,

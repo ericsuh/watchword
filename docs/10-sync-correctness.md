@@ -434,8 +434,10 @@ member's). Call it `J(v)`. It depends on exactly these (review finding Z157):
   coverage of the owner's snapshots merged (`collected`); and the devices judgements waited for or asked about
   (`awaiting`, `relied`), which bind the judged basis;
 - the registries the chain anchors, each counted only for the devices whose IDs commit to its account
-  (`committedDevicesOnly`): which account a device is (one at most), and which devices are revoked (the union, since
-  each registry revokes only its own account's devices).
+  (`committedDevicesOnly`), less every ID two of them list (`countedRegistries`, Z165): which account a device is (one
+  at most), and which devices are revoked (the union, since each registry revokes only its own account's devices). A
+  stream recorded while only one of two such registries was here is forgotten when the second arrives, and the log
+  replayed, so the index too ends as it would had both come first.
 
 It no longer depends on which account signed a stream's lowest segment, on which accounts the current head passes
 over, on who could write when a segment's key was current, or on the order segments arrived in: a stream holds one

@@ -565,6 +565,20 @@ its own account's other device merged, never at a number that device read, and a
 (`restoredStateAboveItsOwnAccountsWitness`, Z159). What an owner's collected stream carried of one record bounds no
 claim about another (`collectedOwnerStream`, Z160). A registry that cannot be read takes nothing out and settles
 nothing (`unreadableRegistrySettlesNothing`, Z161).
+The review of the sixth round (`06-adversarial-review.md` Z162 to Z166; `AdversarialSharedVaultDeviceIdentityTests.swift`
+in "shared vaults through the session", the end of `AdversarialAccountReviewTests.swift` in "account enrolment and
+device registry", the end of `AdversarialSyncEngineReviewTests.swift` in "sync log", `DeviceIdentifierTests` and the
+stream index suite). A device whose ID does not commit accepts no invitation, writes and moves nothing into a shared
+vault, publishes nothing there and says so (`nonCommittingDeviceTakesNoPart`); a copy an earlier build published there
+holds the original's deletion back, so the account's other device keeps the original (`moveByANonCommittingDevice`,
+round 6's L-M1); a device of an account from before IDs committed does not share (`legacyDeviceDoesNotShare`); an
+identity whose ID does not commit is neither approved nor enrolled as (`approvalRefusesNonCommittingIdentity`,
+`enrolmentRefusesNonCommittingIdentity`, Z162). A device that published above a witnessed floor merges its own
+segments below it once a lagging listing shows them (`ownSegmentsBelowTheFloorMergeWhenListed`, Z163). The member whose
+object holds a device's next number is named, junk names nobody (`plantInAPromotedMembersStream`,
+`removedMemberRevokesANewDevice`, Z164). An ID two registries list counts in neither in either order
+(`listedTwiceCountsNowhere`), and a stream forgotten leaves the index of a device that never recorded it
+(`forgottenStream`, Z165).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
