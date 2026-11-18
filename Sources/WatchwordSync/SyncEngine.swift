@@ -1524,9 +1524,13 @@ public actor SyncEngine {
                 report.ownStreamConflict = sequence
                 return
             }
-            // Published above a witnessed claim, the numbers below are this stream's as far as this device can know:
-            // they are gone from the store, and its acknowledgement says so (`vector`).
-            if (state.merged[deviceID] ?? 0) == sequence - 1 || sequence > state.nextSequence {
+            // Merged through this one only if it follows on from what was merged. Published above a witnessed claim,
+            // the numbers between were used by this stream and are not here: gone from the store, or not listed yet
+            // (a lagging listing, a store holding them back). Counted as merged, they would never be read once they
+            // were listed again, and the edits they carry, made before a restore, would never come back to this
+            // device (round 6's L1). Left unmerged, they are fetched and merged in sequence when they appear, and the
+            // stream waits at the first missing one for as long as it is gone, publishing on all the same.
+            if (state.merged[deviceID] ?? 0) == sequence - 1 {
                 state.merged[deviceID] = sequence
             }
             state.nextSequence = sequence + 1

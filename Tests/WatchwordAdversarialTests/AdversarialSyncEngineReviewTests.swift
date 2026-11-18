@@ -277,3 +277,75 @@ extension AdversarialSyncTests {
         #expect(try await witness.items()[next.id] != nil)
     }
 }
+
+// The review of the engine's sixth round (rows Z157 to Z161), over the fakes (docs/06-adversarial-review.md §Z, rows
+// from Z162).
+extension AdversarialSyncTests {
+    /// Threat: someone who can put back an older copy of this device's store and signed state (A8: a backup restored
+    /// onto the same hardware), with a listing that lags (a provider showing new objects late, or a store holding some
+    /// back, A1). The device had published segments 1 to 5 of a vault that keeps its whole log; the backup is from just
+    /// after segment 2, and the listing shows only 1 and 2. A device of its own account says it merged the stream
+    /// through 5, so the device publishes its new edit at 6 (Z159). Before round 6's L1 it also counted its stream as
+    /// merged through 6, so when 3 to 5 were listed again it never read them: the three edits it made before the
+    /// restore were on every other device and never on this one again. They are merged when they appear.
+    @Test("a device that published above a witnessed claim merges its own segments below it once they are listed")
+    func ownSegmentsBelowTheFloorMergeWhenListed() async throws {
+        let f = try await Self.fixture()
+        var configuration = SyncTestClient.configuration
+        configuration.maintainsLog = false
+        configuration.ownStreamWitnesses = [Self.a, Self.b]
+        let writer = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        var olderState: SyncState?
+        var olderRows: [StoredRecord] = []
+        var written: [Item] = []
+        for index in 1...5 {
+            written.append(try await writer.save(Self.login("Item \(index)", password: "p\(index)")))
+            try await writer.sync()
+            if index == 2 {
+                olderState = await writer.state()
+                olderRows = await writer.store.allRecords
+            }
+        }
+        await f.keys.trust(device: Self.b)
+        let witness = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        try await witness.sync()
+        try await witness.save(Self.login("The witness's own", password: "w"))
+        try await witness.sync()
+
+        // The backup: the store and the signed state as they were after segment 2, on the same hardware.
+        let restoredStore = InMemoryRecordStore()
+        try await restoredStore.commit(StoreChange(upserts: olderRows))
+        let restoredState = InMemorySyncStateStore()
+        await restoredState.tamper(try #require(olderState))
+        let restored = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration,
+            store: restoredStore, syncState: restoredState)
+        // The listing lags: segments 3 to 5 are not shown yet.
+        var lagging: [UInt64: [UInt8]] = [:]
+        for sequence in UInt64(3)...5 {
+            lagging[sequence] = await f.transport.allObjects[f.segmentName(sequence)]
+            await f.transport.tamper(f.segmentName(sequence), contents: nil)
+        }
+        let after = try await restored.save(Self.login("After the restore", password: "q"))
+        let report = try await restored.sync()
+        #expect(report.ownStreamConflict == nil && report.ownStreamUnverified == nil)
+        #expect(await f.transport.allObjects[f.segmentName(6)] != nil, "the device did not publish above the claim")
+        let merged = await restored.state()?.merged[Self.a]
+        #expect(merged == 2, "the numbers below the claim were counted as merged")
+
+        // Listed again: the device merges its own earlier segments, and its pre-restore edits are back.
+        for (sequence, bytes) in lagging { await f.transport.tamper(f.segmentName(sequence), contents: bytes) }
+        try await restored.sync()
+        let items = try await restored.items()
+        for item in written {
+            #expect(items[item.id] != nil, "\(item.title), written before the restore, never came back")
+        }
+        #expect(items[after.id] != nil)
+        let mergedAfter = await restored.state()?.merged[Self.a]
+        #expect(mergedAfter == 6)
+        try await witness.sync()
+        #expect(try await witness.items()[after.id] != nil)
+    }
+}
