@@ -138,9 +138,10 @@ public final class ExportModel: LockSensitive {
             let stamp = Self.stamp(self.now())
             switch kind {
             case .archive:
-                let archive = try await session.exportArchive(
+                var archive = try await session.exportArchive(
                     vaults: vaultIDs, passphrase: passphrase, password: password)
                 var bytes = archive.bytes
+                archive.bytes = []
                 contents = SecureBytes(wiping: &bytes)
                 // What a restore would not bring back, if anything (Z82): before the person relies on the file.
                 let lines =
@@ -153,8 +154,8 @@ public final class ExportModel: LockSensitive {
                 let format: PlaintextExportFormat = kind == .onePUX ? .onePUX : .applePasswordsCSV
                 let export = try await session.exportPlaintext(format, vaults: vaultIDs, password: password)
                 let titles = try await Self.titles(session)
-                var bytes = export.bytes
-                contents = SecureBytes(wiping: &bytes)
+                // Already zeroising memory, the session's own (Z83): no copy is made here.
+                contents = export.bytes
                 file = ExportFile(
                     id: UUID(), kind: kind, filename: "Watchword Export \(stamp).\(kind.fileExtension)",
                     itemCount: export.report.exportedCount,
@@ -173,7 +174,10 @@ public final class ExportModel: LockSensitive {
         guard let contents, let file else { throw CocoaError(.fileNoSuchFile) }
         removeStagedCopy()
         let url = try staging.stage(named: file.filename) { url in
-            try Data(contents.unprotectedCopy()).write(to: url, options: options.union(.withoutOverwriting))
+            // One copy, straight from protected storage, wiped once written (Z83).
+            var data = Data(contents)
+            defer { data.resetBytes(in: data.startIndex..<data.endIndex) }
+            try data.write(to: url, options: options.union(.withoutOverwriting))
         }
         stagedFile = url
         return url

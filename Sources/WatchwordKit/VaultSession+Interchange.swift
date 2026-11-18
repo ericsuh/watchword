@@ -179,8 +179,11 @@ public struct ImportOutcome: Sendable, Equatable {
 }
 
 /// A plaintext export: the file's bytes, what the format could not carry, and the items that could not be read.
-public struct PlaintextExport: Sendable, Hashable {
-    public var bytes: [UInt8]
+public struct PlaintextExport: Sendable {
+    /// The file, in zeroising memory. The exporter's array was moved here and wiped while it was the only reference
+    /// to its buffer (review §Z, Z83); what the exporters build on the way (the CSV or JSON text, the ZIP's parts)
+    /// is ordinary memory and is not wiped, like every decoded item's `String`s (SEC4, D5).
+    public var bytes: SecureBytes
     public var report: ExportReport
     /// Records in the chosen vaults that would not open, and so are not in the file. Show them with the report.
     public var unreadable: [UUID]
@@ -462,7 +465,7 @@ extension VaultSession {
         let chosen = try await exportedItems(vaults, account: record, since: epoch)
         let now = await clock.now()
         _ = try requireKeys(since: epoch)
-        let result: ExportResult
+        var result: ExportResult
         switch format {
         case .applePasswordsCSV:
             result = PasswordCSV.exportApplePasswords(chosen.items)
@@ -480,7 +483,12 @@ extension VaultSession {
                     exporterRelyingPartyID: relyingPartyID, accountID: record.accountID, timestamp: now))
         }
         _ = try requireKeys(since: epoch)
-        return PlaintextExport(bytes: result.bytes, report: result.report, unreadable: chosen.unreadable)
+        // Moved out of the result first, so the array is the buffer's only reference and the wipe reaches it rather
+        // than a copy-on-write duplicate (Z83).
+        var bytes = result.bytes
+        result.bytes = []
+        let contents = SecureBytes(wiping: &bytes)
+        return PlaintextExport(bytes: contents, report: result.report, unreadable: chosen.unreadable)
     }
 
     /// An encrypted Watchword archive of the items of `vaults` (PRD F8.4; docs/02-architecture.md §14.1): every item

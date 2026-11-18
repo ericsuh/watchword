@@ -26,6 +26,25 @@ struct SecureBytesTests {
         #expect(bytes.storageIsAllZero(), "zeroise is idempotent")
     }
 
+    /// The shape of review §Z, Z83: `init(wiping:)` reaches the caller's buffer only while the caller's array is its
+    /// only reference. The export used to wipe a copy-on-write duplicate and free the original unwiped; the session
+    /// now moves the array out of its result before wiping it.
+    @Test("wiping reaches a buffer only through its sole reference")
+    func wipingNeedsTheOnlyReference() {
+        let original: [UInt8] = [7, 7, 7, 7]
+        let kept = original
+        var shared = original
+        _ = SecureBytes(wiping: &shared)
+        #expect(shared == [0, 0, 0, 0] && kept == [7, 7, 7, 7], "the other reference keeps the plaintext")
+
+        struct Holder { var bytes: [UInt8] }
+        var holder = Holder(bytes: [9, 9, 9])
+        var moved = holder.bytes
+        holder.bytes = []
+        let secure = SecureBytes(wiping: &moved)
+        #expect(moved == [0, 0, 0] && Array(secure) == [9, 9, 9] && holder.bytes.isEmpty)
+    }
+
     @Test("deinit wipes storage before the memory is released")
     func deinitWipes() {
         let probe = ZeroisationProbe()
