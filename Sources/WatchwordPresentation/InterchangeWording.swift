@@ -119,9 +119,16 @@ public enum InterchangeWording {
                 "Whether this backup can be restored could not be checked. Do not delete the vault in reliance on it."
             ]
         }
-        return check.skipped.map {
+        var lines = check.skipped.map {
             item($0.itemID) + " is in the backup but would not be restored from it: " + text(for: $0.reason)
         }
+        if let kind = check.limitReachedInAnotherAccount {
+            lines.append(
+                "This backup restores into this account, but is too large to restore into a new one with the "
+                    + "Emergency Kit's Secret Key (\(kind.rawValue)). Keep this account's devices, or back up "
+                    + "fewer vaults at a time.")
+        }
+        return lines
     }
 
     /// What an entry the review raised a concern about would do, a sentence per effect (review finding Z62). The

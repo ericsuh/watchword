@@ -673,7 +673,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   protection is the app's: every file the app writes for the file mover goes into `StagingFolder` (portable, in
   `WatchwordPresentation`), swept at launch, unlock, lock and termination (Z80); never `fileExporter`.
 - An archive this app wrote must restore: `ArchivedItems` uses `InterchangeLimits.archive`, sized to the vault and
-  the format, and `exportArchive` reports what a restore would still not bring back (`restoreCheck`, Z82).
+  the format, and `exportArchive` reports what a restore would still not bring back (`restoreCheck`, Z82). Only for an
+  archive opened with this device's own Secret Key: one opened with a typed Kit key gets
+  `InterchangeLimits.archiveOfAnotherAccount` (a file's import-wide budgets, Z128), and the check says when this
+  account's archive would not restore into a new account (`limitReachedInAnotherAccount`).
 - The archive is sealed under the archive passphrase *and* the Secret Key (ADR 0008); `AccountArchive.parse`
   checks everything, KDF bounds and every envelope's place included, before a key is derived, and every failure
   after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.

@@ -357,11 +357,15 @@ extension VaultSession {
         }
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
+        // An archive opened with this device's own Secret Key is this account's; one opened with a key typed from a
+        // Kit may be A7's, sealed under an account of its own, and gets a file's budgets (review finding Z128).
+        let limits: InterchangeLimits = text == nil ? .archive : .archiveOfAnotherAccount
         let fork = ForkedGenerator(forkingFrom: &random)
         let result = try await awayFromSession(.archiveDerivation, since: epoch) { () -> ImportResult in
             var fork = fork
             let entries = try Self.archivedEntries(of: archive, passphrase: passphrase, secretKey: secretKey)
-            return try ArchivedItems.importEntries(entries, into: vaultID, options: options, using: &fork)
+            return try ArchivedItems.importEntries(
+                entries, into: vaultID, limits: limits, options: options, using: &fork)
         }
         return try await stage(
             result, vaultID: vaultID, since: epoch, generation: generation,

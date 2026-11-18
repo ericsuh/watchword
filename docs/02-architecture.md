@@ -3423,7 +3423,13 @@ the largest archive (no field `ItemCodec` writes is shorter), and 1 GiB stored o
 restore would still not bring back is found when the archive is made: `exportArchive` runs the items through the
 restore's own assembler off the actor (`ArchivedItems.restoreCheck`, `AwayWork.archiveRestoreCheck`) and returns it
 (`ArchiveExport.restoreCheck`), and the export screen lists it before the person relies on the file (review §Z,
-Z82). The restore screen offers the archive's trash, which is otherwise left out and reported.
+Z82). The restore screen offers the archive's trash, which is otherwise left out and reported. Those limits are for
+an archive opened with this device's own Secret Key. One opened with a Secret Key typed from a Kit (a restore into a
+new account) may be one A7 sealed under an account of its own and handed over with its Kit, which the code cannot
+tell from the person's own: it keeps the format's item count and the per-item bounds, and has the import-wide
+budgets of another app's file (`InterchangeLimits.archiveOfAnotherAccount`: 512 MiB stored, a million fields,
+100,000 scope derivations, 32 URLs an item; review finding Z128). The restore check says when this account's archive
+would not restore into a new account under those budgets (`limitReachedInAnotherAccount`).
 
 **Reading one checks everything before decrypting anything.** `AccountArchive.parse` bounds the file (256 MiB),
 the entry count (200,000, and against the bytes that could hold it, before anything is allocated), every length,

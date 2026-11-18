@@ -129,6 +129,31 @@ public struct InterchangeLimits: Hashable, Sendable {
         storedItemBytes: 1 << 20,
         totalStoredBytes: 1 << 30)
 
+    /// The limits for an archive another account made, opened with a Secret Key typed from its Kit (review finding
+    /// Z128). The code cannot tell a genuine restore into a new account from an archive A7 sealed under an account of
+    /// its own and handed over with its Kit, so such an archive is a file from elsewhere: it keeps what the format and
+    /// the vault need of each item (`archive`'s item count, per-item stored size, fields per item and field size) and
+    /// has `standard`'s import-wide budgets (stored size, fields, scope derivations, URLs per item). An honest archive
+    /// past those still restores into the account that made it; `exportArchive` says when one would not restore
+    /// into another (`ArchiveRestoreCheck.limitReachedInAnotherAccount`).
+    public static let archiveOfAnotherAccount = InterchangeLimits(
+        uncheckedInputBytes: archive.maximumInputBytes,
+        documentBytes: archive.maximumDocumentBytes,
+        archiveEntries: archive.maximumArchiveEntries,
+        items: archive.maximumItems,
+        compressionRatio: archive.maximumCompressionRatio,
+        entryBytes: archive.maximumEntryBytes,
+        fieldBytes: archive.maximumFieldBytes,
+        fieldsPerItem: archive.maximumFieldsPerItem,
+        nestingDepth: archive.maximumNestingDepth,
+        entryNameBytes: archive.maximumEntryNameBytes,
+        totalFields: standard.maximumTotalFields,
+        csvColumns: archive.maximumCSVColumns,
+        urlsPerItem: standard.maximumURLsPerItem,
+        scopeDerivations: standard.maximumScopeDerivations,
+        storedItemBytes: archive.maximumStoredItemBytes,
+        totalStoredBytes: standard.maximumTotalStoredBytes)
+
     private init(
         uncheckedInputBytes: Int, documentBytes: Int, archiveEntries: Int, items: Int, compressionRatio: Int,
         entryBytes: Int, fieldBytes: Int, fieldsPerItem: Int, nestingDepth: Int, entryNameBytes: Int,

@@ -68,7 +68,20 @@ public enum ArchivedItems {
                 guard let id = record.entry.sourceID.flatMap(UUID.init(uuidString:)) else { return nil }
                 return ArchiveRestoreCheck.Skipped(itemID: id, reason: record.reason)
             }
-            return ArchiveRestoreCheck(skipped: skipped, limitReached: nil)
+            var check = ArchiveRestoreCheck(skipped: skipped, limitReached: nil)
+            // Restored into a new account (the Kit's Secret Key typed), the import-wide budgets are a file's (Z128).
+            if limits == .archive {
+                do {
+                    _ = try importEntries(
+                        items.map { ArchivedEntry(.item($0)) }, into: UUID(), limits: .archiveOfAnotherAccount,
+                        options: ImportOptions(includesTrashed: true), using: &generator)
+                } catch InterchangeError.limitExceeded(let kind, _) {
+                    check.limitReachedInAnotherAccount = kind
+                } catch {
+                    check.failed = true
+                }
+            }
+            return check
         } catch InterchangeError.limitExceeded(let kind, _) {
             return ArchiveRestoreCheck(skipped: [], limitReached: kind)
         } catch {
@@ -90,15 +103,25 @@ public struct ArchiveRestoreCheck: Hashable, Sendable {
     public var limitReached: InterchangeLimits.Kind?
     /// The check itself failed for another reason: whether the archive restores is unknown.
     public var failed: Bool
+    /// A budget that would fail a restore of the archive into a new account, with its Kit's Secret Key typed, where it
+    /// has a file's import-wide budgets (`InterchangeLimits.archiveOfAnotherAccount`, review finding Z128), if one
+    /// would. It still restores into this account.
+    public var limitReachedInAnotherAccount: InterchangeLimits.Kind?
 
-    public init(skipped: [Skipped] = [], limitReached: InterchangeLimits.Kind? = nil, failed: Bool = false) {
+    public init(
+        skipped: [Skipped] = [], limitReached: InterchangeLimits.Kind? = nil, failed: Bool = false,
+        limitReachedInAnotherAccount: InterchangeLimits.Kind? = nil
+    ) {
         self.skipped = skipped
         self.limitReached = limitReached
         self.failed = failed
+        self.limitReachedInAnotherAccount = limitReachedInAnotherAccount
     }
 
-    /// Everything in the archive would come back.
-    public var restoresEverything: Bool { skipped.isEmpty && limitReached == nil && !failed }
+    /// Everything in the archive would come back, into this account or a new one.
+    public var restoresEverything: Bool {
+        skipped.isEmpty && limitReached == nil && !failed && limitReachedInAnotherAccount == nil
+    }
 }
 
 extension ImportAssembler {
