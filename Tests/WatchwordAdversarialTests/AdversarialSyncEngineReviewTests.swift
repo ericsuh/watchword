@@ -177,3 +177,40 @@ extension AdversarialSyncTests {
         #expect(await f.transport.allObjects[f.segmentName(8)] != nil, "the head was collected")
     }
 }
+
+// The review of the engine's fourth round (rows Z144 to Z149), over the fakes (docs/06-adversarial-review.md §Z, rows
+// from Z150).
+extension AdversarialSyncTests {
+    /// Threat: a member of a shared vault who may write (A4), whose segment acknowledges this device's stream as far
+    /// as 10, and anyone who can delete in the folder (A1, or a member with delete access to the shared folder) removing
+    /// this device's head. A vault that keeps its whole log collects nothing, so no number of this stream was ever
+    /// freed: publishing at the next one cannot land where no reader looks, and creating at a used one is refused. Z145's
+    /// hold for a trusted device's claim guarded nothing there, and a replay re-made the claim each time: the device
+    /// published nothing in that vault and held its deletions back in every vault, for good.
+    @Test("an acknowledgement does not hold back a device of a vault that keeps its whole log")
+    func acknowledgementInAWholeLog() async throws {
+        let f = try await Self.fixture()
+        var configuration = SyncTestClient.configuration
+        configuration.maintainsLog = false
+        let writer = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        for index in 1...3 {
+            try await writer.save(Self.login("Item \(index)", password: "p\(index)"))
+            try await writer.sync()
+        }
+        await f.keys.trust(device: Self.b)
+        try await f.plant(
+            SyncPayload(
+                kind: .segment, vaultID: Self.vault, author: Self.b, number: 1, vector: [Self.a: 10], entries: []),
+            signedBy: FakeSyncKeyring(deviceID: Self.b, keys: f.keys))
+        await f.transport.tamper(f.segmentName(3), contents: nil)
+
+        try await writer.save(Self.login("After the head went", password: "q"))
+        for _ in 0..<2 {
+            let report = try await writer.sync()
+            #expect(report.ownStreamUnverified == nil, "the device is held for a claim that guards nothing")
+        }
+        // At the number after its head, which was never collected: nothing it used is written over.
+        #expect(await f.transport.allObjects[f.segmentName(4)] != nil, "the device published nothing")
+    }
+}

@@ -509,7 +509,8 @@ public actor SyncEngine {
     /// - while an object of its stream at or past its next number cannot be told from its own (`ownUndecided`): a
     ///   name shown to be someone else's (junk, another's signatures) is not one, since anyone who can create a file
     ///   can list it, and with a snapshot's claim it held for good a device that never published there (Z145, Z139);
-    /// - and, for a device that has published in the vault, while a device still trusted says, by a snapshot's
+    /// - and, for a device that has published in a vault whose log is collected (`maintainsLog`; a shared vault's is
+    ///   not, so nothing there was freed for reuse, Z154), while a device still trusted says, by a snapshot's
     ///   coverage or a segment's acknowledgement, that it merged this stream further than this state's next number.
     ///   A current state's head is listed unless the store withholds it, and nobody can have merged beyond it; an older
     ///   state whose head is missing from this listing (withheld, a stale listing, A8) would otherwise publish over a
@@ -521,7 +522,11 @@ public actor SyncEngine {
         guard !listing.ownAnchored else { return nil }
         let next = state.nextSequence
         if let undecided = listing.ownUndecided.filter({ $0 >= next }).min() { return undecided }
-        guard state.lastPublishedSequence > 0 else { return nil }
+        // A vault that keeps its whole log (a shared vault) collects nothing, so no number of this stream was freed
+        // for reuse, and creating at a used one is refused: a claim guards nothing there, and a member's
+        // acknowledgement, re-made by every replay, held the device for good once its head was gone (review finding
+        // Z154).
+        guard state.lastPublishedSequence > 0, configuration.maintainsLog else { return nil }
         let covered =
             state.snapshots.filter { !retired.contains($0.key.author) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
         let acknowledged =
