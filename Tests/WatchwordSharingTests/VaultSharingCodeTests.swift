@@ -123,14 +123,20 @@ struct VaultSharingCodeTests {
                 commitment: commitment ?? base, starterNonce: ns ?? base, joinerNonce: nj ?? base)
         }
         let reference = t()
-        let variants = [
-            t(session: Array(repeating: 2, count: 16)), t(number: SharingSessionNumber(typed: "12345679")),
-            t(starter: other.bundle), t(joiner: other.bundle),
-            t(starter: rig.joiner.bundle, joiner: rig.starter.bundle),
-            t(commitment: Array(repeating: 8, count: 32)), t(ns: Array(repeating: 8, count: 32)),
-            t(nj: Array(repeating: 8, count: 32)),
-        ]
-        #expect(Set(variants + [reference]).count == variants.count + 1)
+        // Built one at a time with its type named: as one literal, Swift 6.0 (Xcode 16.4) gives up type-checking it.
+        let changed: [UInt8] = Array(repeating: 8, count: 32)
+        var variants: [[UInt8]] = []
+        variants.append(t(session: Array(repeating: 2, count: 16)))
+        variants.append(t(number: SharingSessionNumber(typed: "12345679")))
+        variants.append(t(starter: other.bundle))
+        variants.append(t(joiner: other.bundle))
+        variants.append(t(starter: rig.joiner.bundle, joiner: rig.starter.bundle))
+        variants.append(t(commitment: changed))
+        variants.append(t(ns: changed))
+        variants.append(t(nj: changed))
+        let distinct: Set<[UInt8]> = Set(variants).union([reference])
+        let expected: Int = variants.count + 1
+        #expect(distinct.count == expected)
         // The same keys with a fresh self-signature (Ed25519 signing is randomised on CryptoKit) change nothing.
         let resigned = try rig.starter.keyset.publicKeyBundle()
         #expect(t(starter: resigned) == reference)
