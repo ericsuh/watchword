@@ -543,7 +543,28 @@ admits it, and the vault settles (`revocationLearntAfterTheHold`, Z153). A segme
 a device of a vault that keeps its whole log (`acknowledgementInAWholeLog`, Z154). A read-only member's flood of
 segments into its own device's stream is not recorded, and a plant the victim steps over is recorded once the victim
 publishes above it (`readOnlyFloodIsNotRecorded`, Z155). The deletion gate of Z148 opens once the copy is published
-(`plantedTombstoneForAMovesCopy`, Z156).
+(`plantedTombstoneForAMovesCopy`, Z156). Since Z157 the Z150, Z152 and Z155 tests check the rule that replaced
+theirs: a revocation of another member's device ID retires nothing because no registry but its own account's counts
+it; a planted segment verifies nowhere before or after a promotion, and no rotation follows one; a read-only member's
+flood is passed over and never recorded.
+The review of the fifth round (`06-adversarial-review.md` Z157 to Z161; `AdversarialSharedVaultStreamIdentityTests.swift`
+and the end of `AdversarialSharedVaultEngineRound4Tests.swift` in "shared vaults through the session", the end of
+`AdversarialSyncEngineReviewTests.swift` in "sync log", `DeviceIdentifierTests` in the crypto tests and the stream index
+suite). Device IDs commit to their account: known answers from Python's `hashlib`, and a registry counts in a shared
+vault only the devices whose IDs commit to it, another account's listing of one (under its own key or the device's)
+counting for nothing (`knownAnswers`, `committedDevicesOnly`, Z157). A stream holds one account's segments in any order
+of arrival (`oneAccountPerStream`). A writer's segment in a promoted member's stream verifies nowhere, before and after
+a rotation, on the victim's device and others, and versions that saw the victim's edits count there
+(`plantInAPromotedMembersStream`, round 5's M1); a removed member's plant at a new device's segment 1 and revocation of
+its ID retire it nowhere, and its work arrives once the object is gone (`removedMemberRevokesANewDevice`, M2); the
+Z46, Z51, Z120, Z137 and Z146 tests (`segmentsInAnotherMembersStream`, `streamOwnerForSomeoneWhoJoinedAfterARotation`,
+`anotherAccountsSegmentIsNeverRecorded`, `replayRequestedDuringAReplay`, `readOnlyMemberPlantIsSteppedOver`,
+`readOnlyMemberPlantAtSegmentOne`) check that another account's object squats like junk, says so, loses nothing and is
+stepped over by nobody. A device restored to an older state in a vault that keeps its whole log publishes above what
+its own account's other device merged, never at a number that device read, and a member's claim moves nothing
+(`restoredStateAboveItsOwnAccountsWitness`, Z159). What an owner's collected stream carried of one record bounds no
+claim about another (`collectedOwnerStream`, Z160). A registry that cannot be read takes nothing out and settles
+nothing (`unreadableRegistrySettlesNothing`, Z161).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

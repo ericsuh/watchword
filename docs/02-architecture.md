@@ -467,9 +467,10 @@ damaged object is reported and skipped; it never stops other streams. An object 
 looked at more closely, because where its next segment goes follows from it: one that carries this device's *own*
 signatures (`SyncKeyring.verifyOwn`: this account's key and this device's key, as this account's registry holds them)
 raises its next sequence number; one shown not to be its own (not a signed object, other signatures, over the size cap)
-changes nothing. In a shared vault "verifies here" is not "mine": another member's device can be registered under this
-device's ID (S33), so such an object verifies, is staged, and is held aside in sequence by the judge as on every other
-device, and it never numbers the stream (review finding Z30). A name alone never moves the number: anyone who can
+changes nothing. In a shared vault "verifies here" and "mine" now coincide: another member could register a device under
+this device's ID (S33), and such an object verified and was held aside in sequence (Z30), but the ID commits to this
+account (§7.8, Z157) and another account's registry listing it counts for nothing, so only this account's keys sign
+what verifies in this device's stream, and an object there that is not its own numbers nothing. A name alone never moves the number: anyone who can
 create a file under the vault's prefix can list one (Z24). What cannot be told (listed and not there, unreadable, no key
 to check with) holds publishing back (`SyncReport.ownStreamUnverified`) only where the device's state could be older
 than its stream and the stream cannot show which numbers it used: when no object of the stream that is known to be
@@ -602,15 +603,23 @@ object of this stream on the transport that carries this device's own signatures
 the state may be behind and the stream cannot say how far (above), so a device whose state was rolled back never reuses
 a collected number. It comes from nothing else: not from a listed name (Z24), not from another account's object in a
 shared vault (Z30), not from a staged row (the staging area is a local file, Z39), and not from a snapshot's coverage
-of this device's own stream beyond what the stream can have got (Z21). A number beyond 2^48, which no reader
+of this device's own stream beyond what the stream can have got (Z21); with one exception, in a vault whose log is kept
+whole (a shared vault): where a device of this device's own account, not revoked, says by a snapshot's coverage or a
+segment's acknowledgement that it merged this stream at or past the next number, this device publishes above that
+claim (`SyncConfiguration.ownStreamWitnesses`, `push`; never saved unless published, so a claim a revocation discounts
+moves nothing for good). Its state is older than what it published (a restored backup, A8), and those numbers have been
+taken out of the store (a member with delete access): published there again, a device that merged them would never
+read it (round 5's L-M2, Z159). Another account's word moves nothing (Z154). A number beyond 2^48, which no reader
 lists, is never written at (`SyncReport.ownStreamExhausted`). An unsigned object squatting at exactly the next number
 stops this vault's publishing while it is there, reported at every sync (`ownStreamConflict`) with nothing marked as
-sent; passing it needs a skip the author signs and readers honour, which is open. In a shared vault, an object there
-that verifies as another member's is staged and held aside in sequence, so the device steps over it after one sync
-that reports the conflict (Z30), and so is one signed by a member whose writes never count, which the judge passes over
-keeping nothing (Z137); stepping over either is reported (`SyncReport.ownStreamSteppedOver`, Z146), since below the
-device's first segment there the other devices may take the stream for the planter's. Junk, or an object under keys
-that differ from the pin or by an account the chain does not list, still squats, reported and worded.
+sent; passing it needs a skip the author signs and readers honour, which is open. In a shared vault the same holds of
+an object there that another member signed: device IDs commit to their account (Z157), so it verifies nowhere, like
+junk, and the device stops at it, reported, until it is gone. Z30 and Z137 used to stage such an object and step over
+it, which bought nothing against a member able to create files, who can write junk at that number as well, and cost
+the inference of Z46 to Z155 about whose a stream was; a member who can do it is an A1 there. A segment of a member
+whose writes never count, in that member's own device's stream, is still passed over in sequence keeping nothing
+(Z137). `SyncReport.ownStreamSteppedOver` (Z146) stays as a defence: no object that is not this device's own can be
+admitted in its stream now.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
 value (`EnvelopeKind.criticality(ofRawValue:)`: 10 to 127 ignorable, everything else critical; `scanStatus` is the first
@@ -942,6 +951,18 @@ it follows). Every entry carries the account key's signature and its author's: a
 — for a device registering itself — the current enrolment key. A credential entry is signed a third time, by the
 enrolment key of the generation it replaces: a device that merely holds the keyset cannot change the password for
 everyone. Entries the account key did not sign are never admitted at all.
+
+**A device's ID commits to its account** (review finding Z157). It is the first 128 bits of
+`SHA-256("WW-device-id-v1" ‖ 0x00 ‖ accountID ‖ algorithm ‖ keyLength ‖ key)` over the device key's public half, as an
+RFC 9562 version-8 UUID (`DeviceIdentifier`): the device makes its key first and takes the ID it gives
+(`DeviceKeyStore.createDevice`, at account creation, enrolment, a restore onto new hardware and
+`prepareDeviceIdentity`). A registered device's key never changes, so neither does the commitment. Nothing in the
+registry's own rules depends on it, and a private vault never asks: its writers are this account's devices. A shared
+vault asks it of every registry, this account's own included (`DeviceRegistryState.committedDevicesOnly`): a device
+counts there only if its ID commits to the registry's account under the key the registry lists. Any account can still
+put any device ID in its own registry, but for another account's device that is a second preimage of 122 bits, so no
+account can list, sign as or revoke another account's device where it matters; §8.10 says what that settles. No entry
+format changed; an installation whose device IDs predate this has devices that count in no shared vault.
 
 **Rules** (`DeviceRegistry.evaluate`, a pure function; the merge is set union, so devices that hold the same
 entries and follow the same credentials compute the same registry). The entries are replayed in one order:
@@ -1945,47 +1966,46 @@ tracked): a device whose pins are gone anchors again from what the transport sho
 lands now. These end with the account re-key (F10.1, not built), which gives the member a signing key the old
 device never held, and the pins' digest in the Keychain.
 
-**A stream is one account's** (review finding Z46). An object's name carries a device ID and no account, device IDs
-are chosen by devices, and a member can list another member's device ID in their own registry (S33) and sign segments
-into the stream named after it; `validate` then makes every entry in such a segment name that device, so to every rule
-keyed by device ID they were the victim's device's versions, merged "like any other" on the victim's own device too. A
-claim to have seen that device's unpublished edits was not asked of the device (S46's check exempts a version's own
-writer), and the victim's unpublished value was superseded with no conflict. Two rules now. A device knows what it
-wrote: a segment in its own stream that its own account's keys did not sign is held aside and not recorded, and does
-not number its stream (`SyncKeyring.verifyOwn`, Z30; a snapshot named as its own is refused). And for every other
-device, a stream belongs to the account that signed its lowest-numbered segment
-(`SharedStreamIndex.account(ofStream:)`): a segment in it that another account signed is recorded, since a cut's chain
-runs over every object of the stream, but nothing is filed or attributed through it, `segmentCounts` is false for it,
-and the judge holds it aside, so the stream carries on past it instead of waiting.
-**Every device records every segment**, whether or not it opens there (Z51): who signed a segment and which object
-it is need no vault key, so one sealed under a key the device does not hold (it joined after a rotation, or the key is
-a losing branch's) is recorded by digest and signer, marked unopened, and completed if it opens later. A shared vault
-keeps its whole log, so the lowest-numbered segment, and with it the stream's account, is the same on every device;
-recorded only where they opened, a member who joined after a rotation took the first segment sealed under the new key
-for the stream's first, and an insider who wrote one there had the stream on that device and nowhere else. A segment of
-an account whose work cannot count under the current head (`nothingCounts`: a member never let write) is recorded by
-digest and signer alone and names no stream's account (`SharedStreamIndex.passedOver`, set from the ledger before each
-judgement and refiled when it changes, Z146): otherwise such a member, with a device listed under a writer's device ID,
-took the writer's stream everywhere by signing its segment 1 first, and every device held aside all the writer wrote.
-Such a segment is recorded at all only below a segment of another account's in the same stream, where a cut's chain can
-run over it; elsewhere the stream's lowest skipped number is noted (`skippedPassedOver`), and a counting segment
-recorded above it replays the log, which records it (Z155): otherwise such a member grew every device's signed index
-without bound. Which segment names a stream is a function of the chain, not the head (Z152): each segment records the
-key it was sealed under (its envelope header needs no key), and one names the stream ahead of any other only if its
-signer first appeared in the accepted chain, while that key was current, in a role that could write
-(`SharedStreamIndex.naming`); a stream with no such segment is named by its lowest other one. Passed over only while
-the head said so, a read-only member's plant at segment 1 took the writer's stream the day the member was promoted. A
-member promoted while a key is current signs under it with segments that name nothing ahead of another's, so an
-administrator's device rotates the key after a promotion (`promotedWithinKeyEra`, as for exposed key holders), after
-which they do. The same
-recording keeps a cut's chain whole across segments the cutting device could not open (Z52). And when an
-earlier segment arrives after a later one and shows the stream to be another account's, the index files it again and
-the log is replayed, so nothing judged under the wrong account stays merged. A cut covers the streams that are the
-departing account's. And a version is exempt from the question about its own writer's edits only where it is known
-to be that device's work: its own stream carried it, or it is this device's own; one that merely names a device, in a
-snapshot say, is held to that device's stream like anyone's claim. What is left is denial of service by an insider, as
-S33 and S11: a member who writes into a stream **before** its device's first segment in that vault takes the stream,
-and that device's later segments are then held aside by everyone else (visibly), its own device excepted.
+**A stream is one account's, by identity** (review findings Z46, Z157). An object's name carries a device ID and no
+account, and until Z157 any member could list another member's device ID in their own registry (S33) and sign
+segments into the stream named after it; `validate` makes every entry in such a segment name that device, so to every
+rule keyed by device ID they were the victim's device's versions. Z46 to Z155 inferred whose a stream was: the signer
+of its lowest segment, passing over accounts whose work could not count (Z146), recording such segments only where a
+cut could need them (Z155), preferring a signer who could write when its key was current and rotating after a
+promotion (Z152), and counting a revocation only from the stream's account (Z150). Each inference was attacked in turn:
+a plant at segment 1 took a stream; a promotion moved it; a later plant by a writer named a promoted member's stream
+for the writer, on the victim's own device too (round 5's M1); a captured stream let a removed member's revocation
+silence a new device everywhere (M2). Now a device's ID commits to its account under its key (§7.8), and a shared
+vault counts a registry's device only if it commits to that registry's account, this account's own registry included
+(`memberRegistries`, `committedOwnState`). So:
+
+- **Every object that verifies in a device's stream is signed by that device's account** (`signingAccount`): no other
+  account's registry lists the device. Another account's object there verifies nowhere, is refused at download as
+  junk is, and is never staged, recorded or judged; the stream's account is the one its device ID commits to
+  (`SharedStreamIndex.account(ofStream:)`, which reads it off any recorded segment), on every device, whatever arrives
+  first, before a promotion or after. `SharedStreamIndex.record` refuses a second account's segment in a stream, and
+  an index of an earlier format, which may hold one, is refused and rebuilt (format 7).
+- **A value's stamp and a clock's entry name one account**: the device a stamp names is listed by one registry at most
+  (`accountsListing`), so a claim about a device's edits is a claim about that account's.
+- **A revocation is its own account's** (`revokedDevices`): the revocations of every registry the chain anchors are
+  unioned, since each lists only devices of its own account; no member can retire another's device.
+- **Nothing an account whose work cannot count signs is recorded** (`nothingCounts`, a member never let write): no
+  cut runs over it, since a cut is taken only of an account that could write, and the change of head that lets the
+  account write replays the log, which records it then. Its segments are passed over in sequence in its own devices'
+  streams (Z137), and it can grow no other device's index (Z146, Z155).
+
+What this removed, and why each is no longer needed: `passedOver` and the refiling of streams at each change of head
+(Z146), `skippedPassedOver` and the rule of where a passed-over segment is recorded (Z155), `naming`, each segment's key
+ID and the rotation after a promotion (`promotedWithinKeyEra`, Z152), the account-of-stream test on revocations (Z150),
+the own-stream guard in `judgeRecord` and `streamAdmits` (Z46, Z30), and the replay asked for when a stream's account
+changed (Z51(b), Z120's trigger): every one answered "whose is this stream?", which identity now answers. What stays:
+**every device records every segment**, whether or not it opens there (Z51): who signed it and which object it is need
+no vault key, so a cut's chain is whole across segments the cutting device could not open (Z52); a stream's first
+sequence falling asks for a replay (Z151); and a version is exempt from the question about its own writer's edits only
+where its writer's own stream carried it or it is this device's own. What is left is what anyone who can create objects
+in the store can do (A1, and a member with write access to the folder): an object at a device's next number, junk or
+signed by any key at all, stops that device's stream there in that vault, reported (`ownStreamConflict`, and
+`waiting` elsewhere), nothing marked sent and nothing lost, until it is removed.
 
 **The write cut over sync's objects** (S28). The cut a removal, departure or demotion carries is, for each device
 whose segments the departing account's keys signed, the furthest sequence through which the signing device holds every
@@ -2014,12 +2034,13 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   segment is not checked. Nor is a stream that will never carry the edits here (Z144): a revoked device's, which is
   never read again (and a shared vault writes no snapshot to hand its work on), and a device of the owner's account
   whose first segments were collected before the vault was shared; for an account that may write, a claim about either
-  is believed and never waited for, as such a device's own versions already were. A revocation counts only from the
-  account the device is (Z150): its stream is that account's, or, for a stream nothing was recorded of, every registry
-  listing the device has revoked it; and this device is revoked by its own registry alone. Unioned, any member's
-  revocation of another member's device ID retired it everywhere, the victim's own device included. "Collected" only
+  is believed and never waited for, as such a device's own versions already were. A revocation is its own account's
+  (Z157): a registry counts only devices whose IDs commit to its account, so the revocations of every registry are
+  unioned, and a member's revocation of another member's device ID, which once retired it everywhere (Z150), revokes
+  nobody's device. "Collected" only
   where an owner's snapshot merged here covers the missing segments (`SharedStreamIndex.collected`, from
-  `WriteJudge.recordSnapshot`), and only for versions no higher than the stream carried (Z151): a compacted vault is
+  `WriteJudge.recordSnapshot`), and only for versions of the record no higher than the stream carried of that record
+  (Z151; round 5's L-M3, Z160: a version of another record said nothing about this one): a compacted vault is
   never shared (Z42), so a missing first segment had nearly always not arrived, and any writer's claim to have seen the
   owner's device's future edits was believed. What a replay settles is the *judged basis* (`judgedBasis`): the head,
   and the counted revocations of devices a judgement since the last replay waited for or asked about (`awaiting`,
@@ -2081,9 +2102,9 @@ chain once that record is here. Tests: "Vault session: a shared vault in a later
 
 **Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46):
 
-- A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
-  through vouching count only while every listing account's work can count (S33, insider denial of service like S11).
-  Segments are no longer attributed by signature alone: a stream is one account's (Z46, above).
+- A device ID is listed by one account's registry at most, as a shared vault counts them (Z157): values stamped with a
+  device that reached a newcomer only through vouching count while that account's work can count (S33). Another
+  account's object at a device's next number stops that device's stream there until it is removed, as junk does (above).
 - Vouching is for a member who joined after a rotation, and only under a key introduced at or after the latest record
   that ended a permission: a member invited after a demotion, with no rotation since, holds aside versions carrying
   values from before the last rotation until the next one seals them again, and a store withholding one device's
