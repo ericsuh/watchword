@@ -174,7 +174,9 @@ Built as decided (`docs/02-architecture.md` §8.4; review in `06-adversarial-rev
 
 - The transcript hashes each bundle as `accountID ‖ X25519 key ‖ Ed25519 key`, not in `KeyBundleCodec` bytes: those
   carry the self-signature, which CryptoKit randomises, so a device's own bundle and the directory's copy would hash
-  apart (V12). The self-signature says nothing about whose keys they are.
+  apart (V12). The self-signature says nothing about whose keys they are. As built, the transcript writes each account
+  ID twice, `S.account ‖ keys(S)` with `keys(S)` beginning with the same ID (and likewise for J); the layout is pinned
+  by a hashlib known-answer vector (V30) and written out in §8.4.
 - Board objects carry the session ID in every message (`"WWVS" ‖ version ‖ kind ‖ session ‖ …`), so a reply or reveal
   of another session is refused at once; the invitation object is `"WWVI"`, bound to the session, its number and the
   joiner. Each device's lookup in the directory happens once, before its own nonce is published.

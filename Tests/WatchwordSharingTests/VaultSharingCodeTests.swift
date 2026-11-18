@@ -75,6 +75,53 @@ struct VaultSharingCodeTests {
         #expect(SharingTranscript.grouped(Array("972583".utf8)) == "972 583")
     }
 
+    /// The transcript's byte layout pinned by an independent implementation (V30), not by our own code: the field
+    /// order, the account ID written once before `keys(B)` and again as its first field, and `keys(B)` as
+    /// `accountID ‖ X25519 ‖ Ed25519` (V12). The two bundles are `SharingParty(seed: 70)` and `(seed: 71)`; their
+    /// `keys` bytes are pinned below first, so a change of key generation shows as that, not as a transcript change.
+    /// Computed with Python's hashlib:
+    ///
+    /// ```
+    /// import hashlib
+    /// keys_s = bytes.fromhex("0f08bb7b…958359")  # the full hex below
+    /// keys_j = bytes.fromhex("af5afb38…f3e8d2")
+    /// session, number = bytes(range(1, 17)), b"12345678"
+    /// ns, nj = bytes([0xA5] * 32), bytes([0x5A] * 32)
+    /// c = hashlib.sha256(b"WWSC1-commit" + session + keys_s[:16] + ns).digest()
+    /// t = hashlib.sha256(b"WWSC1-code" + session + number + keys_s[:16] + keys_s + keys_j[:16] + keys_j
+    ///                    + c + ns + nj).digest()
+    /// "%06d" % (int.from_bytes(t[0:8], "big") % 10**6), "%06d" % (int.from_bytes(t[8:16], "big") % 10**6)
+    /// ```
+    @Test("the transcript and both codes match an independent implementation (Python hashlib)")
+    func transcriptKnownAnswer() throws {
+        let starter = try SharingParty(seed: 70).bundle
+        let joiner = try SharingParty(seed: 71).bundle
+        let starterKeys =
+            "0f08bb7b0e8e4a35adbfdb5e830f2306ca39b50a7074f2fd112b974efd76dcbeda7075617ae4f1131e0dc85127c0f216"
+            + "14230f5baf29b8bbce97eeeb86a5f959475b2e7ff7d15cc831c70ae356958359"
+        let joinerKeys =
+            "af5afb387b384ca3936da20884364c1135c00b66bed23acf15fca52a738e7a72b22bacef66810da3e1d74d110ce9012e"
+            + "3aacc5d901a6fc3ed10971516f5c32b8d4fd020c683b1bd96c3c2d6fb4f3e8d2"
+        #expect(SharingBytes.hex(SharingTranscript.keys(starter)) == starterKeys)
+        #expect(SharingBytes.hex(SharingTranscript.keys(joiner)) == joinerKeys)
+
+        let session = Array(1...16).map(UInt8.init)
+        let number = try #require(SharingSessionNumber(typed: "1234 5678"))
+        let starterNonce = Array(repeating: UInt8(0xA5), count: 32)
+        let joinerNonce = Array(repeating: UInt8(0x5A), count: 32)
+        let commitment = SharingTranscript.commitment(
+            session: session, starter: starter.accountID, nonce: starterNonce)
+        #expect(SharingBytes.hex(commitment) == "d631764b8ba9b57d430c079e0b6758ec7376c00057a34d1339d5c455fbf21579")
+        let transcript = SharingTranscript.transcript(
+            session: session, number: number, starter: starter, joiner: joiner, commitment: commitment,
+            starterNonce: starterNonce, joinerNonce: joinerNonce)
+        #expect(SharingBytes.hex(transcript) == "6b4c9c94d26e0af4a62cb1e8dc0083c8ef4cbb2b37dc9be33a2de12de60564af")
+        let joinerCode = String(decoding: SharingTranscript.code(transcript, at: 0), as: UTF8.self)
+        let starterCode = String(decoding: SharingTranscript.code(transcript, at: 8), as: UTF8.self)
+        #expect(joinerCode == "818996")
+        #expect(starterCode == "856520")
+    }
+
     @Test("every board message parses only at its own length, magic, version and kind")
     func messagesAreExact() throws {
         let session = Array(repeating: UInt8(7), count: 16)

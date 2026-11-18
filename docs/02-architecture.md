@@ -1477,8 +1477,12 @@ both:      T = SHA-256("WWSC1-code" ‖ session ‖ number ‖ S.account ‖ key
            joiner's code = T[0..<8] mod 10^6, starter's = T[8..<16] mod 10^6, six digits each
 ```
 
-Each board object is `"WWVS" ‖ version ‖ kind ‖ session ‖ …` of one fixed length, parsed exactly. `keys(B)` is
-`accountID ‖ X25519 ‖ Ed25519`, the fingerprint's inputs, not the ADR's `KeyBundleCodec` bytes: those carry the
+Each board object is `"WWVS" ‖ version ‖ kind ‖ session ‖ …` of one fixed length, parsed exactly. The transcript is,
+byte for byte, `SHA-256("WWSC1-code" ‖ session(16) ‖ number(8 ASCII digits) ‖ S.account(16) ‖ keys(S) ‖ J.account(16)
+‖ keys(J) ‖ C(32) ‖ Ns(32) ‖ Nj(32))`, so each account ID appears twice (once on its own, once as the first field of
+its `keys`), with the commitment `C = SHA-256("WWSC1-commit" ‖ session ‖ S.account ‖ Ns)`; a known-answer vector from
+Python's hashlib pins it (`transcriptKnownAnswer`, V30). `keys(B)` is `accountID ‖ X25519 ‖ Ed25519`, the fingerprint's
+inputs, not the ADR's `KeyBundleCodec` bytes: those carry the
 self-signature, which CryptoKit randomises, so a device's own bundle and the directory's copy would hash apart on a Mac
 (deterministic BoringSSL signing would hide it on Linux). The person on S reads eight digits; the person on J types
 them (or scans S's QR code, `"WWSC1-" ‖ number ‖ FingerprintCode`), reads six back, S's person types them, and only
