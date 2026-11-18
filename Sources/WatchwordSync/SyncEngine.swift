@@ -137,6 +137,11 @@ public struct SyncReport: Sendable, Equatable {
     /// This device's next sequence number was already taken: a crash after publishing, or another installation using
     /// this device ID (a restored backup). The object is merged on the next sync and nothing is overwritten.
     public var ownStreamConflict: UInt64?
+    /// The lowest number of this device's own stream at which a shared vault's judge stepped over (held aside or passed
+    /// over) a segment this device's own keys did not sign: another account's device listed under this device's ID
+    /// (S33) wrote there (review finding Z146). Below this device's first segment there, every other device may take
+    /// the stream for that account's and hold aside what this device publishes in it, so the person is told.
+    public var ownStreamSteppedOver: UInt64?
     /// An object in this device's own stream, at or beyond its next sequence number, that could not be fetched or
     /// checked in this sync (listed and not there yet, unreadable, or no key to check it with): the lowest such
     /// number. Whether this device wrote it decides where its next segment goes — a state older than the transport
@@ -824,6 +829,12 @@ public actor SyncEngine {
                                 report.heldAside.append(entry.key)
                                 try await keepAside(entry, state: &state, report: &report)
                             }
+                        }
+                        if author == deviceID,
+                            (try? await keyring.verifyOwn(
+                                object.object.signature, over: object.object.envelope, at: object.location)) == nil
+                        {
+                            report.ownStreamSteppedOver = min(report.ownStreamSteppedOver ?? .max, sequence)
                         }
                         state.merged[author] = sequence
                         next = sequence + 1

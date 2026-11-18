@@ -58,9 +58,17 @@ struct SharedStreamIndex: Sendable, Hashable {
 
     /// By device, then sequence number.
     private(set) var streams: [UUID: [UInt64: Segment]] = [:]
-    /// The lowest sequence recorded of each stream, kept beside `streams`: the segment that names the stream's
-    /// account (`account(ofStream:)`), asked for with every value judged.
+    /// The lowest sequence recorded of each stream whose signer is not `passedOver`, kept beside `streams`: the
+    /// segment that names the stream's account (`account(ofStream:)`), asked for with every value judged.
     private var lowest: [UUID: UInt64] = [:]
+    /// The accounts whose work cannot count in the vault under its current head (`WriteStanding.nothingCounts`: a
+    /// member never let write, say), whose segments name no stream's account (review finding Z146). Such a member
+    /// could otherwise list another member's device ID in their own registry (S33), sign that device's segment 1
+    /// before it published there, and have every device take the stream for theirs and hold aside all that device
+    /// wrote; and since Z137 every device records that segment. Set from the ledger by the session before each
+    /// judgement (`setPassedOver`), never saved: it is a function of the head, and refiling on a change keeps every
+    /// device that holds the same segments and head in agreement.
+    private(set) var passedOver: Set<UUID> = []
     /// The membership head the vault's items were last judged against (`MembershipHash.bytes`), so that a change of
     /// head is noticed after a restart too.
     var judgedHead: [UInt8]?
@@ -76,8 +84,8 @@ struct SharedStreamIndex: Sendable, Hashable {
 
     init() {}
 
-    /// The account a device's stream belongs to: the one whose keys signed its lowest-numbered segment recorded here
-    /// (review finding Z46). A stream is named by a device ID alone, device IDs are chosen by devices, and nothing
+    /// The account a device's stream belongs to: the one whose keys signed its lowest-numbered segment recorded here,
+    /// passing over the segments of an account whose work cannot count (`passedOver`, Z146) (review finding Z46). A stream is named by a device ID alone, device IDs are chosen by devices, and nothing
     /// stops a member listing another member's device ID in their own registry and signing objects into "its"
     /// stream. So the name does not say whose a stream is; its first segment does, and a shared vault keeps its whole
     /// log, so devices that hold the same segments agree. `nil` for a stream nothing was recorded of.
@@ -85,7 +93,7 @@ struct SharedStreamIndex: Sendable, Hashable {
         firstSequence(ofStream: device).flatMap { streams[device]?[$0]?.account }
     }
 
-    /// The lowest sequence number recorded of a device's stream.
+    /// The lowest sequence number recorded of a device's stream, passing over `passedOver` accounts' segments.
     func firstSequence(ofStream device: UUID) -> UInt64? {
         lowest[device]
     }
@@ -117,7 +125,7 @@ struct SharedStreamIndex: Sendable, Hashable {
         }
         let before = account(ofStream: device)
         streams[device, default: [:]][sequence] = segment
-        lowest[device] = min(lowest[device] ?? .max, sequence)
+        if !passedOver.contains(segment.account) { lowest[device] = min(lowest[device] ?? .max, sequence) }
         let owner = account(ofStream: device)
         if let before, before != owner {
             firstCarrier[device] = nil
@@ -131,6 +139,24 @@ struct SharedStreamIndex: Sendable, Hashable {
             }
         } else if segment.account == owner {
             file(segment, device: device, sequence: sequence)
+        }
+    }
+
+    /// Names no stream after `accounts`' segments (`passedOver`), and files again what every stream carried for the
+    /// account it now belongs to. Nothing changes if the set is the one in force.
+    mutating func setPassedOver(_ accounts: Set<UUID>) {
+        guard accounts != passedOver else { return }
+        passedOver = accounts
+        lowest = [:]
+        firstCarrier = [:]
+        valueCarriers = [:]
+        for (device, stream) in streams {
+            let ordered = stream.sorted { $0.key < $1.key }
+            guard let first = ordered.first(where: { !accounts.contains($0.value.account) }) else { continue }
+            lowest[device] = first.key
+            for (number, held) in ordered where held.account == first.value.account {
+                file(held, device: device, sequence: number)
+            }
         }
     }
 

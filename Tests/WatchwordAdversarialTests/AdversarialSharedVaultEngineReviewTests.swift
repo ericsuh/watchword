@@ -93,3 +93,65 @@ extension AdversarialSharedVaultTests {
         }
     }
 }
+
+// Review finding Z146: a read-only member's segment at the first number of another member's stream decided whose the
+// stream was.
+extension AdversarialSharedVaultTests {
+    /// Threat: a member the vault never let write (read-only from the start, A4), with a device registered under a
+    /// writer's device ID (S33), who signs segment 1 of that device's stream before the writer has published in the
+    /// vault. Since Z137 every device takes such a segment in and records it, and a stream belongs to the account that
+    /// signed its lowest segment: every other device took the writer's stream for the read-only member's and held aside
+    /// everything the writer published there, while the writer's device stepped over the planted segment and published
+    /// from 2, told nothing. A segment of an account whose work cannot count names no stream, and the writer is told
+    /// that someone wrote in its place.
+    @Test("a read-only member's segment at the start of a writer's stream does not take the stream")
+    func readOnlyMemberPlantAtSegmentOne() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3400)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let victim = try await household.account(seed: 3401)
+        let reader = try await household.account(seed: 3402)
+        try await owner.invite(victim, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(reader, to: vaultID, as: .readOnly, owner: owner)
+        let bank = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, victim, reader])
+        let victimDevice = try await Self.deviceID(of: victim)
+        let victimStream = "vault/\(vaultID.uuidString)/log/\(victimDevice.uuidString)/"
+        #expect(await household.transport.list(prefix: victimStream).isEmpty, "the victim has published already")
+        let rogue = try await household.secondDevice(of: reader, deviceID: victimDevice)
+        try await rogue.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await rogue.session.sync()
+
+        let summary = try ItemErasure(
+            seen: VersionVector([victimDevice: 1000]), row: 1000, device: victimDevice, date: nil
+        ).summary()
+        let deletion = SyncEntry.tombstone(
+            RecordKey(recordID: bank.id, kind: .item),
+            stamp: RecordStamp(version: 1001, device: victimDevice, deleted: true), erasure: summary)
+        let location = SyncObjectLocation.segment(vaultID: vaultID, author: victimDevice, sequence: 1)
+        let payload = SyncPayload(
+            kind: .segment, vaultID: vaultID, author: victimDevice, number: 1, vector: [:], entries: [deletion])
+        let adapter = VaultSyncAdapter(session: rogue.session)
+        let envelope = try await adapter.seal(payload.encoded(), at: location)
+        let signature = try await adapter.sign(envelope, at: location)
+        try await household.transport.create(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+
+        var item = Self.bank(in: vaultID)
+        item.title = "The victim's own"
+        let own = try await victim.session.save(item)
+        let report = try #require(try await victim.session.syncAll().vaults[vaultID])
+        #expect(report.ownStreamSteppedOver == 1, "the victim is not told someone wrote in its place")
+        #expect(try await Self.head(of: victim, in: vaultID) > 1)
+        try await Self.syncAll([owner, reader, victim])
+        for account in [owner, reader] {
+            #expect(
+                (try? await account.session.item(id: own.id))?.title == own.title,
+                "the victim's work is held aside as the read-only member's stream")
+            #expect(try await account.session.item(id: bank.id).title == bank.title, "the planted deletion counted")
+        }
+    }
+}

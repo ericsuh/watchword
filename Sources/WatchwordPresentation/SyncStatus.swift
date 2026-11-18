@@ -150,6 +150,13 @@ public struct SyncSummary: Hashable, Sendable {
                 "this device found its place in the sync storage already taken; some of its own changes, and its "
                     + "deletions, wait for the next sync")
         }
+        if report.ownStreamSteppedOver != nil {
+            // Another account wrote in this device's place in a shared vault (review finding Z146): what this device
+            // publishes there may count for nobody else. Nothing here is lost.
+            parts.append(
+                "another member's device wrote in this device's place in a shared vault, so its changes there may "
+                    + "not reach the others")
+        }
         if report.awaitingNewPassword { parts.append("waiting for the new account password") }
         return parts.isEmpty ? "Up to date." : sentence(parts)
     }

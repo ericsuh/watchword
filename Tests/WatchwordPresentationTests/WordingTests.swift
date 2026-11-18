@@ -36,12 +36,18 @@ struct WordingTests {
         report.ownStreamConflict = 9
         let taken = SyncSummary.describe(report)
         #expect(taken.contains("already taken"))
+        // Another account wrote in this device's place in a shared vault (review finding Z146): told, where it was
+        // told nothing while every other device held its work aside.
+        report = SyncReport()
+        report.ownStreamSteppedOver = 1
+        let steppedOver = SyncSummary.describe(report)
+        #expect(steppedOver.contains("wrote in this device's place"))
         report = SyncReport()
         report.quarantineFull = 3
         report.collided = [RecordKey(recordID: UUID(), kind: .item)]
         let full = SyncSummary.describe(report)
         #expect(full.contains("3 more could not be kept") && full.contains("another vault"))
-        for line in [held, exhausted, taken, full] {
+        for line in [held, exhausted, taken, steppedOver, full] {
             #expect(!line.contains("sent") && !line.contains("received"))
         }
     }

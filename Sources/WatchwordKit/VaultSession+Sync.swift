@@ -248,6 +248,7 @@ extension VaultSession {
         total.replayNeeded = total.replayNeeded || first.replayNeeded
         total.ownStreamExhausted = total.ownStreamExhausted || first.ownStreamExhausted
         total.ownStreamConflict = total.ownStreamConflict ?? first.ownStreamConflict
+        total.ownStreamSteppedOver = [total.ownStreamSteppedOver, first.ownStreamSteppedOver].compactMap { $0 }.min()
         total.ownStreamUnverified = total.ownStreamUnverified ?? first.ownStreamUnverified
         total.quarantineFull += first.quarantineFull
         return total
@@ -880,6 +881,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.transportUnavailable = total.transportUnavailable || report.transportUnavailable
             total.transportFailure = total.transportFailure ?? report.transportFailure
             total.ownStreamConflict = total.ownStreamConflict ?? report.ownStreamConflict
+            total.ownStreamSteppedOver = total.ownStreamSteppedOver ?? report.ownStreamSteppedOver
             total.requiresNewerVersion = total.requiresNewerVersion || report.requiresNewerVersion
             total.unknownEntriesKept += report.unknownEntriesKept
             total.unknownEntriesDropped += report.unknownEntriesDropped
