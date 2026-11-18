@@ -9,17 +9,18 @@ import WatchwordSync
 //
 // Whether a vault is governed by a membership chain used to be answered by the ledger a device had loaded, which is
 // per-device state: another device of the account, or this one after its sharing state was lost or edited (A8), ran
-// the vault as one of the account's own. Two things answer it now, neither of which goes with the ledger:
+// the vault as one of the account's own. Three things answer it now, none of which goes with the ledger:
 //
 // - a **marker** beside the vault's directory entry, signed by the account key and a device, published in the
 //   account's vault directory and kept as a row of the record store. It names the chain's owner;
 // - a vault key that **arrived by grant** (`VaultKey.arrivedByGrant`), which the key's own wrap authenticates, so it
-//   reaches every device of the account with the key and cannot be taken off it.
+//   reaches every device of the account with the key and cannot be taken off it;
+// - more than one key of the vault: only a chain rotates one (V40).
 //
-// Nothing in the sharing state is a third: its rows are not all signed, and a row planted there must not close a
+// Nothing in the sharing state is a fourth: its rows are not all signed, and a row planted there must not close a
 // vault that was never shared (Z50).
 //
-// A vault any of them names, with no verified ledger loaded, is **unavailable** on this device: readable, and
+// A vault any of these names, with no verified ledger loaded, is **unavailable** on this device: readable, and
 // otherwise held closed. `sharedCurrentKey` gives it no current key (never the smallest key ID held), so nothing is
 // sealed, signed or published and its engine only downloads (no snapshots, no collection); `checkSharedWrite`,
 // `checkSharedRename` and `checkSharedDeletion` refuse every write and the vault's deletion
@@ -217,6 +218,10 @@ extension VaultSession {
         if keys?.vaultKeys.values.contains(where: { $0.vaultID == vaultID && $0.arrivedByGrant }) == true {
             return true
         }
+        // Only a chain rotates a vault's key, so a vault holding more than one key ID is shared, whatever else is
+        // missing here (review of V31 to V37, M2; docs/06-adversarial-review.md V40): with its ledger and marker rows
+        // deleted (A8) and the marker withheld (A1), it is never run as an own vault sealed under the lowest key ID.
+        if (keys?.vaultKeys.values.lazy.filter { $0.vaultID == vaultID }.prefix(2).count ?? 0) > 1 { return true }
         return !sharing.markersLoaded
     }
 

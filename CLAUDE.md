@@ -806,7 +806,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - **"Shared" does not depend on the ledger a device happens to hold** (Z41; `VaultSession+SharedMarker.swift`). A key
   opened from a grant is `arrivedByGrant`, which its wrap's context authenticates on every device of the account; the
   account signs a marker beside the vault's directory entry (`AccountObjectLocation.vaultShared`) naming the chain's
-  owner. Nothing in the sharing state marks a vault: its rows are not all signed (Z50). A vault either names with no
+  owner; and a vault other than the Personal one holding more than one key ID is shared, since only a chain rotates
+  one (V40). Nothing in the sharing state marks a vault: its rows are not all signed (Z50). A vault either names with no
   verified ledger loaded is **unavailable**: `sharedCurrentKey` gives it no key (never the lowest key ID), its engine
   only downloads, and `checkSharedWrite`/`checkSharedDeletion` throw `ledgerUnavailable`. Never add a path that asks
   only `sharing.vaults[vaultID]` to decide a vault is private; ask `isMarkedShared`. Until the markers are read every
