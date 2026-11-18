@@ -896,10 +896,17 @@ extension VaultSession {
                 $0.key.recordID == record.recordID && $0.key.kind == record.kind && $0.key.version >= count
             }
             if carriers.contains(where: { Self.segmentCounts(device, sequence: $0.value, in: vault) }) { continue }
+            // A claim about this device's own edits beyond what it published is refused, whatever else is known: it
+            // knows what it wrote, and no version vouches for that, nor does a stream it has not published in yet
+            // (review finding Z127).
+            if device == me { return false }
             if accounts.allSatisfy({ vault.ledger.writeStanding(of: $0) == .mayWrite }) {
-                // "Cannot read from its first segment": not here at all, or here and sealed under a key not held.
-                if vouched || vault.index.segment(device: device, sequence: 1)?.opened != true { continue }
-                if device != me { awaited.insert(device) }
+                // "Cannot read from its first segment": here and sealed under a key not held. A stream with no first
+                // segment here has not published it yet (a shared vault keeps its whole log, Z42), and a claim about
+                // it waits for it (Z127): taken for unreadable, a claim about a member who had never published was
+                // believed everywhere.
+                if vouched || vault.index.segment(device: device, sequence: 1)?.opened == false { continue }
+                awaited.insert(device)
                 return false
             }
             if carriers.isEmpty {
