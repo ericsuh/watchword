@@ -1381,7 +1381,7 @@ public actor VaultSession: SharesExecutor {
         for scope in added {
             let others = draft.scopes.filter { $0.host != scope.host }
             if case .needsConfirmation(let resembles) = sites.standing(
-                ofNewHost: scope.host, beside: others, inSharedVault: inSharedVault)
+                ofNewHost: scope.host, beside: others, inSharedVault: inSharedVault, inVault: draft.vaultID)
             {
                 needed.append(HostConfirmation(host: scope.host, resembles: resembles))
             }

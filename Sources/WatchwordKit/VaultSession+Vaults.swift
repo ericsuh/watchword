@@ -584,7 +584,7 @@ extension VaultSession {
             // is a look-alike of it.
             let others = scopes.filter { $0.host != scope.host }
             if case .needsConfirmation(let resembles) = sites.standing(
-                ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnDestination)
+                ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnDestination, inVault: destination)
             {
                 concern.lookAlikeHosts.append(HostConfirmation(host: scope.host, resembles: resembles))
             }

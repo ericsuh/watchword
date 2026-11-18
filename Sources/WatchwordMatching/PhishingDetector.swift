@@ -231,8 +231,9 @@ public enum PhishingDetector {
     /// be verified by eye, and only the person's own scope for it says they have looked.
     public struct SiteIndex: Sendable {
         let own: ScopeIndex
-        /// Each shared vault's scopes, in a fixed order.
+        /// Each shared vault's scopes, in a fixed order, with the vault's ID.
         let shared: [ScopeIndex]
+        let sharedIDs: [UUID]
         let everything: ScopeIndex
 
         public init(items: [Item], sharedVaults: Set<UUID>) {
@@ -247,6 +248,7 @@ public enum PhishingDetector {
             }
             own = ScopeIndex(ownScopes)
             let order = sharedScopes.keys.sorted { $0.uuidString < $1.uuidString }
+            sharedIDs = order
             shared = order.map { ScopeIndex(sharedScopes[$0] ?? []) }
             everything = ScopeIndex(ownScopes + order.flatMap { sharedScopes[$0] ?? [] })
         }
@@ -254,6 +256,10 @@ public enum PhishingDetector {
         /// How many saved scopes one assessment may compare a host with.
         public var count: Int { everything.count }
 
+        /// The gate's assessment of a page's host. A match in a shared vault recognises it for that vault's items,
+        /// and the host is compared with everything outside the vaults that recognise it: within one shared vault a
+        /// member who can add a look-alike could as well edit the item it resembles, so only a host that cannot be
+        /// read is still refused there.
         public func assess(_ host: NormalizedHost) -> PhishingAssessment {
             if own.matches(host) { return .recognized }
             let recognising = shared.map { $0.matches(host) }
@@ -265,6 +271,24 @@ public enum PhishingDetector {
             }
             let assessment = ScopeIndex(entries: others).assess(host)
             return assessment.isSuspicious ? assessment : .recognized
+        }
+
+        /// The assessment of `host` about to be added to an item of `vault`, by the person (review finding Z76). Only
+        /// the person's own vaults, and `vault` itself if it is shared, may recognise it: a match in another shared
+        /// vault is a member's word about that vault's items, not about this one's (`nil`: no shared vault vouches).
+        /// And where only shared vaults match, the host is compared with every saved scope that does not itself
+        /// match it, in whichever vault: the person adding a member's `аmazon.com` to the household's own Amazon item
+        /// is asked, as they would be anywhere else. This is the person's own write, so the gate's allowance for one
+        /// shared vault does not apply.
+        public func assess(_ host: NormalizedHost, forItemIn vault: UUID?) -> PhishingAssessment {
+            if own.matches(host) { return .recognized }
+            let recognising = shared.map { $0.matches(host) }
+            guard recognising.contains(true) else { return everything.assess(host) }
+            let others = everything.entries.filter { ScopeMatcher.match($0.scope, host: host) == nil }
+            let assessment = ScopeIndex(entries: others).assess(host)
+            if assessment.isSuspicious { return assessment }
+            let vouched = zip(sharedIDs, recognising).contains { $0 == vault && $1 }
+            return vouched ? .recognized : assessment
         }
     }
 

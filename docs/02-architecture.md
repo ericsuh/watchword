@@ -2078,7 +2078,13 @@ host are in shared vaults, the host is still compared with what every *other* va
 (`PhishingDetector.assess(host:againstItemsIn:sharedVaults:)`), and one that resembles a site saved there,
 or that cannot be verified by eye (a label mixing scripts, punycode that did not decode), is refused as
 `FillRefusal.resemblesSavedSite`. A scope recognises a host for its own vault and no further; the person's
-own scope for the host is what ends the refusal.
+own scope for the host is what ends the refusal. The same holds when a host is about to be *added* to an item (the
+editor, an import, a merge, a copy out of a shared vault: `SavedSites.Prepared.standing(…, inVault:)`), more
+strictly (review finding Z76): it is recognised only by the person's own vaults or the item's own vault, and where
+only shared vaults match it is compared with every saved scope that does not itself match it, the matching vault's
+included, so a member's `аmazon.com` in the household beside the household's `amazon.com` is asked about when the
+person adds it anywhere. A page is still judged as above: within one shared vault a member who can add a look-alike
+could as well edit the item it resembles.
 
 Scenario S1: retail item scoped `amazon.com` (subdomains on); AWS item scoped
 `signin.aws.amazon.com` and `console.aws.amazon.com`. On `www.amazon.com`, only retail matches. On

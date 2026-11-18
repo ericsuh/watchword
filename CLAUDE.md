@@ -636,7 +636,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends (and in `resolveConflict`). A host a save
   adds is judged against `SavedSites` (what the gate ranks among, every vault): one that resembles a saved site or
   cannot be read by eye is refused (`hostsNeedConfirmation`) unless the call names it in `confirmingHosts` (F11.7,
-  Z61). `ItemEditorModel` asks; a view that skips it is refused all the same.
+  Z61). It is recognised only by the person's own vaults or the item's own (`standing(…, inVault:)`, Z76): pass the
+  item's vault wherever a host is about to be added. `ItemEditorModel` asks; a view that skips it is refused all the same.
 - The vault owns sync metadata: every write goes through `ItemMerge.stamped` and commits conditionally on the row it
   read (`commitItem`); a caller's `revisions`, `clock` or `conflicts` are never trusted. The session's deletions go
   through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.

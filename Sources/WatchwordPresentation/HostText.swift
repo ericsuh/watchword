@@ -130,13 +130,14 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
     ///   - sites: What is saved, as the session gives it (`VaultSession.savedSites()`), prepared.
     ///   - otherScopes: The scopes the item would hold beside this one.
     ///   - inSharedVault: Whether the item is in a vault other accounts write.
+    ///   - vault: The item's vault: another shared vault's scope does not vouch for the host (Z76).
     public init(
         _ scope: ServiceScope, among sites: SavedSites.Prepared, beside otherScopes: [ServiceScope] = [],
-        inSharedVault: Bool = false
+        inSharedVault: Bool = false, inVault vault: UUID? = nil
     ) {
         let (warning, resembles) = Self.warning(
             for: scope.host, ascii: HostText.ascii(scope.host), among: sites, beside: otherScopes,
-            inSharedVault: inSharedVault)
+            inSharedVault: inSharedVault, vault: vault)
         self.init(scope, warning: warning, resembles: resembles)
     }
 
@@ -162,7 +163,8 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
         inSharedVault: Bool,
         mergingInto existing: (id: UUID, vaultID: UUID)
     ) {
-        let lookAlike = MergeHost(scope, among: sites, beside: otherScopes, inSharedVault: inSharedVault)
+        let lookAlike = MergeHost(
+            scope, among: sites, beside: otherScopes, inSharedVault: inSharedVault, inVault: existing.vaultID)
         guard lookAlike.warning == nil else {
             self = lookAlike
             return
@@ -214,7 +216,7 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
 
     static func warning(
         for host: String, ascii: String, among sites: SavedSites.Prepared, beside otherScopes: [ServiceScope],
-        inSharedVault: Bool
+        inSharedVault: Bool, vault: UUID?
     ) -> (String?, [String]) {
         guard (try? HostNormalizer.normalize(ServiceIdentifier(host, kind: .domain))) != nil else {
             return (unreadable, [])
@@ -225,7 +227,7 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
         var suspicious = false
         for spelling in ascii == host ? [host] : [host, ascii] {
             if case .needsConfirmation(let resembles) = sites.standing(
-                ofNewHost: spelling, beside: otherScopes, inSharedVault: inSharedVault)
+                ofNewHost: spelling, beside: otherScopes, inSharedVault: inSharedVault, inVault: vault)
             {
                 suspicious = true
                 names.formUnion(resembles)

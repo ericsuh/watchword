@@ -140,28 +140,34 @@ extension SavedSites {
         /// How `host`, about to become a scope of an item, stands against what is saved. `otherScopes` are the scopes
         /// the same item would hold beside it, in a vault of the person's own or not: a host the item's other scopes
         /// already cover is the item's own, and a host that resembles one of them is a look-alike of it.
+        ///
+        /// `vault` is the item's vault: a scope of another shared vault does not make the host recognised for it
+        /// (review finding Z76). `nil` lets no shared vault vouch.
         public func standing(
-            ofNewHost host: String, beside otherScopes: [ServiceScope] = [], inSharedVault: Bool = false
+            ofNewHost host: String, beside otherScopes: [ServiceScope] = [], inSharedVault: Bool = false,
+            inVault vault: UUID? = nil
         ) -> NewHostStanding {
-            standing(ofNewHost: host, beside: otherScopes, vouching: true, inSharedVault: inSharedVault)
+            standing(ofNewHost: host, beside: otherScopes, vouching: true, inSharedVault: inSharedVault, vault: vault)
         }
 
         /// As `standing(ofNewHost:beside:)`, for scopes that are not the person's word (an import file's, a member's):
         /// `otherScopes` are compared with the host for resemblance only, so `amaz0n.com` beside `amazon.com` in one
         /// entry needs a confirmation, and a host they cover is not thereby recognised (review findings Z72, Z74).
         public func standing(
-            ofNewHost host: String, resemblingOnly otherScopes: [ServiceScope], inSharedVault: Bool = false
+            ofNewHost host: String, resemblingOnly otherScopes: [ServiceScope], inSharedVault: Bool = false,
+            inVault vault: UUID? = nil
         ) -> NewHostStanding {
-            standing(ofNewHost: host, beside: otherScopes, vouching: false, inSharedVault: inSharedVault)
+            standing(ofNewHost: host, beside: otherScopes, vouching: false, inSharedVault: inSharedVault, vault: vault)
         }
 
         private func standing(
-            ofNewHost host: String, beside otherScopes: [ServiceScope], vouching: Bool, inSharedVault: Bool
+            ofNewHost host: String, beside otherScopes: [ServiceScope], vouching: Bool, inSharedVault: Bool,
+            vault: UUID?
         ) -> NewHostStanding {
             guard let normalized = try? HostNormalizer.normalize(ServiceIdentifier(host, kind: .domain)) else {
                 return .needsConfirmation(resembles: [])
             }
-            var assessment = index.assess(normalized)
+            var assessment = index.assess(normalized, forItemIn: vault)
             let others = PhishingDetector.ScopeIndex(otherScopes.filter(ScopePolicy.isAcceptable))
             if others.count > 0 {
                 if others.matches(normalized) {

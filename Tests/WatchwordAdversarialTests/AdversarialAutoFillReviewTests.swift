@@ -118,3 +118,56 @@ extension AdversarialAutoFillRequestTests {
         ).value
     }
 }
+
+extension AdversarialAutoFillRequestTests {
+    /// Threat (Z76): A4 puts `аmazon.com` (Cyrillic а) into the household vault, which is where the family's only
+    /// Amazon login is. A host a shared vault matches was compared only with what is outside the vaults that recognise
+    /// it, and that held for the host being added to an item as well as for a page: when the victim added
+    /// `аmazon.com` to an item of their own, or to the household's Amazon item, the editor asked nothing, the host
+    /// reading as recognised, and the victim's own item then filled there. Now a host being added to an item is
+    /// recognised only by the person's own vaults or the item's own vault, and is compared with every saved scope that
+    /// does not itself match it. The gate's judgement of a page is unchanged (within one shared vault a member could
+    /// as well edit the item the look-alike resembles; `AdversarialPhishingTests` holds that), and a host that cannot
+    /// be read is refused there whatever.
+    @Test("a member's look-alike in a shared vault vouches for no item the person adds it to")
+    func sharedVaultLookAlikeOfItsOwnSite() async throws {
+        let lookAlike = "\u{0430}mazon.com"
+        let real = Self.login(
+            90, vault: Fixtures.sharedVaultID, title: "Amazon", scope: ServiceScope(host: "amazon.com"),
+            userName: "family", password: "family-password")
+        let planted = Self.login(
+            91, vault: Fixtures.sharedVaultID, title: "Amazon", scope: ServiceScope(host: lookAlike),
+            userName: "family", password: "member-password")
+        let harness = AutoFillHarness(items: [real, planted], sharedVaults: Self.household)
+        let page = Fixtures.url("https://\(lookAlike)/signin")
+        guard case .warning = await harness.model.credentialList(for: [page]) else {
+            Issue.record("a host that mixes scripts is offered without a warning")
+            return
+        }
+
+        // The editor's question, for an item of the person's own vault and for one of the household's.
+        let sites = SavedSites(stored: [real, planted], ownVaults: [Fixtures.vaultID]).prepared()
+        #expect(
+            sites.standing(ofNewHost: lookAlike, inVault: Fixtures.vaultID)
+                == .needsConfirmation(resembles: ["amazon.com"]))
+        #expect(
+            sites.standing(ofNewHost: lookAlike, inSharedVault: true, inVault: Fixtures.sharedVaultID)
+                == .needsConfirmation(resembles: ["amazon.com"]))
+        // A plain host a member saved is still recognised for that vault's items, and for no other vault's.
+        let plain = Self.login(
+            92, vault: Fixtures.sharedVaultID, title: "Club", scope: ServiceScope(host: "gardenclub.example"),
+            userName: "family", password: "club")
+        let more = SavedSites(stored: [real, plain], ownVaults: [Fixtures.vaultID]).prepared()
+        #expect(
+            more.standing(ofNewHost: "gardenclub.example", inSharedVault: true, inVault: Fixtures.sharedVaultID)
+                == .ordinary)
+        #expect(more.standing(ofNewHost: "gardenclub.example", inVault: Fixtures.vaultID) == .ordinary)
+        // A look-alike that only a shared vault holds a scope for, and that resembles nothing saved, still reads as
+        // nothing in particular for another vault's item: neither recognised nor a look-alike.
+        let lone = Self.login(
+            93, vault: Fixtures.sharedVaultID, title: "Lone", scope: ServiceScope(host: "lone-site.example"),
+            userName: "family", password: "lone")
+        let single = SavedSites(stored: [lone], ownVaults: [Fixtures.vaultID]).prepared()
+        #expect(single.standing(ofNewHost: "lone-site.example", inVault: Fixtures.vaultID) == .ordinary)
+    }
+}

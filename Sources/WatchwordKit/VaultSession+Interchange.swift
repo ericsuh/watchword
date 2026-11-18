@@ -637,7 +637,8 @@ extension VaultSession {
                 concern.beside += overlap.beside.filter { $0.itemID != merge.existing.id }
                 concern.overlapIsTruncated = concern.overlapIsTruncated || overlap.isTruncated
                 if case .needsConfirmation(let resembles) = prepared.standing(
-                    ofNewHost: scope.host, beside: merge.existing.scopes, inSharedVault: !isOwnVault)
+                    ofNewHost: scope.host, beside: merge.existing.scopes, inSharedVault: !isOwnVault,
+                    inVault: merge.existing.vaultID)
                 {
                     concern.lookAlikeHosts.append(HostConfirmation(host: scope.host, resembles: resembles))
                 }
@@ -740,7 +741,7 @@ extension VaultSession {
                 }
                 budget -= cost + others.count
                 if case .needsConfirmation(let resembles) = prepared.standing(
-                    ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnVault)
+                    ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnVault, inVault: vaultID)
                 {
                     lookAlikes.append(HostConfirmation(host: scope.host, resembles: resembles))
                 }
