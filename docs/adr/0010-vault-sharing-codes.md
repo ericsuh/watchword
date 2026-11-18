@@ -190,6 +190,8 @@ Built as decided (`docs/02-architecture.md` §8.4; review in `06-adversarial-rev
 - A scan is the person's choice and is named before it is pinned (V18): the scanner hands over only the code tapped;
   a joiner's scan is evidence only after the starter's reveal opened its commitment, and the screen names the account
   and pins it on a yes (`confirmScannedSharingPartner`). Nothing unpinned outlives the session.
+- A start or a join ends the running session first and re-checks the lock and the session after every wait (V20),
+  and each screen drives only the session it started, by its `runID` (V25): one session object serves every window.
 - A session never replaces a pin on its own. "Keys changed" is settled only by the person's explicit choice, and only
   to keys a vault's chain lists for that account (V13, an owner decision still open).
 - No production board adapter exists yet, as none exists for the directory, and a release build configures no sharing
