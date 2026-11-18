@@ -583,14 +583,15 @@ public actor VaultSession: SharesExecutor {
             let existing = try await store.record(Self.headerKey(record.accountID))
             let stale = try await store.records(in: record.accountID, kind: .accountHeader)
                 .filter { $0.recordID != record.accountID }.map(\.key)
-            try await store.commit(
+            let row = Self.headerRow(
+                candidate, recordID: record.accountID, version: try Self.version(replacing: existing))
+            try await commitOwnStep(
                 StoreChange(
-                    account: .update(updated, expectedKeysetVersion: record.keysetVersion),
-                    upserts: [
-                        Self.headerRow(
-                            candidate, recordID: record.accountID, version: try Self.version(replacing: existing))
-                    ], deletions: stale))
-            try await pinRegistry(followed, accountID: record.accountID)
+                    account: .update(updated, expectedKeysetVersion: record.keysetVersion), upserts: [row],
+                    deletions: stale),
+                credential: candidate.credentialID, header: row, accountID: record.accountID)
+            // Committed: if this pin cannot be written, the intent written before the commit completes it.
+            try? await pinRegistry(followed, accountID: record.accountID)
         } catch {
             unlockKey.zeroise()
             keyset.zeroise()
@@ -599,6 +600,25 @@ public actor VaultSession: SharesExecutor {
         account = updated
         registryView = nil
         return (unlockKey, keyset, updated)
+    }
+
+    /// Commits a step of this device's own that moves it to `credential` (an adoption or a password change), with
+    /// the intent written to the Keychain first (review finding Z9, `RegistryAnchor.Intent`): a header row ahead of
+    /// the anchor is this device's own only where the Keychain named it. If the intent cannot be written nothing is
+    /// committed; if the commit fails the intent is taken back (and would be dropped at the next read anyway).
+    func commitOwnStep(_ change: StoreChange, credential: ObjectDigest, header: StoredRecord, accountID: UUID)
+        async throws
+    {
+        guard let previous = await readAnchor(accountID) else { throw VaultError.deviceRegistryUnavailable }
+        var intended = previous
+        intended.intent = RegistryAnchor.Intent(credential: credential, header: ObjectDigest(hashing: header.envelope))
+        try await writeAnchor(intended, accountID: accountID)
+        do {
+            try await store.commit(change)
+        } catch {
+            try? await writeAnchor(previous, accountID: accountID)
+            throw error
+        }
     }
 
     /// Follows a password change made on `device`, from an unlocked session: the way to follow a change the lock
@@ -1174,12 +1194,14 @@ public actor VaultSession: SharesExecutor {
             let candidates = try await store.records(in: record.accountID, kind: .accountHeader)
                 .filter { $0.recordID != record.accountID }.map(\.key)
             rows.append(Self.registryRow(credential, account: record))
-            rows.append(
-                Self.headerRow(header, recordID: record.accountID, version: try Self.version(replacing: existing)))
-            try await store.commit(
+            let headerRow = Self.headerRow(
+                header, recordID: record.accountID, version: try Self.version(replacing: existing))
+            rows.append(headerRow)
+            try await commitOwnStep(
                 StoreChange(
                     account: .update(updated, expectedKeysetVersion: record.keysetVersion), upserts: rows,
-                    deletions: candidates))
+                    deletions: candidates),
+                credential: credentialID, header: headerRow, accountID: record.accountID)
         } catch {
             newUnlockKey.zeroise()
             throw error
@@ -1188,7 +1210,7 @@ public actor VaultSession: SharesExecutor {
         registryView = nil
         // The new password is committed: from here on, report success whatever happens to the session. Telling the
         // person "nothing changed" now would leave them believing the old password still works (F10.2). If the
-        // anchor cannot be written now, the next unlock moves it: the header that opens names the credential.
+        // anchor cannot be written now, the intent written before the commit moves it at the next read (Z9).
         try? await writeAnchor(
             RegistryAnchor(
                 genesis: view.state.genesis, credential: credentialID, generation: updated.credentialGeneration,

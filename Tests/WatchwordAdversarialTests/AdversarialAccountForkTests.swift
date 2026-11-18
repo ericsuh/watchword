@@ -458,7 +458,7 @@ extension AdversarialAccountTests {
         #expect(read.pending.isEmpty && read.generation == 7 && Set(read.heads) == [digests[2], digests[3]])
         #expect(read.genesis == digests[0] && read.credential == digests[1])
         #expect(RegistryAnchor(bytes: earlier + [0]) == nil, "an earlier anchor with anything after its heads")
-        #expect(RegistryAnchor(bytes: Array("WWRA3".utf8) + Array(earlier.dropFirst(5))) == nil)
+        #expect(RegistryAnchor(bytes: Array("WWRA4".utf8) + Array(earlier.dropFirst(5))) == nil)
     }
 
     // MARK: - Which vault is the Personal one (Z5)

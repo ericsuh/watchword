@@ -63,14 +63,27 @@ public enum RevocationPasswordChoice: Sendable, Hashable {
 
 /// What this device trusts of the registry, kept in the Keychain (`KeychainItem.deviceRegistryAnchor`).
 ///
-/// `"WWRA2" ‖ genesis 32 ‖ credential 32 ‖ generation u64 ‖ headCount u16 ‖ heads ‖ pendingCount u8 ‖ pending`,
-/// little-endian. An anchor written before `pending` existed (`"WWRA1"`, no pending part) is read as one that has
-/// seen no change.
+/// `"WWRA3" ‖ genesis 32 ‖ credential 32 ‖ generation u64 ‖ headCount u16 ‖ heads ‖ pendingCount u8 ‖ pending ‖
+/// intentFlag u8 ‖ (intent credential 32 ‖ intent header 32)?`, little-endian. An anchor written before `intent`
+/// existed (`"WWRA2"`, nothing after `pending`) is read as one with no step under way, and one written before
+/// `pending` existed (`"WWRA1"`, nothing after the heads) as one that has also seen no change.
 struct RegistryAnchor: Equatable, Sendable {
-    static let magic = Array("WWRA2".utf8)
+    static let magic = Array("WWRA3".utf8)
+    static let secondMagic = Array("WWRA2".utf8)
     static let firstMagic = Array("WWRA1".utf8)
     static let maximumHeads = 256
     static let maximumPending = 16
+
+    /// A step of this device's own that moves it to another credential entry (adopting a password change, or making
+    /// one), written here **before** the store commits it (review finding Z9). The local file is A8's, so a header
+    /// row ahead of the anchor is this device's own step only if the Keychain says so: `credential` is the entry the
+    /// step follows and `header` the SHA-256 of the exact header row it commits. A crash between the commit and the
+    /// pin leaves an intent that the next read completes (the row is that header) or discards (the row is still the
+    /// one the anchor follows); a row that is neither is not this device's step, and a password change is pending.
+    struct Intent: Equatable, Sendable {
+        var credential: ObjectDigest
+        var header: ObjectDigest
+    }
 
     var genesis: ObjectDigest
     var credential: ObjectDigest
@@ -85,6 +98,8 @@ struct RegistryAnchor: Equatable, Sendable {
     /// chain, so `heads` does not notice its rows being deleted (review finding Z3). It is emptied only by this
     /// device coming to follow another credential entry.
     var pending: [ObjectDigest]
+    /// This device's own step under way, if any (`Intent`).
+    var intent: Intent?
 
     func encoded() -> [UInt8] {
         let kept = heads.sorted().prefix(Self.maximumHeads)
@@ -94,27 +109,34 @@ struct RegistryAnchor: Equatable, Sendable {
         for head in kept { out += head.bytes }
         out.append(UInt8(truncatingIfNeeded: pending.count))
         for change in pending { out += change.bytes }
+        if let intent {
+            out += [1] + intent.credential.bytes + intent.header.bytes
+        } else {
+            out.append(0)
+        }
         return out
     }
 
     init(
         genesis: ObjectDigest, credential: ObjectDigest, generation: UInt64, heads: [ObjectDigest],
-        pending: [ObjectDigest] = []
+        pending: [ObjectDigest] = [], intent: Intent? = nil
     ) {
         self.genesis = genesis
         self.credential = credential
         self.generation = generation
         self.heads = heads.sorted()
         self.pending = Array(Set(pending).sorted().prefix(Self.maximumPending))
+        self.intent = intent
     }
 
     init?(bytes: [UInt8]) {
         let fixed = Self.magic.count + 2 * ObjectDigest.byteCount + 8 + 2
         guard bytes.count >= fixed else { return nil }
         let magic = Array(bytes[..<Self.magic.count])
-        guard magic == Self.magic || magic == Self.firstMagic else { return nil }
+        guard magic == Self.magic || magic == Self.secondMagic || magic == Self.firstMagic else { return nil }
         var offset = Self.magic.count
         func digest(_ offset: inout Int) -> ObjectDigest? {
+            guard bytes.count >= offset + ObjectDigest.byteCount else { return nil }
             defer { offset += ObjectDigest.byteCount }
             return ObjectDigest(bytes: Array(bytes[offset..<(offset + ObjectDigest.byteCount)]))
         }
@@ -130,20 +152,37 @@ struct RegistryAnchor: Equatable, Sendable {
             heads.append(head)
         }
         var pending: [ObjectDigest] = []
-        if magic == Self.magic {
+        if magic != Self.firstMagic {
             guard offset < bytes.count else { return nil }
             let pendingCount = Int(bytes[offset])
             offset += 1
             guard pendingCount <= Self.maximumPending,
-                bytes.count == offset + pendingCount * ObjectDigest.byteCount
+                bytes.count >= offset + pendingCount * ObjectDigest.byteCount
             else { return nil }
             for _ in 0..<pendingCount {
                 guard let change = digest(&offset) else { return nil }
                 pending.append(change)
             }
         }
+        var intent: Intent?
+        if magic == Self.magic {
+            guard offset < bytes.count else { return nil }
+            let flag = bytes[offset]
+            offset += 1
+            switch flag {
+            case 0:
+                break
+            case 1:
+                guard let credential = digest(&offset), let header = digest(&offset) else { return nil }
+                intent = Intent(credential: credential, header: header)
+            default:
+                return nil
+            }
+        }
         guard offset == bytes.count else { return nil }
-        self.init(genesis: genesis, credential: credential, generation: generation, heads: heads, pending: pending)
+        self.init(
+            genesis: genesis, credential: credential, generation: generation, heads: heads, pending: pending,
+            intent: intent)
     }
 }
 
@@ -232,6 +271,49 @@ extension VaultSession {
         try await keychain.store(SecureBytes(wiping: &bytes), for: .deviceRegistryAnchor(accountID: accountID))
     }
 
+    /// The anchor as this device follows it, with any step of its own that was under way settled first (review
+    /// finding Z9, `RegistryAnchor.Intent`). Every decision about what the device trusts reads this, never the raw
+    /// Keychain value, so a row ahead of the anchor counts as this device's own only where the Keychain named it.
+    ///
+    /// - The local header row is the one the intent named, byte for byte, and the account row matches it: the step
+    ///   was committed. The anchor moves to it (pinned along its credential entry, the intent cleared), and is
+    ///   returned so even if the Keychain cannot be written now. If the registry cannot be evaluated along it, the
+    ///   intent stays and the device is in the middle of a step: a change is pending and no candidate is tried.
+    /// - The account row is still at the anchor's generation: the step was never committed, and the intent is
+    ///   dropped.
+    /// - Anything else is left as it is, intent and all, and judged as a password change pending.
+    func trustedAnchor(_ account: AccountRecord) async -> RegistryAnchor? {
+        guard var anchor = await readAnchor(account.accountID) else { return nil }
+        guard let intent = anchor.intent else { return anchor }
+        let stored = try? await storedHeader(account)
+        if let stored, ObjectDigest(hashing: stored.row.envelope) == intent.header,
+            stored.header.credentialID == intent.credential, stored.header.genesisID == anchor.genesis,
+            stored.header.unlockKeyID == account.unlockKeyID, stored.header.generation == account.credentialGeneration,
+            stored.header.keysetVersion == account.keysetVersion
+        {
+            guard let accountKey = await trustedAccountSigningKey(account),
+                let rows = try? await store.records(in: account.accountID, kind: .deviceRegistry),
+                let view = try? Self.evaluateRegistry(
+                    rows.map(\.envelope), accountID: account.accountID, accountKey: accountKey,
+                    genesis: anchor.genesis, credential: intent.credential)
+            else { return anchor }
+            let completed = RegistryAnchor(
+                genesis: view.state.genesis, credential: view.state.credential.id,
+                generation: view.state.credential.generation, heads: view.state.heads,
+                pending: view.state.pendingCredentials.map(\.id))
+            try? await writeAnchor(completed, accountID: account.accountID)
+            registryView = nil
+            return completed
+        }
+        if account.keysetVersion == anchor.generation, account.credentialGeneration == anchor.generation,
+            stored?.header.credentialID == anchor.credential
+        {
+            anchor.intent = nil
+            try? await writeAnchor(anchor, accountID: account.accountID)
+        }
+        return anchor
+    }
+
     /// The registry as this device sees it: the entries in the local store, replayed from the genesis entry and
     /// along the credentials the Keychain anchor names. Needs public keys only, so it works while locked. Throws
     /// `deviceRegistryUnavailable` when there is no anchor or account key to trust, or when the store no longer
@@ -239,7 +321,7 @@ extension VaultSession {
     func registry(_ account: AccountRecord) async throws -> RegistryView {
         if let registryView { return registryView }
         guard let accountKey = await trustedAccountSigningKey(account),
-            let anchor = await readAnchor(account.accountID)
+            let anchor = await trustedAnchor(account)
         else { throw VaultError.deviceRegistryUnavailable }
         let rows = try await store.records(in: account.accountID, kind: .deviceRegistry)
         let view = try Self.evaluateRegistry(
@@ -272,13 +354,17 @@ extension VaultSession {
     /// behind it: the newest entries applied, and the password changes it has not been given. Those are remembered
     /// for as long as this device follows the same credential entry, whatever the store shows later; a view along
     /// another credential entry starts the list again (the device adopted a change, or made one).
+    ///
+    /// A step of this device's own still under way (`RegistryAnchor.Intent`) is kept unless `view` is along the
+    /// credential entry it names, which is what completes it.
     func pinRegistry(_ view: RegistryView, accountID: UUID) async throws {
         let previous = await readAnchor(accountID)
         var pending = view.state.pendingCredentials.map(\.id)
         if let previous, previous.credential == view.state.credential.id { pending += previous.pending }
+        let intent = previous?.intent.flatMap { $0.credential == view.state.credential.id ? nil : $0 }
         let anchor = RegistryAnchor(
             genesis: view.state.genesis, credential: view.state.credential.id,
-            generation: view.state.credential.generation, heads: view.state.heads, pending: pending)
+            generation: view.state.credential.generation, heads: view.state.heads, pending: pending, intent: intent)
         if previous != anchor {
             try await writeAnchor(anchor, accountID: accountID)
         }
@@ -295,23 +381,16 @@ extension VaultSession {
     /// can withhold that (A1) while the entry is here.
     ///
     /// `account.keysetVersion` is the generation the local header belongs to (bound into the keyset's wrap, so an
-    /// edited value opens nothing). One generation ahead of the anchor is this device's own step that was committed
-    /// and not pinned (a password change or an adoption, interrupted): what is pending is then judged along the
-    /// credential entry the local header names, and pending if that cannot be done.
+    /// edited value opens nothing). A header ahead of the anchor is this device's own step only where the Keychain
+    /// named it before the step was committed (`trustedAnchor`, which then moves the anchor to it); otherwise it is
+    /// no step of this device's, whoever wrote it into the file and whatever its own branch says, and a change is
+    /// pending (review finding Z9). So is one this device's own step left half done.
     func passwordChangePending(_ account: AccountRecord) async -> Bool {
-        guard let anchor = await readAnchor(account.accountID) else { return false }
-        if account.keysetVersion <= anchor.generation {
-            if !anchor.pending.isEmpty { return true }
-            guard let view = try? await registry(account) else { return false }
-            return !view.state.pendingCredentials.isEmpty
+        guard let anchor = await trustedAnchor(account) else { return false }
+        if !anchor.pending.isEmpty || anchor.intent != nil || account.keysetVersion > anchor.generation {
+            return true
         }
-        guard let stored = try? await storedHeader(account), stored.header.unlockKeyID == account.unlockKeyID,
-            let accountKey = await trustedAccountSigningKey(account),
-            let rows = try? await store.records(in: account.accountID, kind: .deviceRegistry),
-            let view = try? Self.evaluateRegistry(
-                rows.map(\.envelope), accountID: account.accountID, accountKey: accountKey, genesis: anchor.genesis,
-                credential: stored.header.credentialID)
-        else { return true }
+        guard let view = try? await registry(account) else { return false }
         return !view.state.pendingCredentials.isEmpty
     }
 
@@ -491,10 +570,14 @@ extension VaultSession {
     /// header must carry the account key's signature and that device's. `pending` are password changes made after
     /// the one this device follows; `forked` branch off earlier. **One per authoring device**, its newest, newest
     /// generation first: whoever publishes many changes under one device's name is tried once (Z1).
+    ///
+    /// Judged along the chain `passwordChangePending` reads (`trustedAnchor`), and none at all while a step of this
+    /// device's own is under way: a change that was pending before it is a fork after it (review finding Z9).
     func candidateHeaders(_ account: AccountRecord) async -> (
         pending: [AccountHeaderObject], forked: [AccountHeaderObject]
     ) {
-        guard let view = try? await registry(account),
+        guard let anchor = await trustedAnchor(account), anchor.intent == nil,
+            let view = try? await registry(account),
             let rows = try? await store.records(in: account.accountID, kind: .accountHeader)
         else { return ([], []) }
         var pending: [UUID: AccountHeaderObject] = [:]
@@ -593,7 +676,7 @@ extension VaultSession {
         registryView = nil
         let accountID = account.accountID
         let stored = try await storedHeader(account)
-        let anchor = await readAnchor(accountID)
+        let anchor = await trustedAnchor(account)
         guard epoch == lockEpoch, !keys.accountUnlockKey.isZeroised else { return }
 
         // An account from before the registry existed has none of this. Its registry is started at a sync, and only
@@ -603,8 +686,9 @@ extension VaultSession {
 
         // The stored header is this account record's own only if it opens under the key just derived; then what it
         // names is authenticated by the password, and can restore a missing anchor (a Keychain that lost it, a
-        // store restored onto other hardware) or move it forward (a crash between committing a password change and
-        // pinning it).
+        // store restored onto other hardware). It never moves an anchor that exists (review finding Z9): this
+        // device's own steps move it through the intent they write first (`trustedAnchor`), and a header ahead of
+        // the anchor that no intent named is not this device's step, whoever opened it with which password.
         // A device that has an anchor never takes another genesis entry: one registry per account, for good.
         //
         // A stored header that is not this record's own, or whose binding names another Personal vault than the row
@@ -630,10 +714,10 @@ extension VaultSession {
                 // Older than, or beside, what this device follows: the file was rolled back (A8).
                 throw VaultError.accountHeaderRolledBack
             }
-            if let view = try? Self.evaluateRegistry(
-                rows.map(\.envelope), accountID: accountID, accountKey: accountKey,
-                genesis: stored.header.genesisID, credential: stored.header.credentialID,
-                requiredHeads: anchor?.heads ?? [])
+            if anchor == nil,
+                let view = try? Self.evaluateRegistry(
+                    rows.map(\.envelope), accountID: accountID, accountKey: accountKey,
+                    genesis: stored.header.genesisID, credential: stored.header.credentialID)
             {
                 try await pinRegistry(view, accountID: accountID)
                 registryView = view
@@ -681,7 +765,7 @@ extension VaultSession {
     /// before any key is installed. Needs nothing from the file but the account record, so deleting registry
     /// entries hides nothing.
     func refuseRolledBackHeader(_ account: AccountRecord) async throws {
-        guard let anchor = await readAnchor(account.accountID) else { return }
+        guard let anchor = await trustedAnchor(account) else { return }
         // The two move together with every credential change; apart, one of them was edited.
         guard account.keysetVersion == account.credentialGeneration, account.keysetVersion >= anchor.generation
         else { throw VaultError.accountHeaderRolledBack }
@@ -1417,7 +1501,7 @@ extension VaultSession {
         //    from the local header's genesis and credential: that decides what is stored, not what is trusted,
         //    which waits for the header to open under the password at the next unlock.
         let pin: (genesis: ObjectDigest, credential: ObjectDigest, heads: [ObjectDigest])
-        if let anchor = await readAnchor(accountID) {
+        if let anchor = await trustedAnchor(account) {
             pin = (anchor.genesis, anchor.credential, anchor.heads)
         } else if let stored = try await storedHeader(account) {
             pin = (stored.header.genesisID, stored.header.credentialID, [])
@@ -1491,6 +1575,7 @@ extension VaultSession {
             // Any device puts back a header the store has lost — unless it knows its own to be out of date (the
             // password was changed elsewhere), or is no longer a device of the account.
             if !listed.contains(name), view.state.pendingCredentials.isEmpty,
+                stored.header.credentialID == view.state.credential.id,
                 view.state.standing(of: account.deviceID) == .active
             {
                 report.headerPublished = try await create(name, contents: stored.row.envelope, on: transport)
