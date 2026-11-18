@@ -92,8 +92,10 @@ public actor FakeHTTPClient: HTTPClient {
 /// A prefix cache that counts what is asked of it and stored in it, so a test can say "nothing was persisted", and
 /// that can hold a store in mid-air, so a test can put a lock between a check and its entry reaching the cache.
 public actor RecordingPwnedRangeCache: PwnedRangeCache {
-    public private(set) var entries: [PwnedRangePrefix: CachedPwnedRange] = [:]
+    public private(set) var entries: [PwnedRangeCacheKey: CachedPwnedRange] = [:]
     public private(set) var lookups: [PwnedRangePrefix] = []
+    /// The partition of each lookup, in order (`lookups` holds the prefixes).
+    public private(set) var lookupPartitions: [UUID] = []
     public private(set) var stores: [CachedPwnedRange] = []
     public private(set) var locks = 0
     private var holding = false
@@ -102,12 +104,13 @@ public actor RecordingPwnedRangeCache: PwnedRangeCache {
 
     public init() {}
 
-    public func cachedRange(for prefix: PwnedRangePrefix) -> CachedPwnedRange? {
+    public func cachedRange(for prefix: PwnedRangePrefix, in partition: UUID) -> CachedPwnedRange? {
         lookups.append(prefix)
-        return entries[prefix]
+        lookupPartitions.append(partition)
+        return entries[PwnedRangeCacheKey(partition: partition, prefix: prefix)]
     }
 
-    public func store(_ entry: CachedPwnedRange) async {
+    public func store(_ entry: CachedPwnedRange, in partition: UUID) async {
         stores.append(entry)
         if holding {
             await withCheckedContinuation { continuation in
@@ -117,11 +120,11 @@ public actor RecordingPwnedRangeCache: PwnedRangeCache {
             }
         }
         // Written after the wait: the worst case, an entry that lands after whatever happened meanwhile.
-        entries[entry.range.prefix] = entry
+        entries[PwnedRangeCacheKey(partition: partition, prefix: entry.range.prefix)] = entry
     }
 
-    public func remove(_ prefix: PwnedRangePrefix) {
-        entries[prefix] = nil
+    public func remove(_ prefix: PwnedRangePrefix, in partition: UUID) {
+        entries[PwnedRangeCacheKey(partition: partition, prefix: prefix)] = nil
     }
 
     public func removeAll() {
@@ -134,8 +137,8 @@ public actor RecordingPwnedRangeCache: PwnedRangeCache {
     }
 
     /// Plants an entry without counting it as a store: a cache file someone else wrote.
-    public func plant(_ entry: CachedPwnedRange, under prefix: PwnedRangePrefix) {
-        entries[prefix] = entry
+    public func plant(_ entry: CachedPwnedRange, under prefix: PwnedRangePrefix, in partition: UUID) {
+        entries[PwnedRangeCacheKey(partition: partition, prefix: prefix)] = entry
     }
 
     /// Makes stores wait, before they write, until `releaseStores()`.

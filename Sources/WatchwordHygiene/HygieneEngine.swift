@@ -495,7 +495,9 @@ public actor HygieneEngine: SharesExecutor {
             }
             let digest = PasswordDigest(utf8Of: field.value)
             do {
-                let check = try await client.check(digest, now: now, freshAfter: freshAfter) { [weak self] in
+                // Filed under the item's vault: a range fetched for one vault never answers another's (Z88).
+                let check = try await client.check(digest, in: item.vaultID, now: now, freshAfter: freshAfter) {
+                    [weak self] in
                     await self?.isCurrent(started) ?? false
                 }
                 if check.source == .network { requests += 1 }

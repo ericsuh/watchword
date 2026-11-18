@@ -110,9 +110,9 @@ struct SessionHygieneTests {
 
         // The cached range is found under its sealed record, by prefix.
         let prefix = try #require(PwnedRangePrefix("5BAA6"))
-        #expect(await relaunched.session.hygieneCachedRange(prefix)?.range.prefix == prefix)
+        #expect(await relaunched.session.hygieneCachedRange(prefix, in: vaultID)?.range.prefix == prefix)
         await relaunched.session.lock()
-        #expect(await relaunched.session.hygieneCachedRange(prefix) == nil)
+        #expect(await relaunched.session.hygieneCachedRange(prefix, in: vaultID) == nil)
     }
 
     @Test("an evicted or removed range is gone from the device-local store, and an account deletion erases it all")
@@ -160,7 +160,7 @@ struct SessionHygieneTests {
         try await fixture.session.unlock(password: TestVault.password)
         let report = try await fixture.session.hygieneReport()
         #expect(report.totals.itemsAwaitingBreachCheck == 1)
-        #expect(await fixture.session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6"))) == nil)
+        #expect(await fixture.session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6")), in: vaultID) == nil)
         let renewed = try #require(await fixture.keychain.raw(secretItem))
         #expect(renewed.count == 32 && renewed != secret)
         try await fixture.scanUntilIdle()
@@ -202,11 +202,15 @@ struct SessionHygieneTests {
 
         // Why: an index at the bound round-trips, and one past it is refused as a whole.
         var index = RangeCacheIndex()
+        let vault = UUID()
         for prefix in 0..<UInt32(RangeCacheIndex.maximumEntries) {
-            index.entries[prefix] = RangeCacheIndex.Entry(fetchedAt: 1, size: 100)
+            index.entries[RangeCacheIndex.Key(vault: vault, prefix: prefix)] = RangeCacheIndex.Entry(
+                fetchedAt: 1, size: 100)
         }
         #expect(RangeCacheIndex(decoding: index.encoded()) == index)
-        index.entries[UInt32(RangeCacheIndex.maximumEntries)] = RangeCacheIndex.Entry(fetchedAt: 1, size: 100)
+        #expect(index.encoded().count + 64 <= VaultSession.hygieneIndexLimit, "the full index fits its read limit")
+        index.entries[RangeCacheIndex.Key(vault: vault, prefix: UInt32(RangeCacheIndex.maximumEntries))] =
+            RangeCacheIndex.Entry(fetchedAt: 1, size: 100)
         #expect(RangeCacheIndex(decoding: index.encoded()) == nil)
     }
 }
