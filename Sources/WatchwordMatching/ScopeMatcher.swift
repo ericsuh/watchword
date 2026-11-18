@@ -23,7 +23,9 @@ public enum ScopeMatcher {
         if host == scope.host {
             return ScopeMatch(scope: scope, specificity: 2 * scope.labelCount + 1, isExact: true)
         }
-        if scope.includeSubdomains, host.hasSuffix("." + scope.host) {
+        // An IP address has no subdomains: an IPv6 literal may end in a dotted quad, which is not a name below a
+        // scope (review finding Z64).
+        if scope.includeSubdomains, !host.contains(":"), host.hasSuffix("." + scope.host) {
             return ScopeMatch(scope: scope, specificity: 2 * scope.labelCount, isExact: false)
         }
         return nil

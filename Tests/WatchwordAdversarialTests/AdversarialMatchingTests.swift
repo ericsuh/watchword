@@ -208,4 +208,42 @@ struct AdversarialMatchingTests {
         #expect(ranking.isEmpty)
         #expect(error != nil)
     }
+
+    // MARK: - IPv6 literals (review finding Z64)
+
+    /// Threat: A6, should any client hand the extension a domain identifier that is not a real IPv6 literal. The
+    /// normaliser's IPv6 branch accepted anything made of hex digits, colons and dots and skipped every other check,
+    /// so `a::b.cafe.de` normalised and was a subdomain of a saved `cafe.de` scope: normalisation invented a match.
+    /// Fullwidth hex digits passed too, unmapped, and so did a megabyte of `a:`, past the length bound of C5.
+    @Test(
+        "a colon-bearing identifier that is not an IPv6 literal is refused, and matches nothing",
+        arguments: [
+            "a::b.cafe.de", "::cafe.de", "1::2:3.4.5.6.7", "1:2:3:4:5:6:7:8:9", "1::2::3", "12345::1",
+            "::\u{FF41}", "\u{FF11}::1", "::1.2.3.256", "::1.2.3", "a:b", ":::", "1:2:3:4:5:6:7:1.2.3.4",
+        ])
+    func notAnIPv6Literal(_ value: String) {
+        #expect(throws: HostNormalizationError.self) { _ = try Self.host(value) }
+    }
+
+    @Test("an over-long colon-bearing identifier is refused before it is compared with anything")
+    func overLongIPv6() {
+        let huge = String(repeating: "a:", count: 500_000)
+        #expect(throws: HostNormalizationError.self) { _ = try Self.host(huge) }
+    }
+
+    @Test(
+        "real IPv6 literals still normalise",
+        arguments: ["::1", "[::1]", "2001:db8::1", "fe80::1:2:3:4", "::ffff:192.0.2.1", "1:2:3:4:5:6:7:8", "::"])
+    func realIPv6(_ value: String) throws {
+        let host = try Self.host(value)
+        #expect(host.value.contains(":"))
+    }
+
+    /// A literal has no subdomains: the matcher never treats one as below a domain scope, whatever it ends with.
+    @Test("an IPv6 host is never a subdomain match")
+    func ipv6NeverSubdomain() {
+        let host = NormalizedHost(vouchedFor: "::ffff:1.2.3.4")
+        #expect(ScopeMatcher.match(ServiceScope(host: "2.3.4"), host: host) == nil)
+        #expect(ScopeMatcher.match(ServiceScope(host: "::ffff:1.2.3.4"), host: host)?.isExact == true)
+    }
 }
