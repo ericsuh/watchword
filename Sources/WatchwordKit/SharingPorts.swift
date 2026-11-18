@@ -148,4 +148,7 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// on this device alone (PRD F7.6). Nothing is written, shared, accepted or published there from this device until
     /// it is enrolled again as a new device, whose ID commits.
     case deviceIDDoesNotCommit
+    /// This device's key could not be read just now (the Keychain failed), so whether its ID commits is unknown.
+    /// Refused as `deviceIDDoesNotCommit` would be, and worth trying again: nothing is wrong with the device.
+    case deviceKeyUnreadable
 }

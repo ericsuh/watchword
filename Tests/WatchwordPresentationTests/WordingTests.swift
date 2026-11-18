@@ -139,6 +139,15 @@ struct WordingTests {
         #expect(ErrorWording.message(for: SharingError.requiresNewerVersion) == text)
     }
 
+    @Test("a device key that could not be read is worded as a retry, never as setting the device up again")
+    func deviceKeyUnreadable() {
+        let unreadable = ErrorWording.message(for: SharedVaultError.deviceKeyUnreadable)
+        let doesNotCommit = ErrorWording.message(for: SharedVaultError.deviceIDDoesNotCommit)
+        #expect(unreadable.contains("Try again"))
+        #expect(!unreadable.contains("Set it up again"))
+        #expect(doesNotCommit.contains("Set it up again"))
+    }
+
     @Test("a cancelled biometric prompt or task says nothing")
     func cancelled() {
         #expect(ErrorWording.message(for: KeychainError.userCancelled).isEmpty)

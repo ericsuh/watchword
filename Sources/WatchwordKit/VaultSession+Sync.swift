@@ -72,7 +72,16 @@ extension VaultSession {
         if mayWrite { report.deletionsHeldBack.formUnion(await releaseParkedDeletions(account: record, view: view)) }
         let ownDevices: Set<UUID> = view.map { Set($0.state.devices.keys) } ?? []
         // A device whose ID does not commit to its account publishes nothing in a shared vault, and says so (Z162).
-        let ownIDCommits = await thisDeviceCommits(record)
+        // A key that could not be read is not one that does not commit: nothing is published there, and it is reported
+        // as a failure to retry, never as a reason to enrol again.
+        let ownIDCommits: Bool
+        var deviceKeyUnreadable = false
+        do {
+            ownIDCommits = try await thisDeviceCommits(record)
+        } catch {
+            ownIDCommits = false
+            deviceKeyUnreadable = true
+        }
 
         let adapter = VaultSyncAdapter(session: self)
         let merger = KindRoutingMerger([
@@ -84,7 +93,11 @@ extension VaultSession {
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
         if !ownIDCommits {
             for vaultID in sharing.vaults.keys {
-                sharingReports[vaultID, default: SharedVaultSyncReport()].deviceIDDoesNotCommit = true
+                if deviceKeyUnreadable {
+                    sharingReports[vaultID, default: SharedVaultSyncReport()].deviceKeyUnreadable = true
+                } else {
+                    sharingReports[vaultID, default: SharedVaultSyncReport()].deviceIDDoesNotCommit = true
+                }
             }
         }
         func engine(_ vaultID: UUID) -> SyncEngine {
@@ -224,7 +237,9 @@ extension VaultSession {
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): an edit of its own in a row it holds is unpublished whatever its state says, such as a
         // move's copy published by a build from before this was refused.
-        let receivedNowhere = sharing.vaults[vaultID] != nil ? !(await thisDeviceCommits(account)) : false
+        // A key that cannot be read counts as one that does not commit here: the gate fails closed.
+        let receivedNowhere =
+            sharing.vaults[vaultID] != nil ? !((try? await thisDeviceCommits(account)) ?? false) : false
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
             if receivedNowhere, holdsUnpublishedEdit(row, published: nil, account: account) { return true }
             guard let stamp = known[row.key] else { return true }

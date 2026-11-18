@@ -174,6 +174,43 @@ extension AdversarialSharedVaultTests {
         #expect((try? await member.session.item(id: original.id)) == nil, "the parked deletion never went out")
     }
 
+    /// Threat: none needed; the review of round 7. A Keychain read of the device key that fails for a moment (the
+    /// device locked, the keychain daemon busy) read as a device whose ID does not commit, and the refusal advised
+    /// setting the device up again. It is now its own refusal (`deviceKeyUnreadable`), still fail-closed: nothing is
+    /// written, shared or published in the vault while the key cannot be read, and the next attempt succeeds.
+    @Test("a device key that cannot be read for a moment refuses as a retry, not as a device that does not commit")
+    func unreadableDeviceKey() async throws {
+        let transport = InMemorySyncTransport()
+        let keys = UnreadableDeviceKeyStore(base: FakeDeviceKeyStore(seed: 16_240))
+        let vault = TestVault(
+            sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport), seed: 16_240, deviceKeys: keys)
+        try await vault.createAccount()
+        await vault.session.configureSharing(
+            SharingSettings(
+                state: InMemorySharingStateStore(), contacts: InMemoryVerifiedContactStore(),
+                directory: InMemoryKeyBundleDirectory(), shareAccess: RecordingShareAccess()))
+        try await vault.session.sync()
+        let vaultID = try await vault.session.createVault(name: "Household").id
+
+        await keys.setUnreadable(true)
+        await #expect(throws: SharedVaultError.deviceKeyUnreadable) { try await vault.session.shareVault(vaultID) }
+        await keys.setUnreadable(false)
+        try await vault.session.shareVault(vaultID)
+
+        await keys.setUnreadable(true)
+        await #expect(throws: SharedVaultError.deviceKeyUnreadable) {
+            _ = try await vault.session.save(Self.bank(in: vaultID))
+        }
+        let report = try await vault.session.syncAll()
+        #expect(report.sharing[vaultID]?.deviceKeyUnreadable == true)
+        #expect(report.sharing[vaultID]?.deviceIDDoesNotCommit == false)
+        await keys.setUnreadable(false)
+        let saved = try await vault.session.save(Self.bank(in: vaultID))
+        let later = try await vault.session.syncAll()
+        #expect(later.sharing[vaultID]?.deviceKeyUnreadable == false)
+        #expect(try await vault.session.item(id: saved.id).vaultID == vaultID)
+    }
+
     /// Threat: none needed; an account made before the device registry existed, whose first device started the
     /// registry under its old random ID (`registryGenesis`), which commits to nothing. Shared from that device, the
     /// vault's items would carry values every member holds aside, and nothing it wrote there would reach them. It does
@@ -200,5 +237,42 @@ extension AdversarialSharedVaultTests {
         let vaultID = try await vault.session.createVault(name: "Household").id
         await #expect(throws: SharedVaultError.deviceIDDoesNotCommit) { try await vault.session.shareVault(vaultID) }
         #expect(try await vault.session.sharedVaultIDs().isEmpty)
+    }
+}
+
+/// A device key store whose reads of the public key fail while `unreadable` is set, as a Keychain can for a moment.
+actor UnreadableDeviceKeyStore: DeviceKeyStore {
+    struct ReadFailed: Error {}
+
+    let base: FakeDeviceKeyStore
+    private var unreadable = false
+
+    init(base: FakeDeviceKeyStore) {
+        self.base = base
+    }
+
+    func setUnreadable(_ value: Bool) {
+        unreadable = value
+    }
+
+    func createDevice(accountID: UUID) async throws -> DeviceIdentity {
+        try await base.createDevice(accountID: accountID)
+    }
+
+    func create(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey {
+        try await base.create(accountID: accountID, deviceID: deviceID)
+    }
+
+    func publicKey(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey? {
+        if unreadable { throw ReadFailed() }
+        return try await base.publicKey(accountID: accountID, deviceID: deviceID)
+    }
+
+    func sign(_ prepared: [UInt8], accountID: UUID, deviceID: UUID) async throws -> [UInt8] {
+        try await base.sign(prepared, accountID: accountID, deviceID: deviceID)
+    }
+
+    func delete(accountID: UUID) async throws {
+        await base.delete(accountID: accountID)
     }
 }

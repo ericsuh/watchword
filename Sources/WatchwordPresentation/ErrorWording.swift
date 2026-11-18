@@ -155,6 +155,9 @@ public enum ErrorWording {
         case .deviceIDDoesNotCommit:
             return "This device was set up by an older version of Watchword and cannot change shared vaults. "
                 + "Set it up again as a new device to share, join or change them."
+        case .deviceKeyUnreadable:
+            return "Watchword couldn't read this device's key just now, so the shared vault was not changed. "
+                + "Try again."
         }
     }
 
