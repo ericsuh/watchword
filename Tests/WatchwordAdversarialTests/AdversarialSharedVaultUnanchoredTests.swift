@@ -178,3 +178,77 @@ extension AdversarialSharedVaultTests {
         #expect(try await relaunched.session.item(id: written.id).id == written.id)
     }
 }
+
+/// A pin store that holds the first read of one account's pin: the value is read when asked, and handed back only
+/// once the test releases it, as a load that read the pins before a later write does. Test code only.
+actor HeldPinRead: VerifiedContactStore {
+    let base: InMemoryVerifiedContactStore
+    let held: UUID
+    private var holding = true
+    private var reached: CheckedContinuation<Void, Never>?
+    private var isReached = false
+    private var release: CheckedContinuation<Void, Never>?
+
+    init(base: InMemoryVerifiedContactStore, holding account: UUID) {
+        self.base = base
+        self.held = account
+    }
+
+    /// Returns once the held read has been asked for.
+    func waitUntilReached() async {
+        if isReached { return }
+        await withCheckedContinuation { reached = $0 }
+    }
+
+    func releaseRead() {
+        release?.resume()
+        release = nil
+    }
+
+    func pin(for accountID: UUID) async throws -> [UInt8]? {
+        let value = await base.pin(for: accountID)
+        guard accountID == held, holding else { return value }
+        holding = false
+        isReached = true
+        reached?.resume()
+        reached = nil
+        await withCheckedContinuation { release = $0 }
+        return value
+    }
+
+    func savePin(_ pin: [UInt8], for accountID: UUID) async throws {
+        await base.savePin(pin, for: accountID)
+    }
+
+    func removePin(for accountID: UUID) async throws {
+        await base.removePin(for: accountID)
+    }
+}
+
+extension AdversarialSharedVaultTests {
+    /// Threat: none from outside; review finding L4 against V19's recovery. A load of the shared vaults that read the
+    /// owner's pin (missing, A8) before the person checked the owner again, and finished after, marked the vaults
+    /// loaded with the vault unrestored: the pin's request to load again was lost, and the vault stayed closed for the
+    /// session though its owner was checked. A load that began before a pin settles nothing.
+    @Test("a load of the shared vaults that read the pins before a new pin was made settles nothing")
+    func staleLoadSettlesNothing() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readOnly], seed: 1_560)
+        let member = members[0]
+        await member.contacts.removePin(for: owner.accountID)
+        let pins = HeldPinRead(base: member.contacts, holding: owner.accountID)
+        let relaunched = member.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: pins, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+        let session = relaunched.session
+
+        let load = Task { try await session.sharedVaultIDs() }
+        await pins.waitUntilReached()
+        try await session.verifyContact(owner.accountID, evidence: .safetyNumber(owner.safetyNumber))
+        await pins.releaseRead()
+        #expect(try await load.value.contains(vaultID) == false, "the load read the pins before the check")
+        #expect(try await session.sharedVaultIDs().contains(vaultID), "and the next one restores the vault")
+        #expect(try await session.unavailableSharedVaults().isEmpty)
+    }
+}
