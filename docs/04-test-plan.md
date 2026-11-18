@@ -994,6 +994,16 @@ interchange through the session"), and `InterchangeScreenTests` drives the scree
 judged against `SavedSites`, the gate's own view (`MergeHostTests`: a trashed item, a policy-refused scope
 or a member's item scoped to the look-alike recognises nothing).
 
+*From the review of those fixes (Z70 to Z79):* every other write path that adds a host is held the same way, in
+the session: a merge's accepted hosts (`AdversarialImportReviewTests`, "a merge that adds a host taking over
+another saved login…"; the merge screen's second confirmation in "Adversarial: account screens"), a copy or move
+out of a shared vault (`AdversarialSharedVaultTransferTests`), the credential-vault save
+(`AdversarialAutoFillPublicSurfaceTests`), trashed import entries and look-alikes within one entry
+(`AdversarialImportReviewTests`), and only the item's own trust domain vouches for a host being added
+(`AdversarialAutoFillReviewTests`). The keyboard's suggestions are withdrawn where the two trust classes meet at a
+host, and a member's passkey beside the person's own is not suggested (`AdversarialAutoFillReviewTests`); every
+write made for a remote party has the item budget (`AdversarialLargeBlobTests`, `PasskeyRequestTests`).
+
 *Still to come:* a UI test that the AutoFill extension presents no override affordance on a
 suspicious host, and one that drives the editor's F11.7 dialog and the import's concern section on a
 Mac (milestone 5). Milestone 2 enforces F11.2 at the vault boundary: `VaultSession.save` refuses
