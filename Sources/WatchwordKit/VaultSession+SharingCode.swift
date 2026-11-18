@@ -3,6 +3,12 @@ import WatchwordCrypto
 import WatchwordSharing
 import WatchwordStore
 
+/// Which invitation `VaultSession.issuedSharingInvitations` keeps: one per vault and invitee.
+struct IssuedInvitationKey: Hashable, Sendable {
+    let vaultID: UUID
+    let invitee: UUID
+}
+
 /// A board object a session made, kept so that a retry puts the same bytes there again (signing is randomised).
 struct SharingBoardObject: Sendable, Hashable {
     let name: String
@@ -298,18 +304,29 @@ extension VaultSession {
         guard run.pinned else { throw SharingError.fingerprintNotVerified }
         guard !run.invitationSent else { throw SharingError.invitationAlreadyCompleted }
         let generation = run.generation
+        let kept = IssuedInvitationKey(vaultID: vaultID, invitee: partner)
         let invitation: Invitation
         if let issued = run.issued {
             guard issued.vaultID == vaultID else { throw SharingError.invitationAlreadyCompleted }
             invitation = issued
+        } else if let issued = issuedSharingInvitations[kept] {
+            // Issued by an earlier run that ended before delivering it (L3): delivered now, never issued again.
+            invitation = issued
+            sharingCodeRun?.issued = issued
         } else {
             invitation = try await invite(partner, to: vaultID, as: role)
-            // The chain has changed: remember what was issued before anything else can fail.
-            guard sharingCodeRun?.generation == generation else { throw SharingCodeError.notReady }
+            // The chain has changed: remember what was issued before anything else can fail, outside the run too.
+            issuedSharingInvitations[kept] = invitation
+            // A run replaced meanwhile cannot deliver it, and the screen is told so with the invitation (L3).
+            guard sharingCodeRun?.generation == generation else {
+                throw SharedVaultError.invitationNotDelivered(invitation)
+            }
             sharingCodeRun?.issued = invitation
         }
         let keys = try requireKeys(since: epoch)
-        guard sharingCodeRun?.generation == generation else { throw SharingCodeError.notReady }
+        guard sharingCodeRun?.generation == generation else {
+            throw SharedVaultError.invitationNotDelivered(invitation)
+        }
         let object: SharingBoardObject
         if let signed = sharingCodeRun?.invitationObject {
             object = signed
@@ -325,7 +342,15 @@ extension VaultSession {
             guard there == object.contents else { throw SharedVaultError.invitationNotDelivered(invitation) }
         }
         if sharingCodeRun?.generation == generation { sharingCodeRun?.invitationSent = true }
+        issuedSharingInvitations[kept] = nil
         return invitation
+    }
+
+    /// An invitation `inviteThroughSharingCode` issued to `invitee` for `vaultID` and could not deliver (L3), for a
+    /// screen to hand over as text (`SharingCodes.text(for:)`): the invitee is added and holds a grant, and inviting
+    /// them again is refused. `nil` when there is none.
+    public func undeliveredInvitation(to vaultID: UUID, for invitee: UUID) -> Invitation? {
+        issuedSharingInvitations[IssuedInvitationKey(vaultID: vaultID, invitee: invitee)]
     }
 
     /// The joiner's side: the invitation the starter sent in this session, verified under the bundle the session

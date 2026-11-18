@@ -516,7 +516,16 @@ public final class InvitationModel {
                     stepMessage = ErrorWording.invitationNotDelivered
                 }
             } else {
-                let issued = try await context.session.invite(contact.accountID, to: vaultID, as: role)
+                let issued: Invitation
+                do {
+                    issued = try await context.session.invite(contact.accountID, to: vaultID, as: role)
+                } catch MembershipError.memberAlreadyPresent(let member) {
+                    // Added by a session that ended before it could send the invitation (L3): this is that invitation.
+                    guard let kept = await context.session.undeliveredInvitation(to: vaultID, for: member) else {
+                        throw MembershipError.memberAlreadyPresent(member)
+                    }
+                    issued = kept
+                }
                 invitation = issued
                 step = .issued(code: SharingCodes.text(for: issued), confirmation: nil)
             }

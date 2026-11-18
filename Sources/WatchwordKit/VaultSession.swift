@@ -4,6 +4,7 @@ import WatchwordCrypto
 import WatchwordEnvelope
 import WatchwordMatching
 import WatchwordModel
+import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
 
@@ -168,6 +169,12 @@ public actor VaultSession: SharesExecutor {
     /// `lock()` or by ending a session, so that a board that serves a fresh commit under a number already answered
     /// cannot turn one starter session into several tries (docs/06-adversarial-review.md, V23). Public values only.
     var answeredSharingNumbers: [String: Date] = [:]
+    /// Invitations `inviteThroughSharingCode` issued (the invitee added, the grant published) and has not delivered,
+    /// by vault and invitee, outside any one run (review finding L3): a run replaced or dropped after `invite` returned
+    /// (Start Over, another window, a lock) must not lose the invitation, or the invitee is added with no way to join
+    /// and a retry is refused (`memberAlreadyPresent`). An invitation names only the vault and its owner: nothing
+    /// secret, and kept in memory only.
+    var issuedSharingInvitations: [IssuedInvitationKey: Invitation] = [:]
     /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
     var pendingImport: PendingImport?
     /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.

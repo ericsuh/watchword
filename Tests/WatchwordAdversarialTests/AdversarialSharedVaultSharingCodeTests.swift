@@ -510,3 +510,48 @@ extension AdversarialSharedVaultTests {
         }
     }
 }
+
+extension AdversarialSharedVaultTests {
+    /// Threat: no outside adversary; review finding L3 against V22. After `invite` returned (the invitee added, the
+    /// grant published), the run was replaced before the invitation was kept (Start Over, another window, an
+    /// auto-lock; here the store, A1, stretches a listing to give the person time): `notReady` was thrown, the
+    /// invitation was gone, and a retry was refused because the invitee is a member already. The invitation is now
+    /// kept by vault and invitee outside the run: the screen is told it was not delivered, a later session with the
+    /// same invitee delivers it without inviting again, and until then it can be handed over as text.
+    @Test("an invitation issued by a session that is then replaced is never lost")
+    func invitationOutlivesItsRun() async throws {
+        let household = SharedVaultHousehold()
+        let racing = RacingTransport(base: household.transport)
+        let owner = try await SharingAccount.make(
+            over: racing, directory: household.directory, seed: 1_611, board: household.board)
+        let invitee = try await household.account(seed: 1_612)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let (checked, _) = try await owner.checkSharingCode(with: invitee)
+
+        await racing.pause(atListingOf: SharingObjectLocation.membershipPrefix(vaultID))
+        let sending = Task {
+            try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: checked)
+        }
+        await racing.untilPaused()
+        await owner.session.endSharingCodeSession()
+        await racing.resume()
+        let expected = Invitation(vaultID: vaultID, ownerAccountID: owner.accountID)
+        await #expect(throws: SharedVaultError.invitationNotDelivered(expected)) { _ = try await sending.value }
+        #expect(await owner.session.undeliveredInvitation(to: vaultID, for: invitee.accountID) == expected)
+        await #expect(throws: MembershipError.memberAlreadyPresent(invitee.accountID), "inviting again is refused") {
+            _ = try await owner.session.invite(invitee.accountID, to: vaultID, as: .readWrite)
+        }
+
+        // A second session with the same person delivers the same invitation, and adds nobody again.
+        let (again, joined) = try await owner.checkSharingCode(with: invitee)
+        let delivered = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: again)
+        #expect(delivered == expected)
+        #expect(await owner.session.undeliveredInvitation(to: vaultID, for: invitee.accountID) == nil)
+        let received = try #require(try await invitee.session.sharingCodeInvitation(run: joined.runID))
+        try await owner.session.sync()
+        #expect(try await owner.session.sharedVaultStatus(vaultID).membership.members.count == 2)
+        try await invitee.session.acceptInvitation(received)
+        #expect(try await invitee.session.sharedVaultStatus(vaultID).role == .readWrite)
+    }
+}
