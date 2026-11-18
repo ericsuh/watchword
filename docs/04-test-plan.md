@@ -1149,8 +1149,11 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
 
 - `required` (`Required checks`): needs every job above and fails unless each succeeded. Branch
   protection requires this one check (`08-repository-hardening.md` §5), so every job above blocks a
-  merge, including every app-test and release-build leg (a matrix job's result is all its legs'), and a runner bump or a regrouping
-  that renames a matrix leg needs no protection change.
+  merge, including every package-test, app-test and release-build leg, and a runner bump or a regrouping
+  that renames a matrix leg needs no protection change. Legs are judged one by one from the API listing of the run
+  attempt's jobs, not from `needs.*.result`, which read `success` for a matrix job with a leg cancelled before it ran
+  (`06-adversarial-review.md` Z119); a leg not finished, not listed or not expected fails it. Its inline script is
+  tested by `test:scripts` [`Tests/ScriptTests/test_required_checks.py`].
 
 - `screenshots.yml`: not a gate. On the `screenshots` label (and each push while a pull request carries it), a
   same-repository head commit whose message has a line that is exactly `[screenshots]`, or a dispatch, it runs the

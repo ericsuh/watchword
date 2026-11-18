@@ -979,7 +979,7 @@ directions are tested; keep both when adjusting constants.
 
 - **Script tests** (`Tests/ScriptTests`, Python `unittest`, `mise run test:scripts`) cover the scripts Swift tests
   cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, the inline steps of
-  `screenshots.yml`, and the supply-chain gates themselves (`audit:actions`, the adversarial-suite check,
+  `screenshots.yml` and `ci.yml`'s `Required checks`, and the supply-chain gates themselves (`audit:actions`, the adversarial-suite check,
   `audit:mise-pins`, `assert-no-dependencies.sh` with its `Apps/project.yml` allowlist, the app tasks' resolved-package
   check and `app:release`, `cloud-setup.sh`), each run
   as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun`, `sips`, `swift`, `xcodebuild` and `gpg`. Standard library
@@ -996,9 +996,13 @@ claiming a layer is covered.
 `app-tests` (a macOS leg and four iOS-simulator legs, each a group of UI-test classes
 passed to `app:test` as `--only-testing`/`--skip-testing`), `release-build` (`app:release` for macOS and the iOS
 simulator: the only job that compiles the Release configuration, read afterwards for the Debug-only UI-test switch),
-and `required` (`Required checks`), which
-fails unless every other job succeeded and is the one check branch protection names, so renaming a matrix leg for a
-runner bump never strands `main` waiting on a check that no longer reports. Everything Xcode-, AppKit- or
+and `required` (`Required checks`), the one check branch protection names, so renaming a matrix leg for a runner bump
+never strands `main` waiting on a check that no longer reports. It needs every other job, but does not trust
+`needs.*.result`, which reads `success` for a matrix job whose leg was cancelled before it ran (run 44175108735,
+`docs/06-adversarial-review.md` Z119): its inline `gh api` step (`actions: read`, no checkout) lists every job of the
+run attempt and fails unless each but itself (recognised by its name, `SELF`) is completed and successful and the names
+are exactly `EXPECTED`. A job or matrix leg added, renamed or removed in `ci.yml` is added to `EXPECTED` and `needs:` in
+the same change; `test_required_checks.py` fails until it is. Everything Xcode-, AppKit- or
 screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is
 `mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
 runs, the libFuzzer harness in `Fuzz/` (`mise run fuzz`), and the audit that every `uses:` is a 40-hex
@@ -1025,9 +1029,10 @@ platform) and uploads each set and, unzipped, its one-PNG contact sheet; `commen
 (pattern, 40 characters, 99 names), finds the artifacts itself by name among the run's own, links the sheet only if
 GitHub will serve it as `image/png`, and creates or updates one sticky comment, recognised by its whole header and
 never by the bot author alone (`claude-pr.yml` posts as the same account). It is not a required check, and there is
-deliberately no comment command (`docs/07-supply-chain.md` §3.2). Its two no-checkout jobs are inline `gh api`, the one
-place a mise task cannot go; `mise run test:scripts` (in the `lint` job) runs those two scripts as they are in the file
-against a stand-in `gh`, so a change to either needs its test in `Tests/ScriptTests`.
+deliberately no comment command (`docs/07-supply-chain.md` §3.2). Its two no-checkout jobs are inline `gh api`, as is `ci.yml`'s
+`Required checks` step: a job that checks nothing out is the one place a mise task cannot go; `mise run test:scripts`
+(in the `lint` job) runs those scripts as they are in the file against a stand-in `gh`, so a change to any of them
+needs its test in `Tests/ScriptTests`.
 The same capture is the `app:screenshots` gate of `mac-run.yml`.
 
 One check on every PR has **no workflow file**: `Analyze (swift)`, from CodeQL *default setup*,
@@ -1054,7 +1059,8 @@ Supply-chain rules that apply to edits in `.github/`:
 - Keep `permissions: contents: read` at workflow and job level, `persist-credentials: false` on every
   checkout, and the trigger as `pull_request` — never `pull_request_target`. The two jobs with more
   (`pull-requests: write` in `claude-pr.yml` and in `screenshots.yml`'s `comment`) check out and run nothing from
-  the pull request; a job that runs the pull request's code never holds a write token.
+  the pull request; a job that runs the pull request's code never holds a write token. `ci.yml`'s `required` adds
+  `actions: read` (read-only, to list its own run's jobs) and checks nothing out either.
 - Xcode selection goes through `.github/scripts/select-xcode.sh`, not a third-party action.
 - Build tools reach CI only through mise with `MISE_LOCKED=1`, so every tool needs a `mise.lock` entry
   (URL and SHA-256). Bump a tool by editing `mise.toml` and running

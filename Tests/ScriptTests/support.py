@@ -164,9 +164,10 @@ sys.stdout.write(redirects[address])
 '''
 
 
-def workflow_script(step_name):
-    """The `run: |` block of the step so named in screenshots.yml, as the runner would hand it to bash."""
-    with open(WORKFLOW, encoding="utf-8") as handle:
+def workflow_script(step_name, workflow=WORKFLOW):
+    """The `run: |` block of the step so named in a workflow (screenshots.yml unless another is given), as the runner
+    would hand it to bash."""
+    with open(workflow, encoding="utf-8") as handle:
         lines = handle.read().split("\n")
     start = next(index for index, line in enumerate(lines) if line.strip() == f"- name: {step_name}")
     run = next(index for index in range(start, len(lines)) if lines[index].strip() == "run: |")

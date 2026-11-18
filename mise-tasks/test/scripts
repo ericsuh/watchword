@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#MISE description="Test the repository's own scripts: screenshots.yml's inline steps, the app tasks, the audits and cloud-setup.sh, against stand-in tools"
+#MISE description="Test the repository's own scripts: screenshots.yml's and ci.yml's inline steps, the app tasks, the audits and cloud-setup.sh, against stand-in tools"
 #USAGE flag "-v --verbose" help="Name each test as it runs"
 #
 # The Swift tests cannot reach the scripts CI itself is made of, and several of them decide things that matter: the
 # comment job of screenshots.yml holds the one write token that runs after a pull request's code, app:screenshots
 # decides what counts as a set of screens, the audits decide what may be depended on, the app tasks which swift-crypto
 # an app is built from and whether a Release build is clean, and cloud-setup.sh which toolchain runs as root in a
-# cloud session. Tests/ScriptTests runs them as they are (the workflow's `run:` blocks are read out of the file)
+# cloud session. Tests/ScriptTests runs them as they are (the workflows' `run:` blocks are read out of the files)
 # against stand-ins for `gh`, `mise`, `xcrun`, `sips`, `swift`, `xcodebuild`, `curl` and `gpg`, so it needs only
 # python3 (3.9 or later, which is what Xcode's command line tools bring), bash and jq, on Linux or macOS.
 set -euo pipefail

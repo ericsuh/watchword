@@ -231,6 +231,15 @@ at run time, so that download is trusted the way the runner image is (§3.3).
 - **[done]** `permissions: contents: read` at workflow level and repeated per job. No job needs
   write access, except the Claude job in `claude-pr.yml` and the comment job in `screenshots.yml`
   (both below), each `pull-requests: write` and nothing more.
+- **[done]** `ci.yml`'s `required` job (`Required checks`, the one check branch protection names) is the one job in
+  that workflow with more than `contents: read`: it adds `actions: read`, which is what lets its token list the jobs of
+  its own run attempt (`GET …/actions/runs/{run_id}/attempts/{attempt}/jobs`). It needs that because `needs.*.result`
+  cannot be trusted for a matrix job: in run 44175108735 a leg the platform cancelled before it started left
+  `needs.package-tests.result` at `success`, and the gate passed (`06-adversarial-review.md` Z119). So it judges each
+  job the API lists. `actions: read` reads run metadata and logs and writes nothing, and the job checks nothing out
+  and runs nothing but its own few lines of `gh api`, which take the repository, run ID and attempt only through
+  `env:` and check their shape before use; `mise run test:scripts` runs those lines as they are in the file against a
+  stand-in `gh` (`Tests/ScriptTests/test_required_checks.py`).
 - **[done]** `persist-credentials: false` on every checkout, so the `GITHUB_TOKEN` is not left in
   `.git/config` for later steps (including any future step that runs third-party code) to read.
 - **[done]** the trigger is `pull_request`, never `pull_request_target`, so a fork's code never
@@ -515,7 +524,10 @@ in an order that does not lock you out, are in `08-repository-hardening.md`:
 - Branch protection on `main`: require `Required checks`, the `ci.yml` job that fails unless
   `package-tests` (both runners), `adversarial-tests`, `strict-memory-safety`, `lint` (which also
   runs the script tests and the action-pinning and mise-pin audits), every `app-tests` leg and
-  both `release-build` legs succeeded; require review; no force-push; no deletion.
+  both `release-build` legs succeeded. It holds every job the API lists for its run attempt, leg by leg, to
+  `completed` and `success`, and to a list of the jobs it expects, rather than trusting `needs.*.result`, which
+  read `success` for a matrix job one of whose legs was cancelled before it ran (Z119, §3.2). Require review; no
+  force-push; no deletion.
 - Require signed commits on `main`, so a push with stolen credentials is distinguishable.
 - Restrict who may edit `.github/` (a CODEOWNERS entry), because a workflow edit is code execution.
 - Tag protection on release tags, with two-person review.

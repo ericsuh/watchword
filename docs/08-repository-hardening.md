@@ -254,7 +254,21 @@ removes the human read of the diff that is the actual control.
 Require one check, `Required checks`: the last job in `ci.yml`, which needs every other job there
 and fails unless each succeeded — both package-test legs, the adversarial suite, strict memory
 safety, lint (with the script tests and the action-pinning and mise-pin audits), the macOS and
-iOS-simulator app tests and the two Release builds on the `xcode-27` (macOS 27) runner. The
+iOS-simulator app tests and the two Release builds on the `xcode-27` (macOS 27) runner.
+
+"Each succeeded" is judged leg by leg, from the API, not from `needs.*.result`. A matrix job's result is not its
+legs' together: in run 44175108735 the `Package tests (Xcode 16.4 / macOS 15)` leg waited 33 minutes for a runner
+and was cancelled by the platform without running a step, `needs.package-tests.result` was still `success`, and this
+check passed (`06-adversarial-review.md` Z119). So the job lists every job of its own run attempt
+(`gh api …/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs`, every page) and fails unless each one but itself is
+`completed` with conclusion `success`, and unless the names are exactly the list it expects (`EXPECTED` in the step,
+which a script test holds equal to the jobs and matrix legs in the file): a leg still queued fails it rather than
+being waited for, and so does a leg that was never created. A failed request or an empty listing fails it too. That
+is why this job, alone in `ci.yml`, has `actions: read` (`07-supply-chain.md` §3.2). A re-run is judged by the new
+attempt's listing, which in that run's attempt 2 listed every job, the ones carried over included; GitHub's REST
+description does not say so, and if a later attempt ever listed less, the gate would fail, not pass.
+
+The
 individual jobs still show as their own checks on a pull request; they are not listed here because
 their names carry the runner and Xcode (`Package tests (Xcode 27 / macOS 27)`), and a required
 check that no longer reports blocks every merge until someone edits this setting. That is what
