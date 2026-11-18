@@ -478,7 +478,15 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   (`staleLoadSettlesNothing`, V36). An invitation issued by a session that is then replaced is kept and delivered by a
   later session (`invitationOutlivesItsRun`, V35). "Screen models: sharing" `accountCheckOnEveryStep`: the starter's
   step at the joiner's scan confirmation shows the account check the scan names (V34). UI tests (drafted, not yet run
-  on a Mac): `testJoinByScanningTheirScreen` (iOS) reaches the joiner's scan confirmation (V37).
+  on a Mac): `testJoinByScanningTheirScreen` (iOS) reaches the joiner's scan confirmation (V37). After the merge with
+  the security-audit branch (V38): `ownersDeletedSharingState` finishes the owner's share from the listed chain (Z50,
+  Z122) as well as by invitation; a device enrolled after a rival marker reached the account follows neither owner
+  (`laterDeviceFollowsNeitherMarker`, V39, the review's M1); an owner's rotated vault with its marker rows deleted and
+  the marker withheld stays shared and closed, and two key IDs mark a vault shared (`rotatedOwnersVaultWithoutMarker`,
+  `moreThanOneKeyIDMarksAVaultShared`, V40); a chain that names no granted key held is not joined
+  (`stalePrefixIsNotJoined`, V41); with no marker no pin is replaced on a session's word (`noMarkerNoPinReplacement`,
+  V42); a kept invitation is delivered only in its role while the chain lists the invitee
+  (`keptInvitationFollowsTheChain`, V43).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed
