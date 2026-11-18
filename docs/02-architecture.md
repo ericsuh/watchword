@@ -1952,8 +1952,9 @@ only membership is ingested and the logs download.
 **Verifying** (`SyncKeyring.verify`, `sharedVerify`): an object of a shared vault must carry the dual signature of a
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
 whose permission ended, the key in the record that ended it), and that account's standing must not be
-`nothingCounts`, nor that account one whose chain keys differ from this device's pin (`MemberKeyCheck.substituted`).
-A snapshot needs an account that may write now. Devices revoked from a member's account, as the vault's chain anchors
+`nothingCounts`, nor that account one whose chain keys differ from this device's pin (`MemberKeyCheck.substituted`,
+from a comparison made on the current head: with none, nothing verifies until one is made, and a comparison is stored
+only for the head it was made on; V29). A snapshot needs an account that may write now. Devices revoked from a member's account, as the vault's chain anchors
 it, are not read.
 
 **The write cut over sync's objects** (S28). The cut a removal, departure or demotion carries is, for each device

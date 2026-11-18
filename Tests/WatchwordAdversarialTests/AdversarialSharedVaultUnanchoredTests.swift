@@ -115,3 +115,63 @@ extension AdversarialSharedVaultTests {
         #expect(pin.bundle.hasSameKeys(as: owner.bundle), "the owner's pin is unchanged")
     }
 }
+
+/// A pin store whose reads fail on demand, as damaged or locked-away pins do (A8). Test code only.
+actor UnreadablePins: VerifiedContactStore {
+    let base: InMemoryVerifiedContactStore
+    var failing = true
+
+    init(base: InMemoryVerifiedContactStore) {
+        self.base = base
+    }
+
+    struct Unreadable: Error {}
+
+    func readable() {
+        failing = false
+    }
+
+    func pin(for accountID: UUID) async throws -> [UInt8]? {
+        guard !failing else { throw Unreadable() }
+        return await base.pin(for: accountID)
+    }
+
+    func savePin(_ pin: [UInt8], for accountID: UUID) async throws {
+        await base.savePin(pin, for: accountID)
+    }
+
+    func removePin(for accountID: UUID) async throws {
+        await base.removePin(for: accountID)
+    }
+}
+
+extension AdversarialSharedVaultTests {
+    /// Threat: a member whose keys in the chain differ from this device's pin (A4 re-added under keys of their own)
+    /// writes, while no comparison of the chain with the pins could be made on the current head: the pin store could
+    /// not be read (A8), or an ingest moved the head while a comparison awaited it (V29). `sharedVerify` took a missing
+    /// or stale comparison for "nobody substituted" and accepted every member's objects. With no comparison on the
+    /// current head nothing verifies; the objects are fetched again, and judged, once one is made.
+    @Test("with no member-key comparison on the current head, no other member's object verifies")
+    func noComparisonNoVerification() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 1_360)
+        let written = try await members[0].session.save(Self.bank(in: vaultID))
+        try await members[0].session.sync()
+
+        let pins = UnreadablePins(base: owner.contacts)
+        let relaunched = owner.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(
+                state: owner.state, contacts: pins, directory: household.directory, shareAccess: owner.shareAccess))
+        try await relaunched.session.unlock(password: TestVault.password)
+        try await relaunched.session.sync()
+        await #expect(throws: VaultError.itemNotFound(written.id), "taken in with no comparison of the member's keys") {
+            _ = try await relaunched.session.item(id: written.id)
+        }
+
+        await pins.readable()
+        try await relaunched.session.sync()
+        try await relaunched.session.sync()
+        #expect(try await relaunched.session.item(id: written.id).id == written.id)
+    }
+}

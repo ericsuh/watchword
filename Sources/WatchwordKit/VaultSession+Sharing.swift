@@ -325,9 +325,10 @@ extension VaultSession {
             vault.proposals.append(record)
         }
         sharing.vaults[vaultID] = vault
-        if let settings = sharing.settings, let contacts = try? verifiedContacts(settings) {
+        if let settings = sharing.settings, let contacts = try? verifiedContacts(settings),
             let check = try? await vault.ledger.checkMemberKeys(against: contacts)
-            sharing.vaults[vaultID]?.keyCheck = check
+        {
+            storeMemberKeyCheck(check, for: vaultID)
         }
         return report
     }
@@ -885,9 +886,10 @@ extension VaultSession {
         let heldAside = try await syncSettings?.state.quarantined(vaultID: vaultID).count ?? 0
         // Only a comparison made on the current head says anything; one is made now if the keys allow.
         if vault.keyCheck?.head != vault.ledger.state.hash, let settings = sharing.settings,
-            let contacts = try? verifiedContacts(settings)
+            let contacts = try? verifiedContacts(settings),
+            let check = try? await vault.ledger.checkMemberKeys(against: contacts)
         {
-            sharing.vaults[vaultID]?.keyCheck = try? await vault.ledger.checkMemberKeys(against: contacts)
+            storeMemberKeyCheck(check, for: vaultID)
         }
         let check = sharing.vaults[vaultID]?.keyCheck.flatMap { $0.head == vault.ledger.state.hash ? $0 : nil }
         return SharedVaultStatus(

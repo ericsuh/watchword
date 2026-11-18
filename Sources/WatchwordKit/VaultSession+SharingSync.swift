@@ -341,8 +341,13 @@ extension VaultSession {
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account)
         else { throw SyncKeyringError.authenticationFailed }
         // Keys in the chain that differ from this device's pin: the person has been warned, and nothing they sign
-        // counts here until that is settled (S39).
-        if vault.keyCheck?.substituted.contains(signer) == true {
+        // counts here until that is settled (S39). With no comparison made on the current head (the pins could not be
+        // read, or the head moved while locked), nobody's substitution is known, so nothing verifies until one is
+        // made; refused objects are fetched again at the next sync (V29).
+        guard let check = vault.keyCheck, check.head == vault.ledger.state.hash else {
+            throw SyncKeyringError.untrustedAuthor(location.author)
+        }
+        if check.substituted.contains(signer) {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
         switch vault.ledger.writeStanding(of: signer) {

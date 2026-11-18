@@ -490,9 +490,17 @@ extension VaultSession {
     func refreshMemberKeyChecks() async {
         guard let settings = sharing.settings, let contacts = try? verifiedContacts(settings) else { return }
         for (vaultID, vault) in sharing.vaults {
-            let check = try? await vault.ledger.checkMemberKeys(against: contacts)
-            sharing.vaults[vaultID]?.keyCheck = check
+            guard let check = try? await vault.ledger.checkMemberKeys(against: contacts) else { continue }
+            storeMemberKeyCheck(check, for: vaultID)
         }
+    }
+
+    /// Keeps a member-key check only if it was made on the head the vault has now (V29): the actor is re-entrant, and
+    /// an ingest that moved the head while the check awaited the pin store has stored the check of the new head. A
+    /// check is never replaced by none; `sharedVerify` refuses while the kept one is not for the current head.
+    func storeMemberKeyCheck(_ check: MemberKeyCheck, for vaultID: UUID) {
+        guard sharing.vaults[vaultID]?.ledger.state.hash == check.head else { return }
+        sharing.vaults[vaultID]?.keyCheck = check
     }
 
     private func sharingCodeStatusOrThrow() throws -> SharingCodeStatus {
