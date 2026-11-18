@@ -96,6 +96,7 @@ enum AccessibilityID {
         static let scannedAccount = "accept.scannedAccount"
         static let confirmScan = "accept.confirmScan"
         static let ownerNotVerified = "accept.ownerNotVerified"
+        static let checkOwner = "accept.checkOwner"
         static let useNewKeys = "accept.useNewKeys"
         static let failed = "accept.failed"
         static let startOver = "accept.startOver"

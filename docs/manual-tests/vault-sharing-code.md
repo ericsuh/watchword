@@ -78,6 +78,16 @@ Steps:
 9. Choose "Join Vault".
 10. **Expected**: "You joined the vault." After a sync the vault "Shared by the household member" is in the list.
 
+### An administrator's invitation waits while you check the owner
+
+Steps (once the production board exists, or with a second account in a `--uitest` build that offers one):
+1. Have an administrator who is not the vault's owner invite you with a vault sharing code.
+2. **Expected**: after your codes match, "This vault belongs to the account …, not to the person you just checked",
+   with "Check the Owner" and "Don't Join".
+3. Choose "Check the Owner"; have the owner open the vault's member list, choose to check you, and read you their
+   eight digits; type them, and exchange the six-digit codes.
+4. **Expected**: "Join a vault shared by the account …?" for the owner's account. Nothing was joined before.
+
 ### With two people: the digits come from the other screen
 
 Steps (once the production board exists):

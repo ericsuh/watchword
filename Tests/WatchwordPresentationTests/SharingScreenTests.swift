@@ -773,3 +773,55 @@ extension SharingScreenTests {
         #expect(secondMembers.contains(carol.accountID))
     }
 }
+
+extension SharingScreenTests {
+    /// No vouching, through the screens (V27): an administrator's invitation names an owner the invitee has not
+    /// checked. The screen told the person to check the owner "then accept again", but its only button dropped the
+    /// invitation and the session, and nothing could accept it later. It now keeps the invitation, runs a session with
+    /// the owner (who checks them from the member list), and offers the invitation again.
+    @Test("an administrator's invitation waits while the invitee checks the owner, and is then offered again")
+    func checkTheOwnerThenJoin() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.administrator], seed: 731)
+        let (owner, administrator) = (home.owner, home.members[0])
+        let invitee = try await household.account(seed: 739)
+        let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+
+        let started = try await administrator.session.startSharingCodeSession()
+        accept.numberText = try #require(started.number)
+        await accept.joinWithNumber()
+        _ = try await administrator.session.refreshSharingCodeSession()
+        await accept.refresh()
+        let inviteeCode = try #require(accept.status?.ownCode)
+        let checked = try await administrator.session.enterSharingCode(inviteeCode)
+        accept.typedCode = try #require(checked.ownCode)
+        await accept.confirmTheirCode()
+        _ = try await administrator.session.inviteThroughSharingCode(to: home.vaultID, as: .readWrite, checked: checked)
+        try await administrator.session.sync()
+        await accept.refresh()
+        guard case .ownerNotVerified(let ownerID) = accept.step else {
+            Issue.record("expected the owner to be checked first, got \(accept.step) \(accept.errorMessage ?? "")")
+            return
+        }
+        #expect(ownerID == owner.accountID)
+
+        await accept.checkOwner()
+        #expect(accept.step == .enterNumber && accept.checkingOwner == owner.accountID)
+        try await owner.session.sync()
+        let ownerSession = try await owner.session.startSharingCodeSession()
+        accept.numberText = try #require(ownerSession.number)
+        await accept.joinWithNumber()
+        _ = try await owner.session.refreshSharingCodeSession()
+        await accept.refresh()
+        let ownerChecked = try await owner.session.enterSharingCode(try #require(accept.status?.ownCode))
+        accept.typedCode = try #require(ownerChecked.ownCode)
+        await accept.confirmTheirCode()
+        guard case .confirmJoin(let shown) = accept.step else {
+            Issue.record("expected the kept invitation again, got \(accept.step) \(accept.errorMessage ?? "")")
+            return
+        }
+        #expect(shown.accountID == owner.accountID)
+        await accept.confirmJoin()
+        #expect(accept.step == .joined(vaultID: home.vaultID), "\(accept.errorMessage ?? "")")
+    }
+}

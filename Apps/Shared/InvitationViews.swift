@@ -379,10 +379,13 @@ struct AcceptInvitationView: View {
                 Section {
                     Banner(
                         text: "This vault belongs to the account \(shortIdentifier(ownerID)), not to the person you "
-                            + "just checked. Check a vault sharing code with its owner too, then accept again."
+                            + "just checked. Ask its owner to check you from the vault's member list, then choose "
+                            + "Check the Owner and type the code their device shows. The invitation is kept meanwhile."
                     )
                     .accessibilityIdentifier(AccessibilityID.Accept.ownerNotVerified)
-                    Button("Start Over") { Task { await model.decline() } }
+                    Button("Check the Owner") { Task { await model.checkOwner() } }
+                        .accessibilityIdentifier(AccessibilityID.Accept.checkOwner)
+                    Button("Don’t Join", role: .cancel) { Task { await model.decline() } }
                         .accessibilityIdentifier(AccessibilityID.Accept.startOver)
                 }
             case .keysChanged:
@@ -435,6 +438,13 @@ struct AcceptInvitationView: View {
     private var enterNumber: some View {
         Group {
             Section {
+                if let owner = model.checkingOwner {
+                    Text(
+                        "Checking the vault's owner, the account \(shortIdentifier(owner)): type the eight digits "
+                            + "their own device shows."
+                    )
+                    .foregroundStyle(.secondary)
+                }
                 TextField("Eight digits", text: $model.numberText)
                     .font(.system(.title2, design: .monospaced))
                     .autocorrectionDisabled()

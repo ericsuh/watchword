@@ -604,7 +604,9 @@ public final class AcceptInvitationModel {
         /// The invitation arrived and its owner is pinned: the person still says yes to joining their vault, which
         /// nothing an invitation says can skip (review of the account screens, finding 8).
         case confirmJoin(ContactSummary)
-        /// The invitation's owner is not the account just checked, and has not been checked by this device.
+        /// The invitation's owner is not the account just checked, and has not been checked by this device. The
+        /// invitation is kept (it names only the vault and its owner): `checkOwner()` runs a session with the owner,
+        /// and then asks again (V27).
         case ownerNotVerified(ownerID: UUID)
         case keysChanged(accountID: UUID)
         case failed(message: String)
@@ -627,6 +629,8 @@ public final class AcceptInvitationModel {
 
     private let context: ScreenContext
     private var invitation: Invitation?
+    /// An invitation waiting for its owner to be checked by a session of this person's own (`checkOwner`).
+    private var awaitingOwner: Invitation?
     private var binding = SharingCodeBinding()
     private var actionFlow: UInt64 = 0
 
@@ -711,11 +715,29 @@ public final class AcceptInvitationModel {
         await perform { try await join(invitation, evidence: nil) }
     }
 
+    /// For an invitation whose owner is not the person just checked: a session of this person's own with the owner
+    /// (the owner checks them from the vault's member list and shows the code; this device types it), after which the
+    /// kept invitation is offered again. Nobody vouches for the owner (ADR 0010).
+    public func checkOwner() async {
+        guard case .ownerNotVerified = step, let invitation else { return }
+        await leaveSession()
+        awaitingOwner = invitation
+        numberText = ""
+        typedCode = ""
+        status = nil
+        errorMessage = nil
+        step = .enterNumber
+    }
+
+    /// The owner the kept invitation waits for, while this screen checks them.
+    public var checkingOwner: UUID? { awaitingOwner?.ownerAccountID }
+
     /// Goes back to the start without joining.
     public func decline() async {
         await leaveSession()
         step = .enterNumber
         invitation = nil
+        awaitingOwner = nil
         numberText = ""
         typedCode = ""
         codeText = ""
@@ -781,6 +803,20 @@ public final class AcceptInvitationModel {
         case .verified:
             if status.keysDifferFromPin, let partner = status.partner {
                 step = .keysChanged(accountID: partner)
+            } else if let kept = awaitingOwner, status.pinned {
+                // A session to check the owner of a kept invitation: no invitation comes through it (V27).
+                guard status.partner == kept.ownerAccountID else {
+                    await leaveSession()
+                    step = .failed(
+                        message: "That was not the owner's device, so nothing was joined. Start over, and type the "
+                            + "code the owner's own device shows.")
+                    return
+                }
+                let owner = ContactSummary(try await context.session.contactCandidate(kept.ownerAccountID))
+                guard owner.isVerified else { return }
+                invitation = kept
+                awaitingOwner = nil
+                step = .confirmJoin(owner)
             } else if status.pinned {
                 step = .awaitingInvitation(code: status.ownCode, scanPayload: status.scanPayload ?? "")
             }
