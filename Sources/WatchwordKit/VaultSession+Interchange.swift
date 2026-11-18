@@ -730,7 +730,12 @@ extension VaultSession {
         var concerns: [ImportConcern] = []
         for entry in entries where !entry.scopes.isEmpty {
             let scopes = entry.scopes
-            let overlap = prepared.overlap(ofAdding: scopes, inVault: vaultID, isOwnVault: isOwnVault)
+            // The overlap is charged to the same budget (review finding Z79): a shared vault's members can put any
+            // number of items on one host, and every entry ranks them. Past the budget it is reported truncated,
+            // which needs the decision like an unchecked host.
+            let overlap = prepared.overlap(
+                ofAdding: scopes, inVault: vaultID, isOwnVault: isOwnVault, limit: max(0, budget))
+            budget -= overlap.comparisons
             var lookAlikes: [HostConfirmation] = []
             var unchecked: [String] = []
             for scope in scopes {

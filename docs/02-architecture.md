@@ -3218,8 +3218,10 @@ of a shared vault next to the person's own), or name a host that resembles a sav
 too, and each is compared with them for resemblance only, so `amaz0n.com` beside `amazon.com` in one entry needs the
 decision: at most 32 × 31 comparisons an entry, charged to the budget, review finding Z74). An entry the source had in
 its trash is judged like any other (`isTrashed`): it is saved into the trash in the one write that creates it, never
-live in between, and a later restore from the trash asks nothing, so the decision is made here (Z73). Hosts past the preview's comparison budget (`VaultSession.maximumImportHostComparisons`) are `uncheckedHosts`
-and need the decision as well. `commitImport` refuses without a decision for every such entry (`decisionRequired`):
+live in between, and a later restore from the trash asks nothing, so the decision is made here (Z73). Hosts past
+the preview's comparison budget (`VaultSession.maximumImportHostComparisons`) are `uncheckedHosts` and need the
+decision as well; the overlap is charged to the same budget (the saved items it ranks, which a shared vault's
+members can make many on one host; review finding Z79), and an entry past it is `overlapIsTruncated`. `commitImport` refuses without a decision for every such entry (`decisionRequired`):
 `keepBoth` imports it, knowing what it does, `skip` leaves it out. The import screen lists them with the accounts
 they would hide, named with their vaults, and shows every entry's hosts through `MergeHost` (ASCII, registrable
 domain, reach). Duplicates are still looked for in the chosen vault only; the concern covers the other vaults. A

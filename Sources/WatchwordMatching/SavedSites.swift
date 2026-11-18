@@ -37,8 +37,11 @@ public struct ScopeOverlap: Hashable, Sendable {
     /// Accounts it would be offered beside: a tie, or an item of a shared vault next to one of the person's own. The
     /// person then chooses between them every time, and a save offers both for update.
     public var beside: [AffectedAccount] = []
-    /// The item's scopes cover more saved hosts than were examined; what is listed is not everything.
+    /// The item's scopes cover more saved hosts than were examined, or ranking them would have cost more than the
+    /// caller's limit; what is listed is not everything.
     public var isTruncated = false
+    /// Saved items ranked to find what is listed: the unit a caller budgets (review finding Z79).
+    public var comparisons = 0
 
     public init() {}
 
@@ -213,8 +216,13 @@ extension SavedSites {
         /// subdomains. An archived or excluded new item is judged like any other: it ranks all the same, and would hide
         /// an account while offering nothing in its place.
         ///
-        /// - Parameter isOwnVault: Whether `vaultID` is a vault only this account writes, by the session's answer.
-        public func overlap(ofAdding scopes: [ServiceScope], inVault vaultID: UUID, isOwnVault: Bool) -> ScopeOverlap {
+        /// - Parameters:
+        ///   - isOwnVault: Whether `vaultID` is a vault only this account writes, by the session's answer.
+        ///   - limit: The most saved items it ranks (`ScopeOverlap.comparisons`); past it the answer is truncated. A
+        ///     member of a shared vault can put any number of items on one host, and an import ranks every entry.
+        public func overlap(
+            ofAdding scopes: [ServiceScope], inVault vaultID: UUID, isOwnVault: Bool, limit: Int = .max
+        ) -> ScopeOverlap {
             var overlap = ScopeOverlap()
             let usable = scopes.filter(ScopePolicy.isAcceptable)
             guard !usable.isEmpty else { return overlap }
@@ -245,6 +253,13 @@ extension SavedSites {
                     positions.formUnion(byHost[String(rest)] ?? [])
                 }
                 guard !positions.isEmpty else { continue }
+                // Two rankings of the relevant items, and the candidate.
+                let cost = 2 * positions.count + 1
+                guard cost <= limit - overlap.comparisons else {
+                    overlap.isTruncated = true
+                    break
+                }
+                overlap.comparisons += cost
                 let relevant = positions.sorted().map { items[$0] }
                 let before = ItemRanker.rank(items: relevant, host: host, sharedVaults: shared).primary
                     .filter { !$0.item.archived && !$0.item.excludedFromSuggestions }

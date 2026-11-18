@@ -866,7 +866,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   classes meet the answer is `chooseAmong`, never a suggestion or a silent fill; its scope does not vouch for a host
   that resembles another vault's site, or that cannot be read (`FillRefusal.resemblesSavedSite`, the warning in place
   of a list, until the person scopes an item of their own to the host); nothing writes to it without UI (the
-  conditional passkey upgrade, silent saves); it is never the pre-selected destination of a new passkey; a new item
+  conditional passkey upgrade, silent saves; a relying party's reports and largeBlob writes still do, carrying no
+  secret of the person's and bounded by `remoteWriteItemBudget`, Z79); it is never the pre-selected destination of a new passkey; a new item
   never copies its scope; and every entry, candidate and proposal carries its `EntryVault`. In `WatchwordAutoFill`
   never hand `snapshot.rankable` to `ItemRanker`, `AutoFillGate` or `PhishingDetector` yourself: use
   `VaultSnapshot.candidates(on:)`, `offered(on:)`, `decide(for:)` and `assess(_:)`, which pass `sharedVaults`.

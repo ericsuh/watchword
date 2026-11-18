@@ -176,8 +176,12 @@ public enum PhishingDetector {
 
                 // The same name under a different public suffix (`amazon.de` against a saved
                 // `amazon.com`) is a plausible regional site, not an impersonation. Nothing below
-                // applies in that case.
-                if let hostName, let scopeName = entry.name, hostName == scopeName {
+                // applies in that case. Not for a host below the saved host itself: a tenant of a hosting
+                // suffix named after its operator (`bandcamp.bandcamp.com` beside a saved `bandcamp.com`)
+                // is someone else's page under the operator's name (review finding Z79).
+                if let hostName, let scopeName = entry.name, hostName == scopeName,
+                    !hostValue.hasSuffix("." + scopeHost)
+                {
                     continue
                 }
 

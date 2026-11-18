@@ -171,3 +171,21 @@ extension AdversarialAutoFillRequestTests {
         #expect(single.standing(ofNewHost: "lone-site.example", inVault: Fixtures.vaultID) == .ordinary)
     }
 }
+
+extension AdversarialAutoFillRequestTests {
+    /// Threat (Z79): A6 on a tenant of a hosting suffix named after its operator, `bandcamp.bandcamp.com`, beside the
+    /// person's saved `bandcamp.com` (an exact-host scope, Z63). The "same name under another suffix" allowance
+    /// (`amazon.de` beside `amazon.com`) returned before the out-of-position check, so the page read as merely
+    /// unrecognised: nothing filled, but nothing warned either, and the person typed the password by hand. The
+    /// allowance no longer applies to a host below the saved host itself.
+    @Test("a tenant named after its hosting operator is a look-alike of the operator's saved sign-in site")
+    func tenantNamedAfterTheOperator() throws {
+        let saved = [ServiceScope(host: "bandcamp.com", includeSubdomains: false)]
+        let tenant = try HostNormalizer.normalize(ServiceIdentifier("bandcamp.bandcamp.com", kind: .domain))
+        let assessment = PhishingDetector.assess(host: tenant, against: saved)
+        #expect(assessment.impersonatesSavedSite, "\(assessment)")
+        // A regional site of the same name is still not one.
+        let regional = try HostNormalizer.normalize(ServiceIdentifier("amazon.de", kind: .domain))
+        #expect(PhishingDetector.assess(host: regional, against: [ServiceScope(host: "amazon.com")]) == .unrecognized)
+    }
+}

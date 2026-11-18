@@ -144,3 +144,30 @@ extension AdversarialSessionInterchangeTests {
         #expect(outcome.merged == [shop.id])
     }
 }
+
+extension AdversarialSessionInterchangeTests {
+    /// Threat (Z79): A4 puts thousands of items on one host of a shared vault, and A7's file has thousands of entries
+    /// on it. The host comparisons of the review were budgeted, the overlap (ranking every saved item on the entry's
+    /// hosts) was not, so its cost was the product of the two. It is now charged to the same budget, and an entry
+    /// whose overlap the budget does not cover is reported truncated, which needs the decision like an unchecked host.
+    @Test("the review's overlap is charged to its budget, and an entry past it needs a decision")
+    func overlapIsBudgeted() {
+        let shared = UUID()
+        let own = UUID()
+        let crowd = (0..<50).map {
+            Item(vaultID: shared, title: "Crowd \($0)", scopes: [ServiceScope(host: "crowd.example")], fields: [])
+        }
+        let sites = SavedSites(stored: crowd, ownVaults: [own])
+        let drafts = (0..<3).map { _ in
+            DraftScopes(id: UUID(), scopes: [ServiceScope(host: "crowd.example")], state: .active)
+        }
+        let perHost = sites.prepared().comparisonsPerHost
+        // Room for the first entry's overlap (two rankings of fifty items and the candidate) and host check only.
+        let budget = (2 * 50 + 1) + perHost
+        let concerns = VaultSession.importConcerns(
+            drafts, among: sites, vaultID: own, isOwnVault: true, budget: budget)
+        #expect(concerns.map(\.importedID) == drafts.map(\.id), "every entry stands beside the crowd or is truncated")
+        #expect(concerns.first?.overlapIsTruncated == false && concerns.first?.beside.count == 50)
+        #expect(concerns.dropFirst().allSatisfy { $0.overlapIsTruncated && $0.beside.isEmpty })
+    }
+}
