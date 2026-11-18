@@ -88,7 +88,10 @@ struct LongRunningVaultSimulationTests {
             TestVault(
                 sync: SyncSettings(
                     state: InMemorySyncStateStore(), transport: await server.transport(for: Fleet.deviceID(index)),
-                    configuration: configuration), seed: seed &+ UInt64(index) &* 7_919, deviceName: "Device \(index)")
+                    configuration: configuration),
+                // Never the run's own seed: device 0's session drew the same UUIDs as `generator`, and a copy's new ID
+                // landed on an item the run had created (a collision of the harness, not of the session).
+                seed: seed &+ UInt64(index + 1) &* 7_919, deviceName: "Device \(index)")
         }
 
         var passwords = [TestVault.password]
