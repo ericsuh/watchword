@@ -948,7 +948,7 @@ extension VaultSession {
         withholdUnvouchedKeys()
         try await adoptVaultKey(
             joined.vaultKey, owner: joined.ledger.owner.accountID, account: account, epoch: epoch)
-        try? await admitVaultKeys(vaultID)
+        _ = try? await admitVaultKeys(vaultID)
         try await saveSharedVault(vaultID)
         return vaultID
     }
