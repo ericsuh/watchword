@@ -18,7 +18,7 @@ enum PlatformLifecycle {
 extension PlatformLifecycle {
     /// The Mac has no app-switcher snapshot to hide from (F5.7's cover is iOS's). What it does have: a revealed secret
     /// is hidden again whenever the app resigns active (`ScreenPrivacy`), and every window is excluded from screen
-    /// capture and from state restoration (`WindowProtection`, Z95, Z96). `onTerminate` runs in
+    /// capture (`WindowProtection`, Z95). `onTerminate` runs in
     /// `applicationWillTerminate`, before the process ends.
     @MainActor
     static func installPrivacyShield(_ privacy: ScreenPrivacy, onTerminate: @escaping @MainActor @Sendable () -> Void) {
@@ -37,15 +37,17 @@ extension PlatformLifecycle {
 }
 
 /// Every window of the app, sheets and panels included, is left out of screen capture and screen sharing
-/// (`sharingType = .none`: a shared screen or recording shows it blank; F5.7, Z95) and is not restorable, so AppKit
-/// never writes its state, or a picture of it, under `Saved Application State` at a quit or logout with the vault
-/// unlocked (Z96). Applied to every window whenever one becomes key or main. A Debug `--uitest` launch keeps
-/// windows capturable, so the screenshot tour and XCUITest's failure screenshots still show them.
+/// (`sharingType = .none`; F5.7, Z95). Applied to every window whenever one becomes key or main. A Debug `--uitest`
+/// launch keeps windows capturable, so the screenshot tour and XCUITest's failure screenshots still show them.
+///
+/// Windows stay restorable (Z96, tracked). Marking a SwiftUI `WindowGroup`'s windows `isRestorable = false` made the
+/// next launch open no window at all: AppKit saved "no restorable windows" at the quit, and SwiftUI restored that
+/// (CI run 44273695553, every macOS UI test after the first). The fix that keeps a window at launch is the scene's
+/// `.restorationBehavior(.disabled)`, which needs macOS 15; the deployment target is macOS 14.
 @MainActor
 enum WindowProtection {
     static func protectAll() {
         for window in NSApplication.shared.windows {
-            window.isRestorable = false
             #if DEBUG
                 if AppEnvironment.isUITestLaunch { continue }
             #endif
