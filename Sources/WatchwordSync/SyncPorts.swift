@@ -39,6 +39,13 @@ public protocol SyncKeyring: Sendable {
     /// `location.vaultID`. Needs public keys only, so it works while locked. Throws `untrustedAuthor` or
     /// `authenticationFailed`.
     func verify(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws
+    /// Checks that `signature` over `envelope` is *this device's own*: the account key's and this device's key's, as
+    /// this account's registry holds them, for an object at `location`, a location in this device's own stream. Not
+    /// the same question as `verify` in a shared vault, where another account's device can be listed under this
+    /// device's ID (S33) and its object verifies there; the engine numbers its own stream only from objects that pass
+    /// this (review finding Z30). Throws `authenticationFailed` or `untrustedAuthor` for an object that is shown not
+    /// to be this device's, and `trustedKeyUnavailable` when that cannot be told. Needs public keys only.
+    func verifyOwn(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws
     /// The devices revoked from writing to `vaultID` (docs/02-architecture.md §7.8). `verify` refuses their objects;
     /// the engine also stops reading their streams, stops waiting for their acknowledgements before collecting
     /// garbage (review finding Y6), never waits for them to write a snapshot, and hands on what it had already
@@ -49,6 +56,12 @@ public protocol SyncKeyring: Sendable {
 
 extension SyncKeyring {
     public func retiredAuthors(vaultID: UUID) async -> Set<UUID> { [] }
+
+    /// A keyring whose vaults have no writer but this account's devices, each signing with a key of its own: there,
+    /// an object at a location in this device's stream verifies only if this device signed it.
+    public func verifyOwn(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
+        try await verify(signature, over: envelope, at: location)
+    }
 }
 
 /// A `RecordMerger` that hands each record to the merger for its kind (items to `ItemRecordMerger`, vault metadata

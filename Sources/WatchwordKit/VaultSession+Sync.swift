@@ -415,6 +415,23 @@ extension VaultSession {
             author: location.author, view: view)
     }
 
+    /// Whether an object at a location in this device's own stream carries this device's own signatures: the account
+    /// key's and this device's key's, under this account's registry, in a private vault and a shared one alike. In a
+    /// shared vault `syncVerify` also accepts another member's device listed under this device's ID (S33), whose
+    /// object is then held aside by the judge; this device must not number its stream from such an object, which
+    /// would leave a hole every reader waits at, or move its next number out of range (review finding Z30). A
+    /// registry or key that cannot be read, or this device missing from the registry as read, leaves the question
+    /// open (`trustedKeyUnavailable`): the engine then neither numbers from the object nor rules it out.
+    func syncVerifyOwn(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
+        guard let record = try await loadAccount(), let view = try? await registry(record),
+            view.state.devices[record.deviceID] != nil
+        else { throw SyncKeyringError.trustedKeyUnavailable }
+        guard location.author == record.deviceID else { throw SyncKeyringError.untrustedAuthor(location.author) }
+        try Self.verifyDual(
+            signature, over: Self.syncSignedMessage(envelope, at: location), domain: .logSegment,
+            author: location.author, view: view)
+    }
+
     /// The devices revoked from the account, whose streams sync no longer reads or waits for (review finding Y6).
     func syncRetiredAuthors(vaultID: UUID? = nil) async -> Set<UUID> {
         guard let record = try? await loadAccount(), let view = try? await registry(record) else { return [] }
@@ -717,6 +734,10 @@ struct VaultSyncAdapter: SyncKeyring, ItemSealer {
 
     func verify(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
         try await session.syncVerify(signature, over: envelope, at: location)
+    }
+
+    func verifyOwn(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
+        try await session.syncVerifyOwn(signature, over: envelope, at: location)
     }
 
     func retiredAuthors(vaultID: UUID) async -> Set<UUID> {

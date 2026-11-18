@@ -360,9 +360,11 @@ public actor SyncEngine {
                 state: &state, retired: retired, reconciling: reconcile, ownHead: ownHead, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             try await syncState.saveState(state)
-            // An object of this stream at or past the next number that could not be told from this device's own:
-            // publishing waits for the sync that can tell (Z24).
-            report.ownStreamUnverified = listing.ownUndecided.filter { $0 >= state.nextSequence }.min()
+            // Where this device's state could be older than its stream, and the stream cannot show which numbers it
+            // used: publishing waits for the sync that can tell (Z24, Z31).
+            if !report.transportUnavailable {
+                report.ownStreamUnverified = ownStreamHold(state: state, listing: listing, retired: retired)
+            }
             if !report.transportUnavailable, publishing, report.ownStreamUnverified == nil {
                 try await push(
                     state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
@@ -446,23 +448,49 @@ public actor SyncEngine {
         var segments: [UUID: [UInt64]] = [:]
         var snapshots: [SyncObjectLocation] = []
         /// The highest number in this device's own stream whose object was fetched (now or earlier) and carries this
-        /// device's signatures. Zero if none.
+        /// device's own signatures (`SyncKeyring.verifyOwn`). Zero if none.
         var ownVerified: UInt64 = 0
         /// Numbers listed in this device's own stream, past what it has merged, whose objects could be neither
-        /// verified nor shown not to be this device's: not fetched, unreadable, or no key to check them with.
+        /// verified as this device's nor shown not to be: not fetched, unreadable, or no key to check them with.
         var ownUndecided: [UInt64] = []
+        /// Whether the listing holds an object of this device's own stream that is known to be this device's: one
+        /// that verified as its own in this sync, or the one at the number its signed state last published. Its
+        /// segments are collected lowest first, and never the newest, so while one of them is listed none above it
+        /// has been collected: a number at or past the next one is then either free or listed, and creating at a
+        /// listed one is refused (objects are never overwritten), so publishing reuses nothing (review finding Z31).
+        var ownAnchored = false
     }
 
-    /// Whether a failure to stage an object of this device's own stream shows that this device did not write it: it
-    /// was read in full and is not a signed object, or its signatures are not this device's. Anything else (it could
-    /// not be read, there is no key to check it with) leaves the question open.
+    /// Whether a failure to stage or check an object of this device's own stream shows that this device did not write
+    /// it: it was read in full and is not a signed object, it is over the size cap, or its signatures are not this
+    /// device's (`untrustedAuthor` included: another account's device under this ID, Z30). Anything else (it could not
+    /// be read, there is no key to check it with) leaves the question open.
     static func isNotOwn(_ error: any Error) -> Bool {
         switch error {
         case is SyncFormatError: return true
         case SyncKeyringError.authenticationFailed: return true
+        case SyncKeyringError.untrustedAuthor: return true
         case SyncTransportError.objectTooLarge: return true
         default: return false
         }
+    }
+
+    /// Whether this device's own stream holds back its publishing in this vault, and from which number (review
+    /// findings Z24, Z31). A device whose state may be older than the transport (a restored backup, an earlier row
+    /// put back) must not publish at a number it used and collected, where no reader looks. With an object of its own
+    /// stream known to be its own listed (`Listing.ownAnchored`) that cannot happen. Without one, it holds back while
+    /// an object of its stream at or past its next number cannot be told from its own, or while a snapshot by a
+    /// device still trusted says its stream got that far: a segment is collected only once a listed snapshot covers
+    /// it, so a claim beyond this device's own count is what an older state would see. The claim is read from the
+    /// snapshots as they are now, so a snapshot collected or a signer revoked ends it; it never moves the numbering.
+    private func ownStreamHold(state: SyncState, listing: Listing, retired: Set<UUID>) -> UInt64? {
+        guard !listing.ownAnchored else { return nil }
+        let next = state.nextSequence
+        let undecided = listing.ownUndecided.filter { $0 >= next }.min()
+        let vouched =
+            state.snapshots.filter { !retired.contains($0.key.author) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
+        if vouched >= next { return next }
+        return undecided
     }
 
     private func pull(state: SyncState, retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
@@ -488,6 +516,10 @@ public actor SyncEngine {
             case .snapshot: listing.snapshots.append(location)
             }
         }
+        let listedOwn = Set(listing.segments[deviceID] ?? [])
+        if state.lastPublishedSequence > 0, listedOwn.contains(state.lastPublishedSequence) {
+            listing.ownAnchored = true
+        }
 
         // Every snapshot not yet merged, not only the newest: which one is newest is not which one covers most, and a
         // device's own garbage collection may rely on any of them.
@@ -508,6 +540,7 @@ public actor SyncEngine {
         if !collected.isEmpty { try await syncState.unstage(Array(collected)) }
         let isOwn = { (location: SyncObjectLocation) in location.kind == .segment && location.author == self.deviceID }
         for location in wanted where !alreadyStaged.contains(location) {
+            var decided = false
             do {
                 guard
                     let bytes = try await transport.fetch(
@@ -520,9 +553,14 @@ public actor SyncEngine {
                 }
                 report.fetched += 1
                 let object = try SignedObject.parse(bytes)
+                if isOwn(location) {
+                    // Whether this device wrote it, asked apart from whether the vault accepts it: in a shared vault
+                    // another member's device can be listed under this ID, and its object verifies (Z30).
+                    decided = true
+                    await classifyOwn(object, at: location, listed: true, into: &listing)
+                }
                 try await keyring.verify(object.signature, over: object.envelope, at: location)
                 try await syncState.stage(StagedObject(location: location, object: object))
-                if isOwn(location) { listing.ownVerified = max(listing.ownVerified, location.number) }
             } catch let error as SyncTransportError where error.stopsSync {
                 throw error
             } catch {
@@ -530,21 +568,35 @@ public actor SyncEngine {
                 if location.kind == .segment {
                     report.waiting[location.author] = min(report.waiting[location.author] ?? .max, location.number)
                 }
-                if isOwn(location), !Self.isNotOwn(error) { listing.ownUndecided.append(location.number) }
+                if isOwn(location), !decided, !Self.isNotOwn(error) { listing.ownUndecided.append(location.number) }
             }
         }
         // Staged earlier (downloaded while locked, or waiting behind a gap): checked again, since the staging area is
-        // a local file (A8), before its number counts. The merge checks it once more and unstages what fails.
+        // a local file (A8), before its number counts. Its name must be one a reader lists: a staged row is not bound
+        // by the listing's range check (review finding Z39). The merge checks it once more and unstages what fails.
         for object in try await syncState.staged(vaultID: vaultID)
-        where isOwn(object.location) && alreadyStaged.contains(object.location) {
-            do {
-                try await keyring.verify(object.object.signature, over: object.object.envelope, at: object.location)
-                listing.ownVerified = max(listing.ownVerified, object.location.number)
-            } catch {
-                if !Self.isNotOwn(error) { listing.ownUndecided.append(object.location.number) }
-            }
+        where isOwn(object.location) && alreadyStaged.contains(object.location)
+            && object.location.number <= configuration.maximumSequence
+        {
+            await classifyOwn(
+                object.object, at: object.location, listed: listedOwn.contains(object.location.number),
+                into: &listing)
         }
         return listing
+    }
+
+    /// Files an object of this device's own stream as its own (it numbers the stream, and anchors it if listed), as
+    /// shown not to be its own (it moves nothing), or as undecided.
+    private func classifyOwn(
+        _ object: SignedObject, at location: SyncObjectLocation, listed: Bool, into listing: inout Listing
+    ) async {
+        do {
+            try await keyring.verifyOwn(object.signature, over: object.envelope, at: location)
+            listing.ownVerified = max(listing.ownVerified, location.number)
+            if listed { listing.ownAnchored = true }
+        } catch {
+            if !Self.isNotOwn(error) { listing.ownUndecided.append(location.number) }
+        }
     }
 
     // MARK: - Merge
@@ -558,6 +610,19 @@ public actor SyncEngine {
         state: inout SyncState, retired: Set<UUID>, reconciling: Bool, ownHead: UInt64, report: inout SyncReport
     ) async throws {
         var staged = try await syncState.staged(vaultID: vaultID)
+        // A staged name no reader lists (the staging area is a local file, A8): dropped, so no number past the bounds
+        // reaches the arithmetic below (review finding Z39).
+        let outOfRange = staged.filter {
+            $0.location.number
+                > ($0.location.kind == .segment ? configuration.maximumSequence : configuration.maximumVersion)
+        }
+        if !outOfRange.isEmpty {
+            try await syncState.unstage(outOfRange.map(\.location))
+            staged.removeAll {
+                $0.location.number
+                    > ($0.location.kind == .segment ? configuration.maximumSequence : configuration.maximumVersion)
+            }
+        }
         // Staged before its author was revoked: dropped unmerged, like anything else that device wrote.
         let fromRetired = staged.filter { retired.contains($0.location.author) }
         if !fromRetired.isEmpty {
@@ -592,11 +657,12 @@ public actor SyncEngine {
         }
         let segments = Dictionary(grouping: staged.filter { $0.location.kind == .segment }, by: \.location.author)
         // What the snapshots cover of a stream, as far as it is believed. Of another device's stream, all of it: its
-        // author signed for what it merged. Of this device's own, no further than the stream can have got (`ownHead`,
-        // or a segment of it staged here): this device's next sequence number follows from it, and a snapshot that
-        // claimed 2^48 would otherwise move every later segment of this device to a name no reader lists, for good
-        // (review finding Z21).
-        let ownLimit = max(ownHead, segments[deviceID]?.map(\.location.number).max() ?? 0)
+        // author signed for what it merged. Of this device's own, no further than the stream can have got (`ownHead`):
+        // this device's next sequence number follows from it, and a snapshot that claimed 2^48 would otherwise move
+        // every later segment of this device to a name no reader lists, for good (review finding Z21). Not from a
+        // segment of it merely staged here: the staging area is a local file, and a row planted there at 2^48 would
+        // count for as much (review finding Z39). A claim beyond it holds publishing back instead (`ownStreamHold`).
+        let ownLimit = ownHead
         func covered(_ author: UUID, _ state: SyncState) -> UInt64 {
             let claimed = state.snapshotCoverage[author] ?? 0
             return author == deviceID ? min(claimed, ownLimit) : claimed
@@ -1553,8 +1619,11 @@ public actor SyncEngine {
         let others = state.merged.keys.filter { $0 != deviceID && !retired.contains($0) }
         let acknowledged = others.map { state.acknowledgements[$0]?[deviceID] ?? 0 }.min() ?? covered
         let limit = min(covered, acknowledged)
-        let own = listing.segments[deviceID] ?? []
-        let newest = own.max() ?? 0
+        // Lowest first: while any segment of this stream is listed, none above it has been collected, which is what
+        // lets a device whose state is older than its stream publish without reusing a number (`Listing.ownAnchored`,
+        // review finding Z31). A failed delete stops the loop, so a gap can never open below a listed segment.
+        let own = (listing.segments[deviceID] ?? []).sorted()
+        let newest = own.last ?? 0
         for sequence in own where sequence <= limit && sequence < newest {
             try await transport.delete(
                 SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence).name)
