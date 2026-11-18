@@ -591,3 +591,30 @@ extension SharingScreenTests {
         #expect(try await pins.pinned(owner.accountID)?.method == .scannedCode)
     }
 }
+
+extension SharingScreenTests {
+    /// A shared vault whose saved ledger does not restore (the owner's pin deleted, V19) is listed as shared and closed,
+    /// never as the account's own, and its screen does not offer to share it again.
+    @Test("an unrestored shared vault is listed as shared and closed, and not offered for sharing")
+    func unrestoredSharedVaultOnScreen() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 691)
+        let member = home.members[0]
+        await member.contacts.removePin(for: home.owner.accountID)
+        let relaunched = member.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+
+        let vaults = VaultsModel(context: ContextProbe().context(relaunched.session))
+        await vaults.load()
+        let row = try #require(vaults.row(home.vaultID))
+        #expect(row.awaitingOwnerCheck && row.isShared && row.isReadOnly && !row.mayRename)
+        #expect(row.badge == "Shared · check its owner")
+        let detail = SharedVaultModel(vaultID: home.vaultID, context: ContextProbe().context(relaunched.session))
+        await detail.load()
+        #expect(detail.awaitingOwnerCheck && !detail.isShared)
+        await detail.share()
+        #expect(detail.errorMessage == ErrorWording.sharedVaultUnavailable)
+    }
+}

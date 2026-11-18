@@ -113,4 +113,9 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// A vault sharing code session authenticated keys for an account that a shared vault here lists with other keys:
     /// the pin is not replaced on the session's word against the chain's (`replacePinFromSharingCode`).
     case sharingCodeKeysNotListed
+    /// The sharing state lists this vault as shared, and its saved ledger could not be restored on this device: the
+    /// owner's pin is gone or no longer the chain's, or the saved state is damaged (A8). The vault is shared whatever
+    /// this device can verify, so nothing is written, renamed, deleted, shared again or accepted into it until its owner
+    /// is checked again (docs/06-adversarial-review.md, V19).
+    case sharedVaultUnavailable(UUID)
 }

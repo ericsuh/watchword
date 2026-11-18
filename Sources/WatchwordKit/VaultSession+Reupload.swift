@@ -62,7 +62,7 @@ extension VaultSession {
             let vault = ReuploadPlan.Vault(
                 id: info.id, name: info.name, isPersonal: info.isPersonal, isDeleted: info.isDeleted,
                 itemCount: try await store.records(in: info.id, kind: .item).count)
-            if sharing.vaults[info.id] != nil {
+            if sharing.vaults[info.id] != nil || isUnanchoredSharedVault(info.id) {
                 plan.sharedVaults.append(vault)
             } else {
                 plan.vaults.append(vault)
@@ -136,7 +136,7 @@ extension VaultSession {
         guard let state = syncSettings?.state else { return }
         await loadSharedVaultsIfNeeded()
         for vaultID in try await vaultDirectory(account).keys.sorted(by: { $0.uuidString < $1.uuidString })
-        where sharing.vaults[vaultID] == nil {
+        where sharing.vaults[vaultID] == nil && !isUnanchoredSharedVault(vaultID) {
             guard var vault = try await state.loadState(vaultID: vaultID), !vault.storeResetSuspected,
                 vault.lastPublishedSequence > 0 || !vault.merged.isEmpty || !vault.snapshots.isEmpty
             else { continue }

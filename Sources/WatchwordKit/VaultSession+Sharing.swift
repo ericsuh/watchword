@@ -43,6 +43,12 @@ struct SharingRuntime: Sendable {
     var settings: SharingSettings?
     var vaults: [UUID: SharedVault] = [:]
     var loaded = false
+    /// Vaults the sharing state lists as shared whose saved ledger could not be restored at the last load (the owner's
+    /// pin gone or replaced, the ledger or owner row damaged: A8). Such a vault is shared whatever this device can
+    /// verify, so it is never treated as one of the account's own: nothing is written, synced, sealed under a
+    /// fallback key, shared again or accepted into it until a load restores it (`sharedVaultUnavailable`;
+    /// docs/06-adversarial-review.md, V19). Kept across a lock, as `loaded` is, and recomputed by every load.
+    var unanchored: Set<UUID> = []
     /// Other accounts' registries, evaluated from the transport, by the anchor a vault's chain gives them.
     var registries: [MemberRegistryAnchor: DeviceRegistryState] = [:]
 }
@@ -139,8 +145,10 @@ extension VaultSession {
         let bundle = try await settings.directory.candidateBundle(for: accountID)
         let now = await clock.now()
         let keys = try requireKeys(since: epoch)
-        return try await contacts.verify(
+        let pinned = try await contacts.verify(
             bundle, evidence: evidence, signedBy: keys.keyset, at: now, replacingPin: replacingPin)
+        retryUnanchoredVaults()
+        return pinned
     }
 
     func sharingSettings() throws -> SharingSettings {
@@ -211,7 +219,26 @@ extension VaultSession {
         for (vaultID, vault) in loaded where sharing.vaults[vaultID] == nil {
             sharing.vaults[vaultID] = vault
         }
+        // Listed as shared and not restored: unavailable, never "not shared" (V19).
+        sharing.unanchored = Set(ids).filter { sharing.vaults[$0] == nil }
         sharing.loaded = true
+    }
+
+    /// Whether `vaultID` is a shared vault this device could not restore (`SharingRuntime.unanchored`): shared, and
+    /// unavailable here until the owner is checked again.
+    func isUnanchoredSharedVault(_ vaultID: UUID) -> Bool {
+        sharing.vaults[vaultID] == nil && sharing.unanchored.contains(vaultID)
+    }
+
+    /// Refuses anything that would treat an unrestored shared vault as one of the account's own (V19).
+    func refuseUnanchored(_ vaultID: UUID) throws {
+        if isUnanchoredSharedVault(vaultID) { throw SharedVaultError.sharedVaultUnavailable(vaultID) }
+    }
+
+    /// After a pin was made: a vault left unrestored because its owner was not pinned may restore now, so the next use
+    /// loads the saved ledgers again (what is already loaded is kept).
+    func retryUnanchoredVaults() {
+        if !sharing.unanchored.isEmpty { sharing.loaded = false }
     }
 
     /// Saves one vault's ledger, proposals, plan and index, each signed by the account (or verified again on load).
@@ -475,13 +502,19 @@ extension VaultSession {
     /// Makes one of the account's own vaults shareable: signs and publishes the genesis record of its membership
     /// chain, with this account as its owner and the vault's current key. Nobody else is a member yet.
     public func shareVault(_ vaultID: UUID) async throws {
-        _ = try sharingSettings()
+        let settings = try sharingSettings()
         let epoch = lockEpoch
         _ = try requireKeys()
         await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         guard vaultID != account.personalVaultID else { throw SharedVaultError.personalVaultCannotBeShared }
         guard sharing.vaults[vaultID] == nil else { return }
+        // A vault this device holds sharing state for is shared already, restored or not: a new genesis would replace
+        // its owner and ledger for good (V19).
+        try refuseUnanchored(vaultID)
+        if try await settings.state.value(.owner, vaultID: vaultID) != nil {
+            throw SharedVaultError.sharedVaultUnavailable(vaultID)
+        }
         let keys = try requireKeys(since: epoch)
         let vaultKey = try await writableVaultKey(vaultID, keys: keys, account: account)
         let current = try requireKeys(since: epoch)
@@ -531,6 +564,8 @@ extension VaultSession {
         await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         let vaultID = invitation.vaultID
+        // A vault this device held and cannot restore is never rebuilt from the store (S26, V19).
+        try refuseUnanchored(vaultID)
         var knownOwner = sharing.vaults[vaultID]?.ledger.owner.accountID
         if knownOwner == nil, let saved = try await settings.state.value(.owner, vaultID: vaultID),
             saved.count == 16
@@ -824,6 +859,15 @@ extension VaultSession {
         return sharing.vaults.keys.sorted { $0.uuidString < $1.uuidString }
     }
 
+    /// Shared vaults this device could not restore (the owner's pin is gone or no longer the chain's, or the saved
+    /// ledger is damaged): shared and unavailable here, never one of the account's own, until the owner is checked
+    /// again (V19). Not in `sharedVaultIDs()`, which lists what this device can show.
+    public func sharedVaultsAwaitingOwnerCheck() async throws -> [UUID] {
+        _ = try sharingSettings()
+        await loadSharedVaultsIfNeeded()
+        return sharing.unanchored.filter { sharing.vaults[$0] == nil }.sorted { $0.uuidString < $1.uuidString }
+    }
+
     public func sharedVaultStatus(_ vaultID: UUID) async throws -> SharedVaultStatus {
         _ = try sharingSettings()
         await loadSharedVaultsIfNeeded()
@@ -865,6 +909,8 @@ extension VaultSession {
     /// The key new records of a shared vault are sealed under: the one the membership chain names, if this device
     /// holds it (docs/02-architecture.md §7.7, the seam left for this). `nil` for a vault that is not shared.
     func sharedCurrentKey(_ vaultID: UUID, keys: UnlockedKeys) -> VaultKey?? {
+        // Unrestored: shared, with no key this device may seal under; never the smallest key ID held (V19).
+        if isUnanchoredSharedVault(vaultID) { return .some(nil) }
         guard let vault = sharing.vaults[vaultID] else { return nil }
         let key = keys.vaultKeys[vault.ledger.state.vaultKeyID]
         return .some(key?.vaultID == vaultID ? key : nil)
@@ -873,6 +919,7 @@ extension VaultSession {
     /// The client's half of F4.5: a write the person makes to a shared vault needs `writePermission`.
     func checkSharedWrite(_ vaultID: UUID, account: AccountRecord) async throws {
         await loadSharedVaultsIfNeeded()
+        try refuseUnanchored(vaultID)
         guard let vault = sharing.vaults[vaultID] else { return }
         if case .refused(let refusal) = vault.ledger.writePermission(for: account.accountID) {
             throw SharedVaultError.writeRefused(refusal)
@@ -889,6 +936,7 @@ extension VaultSession {
     /// The client's half of "only the owner or an administrator renames a shared vault": asked after
     /// `checkSharedWrite`, which has loaded the shared vaults and refused an account that may not write at all.
     func checkSharedRename(_ vaultID: UUID, account: AccountRecord) throws {
+        try refuseUnanchored(vaultID)
         guard let vault = sharing.vaults[vaultID] else { return }
         guard mayRenameSharedVault(vault, account: account.accountID) else { throw SharedVaultError.renameRefused }
     }
@@ -896,6 +944,7 @@ extension VaultSession {
     /// A shared vault is deleted through its chain, by its owner (§8.1); a member leaves instead.
     func checkSharedDeletion(_ vaultID: UUID, account: AccountRecord) async throws {
         await loadSharedVaultsIfNeeded()
+        try refuseUnanchored(vaultID)
         guard let vault = sharing.vaults[vaultID] else { return }
         guard vault.ledger.owner.accountID == account.accountID else { throw SharedVaultError.notOwner }
         if !vault.ledger.state.isDeleted {

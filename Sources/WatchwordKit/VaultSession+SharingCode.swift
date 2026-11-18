@@ -302,6 +302,7 @@ extension VaultSession {
             sharingCodeRun?.pinned = true
             sharingCodeRun?.pinConflict = false
         }
+        retryUnanchoredVaults()
         await refreshMemberKeyChecks()
     }
 
@@ -379,7 +380,10 @@ extension VaultSession {
         guard sharingCodeRun?.generation == run.generation else { return }
         sharingCodeRun?.pinned = pinned
         sharingCodeRun?.pinConflict = conflict
-        if pinned { await refreshMemberKeyChecks() }
+        if pinned {
+            retryUnanchoredVaults()
+            await refreshMemberKeyChecks()
+        }
     }
 
     /// Makes every shared vault's member check again, after a pin changed, so a member just verified is listed as

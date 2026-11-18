@@ -445,7 +445,10 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   an invitation planted in a session's slot (`plantedInvitation`); a "keys changed" warning settled only to keys the
   chain lists (`keysChangedSettledOnlyToListedKeys`); a joiner's scan pinned only after the starter's reveal and the
   person's yes to the account named, and nothing pinned by an ending, a spoiled reveal or a lock
-  (`scannedJoinWaitsForRevealAndYes`, V18; "Screen models: sharing" `scanNamesTheAccountFirst`).
+  (`scannedJoinWaitsForRevealAndYes`, V18; "Screen models: sharing" `scanNamesTheAccountFirst`); a shared vault whose
+  ledger no longer restores (the owner's pin deleted) unavailable, never the member's own: no write, rename, share,
+  acceptance, publication, snapshot or collection, nothing taken in, restored once the owner is checked
+  (`unrestoredSharedVaultIsUnavailable`, V19; "Screen models: sharing" `unrestoredSharedVaultOnScreen`).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed

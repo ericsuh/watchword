@@ -57,6 +57,8 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
 public final class SharedVaultModel {
     public let vaultID: UUID
     public private(set) var isShared = false
+    /// Shared, and not restored on this device (V19): nothing is offered but checking the owner again; never "share".
+    public private(set) var awaitingOwnerCheck = false
     public private(set) var sharingAvailable = true
     public private(set) var members: [MemberRow] = []
     public private(set) var sharing: VaultSharing?
@@ -182,8 +184,10 @@ public final class SharedVaultModel {
         guard shared.contains(vaultID) else {
             isShared = false
             members = []
+            awaitingOwnerCheck = try await session.sharedVaultsAwaitingOwnerCheck().contains(vaultID)
             return
         }
+        awaitingOwnerCheck = false
         let status = try await session.sharedVaultStatus(vaultID)
         isShared = true
         sharing = VaultSharing(status)

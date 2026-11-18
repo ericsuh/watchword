@@ -131,8 +131,15 @@ public enum ErrorWording {
         case .sharingCodeKeysNotListed:
             return "The keys you just checked are not the ones this shared vault lists for them, so nothing was "
                 + "changed. Remove them from the vault, or have them invited again."
+        case .sharedVaultUnavailable:
+            return sharedVaultUnavailable
         }
     }
+
+    /// A shared vault this device could not restore: shared, and closed here until its owner is checked again (V19).
+    public static let sharedVaultUnavailable =
+        "This shared vault cannot be used on this device until you check its owner again with a vault sharing code. "
+        + "Nothing in it was changed."
 
     /// Why a member who may edit a shared vault cannot rename it (docs/02-architecture.md §8.7).
     public static let renameRefused = "Only this vault's owner or an administrator can rename it."

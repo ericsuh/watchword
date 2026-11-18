@@ -204,6 +204,11 @@ struct VaultDetailView: View {
             Section("Sharing") {
                 Text("Sharing vaults is not available in this version yet.").foregroundStyle(.secondary)
             }
+        } else if model.awaitingOwnerCheck {
+            Section("Sharing") {
+                Banner(text: ErrorWording.sharedVaultUnavailable, systemImage: "exclamationmark.triangle")
+                    .accessibilityIdentifier(AccessibilityID.Vault.awaitingOwnerCheck)
+            }
         } else if !model.isShared {
             Section("Sharing") {
                 Text("Only you can open this vault.").foregroundStyle(.secondary)

@@ -382,6 +382,9 @@ extension VaultSession {
         guard try await vaultDirectory(record)[location.vaultID] != nil else {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
+        // A shared vault this device could not restore is no vault of this account's alone: nothing in it verifies
+        // until it is restored (V19).
+        if isUnanchoredSharedVault(location.vaultID) { throw SyncKeyringError.untrustedAuthor(location.author) }
         if sharing.vaults[location.vaultID] != nil {
             // A writer from another account (VaultSession+SharingSync.swift).
             return try sharedVerify(signature, over: envelope, at: location, ownView: view, account: record)

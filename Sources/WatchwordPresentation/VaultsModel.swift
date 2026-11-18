@@ -46,23 +46,29 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     public let name: String
     public let isPersonal: Bool
     public let createdAt: Date?
-    /// `nil` for a vault that is not shared.
+    /// `nil` for a vault that is not shared, or for one awaiting its owner's check (`awaitingOwnerCheck`).
     public let sharing: VaultSharing?
+    /// A shared vault this device could not restore: shared, and unavailable here until the owner is checked again
+    /// (`VaultSession.sharedVaultsAwaitingOwnerCheck`; V19). Never shown as one of the account's own.
+    public let awaitingOwnerCheck: Bool
 
-    public var isReadOnly: Bool { sharing?.readOnlyReason != nil }
+    public var isReadOnly: Bool { awaitingOwnerCheck || sharing?.readOnlyReason != nil }
 
     /// Whether this account may rename the vault: always for one that is not shared, and for a shared one only as its
     /// owner or an administrator (docs/02-architecture.md §8.7). The session's answer, not the screen's.
     public var mayRename: Bool { renameRefusal == nil }
 
     /// Why this account cannot rename the vault, worded; `nil` while it can.
-    public var renameRefusal: String? { sharing?.renameRefusal }
+    public var renameRefusal: String? {
+        awaitingOwnerCheck ? ErrorWording.sharedVaultUnavailable : sharing?.renameRefusal
+    }
 
     /// Whose vault this is and this account's part in it, from the session's facts rather than the name: an
     /// administrator can name a shared vault anything, "Personal" included, and a client that does not keep the rule
     /// can try (review of the account screens, finding 4). Shown wherever a vault is named, beside the name.
     public var badge: String {
         if isPersonal { return "Your own vault" }
+        if awaitingOwnerCheck { return "Shared · check its owner" }
         guard let sharing else { return "Only you" }
         if sharing.role == .owner { return "Shared by you" }
         return "Shared with you · " + sharing.roleName
@@ -72,23 +78,25 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     public var label: String { "\(name) (\(badge))" }
 
     /// Whether other accounts can read what is saved here.
-    public var isShared: Bool { sharing != nil }
+    public var isShared: Bool { sharing != nil || awaitingOwnerCheck }
 
     /// What the row says under the name.
     public var detail: String {
         if isPersonal { return "Your own vault. It is never shared." }
+        if awaitingOwnerCheck { return "Shared. Check its owner again before it can be used here." }
         guard let sharing else { return "Only you" }
         if sharing.requiresNewerVersion { return "Read-only: update Watchword" }
         let members = sharing.memberCount == 1 ? "1 member" : "\(sharing.memberCount) members"
         return "Shared, \(members). You: \(sharing.roleName)"
     }
 
-    public init(_ info: VaultInfo, sharing: VaultSharing?) {
+    public init(_ info: VaultInfo, sharing: VaultSharing?, awaitingOwnerCheck: Bool = false) {
         id = info.id
         name = info.name.isEmpty ? "Unnamed vault" : info.name
         isPersonal = info.isPersonal
         createdAt = info.createdAt
         self.sharing = sharing
+        self.awaitingOwnerCheck = awaitingOwnerCheck
     }
 }
 
@@ -102,7 +110,8 @@ extension VaultRow {
         for id in (try? await session.sharedVaultIDs()) ?? [] {
             if let status = try? await session.sharedVaultStatus(id) { shared[id] = VaultSharing(status) }
         }
-        return vaults.map { VaultRow($0, sharing: shared[$0.id]) }
+        let unavailable = Set((try? await session.sharedVaultsAwaitingOwnerCheck()) ?? [])
+        return vaults.map { VaultRow($0, sharing: shared[$0.id], awaitingOwnerCheck: unavailable.contains($0.id)) }
     }
 }
 
@@ -131,10 +140,12 @@ public final class VaultsModel {
             let session = context.session
             let vaults = try await session.vaults()
             var shared: [UUID: VaultSharing] = [:]
+            var unavailable: Set<UUID> = []
             do {
                 for id in try await session.sharedVaultIDs() {
                     shared[id] = VaultSharing(try await session.sharedVaultStatus(id))
                 }
+                unavailable = Set(try await session.sharedVaultsAwaitingOwnerCheck())
                 sharingAvailable = true
                 if fingerprint == nil, let bundle = try? await session.publicKeyBundle() {
                     fingerprint = OwnFingerprint(bundle)
@@ -142,7 +153,7 @@ public final class VaultsModel {
             } catch is SharedVaultError {
                 sharingAvailable = false
             }
-            rows = vaults.map { VaultRow($0, sharing: shared[$0.id]) }
+            rows = vaults.map { VaultRow($0, sharing: shared[$0.id], awaitingOwnerCheck: unavailable.contains($0.id)) }
         }
     }
 
@@ -182,12 +193,14 @@ public final class VaultsModel {
         let session = context.session
         let vaults = try await session.vaults()
         var shared: [UUID: VaultSharing] = [:]
+        var unavailable: Set<UUID> = []
         if sharingAvailable {
             for id in (try? await session.sharedVaultIDs()) ?? [] {
                 if let status = try? await session.sharedVaultStatus(id) { shared[id] = VaultSharing(status) }
             }
+            unavailable = Set((try? await session.sharedVaultsAwaitingOwnerCheck()) ?? [])
         }
-        rows = vaults.map { VaultRow($0, sharing: shared[$0.id]) }
+        rows = vaults.map { VaultRow($0, sharing: shared[$0.id], awaitingOwnerCheck: unavailable.contains($0.id)) }
     }
 
     @discardableResult

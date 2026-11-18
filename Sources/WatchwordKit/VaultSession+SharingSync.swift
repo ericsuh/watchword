@@ -77,6 +77,13 @@ extension VaultSession {
             head: [UInt8]?
         )
     {
+        if isUnanchoredSharedVault(vaultID) {
+            // Shared and not restored (V19): never run as an own vault. It has no key to seal under, so the sync
+            // only downloads, and `syncVerify` refuses its objects; nothing is published, snapshotted or collected.
+            var configuration = base
+            configuration.maintainsLog = false
+            return (configuration, nil, false, false, nil)
+        }
         guard let vault = sharing.vaults[vaultID] else { return (base, nil, true, false, nil) }
         var configuration = base
         configuration.maintainsLog = false

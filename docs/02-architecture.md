@@ -1895,7 +1895,12 @@ entries are values too, S32 and S43, so an older index is refused and rebuilt by
 is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
 account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
 account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
-anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Pins live behind `VerifiedContactStore`.
+anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Such a vault is still shared: the load
+records it (`SharingRuntime.unanchored`), and it is unavailable on the device, never one of the account's own, until a
+load restores it. It has no key to seal under, its sync only downloads and verifies nothing, every write, rename,
+deletion, share and acceptance into it is refused (`SharedVaultError.sharedVaultUnavailable`), and the screens list it as
+shared and closed (`sharedVaultsAwaitingOwnerCheck`); a new pin loads the saved ledgers again (V19). Pins live behind
+`VerifiedContactStore`.
 In-memory implementations serve tests; `SQLiteSharingStore` (`sharing.sqlite`, both ports) is the production one.
 A vault key received through a grant is stored like any other, as a `vaultKeyWrap` row under the keyset, with a
 directory row when the vault is new on the device; a key whose ID the device already holds for another vault is
