@@ -835,6 +835,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   archived or trashed items.
 - Everything a page can influence is bounded here (identifier count, allow-list length, `prf` input, blob, password
   rules, names), and `PasswordRules` cannot take a generated password outside the generator's 4 to 128 characters.
+  A relying party's largeBlob writes are bounded in number too (Z66): one per field per `largeBlobInterval`, and none
+  that would take the item past `largeBlobItemBudget`, since each keeps the old blob in a history never pruned.
 
 ### The matching pipeline is the whole point of `WatchwordMatching`
 

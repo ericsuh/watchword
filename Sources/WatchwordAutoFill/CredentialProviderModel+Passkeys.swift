@@ -126,12 +126,15 @@ extension CredentialProviderModel {
         case .write(let blob):
             // A write that loses a race is reported as not written and the assertion is still good. A vault that
             // locks during the write yields no assertion at all: `storeLargeBlob` rethrows the lock.
+            let now = await clock.now()
             if credential.largeBlob == blob {
                 largeBlob = .write(didWrite: true)
+            } else if !Self.admitsLargeBlobWrite(blob, fieldID: fieldID, in: authorization.item, now: now) {
+                largeBlob = .write(didWrite: false)
             } else {
                 credential.largeBlob = blob
                 largeBlob = .write(
-                    didWrite: try await storeLargeBlob(credential, fieldID: fieldID, in: authorization.item))
+                    didWrite: try await storeLargeBlob(credential, fieldID: fieldID, in: authorization.item, at: now))
             }
         case nil:
             break
@@ -139,12 +142,49 @@ extension CredentialProviderModel {
         return try await releasing(PasskeyAssertionResult(assertion: assertion, prf: prf, largeBlob: largeBlob))
     }
 
-    private func storeLargeBlob(_ credential: PasskeyCredential, fieldID: UUID, in item: Item) async throws -> Bool {
+    /// How often a relying party may replace one passkey's largeBlob (review finding Z66): as often as a report may
+    /// change a field.
+    public static let largeBlobInterval: TimeInterval = reportInterval
+
+    /// The most an item may hold, by `estimatedSize`, for a largeBlob write to be made: half the vault's payload
+    /// limit (`ItemCodec.maximumPayloadLength`, 1 MiB), leaving the person's own edits room whatever a site wrote.
+    public static let largeBlobItemBudget = 512 * 1024
+
+    /// Whether a relying party's write of `blob` into the passkey `fieldID` of `item` may be made. Every write keeps
+    /// the field's earlier value in the item's history, which is never pruned (F1.4), so the number of writes is
+    /// bounded in time (one per `largeBlobInterval`) and in effect (none that would take the item, with that history
+    /// entry, past `largeBlobItemBudget`). A refused write is reported as not written; the assertion stands.
+    static func admitsLargeBlobWrite(_ blob: Data, fieldID: UUID, in item: Item, now: Date) -> Bool {
+        guard let field = item.fields.first(where: { $0.id == fieldID }) else { return false }
+        if let last = field.lastLargeBlobWriteAt, now.timeIntervalSince(last) < largeBlobInterval { return false }
+        // The write adds a history entry holding every field as it is now, and the blob, as base64url, to the field.
+        let afterWrite = estimatedSize(of: item) + estimatedSize(of: item.fields) + (blob.count * 4 + 2) / 3
+        return afterWrite <= largeBlobItemBudget
+    }
+
+    /// A lower bound on the bytes an item's encoding holds: its text, every field's and every history entry's.
+    /// The encoding adds names and punctuation, which the budget's margin covers.
+    static func estimatedSize(of item: Item) -> Int {
+        item.title.utf8.count + item.notes.utf8.count + item.scopes.reduce(0) { $0 + $1.host.utf8.count }
+            + estimatedSize(of: item.fields) + item.history.reduce(0) { $0 + estimatedSize(of: $1.fields) }
+    }
+
+    static func estimatedSize(of fields: [Field]) -> Int {
+        fields.reduce(0) { total, field in
+            total + field.label.utf8.count + field.value.utf8.count
+                + field.meta.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count }
+        }
+    }
+
+    private func storeLargeBlob(
+        _ credential: PasskeyCredential, fieldID: UUID, in item: Item, at now: Date
+    ) async throws -> Bool {
         guard let position = item.fields.firstIndex(where: { $0.id == fieldID }),
             let value = try? credential.fieldValue()
         else { return false }
         var updated = item
         updated.fields[position].value = value
+        updated.fields[position].setTimestamp(now, for: Field.lastLargeBlobWriteKey)
         do {
             _ = try await save(updated, replacing: item)
             return true

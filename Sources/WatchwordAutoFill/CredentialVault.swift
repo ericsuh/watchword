@@ -116,6 +116,7 @@ extension Field {
     static let reportedUnusedKey = "autofill.reportedUnused"
     static let reportedUnknownKey = "autofill.reportedUnknown"
     static let lastReportKey = "autofill.lastReport"
+    static let lastLargeBlobWriteKey = "autofill.lastLargeBlobWrite"
 
     /// When the site said this password is no longer used to sign in (it has been replaced by a passkey, say).
     public var reportedUnusedAt: Date? {
@@ -131,6 +132,11 @@ extension Field {
     /// When a report last changed this field: the rate limit's memory.
     var lastReportAt: Date? {
         timestamp(Field.lastReportKey)
+    }
+
+    /// When a relying party last replaced this passkey's largeBlob: `largeBlobInterval`'s memory.
+    var lastLargeBlobWriteAt: Date? {
+        timestamp(Field.lastLargeBlobWriteKey)
     }
 
     private func timestamp(_ key: String) -> Date? {

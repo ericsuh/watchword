@@ -342,7 +342,12 @@ struct PasskeyRequestTests {
         #expect(try await assert(.write(blob)).largeBlob == .write(didWrite: true))
         #expect(await harness.vault.saves.count == 1)
 
+        // Another write the same day is not made (Z66): reported as not written, the assertion still good.
+        #expect(try await assert(.write(Data("same day".utf8))).largeBlob == .write(didWrite: false))
+        #expect(await harness.vault.saves.count == 1)
+
         // A write that loses to a concurrent change is reported as not written; the assertion still stands.
+        await harness.clock.advance(by: CredentialProviderModel.largeBlobInterval)
         await harness.vault.failNextSave(with: .versionConflict(Fixtures.google.id))
         let lost = try await assert(.write(Data("other".utf8)))
         #expect(lost.largeBlob == .write(didWrite: false))
