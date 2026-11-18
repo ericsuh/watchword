@@ -34,8 +34,8 @@ struct InviteView: View {
                 failed(message)
             case .nameAccount:
                 nameAccount
-            case .compareFingerprint(let contact):
-                compare(contact)
+            case .compareFingerprint(let comparison):
+                compare(comparison)
             case .issued(let code):
                 issued(code)
             }
@@ -209,18 +209,11 @@ struct InviteView: View {
         }
     }
 
-    private func compare(_ contact: ContactSummary) -> some View {
+    /// The fallback's check: the person types the sixty digits the other device shows. None of the directory's digits
+    /// for them are on this screen, only this device's own, for them to type in turn: copying the screen can never
+    /// pass the check (docs/06-adversarial-review.md, V17).
+    private func compare(_ comparison: FullCodeComparison) -> some View {
         Group {
-            Section {
-                SafetyNumberGrid(groups: contact.groups)
-                    .accessibilityIdentifier(AccessibilityID.Invite.safetyNumber)
-            } header: {
-                Text("Their full vault sharing code, as the directory gives it")
-            } footer: {
-                Text(
-                    "Type the code their own device shows, read out by them or seen on their screen, not this one. "
-                        + "Your device checks that the two are the same.")
-            }
             Section {
                 if model.usesFingerprintCode {
                     // A code pasted from a message says which account, not that its keys are the person's.
@@ -231,7 +224,7 @@ struct InviteView: View {
                     .foregroundStyle(.secondary)
                 }
                 TextField(
-                    "Type their full vault sharing code", text: $model.confirmation.typedSafetyNumber, axis: .vertical
+                    "Their full vault sharing code", text: $model.confirmation.typedSafetyNumber, axis: .vertical
                 )
                 .autocorrectionDisabled()
                 #if os(iOS)
@@ -241,6 +234,21 @@ struct InviteView: View {
                 Button("Check") { Task { await model.confirmFingerprint() } }
                     .disabled(model.isWorking)
                     .accessibilityIdentifier(AccessibilityID.Invite.confirm)
+            } header: {
+                Text("Their full vault sharing code")
+            } footer: {
+                Text(
+                    "Type the sixty digits their own device shows in Settings, Vaults, Your Full Vault Sharing Code: "
+                        + "read out by them on a call you know is them, or seen on their screen. Your device checks "
+                        + "them.")
+            }
+            Section {
+                SafetyNumberGrid(groups: comparison.own.groups)
+                    .accessibilityIdentifier(AccessibilityID.Invite.ownSafetyNumber)
+            } header: {
+                Text("Your full vault sharing code")
+            } footer: {
+                Text("Yours, not theirs: read it to them if they check you too.")
             }
         }
     }
@@ -390,8 +398,8 @@ struct AcceptInvitationView: View {
                 }
             case .enterCode:
                 enterCode
-            case .compareOwner(let owner):
-                compareOwner(owner)
+            case .compareOwner(let comparison):
+                compareOwner(comparison)
             }
             ErrorText(message: model.errorMessage)
         }
@@ -545,19 +553,12 @@ struct AcceptInvitationView: View {
         }
     }
 
-    private func compareOwner(_ owner: ContactSummary) -> some View {
+    /// The owner's sixty digits, typed from the owner's own device; only this device's own are shown (V17).
+    private func compareOwner(_ comparison: FullCodeComparison) -> some View {
         Group {
             Section {
-                SafetyNumberGrid(groups: owner.groups)
-                    .accessibilityIdentifier(AccessibilityID.Accept.ownerNumber)
-            } header: {
-                Text("The owner's full vault sharing code, as the directory gives it")
-            } footer: {
-                Text("Type the code the owner's own device shows. Join only if your device says it matched.")
-            }
-            Section {
                 TextField(
-                    "Type the owner's full vault sharing code", text: $model.confirmation.typedSafetyNumber,
+                    "The owner's full vault sharing code", text: $model.confirmation.typedSafetyNumber,
                     axis: .vertical
                 )
                 .autocorrectionDisabled()
@@ -565,6 +566,20 @@ struct AcceptInvitationView: View {
                 Button("Join Vault") { Task { await model.accept() } }
                     .disabled(model.isWorking)
                     .accessibilityIdentifier(AccessibilityID.Accept.join)
+            } header: {
+                Text("The owner's full vault sharing code")
+            } footer: {
+                Text(
+                    "Type the sixty digits the owner's own device shows in Settings, Vaults, Your Full Vault Sharing "
+                        + "Code. Your device joins only if they match.")
+            }
+            Section {
+                SafetyNumberGrid(groups: comparison.own.groups)
+                    .accessibilityIdentifier(AccessibilityID.Accept.ownSafetyNumber)
+            } header: {
+                Text("Your full vault sharing code")
+            } footer: {
+                Text("Yours, not the owner's: read it to them if they check you too.")
             }
         }
     }

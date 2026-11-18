@@ -176,6 +176,9 @@ Built as decided (`docs/02-architecture.md` §8.4; review in `06-adversarial-rev
   joiner. Each device's lookup in the directory happens once, before its own nonce is published.
 - A lock is checked after the board and the directory answer and before anything is held or published (V9); one step
   of a session runs at a time.
+- The full-code fallback's screens show this device's own sixty digits and none of the directory's for the other
+  account: the person types the code the other device shows, so a directory that publishes its own keys under that
+  account cannot be passed by copying the screen (V17, from the follow-up audit of the sharing surface).
 - A session never replaces a pin on its own. "Keys changed" is settled only by the person's explicit choice, and only
   to keys a vault's chain lists for that account (V13, an owner decision still open).
 - No production board adapter exists yet, as none exists for the directory, and a release build configures no sharing

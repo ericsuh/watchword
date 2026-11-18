@@ -273,7 +273,8 @@ public final class InvitationModel {
         case failed(message: String)
         // The fallback, the full vault sharing code:
         case nameAccount
-        case compareFingerprint(ContactSummary)
+        /// Type their full vault sharing code, from their own device; this device's own is shown for them.
+        case compareFingerprint(FullCodeComparison)
         /// The invitation went out. Through a session there is nothing to send (`code` nil); on the fallback, the
         /// invitation as text.
         case issued(code: String?)
@@ -319,10 +320,16 @@ public final class InvitationModel {
     /// Who is being invited, as the role step names them: the chain names accounts, not people.
     public var inviteeName: String {
         switch step {
-        case .compareFingerprint(let contact), .chooseRole(_, let contact):
-            return "the account \(shortIdentifier(contact.accountID)) (Watchword ID \(contact.accountID.uuidString))"
+        case .compareFingerprint(let comparison):
+            return Self.name(comparison.accountID)
+        case .chooseRole(_, let contact):
+            return Self.name(contact.accountID)
         default: return ""
         }
+    }
+
+    private static func name(_ accountID: UUID) -> String {
+        "the account \(shortIdentifier(accountID)) (Watchword ID \(accountID.uuidString))"
     }
 
     /// How the invitee's keys were checked, for the role step; never claims a check that was not made.
@@ -400,22 +407,27 @@ public final class InvitationModel {
         await perform {
             let contact = ContactSummary(try await context.session.contactCandidate(reference.accountID))
             verificationText = contact.isVerified ? "You checked their keys before, and they have not changed." : ""
-            step = contact.isVerified ? .chooseRole(code: nil, contact: contact) : .compareFingerprint(contact)
+            if contact.isVerified {
+                step = .chooseRole(code: nil, contact: contact)
+            } else {
+                let own = OwnFingerprint(try await context.session.publicKeyBundle())
+                step = .compareFingerprint(FullCodeComparison(accountID: contact.accountID, own: own))
+            }
         }
     }
 
     public func confirmFingerprint() async {
-        guard case .compareFingerprint(let contact) = step else { return }
+        guard case .compareFingerprint(let comparison) = step else { return }
         guard let evidence = confirmation.evidence() else {
-            errorMessage = "Type their full vault sharing code."
+            errorMessage = "Type their full vault sharing code, as their own device shows it."
             return
         }
         await perform {
-            try await context.session.verifyContact(contact.accountID, evidence: evidence)
+            try await context.session.verifyContact(comparison.accountID, evidence: evidence)
             verificationText = FingerprintConfirmation.describe(evidence)
             confirmation = FingerprintConfirmation()
             step = .chooseRole(
-                code: nil, contact: ContactSummary(try await context.session.contactCandidate(contact.accountID)))
+                code: nil, contact: ContactSummary(try await context.session.contactCandidate(comparison.accountID)))
         }
     }
 
@@ -513,7 +525,8 @@ public final class AcceptInvitationModel {
         case joined(vaultID: UUID)
         // The fallback: a pasted invitation and the owner's full vault sharing code.
         case enterCode
-        case compareOwner(ContactSummary)
+        /// Type the owner's full vault sharing code, from the owner's own device; this device's own is shown.
+        case compareOwner(FullCodeComparison)
     }
 
     public var numberText = ""
@@ -625,14 +638,19 @@ public final class AcceptInvitationModel {
         self.invitation = invitation
         await perform {
             let owner = ContactSummary(try await context.session.contactCandidate(invitation.ownerAccountID))
-            step = owner.isVerified ? .confirmJoin(owner) : .compareOwner(owner)
+            if owner.isVerified {
+                step = .confirmJoin(owner)
+            } else {
+                let own = OwnFingerprint(try await context.session.publicKeyBundle())
+                step = .compareOwner(FullCodeComparison(accountID: owner.accountID, own: own))
+            }
         }
     }
 
     public func accept() async {
         guard case .compareOwner = step, let invitation else { return }
         guard let evidence = confirmation.evidence() else {
-            errorMessage = "Type the owner's full vault sharing code."
+            errorMessage = "Type the owner's full vault sharing code, as their own device shows it."
             return
         }
         await perform { try await join(invitation, evidence: evidence) }

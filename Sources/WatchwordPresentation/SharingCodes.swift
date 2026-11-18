@@ -101,24 +101,42 @@ public struct OwnFingerprint: Hashable, Sendable {
     public var groups: [String] { SharingCodes.groups(of: safetyNumber) }
 }
 
-/// Another account as the key directory gives it, with its full vault sharing code for the fallback.
+/// Another account as the key directory gives it: which account, and whether this device pinned it before.
+///
+/// It carries none of the directory's digits for that account on purpose. The full-code fallback asks the person to
+/// type the other device's sixty digits, and the directory's copy shown beside the field would be what they type: a
+/// directory that publishes its own keys under the account (A1) would then pass the check it is meant to fail
+/// (docs/06-adversarial-review.md, V17). A step that checks a fingerprint shows this device's own code instead
+/// (`FullCodeComparison`).
 public struct ContactSummary: Hashable, Sendable {
     public let accountID: UUID
-    public let safetyNumber: String
     /// Already pinned: checked before, and the directory's keys are the ones checked.
     public let isVerified: Bool
 
     public init(_ candidate: ContactCandidate) {
         accountID = candidate.accountID
-        safetyNumber = candidate.fingerprint.safetyNumber
         if case .verified = candidate.trust {
             isVerified = true
         } else {
             isVerified = false
         }
     }
+}
 
-    public var groups: [String] { SharingCodes.groups(of: safetyNumber) }
+/// A step of the full-code fallback (ADR 0010): the account whose sixty digits the person types, from that account's
+/// own device, and this device's own full vault sharing code, shown for the other person to type in turn. Nothing
+/// here is the value being checked: the device compares what was typed with the directory's bundle, which no screen
+/// shows (docs/06-adversarial-review.md, V17).
+public struct FullCodeComparison: Hashable, Sendable {
+    /// The other account, as the person named it (invite) or as the invitation names its owner (accept).
+    public let accountID: UUID
+    /// This account's own fingerprint, to read out or show.
+    public let own: OwnFingerprint
+
+    public init(accountID: UUID, own: OwnFingerprint) {
+        self.accountID = accountID
+        self.own = own
+    }
 }
 
 /// How the person confirms a fingerprint by the fallback, the full vault sharing code (PRD F4.2; ADR 0010): the sixty

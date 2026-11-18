@@ -31,17 +31,19 @@ struct SharingScreenTests {
         await invitation.useFullCode()
         invitation.accountText = invitee.accountID.uuidString
         await invitation.lookUp()
-        guard case .compareFingerprint(let contact) = invitation.step else {
+        guard case .compareFingerprint(let comparison) = invitation.step else {
             Issue.record("expected the fingerprint step, got \(invitation.step)")
             return
         }
-        #expect(contact.safetyNumber == invitee.safetyNumber && !contact.isVerified)
+        #expect(comparison.accountID == invitee.accountID && comparison.own == OwnFingerprint(owner.bundle))
         await invitation.confirmFingerprint()
         #expect(invitation.errorMessage != nil, "no evidence, no verification")
-        invitation.confirmation.typedSafetyNumber = "00000 " + invitee.safetyNumber.dropFirst(6)
+        // The person reads the invitee's own screen (Settings, Vaults, Your Full Vault Sharing Code).
+        let inviteeScreen = OwnFingerprint(invitee.bundle).safetyNumber
+        invitation.confirmation.typedSafetyNumber = "00000 " + inviteeScreen.dropFirst(6)
         await invitation.confirmFingerprint()
         #expect(invitation.errorMessage?.contains("does not match") == true)
-        invitation.confirmation.typedSafetyNumber = invitee.safetyNumber
+        invitation.confirmation.typedSafetyNumber = inviteeScreen
         await invitation.confirmFingerprint()
         guard case .chooseRole = invitation.step else {
             Issue.record("expected the role step, got \(invitation.step)")
@@ -59,14 +61,14 @@ struct SharingScreenTests {
         await accept.useFullCode()
         accept.codeText = try #require(code)
         await accept.read()
-        guard case .compareOwner(let ownerContact) = accept.step else {
+        guard case .compareOwner(let ownerComparison) = accept.step else {
             Issue.record("expected the owner's fingerprint, got \(accept.step)")
             return
         }
-        #expect(ownerContact.accountID == owner.accountID)
+        #expect(ownerComparison.accountID == owner.accountID && ownerComparison.own == OwnFingerprint(invitee.bundle))
         await accept.accept()
         #expect(accept.errorMessage != nil, "no evidence, no joining")
-        accept.confirmation.typedSafetyNumber = owner.safetyNumber
+        accept.confirmation.typedSafetyNumber = OwnFingerprint(owner.bundle).safetyNumber
         await accept.accept()
         #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
 
@@ -349,11 +351,11 @@ extension SharingScreenTests {
         await invitation.useFullCode()
         invitation.accountText = OwnFingerprint(stranger.bundle).code
         await invitation.lookUp()
-        guard case .compareFingerprint(let contact) = invitation.step else {
+        guard case .compareFingerprint(let comparison) = invitation.step else {
             Issue.record("a pasted code skipped the comparison: \(invitation.step)")
             return
         }
-        #expect(contact.accountID == stranger.accountID && invitation.usesFingerprintCode)
+        #expect(comparison.accountID == stranger.accountID && invitation.usesFingerprintCode)
         await invitation.confirmFingerprint()
         #expect(invitation.errorMessage != nil, "the code alone was taken as a comparison")
         let pins = VerifiedContacts(store: owner.contacts, account: owner.bundle)
@@ -481,5 +483,64 @@ extension SharingScreenTests {
         #expect(try await !invitee.session.vaults().contains { $0.id == vaultID })
         await accept.confirmJoin()
         #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
+    }
+}
+
+extension SharingScreenTests {
+    /// The full-code fallback (docs/06-adversarial-review.md, V17): A1 runs the key directory and publishes its own
+    /// keys under the invitee's account. A step that showed the directory's sixty digits above the field the person
+    /// types into would pass whoever copies the screen, and pin A1's keys as a typed full code. The steps carry this
+    /// device's own code and none of the directory's digits for the other account, and typing what the screen shows
+    /// fails the check.
+    @Test("the full-code fallback shows this device's own code and none of the other account's digits")
+    func fallbackShowsOnlyOwnDigits() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 671)
+        let invitee = try await household.account(seed: 672)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let impostor = try SharingParty(accountID: invitee.accountID, seed: 679)
+        await household.directory.publish(impostor.bundle)
+
+        let invitation = InvitationModel(vaultID: vaultID, context: ContextProbe().context(owner.session))
+        await invitation.useFullCode()
+        invitation.accountText = invitee.accountID.uuidString
+        await invitation.lookUp()
+        guard case .compareFingerprint(let comparison) = invitation.step else {
+            Issue.record("expected the fingerprint step, got \(invitation.step)")
+            return
+        }
+        let shown = String(describing: invitation.step)
+        let directoryGroups: [String] = SharingCodes.groups(of: impostor.bundle.fingerprint.safetyNumber)
+        for group in directoryGroups {
+            #expect(!shown.contains(group), "the directory's digits are on the screen")
+        }
+        #expect(comparison.own.safetyNumber == owner.safetyNumber)
+
+        // Copying everything the screen shows does not pass, and pins nobody.
+        invitation.confirmation.typedSafetyNumber = comparison.own.safetyNumber
+        await invitation.confirmFingerprint()
+        #expect(invitation.errorMessage?.contains("does not match") == true)
+        let pins = VerifiedContacts(store: owner.contacts, account: owner.bundle)
+        #expect(try await pins.pinned(invitee.accountID) == nil)
+
+        // The invitee's side: an invitation from an owner whose keys the directory replaced.
+        await household.directory.publish(invitee.bundle)
+        let ownerImpostor = try SharingParty(accountID: owner.accountID, seed: 678)
+        await household.directory.publish(ownerImpostor.bundle)
+        let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        await accept.useFullCode()
+        accept.codeText = SharingCodes.text(for: Invitation(vaultID: vaultID, ownerAccountID: owner.accountID))
+        await accept.read()
+        guard case .compareOwner(let ownerComparison) = accept.step else {
+            Issue.record("expected the owner's fingerprint, got \(accept.step)")
+            return
+        }
+        let acceptShown = String(describing: accept.step)
+        let ownerGroups: [String] = SharingCodes.groups(of: ownerImpostor.bundle.fingerprint.safetyNumber)
+        for group in ownerGroups {
+            #expect(!acceptShown.contains(group), "the directory's digits for the owner are on the screen")
+        }
+        #expect(ownerComparison.own.safetyNumber == invitee.safetyNumber)
     }
 }

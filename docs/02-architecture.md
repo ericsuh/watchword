@@ -1505,7 +1505,10 @@ at a time (a second is `busy`), checks the lock before anything reaches the boar
 
 **What the screens accept as a check** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). A vault sharing code
 session, or the fallback: the full vault sharing code typed (`.safetyNumber`), behind a secondary action, for two
-people who cannot be at their devices together. The person's own "the numbers match" is gone (ADR 0010, G3): the case
+people who cannot be at their devices together. Its screens show none of the directory's digits for the other account,
+only this device's own, for the other person to type in turn: the person types the sixty digits the other device shows,
+so copying the screen can never pass (`FullCodeComparison`; `06-adversarial-review.md`, V17). The person's own "the
+numbers match" is gone (ADR 0010, G3): the case
 is removed and its raw value (3) reserved, so a pin that carries it is ignored and the contact is unverified again. A
 fingerprint code pasted from a message only names the account to look up; `.scannedCode` comes only from the camera,
 through the screens' `cameraScanned` entry points (finding 2). `VerifiedContact.method` says what the person did

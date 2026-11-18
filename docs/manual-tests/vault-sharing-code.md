@@ -24,6 +24,17 @@ Steps:
 8. **Expected**: your own six digits appear, with the role picker and "Send Invitation"; the line under the invitee
    says their confirmation code matched.
 
+### The full code: the screen shows only your own
+
+Steps:
+1. Open Invite Someone, choose "Use the Full Code Instead", choose "Use the UI-test household member" and "Look Up".
+2. **Expected**: a field for their full vault sharing code, which the footer says to take from their own device
+   (Settings, Vaults, Your Full Vault Sharing Code), and, in a separate section headed "Your full vault sharing code",
+   this account's own sixty digits (the ones in Settings, Vaults, Your Full Vault Sharing Code here). No sixty digits of
+   theirs appear anywhere on the screen.
+3. Type the digits the screen shows and choose "Check".
+4. **Expected**: "does not match"; nothing is pinned.
+
 ### A wrong code says how many tries are left, and the third ends the session
 
 Steps:
