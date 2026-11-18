@@ -33,9 +33,35 @@ public final class ScreenPrivacy {
         concealments &+= 1
     }
 
-    /// The system reports the screen captured or no longer captured. Starting to capture hides everything; ending it
-    /// reveals nothing again.
+    /// The scenes the system reports captured now. The screen counts as captured while any connected one is (review
+    /// finding Z130: an iPad window opened later, or the one scene that was captured closing, must count).
+    private var capturedScenes: Set<AnyHashable> = []
+
+    /// The system reports the screen captured or no longer captured, for an app with one scene (macOS reports no
+    /// capture). Starting to capture hides everything; ending it reveals nothing again.
     public func captureChanged(_ captured: Bool) {
+        captureChanged(captured, in: AnyHashable("the screen"))
+    }
+
+    /// The system reports one scene (an iPad window) captured or no longer captured: each connected scene reports,
+    /// the first time as it connects and then on every change.
+    public func captureChanged(_ captured: Bool, in scene: AnyHashable) {
+        if captured {
+            capturedScenes.insert(scene)
+        } else {
+            capturedScenes.remove(scene)
+        }
+        update()
+    }
+
+    /// A scene was disconnected (its window closed): what it last reported no longer counts.
+    public func sceneDisconnected(_ scene: AnyHashable) {
+        capturedScenes.remove(scene)
+        update()
+    }
+
+    private func update() {
+        let captured = !capturedScenes.isEmpty
         if captured && !isCaptured { concealments &+= 1 }
         isCaptured = captured
     }

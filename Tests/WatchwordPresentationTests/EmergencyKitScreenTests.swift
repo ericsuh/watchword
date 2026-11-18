@@ -65,6 +65,28 @@ struct EmergencyKitScreenTests {
         #expect(EmergencyKitModel.storageWarning.contains("iCloud Drive"))
     }
 
+    /// The review of Z95 (Z130): capture was registered once, for the scenes connected at the first start, and kept
+    /// as one flag. An iPad window opened later reported nothing; and with two scenes, the one not captured reporting
+    /// "not captured" cleared the flag the captured one had set, so a secret could be revealed while a window was
+    /// being recorded. Now each scene reports for itself, and the screen is captured while any connected one is.
+    @Test("the screen counts as captured while any connected scene is")
+    func captureAcrossScenes() {
+        let privacy = ScreenPrivacy()
+        let first = AnyHashable(1)
+        let second = AnyHashable(2)
+        privacy.captureChanged(true, in: first)
+        #expect(!privacy.mayReveal)
+        privacy.captureChanged(false, in: second)
+        #expect(!privacy.mayReveal, "another window's report cleared the capture")
+        let concealed = privacy.concealments
+        privacy.captureChanged(true, in: second)
+        #expect(privacy.concealments == concealed, "already captured: nothing more to hide")
+        privacy.sceneDisconnected(first)
+        #expect(!privacy.mayReveal)
+        privacy.sceneDisconnected(second)
+        #expect(privacy.mayReveal, "a closed window's capture no longer counts")
+    }
+
     /// Z95: whoever sees a recording or a shared screen of the unlocked app. A revealed value is hidden at the next
     /// resign-active or capture, and cannot be revealed while the screen is captured.
     @Test("a revealed secret is hidden when the app resigns active or the screen is captured")

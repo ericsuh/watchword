@@ -32,12 +32,32 @@ extension PlatformLifecycle {
         center.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: nil) { _ in
             MainActor.assumeIsolated { onTerminate() }
         }
+        // Every scene reports for itself, those connected now and every one that connects later (an iPad window);
+        // a disconnected one stops counting (Z130). `ScreenPrivacy` counts the screen captured while any one is.
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
-            privacy.captureChanged(scene.traitCollection.sceneCaptureState == .active)
-            _ = scene.registerForTraitChanges([UITraitSceneCaptureState.self]) {
-                (scene: UIWindowScene, _: UITraitCollection) in
-                privacy.captureChanged(scene.traitCollection.sceneCaptureState == .active)
+            watchCapture(of: scene, privacy)
+        }
+        center.addObserver(forName: UIScene.willConnectNotification, object: nil, queue: .main) { notification in
+            MainActor.assumeIsolated {
+                guard let scene = notification.object as? UIWindowScene else { return }
+                watchCapture(of: scene, privacy)
             }
+        }
+        center.addObserver(forName: UIScene.didDisconnectNotification, object: nil, queue: .main) { notification in
+            MainActor.assumeIsolated {
+                guard let scene = notification.object as? UIScene else { return }
+                privacy.sceneDisconnected(AnyHashable(ObjectIdentifier(scene)))
+            }
+        }
+    }
+
+    @MainActor
+    private static func watchCapture(of scene: UIWindowScene, _ privacy: ScreenPrivacy) {
+        let id = ObjectIdentifier(scene)
+        privacy.captureChanged(scene.traitCollection.sceneCaptureState == .active, in: AnyHashable(id))
+        _ = scene.registerForTraitChanges([UITraitSceneCaptureState.self]) {
+            (scene: UIWindowScene, _: UITraitCollection) in
+            privacy.captureChanged(scene.traitCollection.sceneCaptureState == .active, in: AnyHashable(id))
         }
     }
 }
