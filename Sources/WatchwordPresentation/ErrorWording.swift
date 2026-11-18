@@ -129,14 +129,18 @@ public enum ErrorWording {
         case .sharingBoardNotConfigured:
             return "Vault sharing codes are not available here. Use the full vault sharing code instead."
         case .sharingCodeKeysNotListed:
-            return "The keys you just checked are not the ones this shared vault lists for them, so nothing was "
-                + "changed. Remove them from the vault, or have them invited again."
+            return keysNotListed
         case .sharedVaultUnavailable:
             return sharedVaultUnavailable
         case .invitationNotDelivered:
             return invitationNotDelivered
         }
     }
+
+    /// The keys a session checked are not the ones a shared vault lists for that member (V13, V24).
+    public static let keysNotListed =
+        "The keys you just checked are not the ones this shared vault lists for them, so nothing was changed. Remove "
+        + "them from the vault, or have them invited again."
 
     /// The invitation was issued and could not be sent inside the session (V22): the screen shows it as text.
     public static let invitationNotDelivered =

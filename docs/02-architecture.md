@@ -1525,7 +1525,9 @@ is removed and its raw value (3) reserved, so a pin that carries it is ignored a
 fingerprint code pasted from a message only names the account to look up; `.scannedCode` comes only from the camera,
 through the screens' `cameraScanned` entry points (finding 2). `VerifiedContact.method` says what the person did
 (S16). The member list offers a session with any member it shows as unverified or with changed keys
-(`MemberVerificationModel`); a session another account answers is ended before anything is pinned.
+(`MemberVerificationModel`); a session another account answers is ended before anything is pinned, and the screen
+says "verified" only when the vault's comparison afterwards lists the member as verified: one whose listed keys are
+not the ones checked is to be removed and invited again (V24).
 
 **Names of shared vaults.** Only a shared vault's owner or an administrator may rename it (owner decision,
 2026-11-17). The review of the account screens (finding 4) had left renaming with every member who may write, for the

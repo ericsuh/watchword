@@ -34,7 +34,9 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         switch trust {
         case .you, .verified: return nil
         case .unverified: return "Not verified by you"
-        case .keysChanged: return "Keys changed: check a vault sharing code with them again"
+        case .keysChanged:
+            return "Keys changed: this vault lists keys for them that you did not check. If a vault sharing code with "
+                + "them does not settle it, remove them and invite them again"
         case .notChecked: return "Not checked yet"
         }
     }
@@ -731,7 +733,9 @@ public final class AcceptInvitationModel {
 /// device's pin ("keys changed"). This device starts; the member's device joins. Only the member asked about may
 /// answer: a session another account answers is ended before anything is pinned. A "keys changed" warning is settled
 /// only if the keys the session checked are the ones the chain lists (`replacePinFromSharingCode(listedIn:)`); if they
-/// are not, nothing changes and the person is told to remove the member.
+/// are not, nothing changes and the person is told to remove the member. "Verified" is said only when the vault's own
+/// comparison lists the member as verified after the session: a session that pinned the member's real keys while the
+/// vault lists others ends at `notListed`, never at "verified" (docs/06-adversarial-review.md, V24).
 @MainActor
 @Observable
 public final class MemberVerificationModel {
@@ -739,8 +743,14 @@ public final class MemberVerificationModel {
         case start
         case showCode(number: String, scanPayload: String)
         case typeTheirCode(attemptsLeft: Int)
-        /// Checked and pinned: show this device's six digits for the member to type.
+        /// Checked and pinned, and the vault lists the keys checked: show this device's six digits for the member to
+        /// type.
         case verified(code: String?)
+        /// Checked and pinned, but this vault lists other keys for the member: the vault wraps its key to keys they do
+        /// not hold. Remove them and invite them again (V24).
+        case notListed(code: String?)
+        /// Checked and pinned; the vault's list could not be compared yet (it is compared at the next sync).
+        case pinnedNotCompared(code: String?)
         /// The session checked keys other than the ones pinned before: replace the pin only on the person's word,
         /// and only to the keys the vault's chain lists.
         case keysChanged
@@ -835,7 +845,15 @@ public final class MemberVerificationModel {
             if status.keysDifferFromPin {
                 step = .keysChanged
             } else if status.pinned {
-                step = .verified(code: status.ownCode)
+                // Pinned is not verified: what the vault lists for them decides (V24).
+                let vault = try await context.session.sharedVaultStatus(vaultID)
+                if vault.verifiedMembers?.contains(memberID) == true {
+                    step = .verified(code: status.ownCode)
+                } else if vault.substitutedMembers.contains(memberID) {
+                    step = .notListed(code: status.ownCode)
+                } else {
+                    step = .pinnedNotCompared(code: status.ownCode)
+                }
             }
         case .failed(let error):
             step = .failed(message: SharingCodeWording.failure(error))

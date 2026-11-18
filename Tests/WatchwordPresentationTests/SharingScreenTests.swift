@@ -665,3 +665,46 @@ extension SharingScreenTests {
         #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
     }
 }
+
+extension SharingScreenTests {
+    /// A4, or A1 through a careless administrator: the chain lists a member with keys they do not hold, and the owner
+    /// has no pin for them (V24). The owner checks the real member in a session, which pins their real keys; the
+    /// screen must not say "verified" while the vault wraps its key to the listed ones, and says to remove and invite
+    /// them again.
+    @Test("a member check says verified only when the vault lists the keys checked")
+    func memberCheckAgainstTheListedKeys() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.administrator], seed: 711)
+        let administrator = home.members[0]
+        let member = try await household.account(seed: 719)
+        let listed = try SharingParty(accountID: member.accountID, seed: 720)
+        await household.directory.publish(listed.bundle)
+        try await administrator.session.verifyContact(
+            member.accountID, evidence: .safetyNumber(listed.bundle.fingerprint.safetyNumber))
+        _ = try await administrator.session.invite(member.accountID, to: home.vaultID, as: .readWrite)
+        try await administrator.session.sync()
+        try await home.owner.session.sync()
+        await household.directory.publish(member.bundle)
+
+        let check = MemberVerificationModel(
+            vaultID: home.vaultID, memberID: member.accountID, context: ContextProbe().context(home.owner.session))
+        await check.startSession()
+        guard case .showCode(let number, _) = check.step else {
+            Issue.record("expected the code, got \(check.step)")
+            return
+        }
+        _ = try await member.session.joinSharingCodeSession(number: number)
+        await check.refresh()
+        let shown = try await member.session.refreshSharingCodeSession()
+        check.typedCode = try #require(shown.ownCode)
+        await check.confirmTheirCode()
+        guard case .notListed = check.step else {
+            Issue.record("expected the keys-not-listed step, got \(check.step) \(check.errorMessage ?? "")")
+            return
+        }
+        let rows = SharedVaultModel.rows(
+            members: [(member.accountID, .readWrite)], substituted: [member.accountID], unverified: [], verified: [],
+            me: nil)
+        #expect(rows.first?.trustText?.contains("remove them and invite them again") == true)
+    }
+}

@@ -112,6 +112,7 @@ enum AccessibilityID {
 
     /// Checking a member of a shared vault with a vault sharing code session (`MemberVerificationView`).
     enum MemberCheck {
+        static let notListed = "memberCheck.notListed"
         static let start = "memberCheck.start"
         static let number = "memberCheck.number"
         static let typedCode = "memberCheck.typedCode"

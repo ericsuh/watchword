@@ -676,6 +676,25 @@ struct MemberVerificationView: View {
                     }
                     Button("Done") { dismiss() }
                 }
+            case .notListed(let code):
+                Section {
+                    Banner(text: ErrorWording.keysNotListed, systemImage: "exclamationmark.octagon")
+                        .accessibilityIdentifier(AccessibilityID.MemberCheck.notListed)
+                    if let code {
+                        SharingDigits(code: code).accessibilityIdentifier(AccessibilityID.MemberCheck.ownCode)
+                    }
+                    Button("Done") { dismiss() }
+                }
+            case .pinnedNotCompared(let code):
+                Section {
+                    Label(
+                        "\(model.memberName)'s keys are checked on this device. The vault's list is compared with them "
+                            + "at the next sync.", systemImage: "checkmark.shield")
+                    if let code {
+                        SharingDigits(code: code).accessibilityIdentifier(AccessibilityID.MemberCheck.ownCode)
+                    }
+                    Button("Done") { dismiss() }
+                }
             case .keysChanged:
                 Section {
                     Banner(
