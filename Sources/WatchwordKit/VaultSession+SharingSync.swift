@@ -191,7 +191,11 @@ extension VaultSession {
                 }
                 // Someone outside the vault holds its current key (an addition and its removal lost a fork
                 // together, Z43): a routine rotation, by any device whose account administers the vault.
-                if !(try sharedVault(vaultID).ledger.exposedKeyHolders.isEmpty), try sharedVault(vaultID).plan == nil,
+                // A member promoted since the current key was introduced (Z152): their segments under it name no stream
+                // ahead of another member's, so the key is rotated, as routinely, and from then on they do.
+                let current = try sharedVault(vaultID).ledger
+                if !current.exposedKeyHolders.isEmpty || !Self.promotedWithinKeyEra(current).isEmpty,
+                    try sharedVault(vaultID).plan == nil,
                     ledger.state.member(account.accountID)?.role.isAdministrator == true,
                     (try? await planRotation(.routine, in: vaultID)) != nil
                 {
@@ -729,7 +733,8 @@ extension VaultSession {
             segment: SharedStreamIndex.Segment(
                 digest: SharedStreamIndex.digest(name: location.name, envelope: envelope), account: signer,
                 entries: entries.map { VersionKey(recordID: $0.recordID, kind: $0.kind.rawValue, version: $0.version) },
-                values: values, opened: opened))
+                values: values, opened: opened,
+                keyID: try? EnvelopeHeader.parse(envelope, expecting: location.envelopeKind).header.keyID))
         vault.indexChanged = true
         sharing.vaults[location.vaultID] = vault
         guard counts else { return }
@@ -1053,15 +1058,54 @@ extension VaultSession {
         return true
     }
 
-    /// Brings the stream index's `passedOver` in line with the vault's current head: the accounts the chain has listed
-    /// whose work cannot count (review finding Z146). Called before anything reads whose a stream is.
+    /// Brings the stream index's `passedOver` and `naming` in line with the vault's accepted chain: the accounts the
+    /// chain has listed whose work cannot count under the current head (review finding Z146), and the account and key
+    /// pairs whose segments name streams first (Z152). Called before anything reads whose a stream is.
     func refreshPassedOver(_ vaultID: UUID) {
         guard let ledger = sharing.vaults[vaultID]?.ledger else { return }
         let listed = Set(ledger.chain.flatMap { $0.state.members.map(\.accountID) })
         let passedOver = listed.filter { !Self.mayHaveWritten($0, in: ledger) }
-        if sharing.vaults[vaultID]?.index.passedOver != passedOver {
-            sharing.vaults[vaultID]?.index.setPassedOver(passedOver)
+        let naming = Self.namingKeys(of: ledger)
+        if let index = sharing.vaults[vaultID]?.index, index.passedOver != passedOver || index.naming != naming {
+            sharing.vaults[vaultID]?.index.setNaming(passedOver: passedOver, naming: naming)
         }
+    }
+
+    /// Each vault key of the accepted chain with the accounts that first appeared while it was current in a role that
+    /// may write (`SharedStreamIndex.naming`, review finding Z152): the genesis' owner, the members of a rotation's
+    /// state who could write, and each member added while that key was current as a writer. A function of the chain.
+    static func namingKeys(of ledger: MembershipLedger) -> Set<SharedStreamIndex.NamingKey> {
+        var first: [UUID: [UUID: Bool]] = [:]
+        for link in ledger.chain {
+            let key = link.state.vaultKeyID
+            for member in link.state.members where first[key]?[member.accountID] == nil {
+                first[key, default: [:]][member.accountID] = member.role.mayWrite
+            }
+        }
+        var keys: Set<SharedStreamIndex.NamingKey> = []
+        for (key, accounts) in first {
+            for (account, mayWrite) in accounts where mayWrite {
+                keys.insert(SharedStreamIndex.NamingKey(account: account, keyID: key))
+            }
+        }
+        return keys
+    }
+
+    /// The members who may write now and first appeared under the current key in a role that could not (review
+    /// finding Z152): promoted since it was introduced. Their segments under it name no stream ahead of another's, so
+    /// an administrator's device rotates the key, after which they do.
+    static func promotedWithinKeyEra(_ ledger: MembershipLedger) -> Set<UUID> {
+        let key = ledger.state.vaultKeyID
+        var first: [UUID: Bool] = [:]
+        for link in ledger.chain where link.state.vaultKeyID == key {
+            for member in link.state.members where first[member.accountID] == nil {
+                first[member.accountID] = member.role.mayWrite
+            }
+        }
+        return Set(
+            ledger.state.members.map(\.accountID).filter {
+                first[$0] == false && ledger.writeStanding(of: $0) == .mayWrite
+            })
     }
 
     /// Notes what one judgement waited for and whose revocations it asked about (`awaiting`, `relied`). A judgement made

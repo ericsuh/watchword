@@ -198,3 +198,79 @@ extension AdversarialSharedVaultTests {
         #expect(await joiner.session.judgementIsSettled(vaultID))
     }
 }
+
+// Review finding Z152: promoting a read-only member brought Z146's capture back.
+extension AdversarialSharedVaultTests {
+    /// Threat: a read-only member (A4) who registers a device under a writer's device ID (S33) and signs segment 1 of
+    /// that device's stream before the writer has published, and then an ordinary promotion by the owner. Z146 passed
+    /// over that segment only while its signer's work could not count, a function of the current head: once the
+    /// member was let write, the planted segment named the stream on every device, its tombstone counted, and every
+    /// segment the writer had published there was held aside. A segment names a stream ahead of another's only if its
+    /// signer first appeared under the key it was sealed under in a role that could write, a function of the chain;
+    /// the key is rotated after a promotion, and the promoted member's later work counts as anyone's.
+    @Test("a planted segment does not take a writer's stream when its read-only signer is promoted")
+    func promotionAfterAPlant() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3800)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let victim = try await household.account(seed: 3801)
+        let reader = try await household.account(seed: 3802)
+        try await owner.invite(victim, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(reader, to: vaultID, as: .readOnly, owner: owner)
+        let bank = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, victim, reader])
+        let victimDevice = try await Self.deviceID(of: victim)
+        let rogue = try await household.secondDevice(of: reader, deviceID: victimDevice)
+        try await rogue.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await rogue.session.sync()
+        let summary = try ItemErasure(
+            seen: VersionVector([victimDevice: 1000]), row: 1000, device: victimDevice, date: nil
+        ).summary()
+        let deletion = SyncEntry.tombstone(
+            RecordKey(recordID: bank.id, kind: .item),
+            stamp: RecordStamp(version: 1001, device: victimDevice, deleted: true), erasure: summary)
+        let location = SyncObjectLocation.segment(vaultID: vaultID, author: victimDevice, sequence: 1)
+        let payload = SyncPayload(
+            kind: .segment, vaultID: vaultID, author: victimDevice, number: 1, vector: [:], entries: [deletion])
+        let adapter = VaultSyncAdapter(session: rogue.session)
+        let envelope = try await adapter.seal(payload.encoded(), at: location)
+        let signature = try await adapter.sign(envelope, at: location)
+        try await household.transport.create(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+
+        var item = Self.bank(in: vaultID)
+        item.title = "The victim's own"
+        let own = try await victim.session.save(item)
+        try await Self.syncAll([victim, owner, reader])
+        let keyBefore = try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID
+
+        try await owner.session.changeRole(of: reader.accountID, in: vaultID, to: .readWrite)
+        try await Self.syncAll([owner, victim, reader], rounds: 3)
+        #expect(
+            try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID != keyBefore,
+            "the key was not rotated after the promotion")
+        for (name, account) in [("owner", owner), ("reader", reader), ("victim", victim)] {
+            #expect(
+                await account.session.streamOwner(victimDevice, in: vaultID) == victim.accountID
+                    || name == "victim",
+                "the planted segment took the victim's stream on the \(name)'s device")
+            #expect(
+                (try? await account.session.item(id: own.id))?.title == own.title,
+                "the victim's work is held aside on the \(name)'s device")
+            #expect(
+                (try? await account.session.item(id: bank.id))?.title == bank.title,
+                "the planted deletion counted on the \(name)'s device")
+        }
+        // The promoted member's own later work counts.
+        var later = Self.bank(in: vaultID)
+        later.title = "Written by the promoted member"
+        later = try await reader.session.save(later)
+        try await Self.syncAll([reader, owner, victim])
+        for account in [owner, victim] {
+            #expect((try? await account.session.item(id: later.id))?.title == later.title)
+        }
+    }
+}

@@ -109,7 +109,9 @@ struct SharedStreamIndexTests {
         var index = SharedStreamIndex()
         index.record(device: Self.device, sequence: 5, segment: Self.segment(5, by: Self.insider))
         index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.victim, opened: false))
-        index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: Self.victim))
+        var keyed = Self.segment(3, by: Self.victim)
+        keyed.keyID = Self.insider
+        index.record(device: Self.device, sequence: 3, segment: keyed)
         index.awaiting = [Self.device]
         index.relied = [Self.victim, Self.insider]
         index.collected = [Self.device: 4, Self.victim: 1]
@@ -123,6 +125,44 @@ struct SharedStreamIndexTests {
         var earlier = saved
         earlier[4] = 4
         #expect(SharedStreamIndex.parse(earlier, account: bundle, vaultID: vaultID) == nil)
+    }
+
+    /// Review finding Z152: a segment names a stream ahead of another's only if its signer first appeared under the
+    /// key it was sealed under in a role that could write, whatever the order the segments came in; a stream with no
+    /// such segment is named by its lowest other one.
+    @Test("a segment whose signer could write under its key names the stream ahead of one planted before it")
+    func namingSegmentsComeFirst() {
+        let key = UUID()
+        func keyed(_ number: UInt8, by account: UUID) -> SharedStreamIndex.Segment {
+            var segment = Self.segment(number, by: account)
+            segment.keyID = key
+            return segment
+        }
+        let naming: Set<SharedStreamIndex.NamingKey> = [SharedStreamIndex.NamingKey(account: Self.victim, keyID: key)]
+        let segments: [(UInt64, SharedStreamIndex.Segment)] = [
+            (1, keyed(1, by: Self.insider)), (2, keyed(2, by: Self.victim)), (3, keyed(3, by: Self.victim)),
+        ]
+        var reference: SharedStreamIndex?
+        for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2]] {
+            var index = SharedStreamIndex()
+            index.setNaming(passedOver: [], naming: naming)
+            for position in order {
+                index.record(device: Self.device, sequence: segments[position].0, segment: segments[position].1)
+            }
+            #expect(index.account(ofStream: Self.device) == Self.victim)
+            #expect(index.firstSequence(ofStream: Self.device) == 2)
+            #expect(index.firstCarrier[Self.device]?[Self.version(1)] == nil)
+            #expect(index.firstCarrier[Self.device]?[Self.version(2)] == 2)
+            if let reference { #expect(index == reference) } else { reference = index }
+        }
+        // With no naming segment, the lowest other names it, and a change of naming files everything again.
+        var index = SharedStreamIndex()
+        index.record(device: Self.device, sequence: 1, segment: keyed(1, by: Self.insider))
+        index.record(device: Self.device, sequence: 2, segment: keyed(2, by: Self.victim))
+        #expect(index.account(ofStream: Self.device) == Self.insider)
+        index.setNaming(passedOver: [], naming: naming)
+        #expect(index.account(ofStream: Self.device) == Self.victim)
+        #expect(index.valueCarriers[Self.value(2)]?[Self.device] == 2 && index.valueCarriers[Self.value(1)] == nil)
     }
 
     /// Review finding Z151: a device of the owner's account whose first segments are not here is taken for one whose
