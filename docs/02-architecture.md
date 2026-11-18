@@ -2494,9 +2494,12 @@ Keychain data into `SecureBytes`), `LAContext.canEvaluatePolicy` and the PDF
 
 Keychain secrets (the Secret Key, the Local Unlock Key, the device seed) are not in `SecureBytes` all the way: a read
 leaves the `CFData` the Security framework allocated, released unwiped when `KeychainBridge.copyData` returns, and a
-write hands `SecItemAdd` one `Data`, made straight from `SecureBytes` and zeroed in place once the call is done
-(`SystemKeychainStore.store`), beside whatever the framework copies internally. The quick-unlock state is decoded
-from one such copy, zeroed after decoding. Wiping the framework's `CFData` would need a write through a pointer to
+write hands `SecItemAdd` one `NSMutableData`, made straight from `SecureBytes` (`withMutableDataCopy`, the one
+helper in `SecureMemory` for it) and zeroed through the object once the call is done (`SystemKeychainStore.store`),
+so the zeros reach that buffer even if the framework kept a reference to it (review finding Z126; a `Data` wiped
+with `resetBytes` copies a shared buffer first and zeroes the copy), beside whatever the framework copies
+internally. The quick-unlock state is decoded from one `Data` copy that nothing else references (the decoder
+returns before the wipe), zeroed after decoding. Wiping the framework's `CFData` would need a write through a pointer to
 storage this code does not own; that copy is accepted and tracked (review §Z, Z98), and a post-lock memory image of
 the process may still hold one of these keys until the allocator reuses the block.
 `SecureBytes`:

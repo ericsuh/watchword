@@ -166,6 +166,22 @@ public final class SecureBytes: @unchecked Sendable {
         unsafe (withLiveBytes { unsafe (Array($0)) })
     }
 
+    /// Runs `body` with one copy of the bytes in an `NSMutableData`, then writes zeros over that object's bytes
+    /// (review finding Z126). For an API that may keep a reference to what it is handed beyond the call (the
+    /// Keychain's `SecItemAdd` query, which takes a `CFData`): the zeros are written through the object itself, a
+    /// reference type, so they reach the one buffer whoever retained it, where a `Data`'s `resetBytes` copies a shared
+    /// buffer first and zeroes the copy. What such an API copies internally is beyond reach.
+    public func withMutableDataCopy<R>(_ body: (NSMutableData) throws -> R) rethrows -> R {
+        guard let copy = NSMutableData(length: count) else { preconditionFailure("could not allocate \(count) bytes") }
+        defer { copy.resetBytes(in: NSRange(location: 0, length: copy.length)) }
+        if count > 0 {
+            unsafe (withLiveBytes { source in
+                unsafe (copy.mutableBytes.copyMemory(from: source.baseAddress!, byteCount: source.count))
+            })
+        }
+        return try body(copy)
+    }
+
     /// Compares contents without an early exit on the first differing byte (`ConstantTime`).
     public func constantTimeEquals(_ other: SecureBytes) -> Bool {
         if self === other { return unsafe (withLiveBytes { _ in true }) }
