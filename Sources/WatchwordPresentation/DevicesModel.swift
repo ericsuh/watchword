@@ -108,6 +108,42 @@ public struct RevocationForm: Hashable, Sendable {
     }
 }
 
+/// A password change made on another device that this one does not follow, as the Devices screen lists it for the
+/// person to choose (review findings Z1, Z8): who made it, and what following it would do here.
+public struct PasswordChangeRow: Hashable, Sendable, Identifiable {
+    public let id: UUID
+    /// The device that made the change, as a sentence names it.
+    public let deviceName: String
+    public let summary: String
+    /// `false` for a change that would remove this device, or that the registry cannot follow at all.
+    public let mayFollow: Bool
+
+    init(_ change: PendingPasswordChange, names: [UUID: String]) {
+        id = change.device
+        let name = names[change.device] ?? "a device this one does not know"
+        deviceName = name
+        let revoked = change.revokedDevices.filter { $0 != change.device }
+            .map { names[$0] ?? "a device this one does not know" }
+        var text = "The account password was changed on \(name)"
+        text += change.isFork ? ", at the same time as the change this device follows." : "."
+        if !change.registeredBeforeFollowed {
+            text += " That device was added after the password this device has was set."
+        }
+        if !change.isDescribed {
+            text += " Select it to see what following it would do."
+        } else if change.revokesThisDevice {
+            text += " That change removes this device from your account, so it cannot be followed here."
+        } else if !change.canBeFollowed {
+            text += " It cannot be followed."
+        } else if !revoked.isEmpty {
+            text += " Following it removes \(revoked.joined(separator: ", ")) from your account."
+        }
+        summary = text
+        // Not yet worked out: the session refuses a change that removes this device or cannot be followed anyway.
+        mayFollow = !change.isDescribed || (change.canBeFollowed && !change.revokesThisDevice)
+    }
+}
+
 /// The account's devices, removing one, and the state of sync on this device (PRD F7, F10.2).
 @MainActor
 @Observable
@@ -116,6 +152,9 @@ public final class DevicesModel: LockSensitive {
     public private(set) var standing: DeviceStanding?
     /// The password was changed on another device and has not been entered here (`isAwaitingNewPassword`).
     public private(set) var awaitingNewPassword = false
+    /// The password changes this device does not follow, one per device that made any: more than one means the
+    /// account's devices disagree, and the person says which change is theirs by the device they made it on.
+    public private(set) var passwordChanges: [PasswordChangeRow] = []
     public private(set) var sync: SyncSummary?
     public private(set) var isSyncConfigured: Bool
     public private(set) var isWorking = false
@@ -245,6 +284,31 @@ public final class DevicesModel: LockSensitive {
         return done
     }
 
+    /// Follows the password change made on the device the person names, with the password this device follows now
+    /// and that change's password: for someone who unlocked with the password this device still had
+    /// (`ignoringPasswordChange`), and for bringing this device over to a change made at the same time as the one it
+    /// follows. Both passwords are asked for every time, as for removing a device (Z14).
+    public func follow(_ change: PasswordChangeRow, current: String, password: String) async -> Bool {
+        var done = false
+        await perform {
+            try await context.session.followPasswordChange(by: change.id, current: current, password: password)
+            if isSyncConfigured { _ = try? await context.session.syncAll() }
+            try await reload()
+            notice = "This device now uses the password set on \(change.deviceName)."
+            done = true
+        }
+        return done
+    }
+
+    /// Works out what following `change` would do, for a row the list did not describe (Z13).
+    public func describe(_ change: PasswordChangeRow) async {
+        await perform {
+            let described = try await context.session.describePasswordChange(by: change.id)
+            let row = PasswordChangeRow(described, names: names)
+            passwordChanges = passwordChanges.map { $0.id == row.id ? row : $0 }
+        }
+    }
+
     private func reload() async throws {
         let session = context.session
         let devices = try await session.devices()
@@ -253,6 +317,9 @@ public final class DevicesModel: LockSensitive {
         rows = devices.map { DeviceRow($0, references: references) }
         standing = try? await session.deviceStanding()
         awaitingNewPassword = (try? await session.isAwaitingNewPassword()) ?? false
+        passwordChanges = ((try? await session.pendingPasswordChanges()) ?? []).map {
+            PasswordChangeRow($0, names: names)
+        }
     }
 
     private func perform(_ body: () async throws -> Void) async {

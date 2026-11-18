@@ -143,7 +143,7 @@ final class VaultSharingTests: XCTestCase {
             app.tap(AccessibilityID.Debug.scanMember)
             step("the scan names their account check; they type this device's code; say it is theirs")
             XCTAssertTrue(app.element(AccessibilityID.Accept.scannedAccount).appears(within: 20), app.debugDescription)
-            XCTAssertTrue(app.element(AccessibilityID.Accept.ownAccount).exists, app.debugDescription)
+            XCTAssertTrue(app.element(AccessibilityID.Accept.ownAccount).isPresent, app.debugDescription)
             app.tap(AccessibilityID.Debug.memberTypes)
             app.tapWhenEnabled(AccessibilityID.Accept.confirmScan)
             XCTAssertTrue(

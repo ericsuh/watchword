@@ -94,6 +94,7 @@ struct VaultDetailView: View {
     @State private var renaming = false
     @State private var confirmingShare = false
     @State private var confirmingLeave = false
+    @State private var confirmingRemoveCopies = false
     @State private var removing: MemberRow?
     @State private var checking: MemberRow?
     private let context: ScreenContext
@@ -118,8 +119,9 @@ struct VaultDetailView: View {
                     Text("Your Personal vault is never shared.").foregroundStyle(.secondary)
                 }
                 // Only a shared vault's owner or an administrator renames it; the session decides and words it
-                // (`VaultSharing.renameRefusal`), and a read-only vault says why in its banner below.
-                if model.sharing?.renameRefusal == nil {
+                // (`VaultRow.renameRefusal`, `VaultSharing.renameRefusal`), and a read-only vault says why in its
+                // banner below.
+                if (row?.renameRefusal ?? model.sharing?.renameRefusal) == nil {
                     Button("Rename…") { renaming = true }
                         .accessibilityIdentifier(AccessibilityID.Vault.rename)
                 } else if model.sharing?.readOnlyReason == nil, let refusal = model.sharing?.renameRefusal {
@@ -127,7 +129,7 @@ struct VaultDetailView: View {
                         .accessibilityIdentifier(AccessibilityID.Vault.renameRefused)
                 }
             }
-            if let reason = model.sharing?.readOnlyReason {
+            if let reason = row?.readOnlyReason ?? model.sharing?.readOnlyReason {
                 Section {
                     Banner(
                         text: reason,
@@ -179,7 +181,16 @@ struct VaultDetailView: View {
                 .accessibilityIdentifier(AccessibilityID.Vault.leaveConfirm)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Its items go from your devices once an administrator's device has replaced the vault's key.")
+            Text(SharedVaultModel.leaveExplanation)
+        }
+        .confirmationDialog(
+            "Remove this vault's items from this device?", isPresented: $confirmingRemoveCopies,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { Task { await model.removeFromThisDevice() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(model.removeCopiesMessage)
         }
         .confirmationDialog(
             "Remove \(removing?.name ?? "this member")?", isPresented: removingBinding, titleVisibility: .visible
@@ -189,9 +200,7 @@ struct VaultDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(
-                "They lose access to new changes. The vault's key is replaced and every item sealed again, but what "
-                    + "they already copied cannot be taken back.")
+            Text(SharedVaultModel.removalExplanation)
         }
     }
 
@@ -204,14 +213,22 @@ struct VaultDetailView: View {
             Section("Sharing") {
                 Text("Sharing vaults is not available in this version yet.").foregroundStyle(.secondary)
             }
-        } else if let reason = model.unavailability {
+        } else if model.awaitingOwnerCheck || model.needsSetUp {
             Section("Sharing") {
-                Banner(text: ErrorWording.unavailable(reason), systemImage: "exclamationmark.triangle")
-                    .accessibilityIdentifier(AccessibilityID.Vault.awaitingOwnerCheck)
+                if let reason = model.unavailability {
+                    Banner(text: ErrorWording.unavailable(reason), systemImage: "exclamationmark.triangle")
+                        .accessibilityIdentifier(AccessibilityID.Vault.awaitingOwnerCheck)
+                } else {
+                    Text(SharedVaultModel.setUpNotice).foregroundStyle(.secondary)
+                }
                 if model.maySetUpAgain {
                     Button("Set Up on This Device") { Task { await model.setUpAgain() } }
                         .disabled(model.isWorking)
                         .accessibilityIdentifier(AccessibilityID.Vault.setUpAgain)
+                }
+                if let code = model.setUpCode {
+                    Text("Invitation to accept on this device:").font(.caption).foregroundStyle(.secondary)
+                    Text(code).font(.caption.monospaced()).textSelection(.enabled)
                 }
             }
         } else if !model.isShared {
@@ -255,6 +272,16 @@ struct VaultDetailView: View {
                 if model.mayLeave {
                     Button("Leave This Vault…", role: .destructive) { confirmingLeave = true }
                         .accessibilityIdentifier(AccessibilityID.Vault.leave)
+                }
+            }
+            if model.membershipEnded {
+                Section {
+                    Button("Remove This Vault's Items From This Device…", role: .destructive) {
+                        confirmingRemoveCopies = true
+                    }
+                    .disabled(model.isWorking)
+                } footer: {
+                    Text(VaultSharing.endedDetail + " " + model.removeCopiesMessage)
                 }
             }
         }

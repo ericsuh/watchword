@@ -533,7 +533,7 @@ struct SyncStoreResetTests {
     @Test("what the engine remembers about a reset survives the state's encoding")
     func encoding() throws {
         var state = SyncState(vaultID: SyncFixtures.vault)
-        state.collectedThrough = 7
+        state.ownUnlistedThrough = 7
         state.storeResetSuspected = true
         state.highestOwnSnapshot = 9
         state.handedOn = HandedOn(
@@ -549,7 +549,7 @@ struct SyncStoreResetTests {
             old = old.replacingOccurrences(of: field + ",", with: "").replacingOccurrences(of: "," + field, with: "")
         }
         #expect(!old.contains("storeResetSuspected") && !old.contains("highestOwnSnapshot"))
-        #expect(old != json && !old.contains("collectedThrough") && !old.contains("handedOn"))
+        #expect(old != json && !old.contains("ownUnlistedThrough") && !old.contains("handedOn"))
         #expect(try JSONDecoder().decode(EncodedState.self, from: Data(old.utf8)).state == bare)
     }
 }

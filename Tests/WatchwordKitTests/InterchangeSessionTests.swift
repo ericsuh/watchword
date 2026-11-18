@@ -239,6 +239,7 @@ struct InterchangeSessionTests {
         let archive = try await vault.session.exportArchive(
             vaults: [personal], passphrase: Self.passphrase, password: TestVault.password)
         #expect(archive.itemCount == 1 && archive.vaultCount == 1)
+        #expect(archive.restoreCheck.restoresEverything, "an archive this app wrote restores (Z82)")
 
         let restored = try await vault.session.createVault(name: "Restored")
         await vault.clock.advance(by: 3600)
@@ -255,6 +256,29 @@ struct InterchangeSessionTests {
         #expect(copy.history.count == 1)
         #expect(copy.history[0].fields.first { $0.kind == .password }?.value == "the-real-bank-pw")
         #expect(copy.field(.password)?.value == "a newer bank pw")
+    }
+
+    /// Z82: the archive's limits are sized to what the vault and the format accept. The field budget assumes no field
+    /// of an item, current or in its history, encodes in fewer than 64 bytes; this holds that to the codec.
+    @Test("the archive's limits are the vault's and the format's own")
+    func archiveLimits() throws {
+        let limits = InterchangeLimits.archive
+        #expect(limits.maximumStoredItemBytes == ItemCodec.maximumPayloadLength)
+        #expect(limits.maximumItems == AccountArchive.maximumEntries)
+        #expect(limits.maximumTotalFields * 64 >= AccountArchive.maximumLength)
+        func size(_ item: Item) throws -> Int { try ItemCodec.encode(item).unprotectedCopy().count }
+        let empty = Field(id: UUID(), kind: .text, label: "", value: "")
+        let base = Item(vaultID: UUID(), title: "", scopes: [], fields: [])
+        var one = base
+        one.fields = [empty]
+        var two = base
+        two.fields = [empty, Field(id: UUID(), kind: .text, label: "", value: "")]
+        var history = base
+        history.history = [ItemHistoryEntry(replacedAt: Date(timeIntervalSince1970: 0), version: 0, fields: [empty])]
+        var longer = history
+        longer.history[0].fields.append(Field(id: UUID(), kind: .text, label: "", value: ""))
+        let costs = [try size(one) - size(base), try size(two) - size(one), try size(longer) - size(history)]
+        #expect(costs.allSatisfy { $0 >= 64 }, "\(costs)")
     }
 
     @Test("a wrong passphrase is an authentication failure, like a tampered archive")
@@ -283,7 +307,7 @@ struct InterchangeSessionTests {
         await #expect(throws: InterchangeSessionError.archiveFromAnotherAccount(kit.accountID)) {
             try await vault.session.previewArchiveImport(archive.bytes, passphrase: Self.passphrase, into: personal)
         }
-        let ownKit = try await vault.session.emergencyKit()
+        let ownKit = try await vault.session.emergencyKit(password: TestVault.password)
         await #expect(throws: CryptoError.authenticationFailed) {
             try await vault.session.previewArchiveImport(
                 archive.bytes, passphrase: Self.passphrase, secretKey: ownKit.secretKey, into: personal)

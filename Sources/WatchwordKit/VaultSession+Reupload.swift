@@ -133,7 +133,9 @@ extension VaultSession {
     /// (`AccountSyncReport.storeNeedsReupload`), and nothing is snapshotted, collected or replayed meanwhile unasked.
     /// A shared vault is not uploaded from one member's device and is left alone.
     func markUploadUnfinished(_ account: AccountRecord) async throws {
-        guard let state = syncSettings?.state else { return }
+        // Through the session's signed state (review finding Z20): a row saved around it carries no authenticator that
+        // verifies, and would be read back as no state at all, forgetting what the device published.
+        guard let state = syncState else { return }
         await loadSharedVaultsIfNeeded()
         for vaultID in try await vaultDirectory(account).keys.sorted(by: { $0.uuidString < $1.uuidString })
         where !isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
@@ -150,7 +152,8 @@ extension VaultSession {
     /// device that has only ever published the account's objects reads as new; nothing but those objects was ever
     /// in such a store.
     func hasSyncedBefore(_ account: AccountRecord) async throws -> Bool {
-        guard let state = syncSettings?.state else { return false }
+        // The signed state only (Z20): a row the session did not sign is no state, and says nothing either way.
+        guard let state = syncState else { return false }
         for vaultID in try await vaultDirectory(account).keys {
             guard let vault = try await state.loadState(vaultID: vaultID) else { continue }
             if vault.lastPublishedSequence > 0 || !vault.merged.isEmpty || !vault.snapshots.isEmpty { return true }

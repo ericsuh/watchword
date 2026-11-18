@@ -17,6 +17,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
     case snapshotWithheld(by: [String])
+    /// This device was due to write a snapshot and held it back because it holds versions aside, or could not keep
+    /// one for want of room (`SyncReport.snapshotWithheldForQuarantine`, review findings Z26, Z37): until the person
+    /// has looked at them, it does not let the sync storage be tidied past them.
+    case snapshotWithheldForReview
     /// Versions kept aside for the person to look at (`quarantined` and `heldAside`).
     case keptAside(Int)
     /// The sync storage was reset, or no longer holds what this device does, and the person has not said whether to
@@ -27,6 +31,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case sharedVaultsNotUploaded(Int)
     /// Vaults the person asked to upload again that do not fit in one upload (`ReuploadRefusal.tooLarge`).
     case vaultsTooLargeToUpload(Int)
+    /// This device's deletions are not going out, because an item it moved or made has reached nobody else: it is in
+    /// a shared vault this account may not write to now, or one not set up here, or was held aside
+    /// (`AccountSyncReport.deletionsHeldBack`).
+    case deletionsHeldBack
 
     public var id: String {
         switch self {
@@ -36,10 +44,12 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .deviceNotRegistered: return "deviceNotRegistered"
         case .registryUnavailable: return "registryUnavailable"
         case .snapshotWithheld: return "snapshotWithheld"
+        case .snapshotWithheldForReview: return "snapshotWithheldForReview"
         case .keptAside: return "keptAside"
         case .storageNeedsUpload: return "storageNeedsUpload"
         case .sharedVaultsNotUploaded: return "sharedVaultsNotUploaded"
         case .vaultsTooLargeToUpload: return "vaultsTooLargeToUpload"
+        case .deletionsHeldBack: return "deletionsHeldBack"
         }
     }
 
@@ -61,6 +71,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .snapshotWithheld(let names):
             return "Older devices need updating before this one can tidy the shared storage: "
                 + names.joined(separator: ", ") + "."
+        case .snapshotWithheldForReview:
+            return "This device is not tidying the sync storage while changes are held aside for you, so that none "
+                + "of them is lost. Review them under Held-Aside Changes."
         case .keptAside(let count):
             return "\(count) change(s) were held aside for you to review. See Held-Aside Changes."
         case .storageNeedsUpload:
@@ -73,6 +86,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .vaultsTooLargeToUpload(let count):
             return "\(count) vault(s) are too large to upload again in one piece. They stay on this device, "
                 + "unchanged."
+        case .deletionsHeldBack:
+            return "Deletions made on this device are waiting. Something it moved or added has not reached your "
+                + "other devices: it is in a shared vault this device cannot write to now, or was held aside. They "
+                + "go out once it has, or once you discard it under Held-Aside Changes."
         }
     }
 }
@@ -173,7 +190,8 @@ public struct SyncSummary: Hashable, Sendable {
             }
             notices.append(.snapshotWithheld(by: named.sorted()))
         }
-        let kept = combined.quarantined.count + combined.heldAside.count
+        if combined.snapshotWithheldForQuarantine { notices.append(.snapshotWithheldForReview) }
+        let kept = combined.quarantined.count + combined.heldAside.count + combined.collided.count
         if kept > 0 { notices.append(.keptAside(kept)) }
         if report.storeNeedsReupload { notices.append(.storageNeedsUpload) }
         let refusals = report.reuploadRefusals.values
@@ -181,6 +199,7 @@ public struct SyncSummary: Hashable, Sendable {
         if shared > 0 { notices.append(.sharedVaultsNotUploaded(shared)) }
         let tooLarge = refusals.filter { $0 == .tooLarge }.count
         if tooLarge > 0 { notices.append(.vaultsTooLargeToUpload(tooLarge)) }
+        if !report.deletionsHeldBack.isEmpty { notices.append(.deletionsHeldBack) }
         self.notices = notices
     }
 
@@ -210,6 +229,32 @@ public struct SyncSummary: Hashable, Sendable {
         }
         if !report.heldAside.isEmpty {
             parts.append("\(report.heldAside.count) change(s) in a shared vault held aside")
+        }
+        if !report.collided.isEmpty {
+            parts.append("\(report.collided.count) change(s) held for review, named like a record of another vault")
+        }
+        if report.quarantineFull > 0 {
+            parts.append("\(report.quarantineFull) more could not be kept for review: the held-aside list is full")
+        }
+        // This device's own stream (review findings Z21, Z24): its changes are not going out. Worded without the two
+        // words the UI tests wait for.
+        if report.ownStreamExhausted {
+            parts.append("this device's own changes cannot go out in one of its vaults")
+        } else if report.ownStreamUnverified != nil {
+            parts.append("this device's own changes are held back until its place in the sync storage is clear")
+        } else if report.ownStreamConflict != nil {
+            // Its next place is taken (review finding Z137): a crash after publishing, a restored copy of this device,
+            // or an object someone else put there. Nothing is lost, and deletions wait with the rest.
+            parts.append(
+                "this device found its place in the sync storage already taken; some of its own changes, and its "
+                    + "deletions, wait for the next sync")
+        }
+        if report.ownStreamSteppedOver != nil {
+            // Another account wrote in this device's place in a shared vault (review finding Z146): what this device
+            // publishes there may count for nobody else. Nothing here is lost.
+            parts.append(
+                "another member's device wrote in this device's place in a shared vault, so its changes there may "
+                    + "not reach the others")
         }
         if report.awaitingNewPassword { parts.append("waiting for the new account password") }
         return parts.isEmpty ? "Up to date." : sentence(parts)

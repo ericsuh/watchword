@@ -1,6 +1,15 @@
 import Foundation
 import WatchwordEnvelope
 
+/// An error of the local storage itself (a database that cannot be read or written, a row that cannot be what was
+/// written), as opposed to one about what a record says. The sync engine stops a sync on one (`SyncEngine.isFatal`)
+/// rather than refusing the object it was working on, which would stop that object's stream for a failure of the
+/// disk. `RecordStoreError` is one, and so are the SQLite connection's failures, which the SQLite stores throw as
+/// they come (review finding Z39).
+public protocol StorageFailure: Error {}
+
+extension RecordStoreError: StorageFailure {}
+
 public enum RecordStoreError: Error, Equatable, Sendable {
     /// `AccountWrite.create` on a store that already holds an account. Creating an account must never overwrite the
     /// wrapped keyset of an existing one: that would destroy the vault.

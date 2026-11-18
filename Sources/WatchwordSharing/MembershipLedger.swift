@@ -83,6 +83,14 @@ public struct MembershipLedger: Sendable {
     /// Removals carried out on a branch that lost, by a signer who may still remove that member: one per member, in
     /// account order. Plan each again (`RotationPlanner.plan` with `reason`) on a device whose account may.
     public private(set) var owedRemovals: [OwedRemoval]
+    /// Accounts that hold the vault's current key and are not members of it, in account order: each was added on a
+    /// branch that lost a fork, which wrapped the key that was current there to them, and removed again on that
+    /// branch by a record that lost with it, rotation and all, so that the key they were given is the accepted
+    /// head's (review finding Z43). Nothing is owed in the sense of `owedRemovals`, since they are not in the
+    /// accepted state; what is owed is a rotation. Until one is adopted `recordsToReseal` is empty,
+    /// `pendingRotation` reports each of them, and a device whose account administers the vault plans a routine
+    /// rotation. A function of the records held, like everything else here.
+    public private(set) var exposedKeyHolders: [UUID]
     /// Records of a format this version cannot read, each signed by the owner as of the record it follows, which
     /// extend a record this ledger holds (docs/02-architecture.md §8.9). Held, and saved with the ledger, so that a
     /// later call that is not offered them again still stops where this one did. At most
@@ -99,7 +107,7 @@ public struct MembershipLedger: Sendable {
 
     init(
         vaultID: UUID, owner: PublicKeyBundle, chain: [Link], branches: [Link], owedRemovals: [OwedRemoval],
-        laterFormatRecords: [[UInt8]] = []
+        exposedKeyHolders: [UUID] = [], laterFormatRecords: [[UInt8]] = []
     ) {
         precondition(!chain.isEmpty)
         self.vaultID = vaultID
@@ -107,12 +115,24 @@ public struct MembershipLedger: Sendable {
         self.chain = chain
         self.branches = branches
         self.owedRemovals = owedRemovals
+        self.exposedKeyHolders = exposedKeyHolders
         self.laterFormatRecords = laterFormatRecords
     }
 
     /// The current verified state.
     public var state: MembershipState {
         chain[chain.count - 1].state
+    }
+
+    /// Whether the accepted chain has never listed anyone but the vault's owner: the vault has been made shareable
+    /// and nobody has been let in. On the owner's own devices only the owner's account can then sign anything that
+    /// verifies in the vault, as in a vault that is not shared at all, and an integration has nobody's writes to judge
+    /// against anybody's standing (review finding Z56). Not on another account's device: a member whose addition lost
+    /// a fork accepts a chain that lists only the owner, and its own account's signatures verify there (Z124), so an
+    /// integration asks this together with whether its account is the owner. A function of the accepted chain alone,
+    /// so it changes only when the head does.
+    public var isOwnersAlone: Bool {
+        chain.allSatisfy { $0.state.members.count == 1 }
     }
 
     public func state(atEpoch epoch: UInt64) -> MembershipState? {
@@ -281,7 +301,8 @@ public struct MembershipLedger: Sendable {
         return (
             MembershipLedger(
                 vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
-                owedRemovals: resolution.owed, laterFormatRecords: resolution.later),
+                owedRemovals: resolution.owed, exposedKeyHolders: resolution.exposed,
+                laterFormatRecords: resolution.later),
             resolution.report
         )
     }
@@ -347,6 +368,7 @@ public struct MembershipLedger: Sendable {
         chain = resolution.chain
         branches = resolution.branches
         owedRemovals = resolution.owed
+        exposedKeyHolders = resolution.exposed
         laterFormatRecords = resolution.later
         return resolution.report
     }
@@ -389,6 +411,7 @@ public struct MembershipLedger: Sendable {
         var chain: [Link]
         var branches: [Link]
         var owed: [OwedRemoval]
+        var exposed: [UUID] = []
         var later: [[UInt8]] = []
         var report: IngestReport
     }
@@ -614,9 +637,75 @@ public struct MembershipLedger: Sendable {
             }
             if !takenBack { carriers[index] = owed }
         }
+
+        // An addition and the removal that undid it can lose a fork together (review finding Z43): an administrator
+        // on a stale head invites someone and removes them again, and one owner-signed record displaces both. That
+        // member is in no accepted state, so nothing above is owed. But the key that was current on the losing path
+        // while they were a member was wrapped to them, and if it is the accepted head's key (the rotation that
+        // removed them lost too), someone outside the vault holds its key. Not if the branch went on to add them
+        // again: what it last meant is that they are a member, and that addition is its author's to replay.
+        //
+        // The branch is believed only as far as accounts with standing signed it, as for an owed removal (S29,
+        // review finding Z53): the removal by someone who could remove such a member on the accepted head (a
+        // departure needs none: the member's own signature asked for it), and the addition by someone who could
+        // add them there. And the key must be the head's by the record that introduced it, not by its ID: on a
+        // branch anyone who could once sign may name any key ID, the current key's among them. Without both, a
+        // former administrator's dead branch would stop re-sealing in the whole vault and have every
+        // administrator's device rotate, as often as they liked.
+        func administrator(_ accountID: UUID) -> Member? {
+            head.member(accountID).flatMap { $0.role.isAdministrator ? $0 : nil }
+        }
+        var exposers: [Int: UUID] = [:]
+        for index in nodes.indices where !nodes[index].isOnChain && !head.isDeleted {
+            guard let parent = nodes[index].parent else { continue }
+            let record = nodes[index].link.record
+            let accountID: UUID
+            let isDeparture: Bool
+            switch record.operation {
+            case .removeMember(let removed): (accountID, isDeparture) = (removed, false)
+            case .memberLeft(let left, _): (accountID, isDeparture) = (left, true)
+            case .createVault, .addMember, .changeRole, .rotateKey, .deleteVault: continue
+            }
+            guard head.member(accountID) == nil, let then = nodes[parent].link.state.member(accountID) else {
+                continue
+            }
+            if !isDeparture {
+                guard let remover = administrator(record.signer), then.role != .owner,
+                    then.role != .administrator || remover.role == .owner
+                else { continue }
+            }
+            // Every state of this path in which they were a member, back to the record that added them.
+            var heldHeadKey = false
+            var addition = parent
+            var cursor: Int? = parent
+            while let at = cursor, nodes[at].link.state.epoch >= then.since {
+                if nodes[at].link.state.vaultKeyID == head.vaultKeyID, nodes[nodes[at].introducer].isOnChain {
+                    heldHeadKey = true
+                }
+                addition = at
+                cursor = nodes[at].parent
+            }
+            guard heldHeadKey else { continue }
+            if !nodes[addition].isOnChain {
+                let added = nodes[addition].link.record
+                guard let adder = administrator(added.signer),
+                    (try? MembershipRules.authorise(added.operation, by: adder, in: head)) != nil
+                else { continue }
+            }
+            var takenBack = false
+            var below = nodes[index].children.min(by: preferred)
+            while let next = below, !takenBack {
+                if case .addMember(let added, _) = nodes[next].link.record.operation, added == accountID {
+                    takenBack = true
+                }
+                below = nodes[next].children.min(by: preferred)
+            }
+            if !takenBack { exposers[index] = accountID }
+        }
         for index in nodes.indices.reversed() {
             nodes[index].isProtected =
-                carriers[index] != nil || nodes[index].children.contains { nodes[$0].isProtected }
+                carriers[index] != nil || exposers[index] != nil
+                || nodes[index].children.contains { nodes[$0].isProtected }
         }
 
         // Keep the losing branches, best-ranked first when there are too many. The order puts every record after
@@ -703,7 +792,11 @@ public struct MembershipLedger: Sendable {
         report.superseded = accepted[shared...].map(\.record)
         report.outranked = nodes.filter { $0.isNew && !$0.isOnChain }.map(\.link.record)
             .sorted { ($0.epoch, $0.hash) < ($1.epoch, $1.hash) }
-        return Resolution(chain: chain, branches: branches, owed: owed, later: laterKept, report: report)
+        // Only from records that are kept: what was forgotten for the cap exposes nobody a restore would not.
+        let kept = Set(side)
+        let exposed = Set(exposers.filter { kept.contains($0.key) }.values).sorted { $0.sharingPrecedes($1) }
+        return Resolution(
+            chain: chain, branches: branches, owed: owed, exposed: exposed, later: laterKept, report: report)
     }
 
     /// Whether `node`, a record on a losing branch, is a removal that still has to happen in `head`: it removes a
@@ -859,6 +952,7 @@ public struct MembershipLedger: Sendable {
         }
         return MembershipLedger(
             vaultID: vaultID, owner: owner.bundle, chain: resolution.chain, branches: resolution.branches,
-            owedRemovals: resolution.owed, laterFormatRecords: resolution.later)
+            owedRemovals: resolution.owed, exposedKeyHolders: resolution.exposed,
+            laterFormatRecords: resolution.later)
     }
 }

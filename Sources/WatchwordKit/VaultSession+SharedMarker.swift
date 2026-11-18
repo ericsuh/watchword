@@ -5,14 +5,11 @@ import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
 
-// "Shared" as a fact a device cannot lose (docs/02-architecture.md §8.10; docs/06-adversarial-review.md V31, which
-// ports the security-audit branch's design for its finding Z41 so that the two branches meet in one implementation).
+// "Shared" as a fact a device cannot lose (docs/02-architecture.md §8.10; review finding Z41).
 //
-// Whether a vault is governed by a membership chain used to be answered by the ledger a device had loaded, and then
-// (V19) by the vaults its sharing state listed: per-device state either way. Someone with the device's files (A8)
-// who deleted a vault's `.ledger` and `.owner` rows took it out of both, and the vault was run as one of the account's
-// own: no judge, snapshots and collection on, a read-only member's writes published, sealed under the smallest key ID
-// held, offered for sharing again. Two things answer it now, neither of which goes with the sharing state:
+// Whether a vault is governed by a membership chain used to be answered by the ledger a device had loaded, which is
+// per-device state: another device of the account, or this one after its sharing state was lost or edited (A8), ran
+// the vault as one of the account's own. Two things answer it now, neither of which goes with the ledger:
 //
 // - a **marker** beside the vault's directory entry, signed by the account key and a device, published in the
 //   account's vault directory and kept as a row of the record store. It names the chain's owner;
@@ -20,15 +17,17 @@ import WatchwordSync
 //   reaches every device of the account with the key and cannot be taken off it.
 //
 // Nothing in the sharing state is a third: its rows are not all signed, and a row planted there must not close a
-// vault that was never shared (the security-audit branch's Z50; here V32).
+// vault that was never shared (Z50).
 //
-// A vault either names, with no verified ledger loaded, is **unavailable** on this device: readable, and otherwise
-// held closed. `sharedCurrentKey` gives it no current key (never the smallest key ID held), so nothing is sealed,
-// signed or published and its engine only downloads (no snapshots, no collection); `checkSharedWrite`,
+// A vault any of them names, with no verified ledger loaded, is **unavailable** on this device: readable, and
+// otherwise held closed. `sharedCurrentKey` gives it no current key (never the smallest key ID held), so nothing is
+// sealed, signed or published and its engine only downloads (no snapshots, no collection); `checkSharedWrite`,
 // `checkSharedRename` and `checkSharedDeletion` refuse every write and the vault's deletion
 // (`SharedVaultError.ledgerUnavailable`); `shareVault` signs no second genesis for it. The way out is this device
-// accepting the vault's invitation itself (`acceptInvitation`, `sharedVaultInvitation`), or, where only the owner's pin
-// is missing, checking the owner again.
+// accepting the vault's invitation itself (`acceptInvitation`, `sharedVaultInvitation`, `setUpSharedVaultAgain`), which
+// the marker's owner makes possible on a second device, or, where only the owner's pin is missing from an intact saved
+// ledger, checking the owner again (`unavailableSharedVaults`; docs/06-adversarial-review.md V19, V31 and V33, the
+// other branch's port of this design, which this file now is).
 extension VaultSession {
     static let sharedMarker = Array("WWVS1-shared".utf8)
     /// The first byte of a marker's row, beside `0x01` (a vault that exists) and `0x02` (a deleted one).
@@ -51,7 +50,7 @@ extension VaultSession {
     /// The record ID of a marker's row: derived from the vault and the owner it names, since the vault's own ID is
     /// its directory row's and a store keeps one row per record ID and kind. One row for each owner the account's
     /// markers name for a vault: there should be one, and a second is kept so that the disagreement is not forgotten
-    /// with the session (`markerConflicts`).
+    /// with the session (`markerConflicts`, Z48).
     static func sharedMarkerRecordID(_ vaultID: UUID, owner: UUID) -> UUID {
         let seed = Array("WW-shared-marker-v2".utf8) + bytes(vaultID) + bytes(owner)
         var id = Array(ObjectDigest(hashing: seed).bytes[..<16])
@@ -96,8 +95,8 @@ extension VaultSession {
     }
 
     /// Reads the markers the record store holds, once per session and again after anything that adds one. Until it
-    /// has, every vault but the Personal one is treated as possibly shared (`isMarkedShared`), so a read that fails
-    /// closes vaults rather than opening them.
+    /// has, every vault but the Personal one is treated as possibly shared (`sharedCurrentKey`), so a read that
+    /// fails closes vaults rather than opening them.
     func loadSharedMarkersIfNeeded(force: Bool = false) async {
         guard force || !sharing.markersLoaded else { return }
         guard let account = try? await loadAccount(), let signingKey = await trustedAccountSigningKey(account),
@@ -119,6 +118,39 @@ extension VaultSession {
             }
         }
         sharing.markersLoaded = true
+    }
+
+    /// Compares every marker in the account's vault directory with the one this device holds for its vault: each
+    /// device vouches for the markers it holds under its own name, so the directory may hold several for one vault,
+    /// and they must agree. One that names another owner is kept beside the first (a row of its own) and the vault
+    /// is in `markerConflicts` from then on, on this device and after a restart. `listed` is the directory's listing
+    /// this sync already made; each object is fetched once a session, and must carry the signatures of the account
+    /// and of a device registered now.
+    func examineSharedMarkers(
+        listed: Set<String>, view: RegistryView, account: AccountRecord, transport: any SyncTransport
+    ) async {
+        for name in listed.sorted() where !sharing.examinedMarkers.contains(name) {
+            guard case .vaultShared(let accountID, let vaultID, let author)? = AccountObjectLocation(name: name),
+                accountID == account.accountID, vaultID != account.personalVaultID,
+                view.state.devices[author] != nil
+            else { continue }
+            guard
+                let bytes = try? await transport.fetch(name, maximumLength: Self.directoryObjectMaximumLength),
+                let object = try? SignedObject.parse(bytes),
+                (try? Self.verifyDual(
+                    object.signature, over: Self.directoryMessage(name: name, body: object.envelope),
+                    domain: .vaultDirectory, author: author, view: view)) != nil,
+                let marker = Self.parseSharedMarkerBody(object.envelope), marker.vaultID == vaultID
+            else { continue }
+            sharing.examinedMarkers.insert(name)
+            guard let held = sharing.markers[vaultID], held != marker.owner else { continue }
+            let row = Self.sharedMarkerRow(
+                vaultID: vaultID, accountID: account.accountID, author: author, object: object)
+            if (try? await store.record(row.key)) == nil {
+                try? await store.commit(StoreChange(upserts: [row], expectations: [row.key: .absent]))
+            }
+            sharing.markerConflicts.insert(vaultID)
+        }
     }
 
     /// Records, signed by the account key and this device, that `vaultID` is governed by a membership chain owned
@@ -158,9 +190,27 @@ extension VaultSession {
         }
     }
 
+    /// Puts this device's marker for `vaultID` on the transport, and throws if that cannot be done (review finding
+    /// Z56). `markShared` publishes when it can and leaves the rest to the next sync, which is enough for a vault
+    /// joined; before the chain's first record is published, and before a key is wrapped to anyone, the account's
+    /// other devices must be able to learn that the vault is shared, or one of them goes on compacting its log.
+    func publishSharedMarker(_ vaultID: UUID, owner: UUID, account: AccountRecord, epoch: UInt64) async throws {
+        guard let transport = syncSettings?.transport else { return }
+        let location = AccountObjectLocation.vaultShared(
+            accountID: account.accountID, vaultID: vaultID, author: account.deviceID)
+        guard try await !transport.list(prefix: location.name).contains(location.name) else { return }
+        let body = Self.sharedMarkerBody(vaultID: vaultID, owner: owner)
+        let signature = try await dualSignature(
+            Self.directoryMessage(name: location.name, body: body), domain: .vaultDirectory,
+            keys: try requireKeys(since: epoch), account: account)
+        _ = try requireKeys(since: epoch)
+        _ = try await create(
+            location.name, contents: SignedObject(signature: signature, envelope: body).serialized(), on: transport)
+    }
+
     /// Whether `vaultID` is governed by a membership chain, as far as anything this device holds says so. With the
     /// markers not read yet the answer for any vault but the Personal one is yes: nothing is run as a private vault
-    /// on a fact that has not been looked up. The Personal vault is never shared, and never closed by this.
+    /// on a fact that has not been looked up.
     func isMarkedShared(_ vaultID: UUID, keys: UnlockedKeys?, personalVaultID: UUID?) -> Bool {
         if vaultID == personalVaultID { return false }
         if sharing.vaults[vaultID] != nil || sharing.markers[vaultID] != nil { return true }
@@ -194,6 +244,7 @@ extension VaultSession {
         if let owner = sharing.vaults[vaultID]?.ledger.owner.accountID {
             return Invitation(vaultID: vaultID, ownerAccountID: owner)
         }
+        // Not where the account's markers disagree about the owner (Z48).
         guard !sharing.markerConflicts.contains(vaultID), let owner = sharing.markers[vaultID] else { return nil }
         return Invitation(vaultID: vaultID, ownerAccountID: owner)
     }

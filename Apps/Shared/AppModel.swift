@@ -47,6 +47,11 @@ final class AppModel {
     /// Every lock of the session, for the screen models to drop what they hold (`LockSensitive`), whether or not
     /// their views are still on screen.
     let lockSignal: LockSignal
+    /// When revealed secrets are hidden again (F5.7, Z95): the platform reports, the views compare.
+    let privacy = ScreenPrivacy()
+    /// The staging folder, swept on every lock through the signal, and by this model at launch, at every unlock and
+    /// at termination (Z80).
+    let staging: StagingSweeper
     #if DEBUG
         private(set) var uiTestPeer: UITestPeer?
         private(set) var uiTestPeerStatus: String?
@@ -59,6 +64,7 @@ final class AppModel {
 
     init(environment: AppEnvironment) {
         lockSignal = LockSignal()
+        staging = StagingSweeper(locks: lockSignal)
         switch environment {
         case .ready(let session):
             self.session = session
@@ -91,6 +97,10 @@ final class AppModel {
     var syncStatus: String? { lastSync?.headline }
 
     func start() async {
+        // Before anything is shown (AppEnvironment.make has swept once already, before the session was built). Once
+        // per process: `start()` runs for every window, and a second window must not delete the file another
+        // window's mover is presenting (Z99).
+        staging.launched()
         guard let session else { return }
         await lockSignal.watch(session)
         #if DEBUG
@@ -105,7 +115,8 @@ final class AppModel {
             switch status.state {
             case .noAccount: phase = .onboarding
             case .locked: phase = .locked
-            case .unlocked: try await enterVault()
+            // Already unlocked (another window's start): no unlock happened, so no unlock sweep (Z99).
+            case .unlocked: try await enterVault(sweeping: false)
             }
         } catch {
             show(error)
@@ -130,15 +141,31 @@ final class AppModel {
                 await self.handle(.systemSleep)
             }
         }
-        PlatformLifecycle.installPrivacyShield()
+        PlatformLifecycle.installPrivacyShield(privacy) { [weak self] in self?.prepareForTermination() }
+    }
+
+    /// The app is about to end (macOS `applicationWillTerminate`, iOS `willTerminateNotification`): what every screen
+    /// model drops on a lock goes now, synchronously, since a lock of the session would finish after the process, and
+    /// the staging folder is swept (Z80).
+    func prepareForTermination() {
+        lockSignal.fire()
+        privacy.locked()
+        staging.sweep()
+        Clipboard.clearIfOurs()
     }
 
     /// After an unlock: the vault, unless the Emergency Kit was never confirmed, in which case the kit again (F5.1).
-    private func enterVault() async throws {
+    /// The session shows that kit without the password only to keys opened with it (Z86): after a quick unlock the
+    /// vault opens and the kit is in Settings, behind the password. Every unlock sweeps the staging folder (Z80); a
+    /// window opened on a session already unlocked does not (Z99).
+    private func enterVault(sweeping: Bool = true) async throws {
         guard let session else { return }
+        if sweeping { staging.sweep() }
         if try await !session.status().emergencyKitConfirmed {
-            phase = .emergencyKit(try await session.emergencyKit())
-            return
+            do {
+                phase = .emergencyKit(try await session.unconfirmedEmergencyKit())
+                return
+            } catch VaultError.accountPasswordRequired {}
         }
         try await reload()
     }
@@ -222,6 +249,7 @@ final class AppModel {
     /// to the app they are pasting into; the copy still expires after 60 s (F5.6).
     private func didLock(_ reason: LockReason) {
         lockSignal.fire()
+        privacy.locked()
         items = []
         vaults = []
         unreadableCount = 0
@@ -293,7 +321,7 @@ final class AppModel {
     /// Why `vaultID` cannot be written to by this account now, or `nil` (PRD F4.5; §8.9). The session refuses such a
     /// write whatever the screen offers; this is what the screen says instead of offering it.
     func readOnlyReason(_ vaultID: UUID) -> String? {
-        vault(vaultID)?.sharing?.readOnlyReason
+        vault(vaultID)?.readOnlyReason
     }
 
     /// Where a new item goes: the vault the list shows, if this account may write to it, else Personal.
@@ -302,15 +330,17 @@ final class AppModel {
         return personalVaultID
     }
 
-    func save(_ item: Item) async -> Bool {
-        guard let session else { return false }
-        var saved = false
-        await perform {
-            try await session.save(item)
-            try await self.reload()
-            saved = true
-        }
-        return saved
+    /// Saves through the editor's model, which turns the session's refusal of a look-alike host into the questions
+    /// the editor shows (PRD F11.7; `ItemEditorModel`). `false` when nothing was written: an error is in
+    /// `errorMessage`, or `editor.prompts` is waiting for the person.
+    func save(_ item: Item, with editor: ItemEditorModel, confirmed: Bool = false) async -> Bool {
+        isWorking = true
+        defer { isWorking = false }
+        let stored = confirmed ? await editor.confirmAndSave() : await editor.save(item)
+        errorMessage = editor.errorMessage
+        guard stored != nil else { return false }
+        await perform { try await self.reload() }
+        return true
     }
 
     func trash(_ item: Item) async {
@@ -384,9 +414,20 @@ final class AppModel {
             guard let uiTestPeer, let session else { return }
             uiTestPeerStatus = nil
             await perform {
-                let kit = try await session.emergencyKit()
+                let kit = try await self.uiTestKit(session)
                 try await body(uiTestPeer, kit)
                 self.uiTestPeerStatus = done
+            }
+        }
+
+        /// The kit for the other device, opened with the password the test launched with, or the one the other device
+        /// changed it to (Z86: the kit needs the account password).
+        private func uiTestKit(_ session: VaultSession) async throws -> EmergencyKit {
+            let launched = ProcessInfo.processInfo.environment[UITestPeer.passwordVariable] ?? ""
+            do {
+                return try await session.emergencyKit(password: launched)
+            } catch CryptoError.authenticationFailed {
+                return try await session.emergencyKit(password: UITestPeer.changedPassword)
             }
         }
 
@@ -476,16 +517,6 @@ final class AppModel {
         #else
             return nil
         #endif
-    }
-
-    func emergencyKit() async -> EmergencyKit? {
-        guard let session else { return nil }
-        do {
-            return try await session.emergencyKit()
-        } catch {
-            show(error)
-            return nil
-        }
     }
 
     // MARK: Errors

@@ -25,6 +25,15 @@ public struct SyncConfiguration: Sendable {
     /// judged against the departing account's own segments, so they must stay on the transport for every device
     /// that has yet to judge it (docs/02-architecture.md §8.8, "a departed account's log").
     public var maintainsLog = true
+    /// In a vault whose log is never collected (`maintainsLog` off, a shared vault): the devices whose word about this
+    /// device's own stream it takes, its own account's (round 5's L-M2). A snapshot's coverage or a segment's
+    /// acknowledgement from one of them, not revoked, that says it merged this stream at or past the next number
+    /// moves this device's next number above it (`push`): its state is older than what it published (a restored
+    /// backup, A8), and those numbers were taken out of the store since (a member with delete access), so nothing
+    /// listed shows them; publishing there anew, a device that merged them would never read it. A move, never a hold:
+    /// the numbers are gone, and a hold would never end. Another account's word moves nothing: any member could
+    /// otherwise push this device's numbering out of reach (Z154). `nil` takes nobody's word, as before.
+    public var ownStreamWitnesses: Set<UUID>?
     /// Entries of ignorable record kinds this version does not carry that one vault keeps aside (`SyncStash`, ADR
     /// 0009), and their bytes, in all and for what any one device's objects carried. Past any of them, an entry is
     /// not kept (`SyncReport.unknownEntriesDropped`, `SyncStash.overflow`): the stream still merges, the device writes
@@ -46,6 +55,16 @@ public struct SyncConfiguration: Sendable {
     /// again at every sync, cannot keep a late copy, a fork of its own stream included, from ever being read (review
     /// finding R13).
     public var maximumCopiesPerSync = 512
+    /// Versions one vault keeps aside for the person (the quarantine), and their bytes, in all and for the versions
+    /// any one device wrote (review finding Z27). Past any of them a version is not kept on this device
+    /// (`SyncReport.quarantineFull`): the object that carried it is still merged or passed as before, and a shared
+    /// vault's log, which is never collected, still holds it. Generous for honest use, where a kept version is rare,
+    /// and small enough that someone whose segments are accepted only to be held aside (a former member, A5) cannot
+    /// fill a device's disk or make each sync reread it all.
+    public var maximumQuarantinedEntries = 2048
+    public var maximumQuarantinedBytes = 64 << 20
+    public var maximumQuarantinedEntriesPerAuthor = 512
+    public var maximumQuarantinedBytesPerAuthor = 16 << 20
 
     public init(schemaVersions: [EnvelopeKind: UInt64]) {
         self.schemaVersions = schemaVersions
@@ -77,8 +96,6 @@ public enum SyncRejectionReason: Sendable, Equatable {
     /// A record's envelope claims another record, vault, kind, key or version than the entry carrying it: a record
     /// swap or relabel inside a validly signed segment.
     case recordContextMismatch(UUID)
-    /// The record ID belongs to a record of another vault on this device.
-    case recordInAnotherVault(UUID)
     /// The merger could not merge the remote version (it does not open, or opens to another item).
     case mergeFailed(UUID)
     /// The merger returned a result the engine must not store.
@@ -119,6 +136,10 @@ public struct SyncReport: Sendable, Equatable {
     /// Remote versions held aside because they carry work that does not count in a shared vault (a write outside
     /// its author's write cut, docs/02-architecture.md §8.7). Kept in the quarantine like the others.
     public var heldAside: [RecordKey] = []
+    /// Remote versions whose record ID a record of *another vault* holds on this device (the local store keys
+    /// records by ID and kind across vaults). Not merged, and the other vault's row is not touched: kept in the
+    /// quarantine like the others, while the rest of the object and its stream are merged (review finding Z22).
+    public var collided: [RecordKey] = []
     /// Streams stopped at a missing or rejected segment: the next sequence number each is waiting for. Later segments
     /// are never applied over a gap.
     public var waiting: [UUID: UInt64] = [:]
@@ -137,6 +158,21 @@ public struct SyncReport: Sendable, Equatable {
     /// This device's next sequence number was already taken: a crash after publishing, or another installation using
     /// this device ID (a restored backup). The object is merged on the next sync and nothing is overwritten.
     public var ownStreamConflict: UInt64?
+    /// The lowest number of this device's own stream at which a shared vault's judge stepped over (held aside or passed
+    /// over) a segment this device's own keys did not sign: another account's device listed under this device's ID
+    /// (S33) wrote there (review finding Z146). Below this device's first segment there, every other device may take
+    /// the stream for that account's and hold aside what this device publishes in it, so the person is told.
+    public var ownStreamSteppedOver: UInt64?
+    /// An object in this device's own stream, at or beyond its next sequence number, that could not be fetched or
+    /// checked in this sync (listed and not there yet, unreadable, or no key to check it with): the lowest such
+    /// number. Whether this device wrote it decides where its next segment goes — a state older than the transport
+    /// must not reuse a number, and a name anyone can create must not move it — so nothing was published, and the
+    /// next sync asks again (review finding Z24).
+    public var ownStreamUnverified: UInt64?
+    /// This device's next sequence number is beyond `SyncConfiguration.maximumSequence`, where no reader lists a
+    /// segment: nothing was published, and nothing was marked as published (review finding Z21). Not reachable by
+    /// publishing; it means the stream's position was damaged, and this device cannot publish in this vault.
+    public var ownStreamExhausted = false
     /// Objects on the transport written by a device since revoked: not fetched, not counted as waiting, and not
     /// waited for by garbage collection (review finding Y6).
     public var retiredObjects = 0
@@ -168,6 +204,13 @@ public struct SyncReport: Sendable, Equatable {
     /// The trusted devices whose objects carried those entries: the ones to update, or, if no version reads the kind,
     /// to look at (an insider can hold back snapshots this way for as long as it is trusted).
     public var snapshotWithheldBy: Set<UUID> = []
+    /// This device was due to write a snapshot and did not, because its quarantine holds versions written by devices
+    /// still trusted: a snapshot would cover their segments without carrying them (review finding Z26). Ends when
+    /// the person discards them (they are listed as held aside), or another device steps in.
+    public var snapshotWithheldForQuarantine = false
+    /// Versions that were to be kept aside and were not, the vault's quarantine being full (review finding Z27). The
+    /// same version offered again by a replay is counted again.
+    public var quarantineFull = 0
     /// The stash was incomplete (entries of a kind this version carries dropped past the caps, or a stash not saved
     /// after a sync), or a shared vault holds kept entries this version can now read: the vault's log had to be
     /// replayed. The engine does it itself unless the vault has a judge, whose session replays it in the same sync.
@@ -245,6 +288,14 @@ public actor SyncEngine {
     private var stash = SyncStash()
     /// The stash may lack entries of segments counted as merged, and this vault's log has not been replayed yet.
     private var stashIncomplete = false
+    /// What the vault's quarantine holds, as the sync in progress found it and has added to it; loaded when first
+    /// needed (`keepAside`).
+    private var quarantineUsage: QuarantineUsage?
+    /// Entries the merge in progress refused as beyond the version-jump ceiling, to be tried again once everything
+    /// else in the pass has been merged (`retryOutOfReach`, review finding Z25).
+    private var outOfReach: [SyncEntry] = []
+    /// A retry owed by an earlier pass (`SyncState.retryUnfinished`) that this pass, not a replay, cannot settle.
+    private var retryOwedEarlier = false
 
     /// `store` is the underlying record store; the session writes through a `DeletionRecordingStore` around the same
     /// store, so the engine's own deletions (applying remote tombstones) are not re-published as local ones.
@@ -298,6 +349,7 @@ public actor SyncEngine {
         running = true
         defer { running = false }
         var report = SyncReport()
+        quarantineUsage = nil
         let retired = await keyring.retiredAuthors(vaultID: vaultID)
         guard !retired.contains(deviceID) else {
             report.deviceRevoked = true
@@ -355,6 +407,23 @@ public actor SyncEngine {
             report.replayPostponed = true
         }
         stashIncomplete = incomplete && !reconcile
+        // A pass that refused versions as out of reach and was stopped before it tried them again (review finding
+        // Z33), or versions not kept aside for want of room that now have it (Z38): only the log offers them again.
+        var offerAgain = state.retryUnfinished
+        if !state.quarantineDropped.isEmpty {
+            let usage = try await syncState.quarantineUsage(vaultID: vaultID)
+            quarantineUsage = usage
+            // A version the store refused for a crowded digest is offered again only once something has left the
+            // quarantine: the caps alone had room, and a replay at every sync dropped it again (review finding Z147).
+            offerAgain =
+                offerAgain
+                || (state.quarantineDropped.allSatisfy { hasRoom(usage, for: $0) }
+                    && state.quarantineCrowded.map { UInt64(usage.entries) < $0 } ?? true)
+        }
+        if offerAgain {
+            if judge == nil { reconcile = true } else { report.replayNeeded = true }
+        }
+        retryOwedEarlier = state.retryUnfinished && !reconcile
         if reconcile {
             // Everything but what this device has done itself is rebuilt from the log. Erasures are kept too: they
             // are facts the log also holds, and keeping them stops a replay from putting an erased record back. Not
@@ -365,11 +434,12 @@ public actor SyncEngine {
             state.nextSequence = kept.nextSequence
             state.publishedAcknowledgement = kept.publishedAcknowledgement
             state.lastPublishedSequence = kept.lastPublishedSequence
+            state.collectedThrough = kept.collectedThrough
             if judge == nil { state.erasures = kept.erasures }
             state.stashGeneration = kept.stashGeneration
             // What this device owes and what it knows of its own stream on the transport are not in the log either.
             state.handOnOwed = kept.handOnOwed
-            state.collectedThrough = kept.collectedThrough
+            state.ownUnlistedThrough = kept.ownUnlistedThrough
             state.handedOn = kept.handedOn
             state.highestOwnSnapshot = kept.highestOwnSnapshot
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
@@ -380,20 +450,27 @@ public actor SyncEngine {
         }
         if stash != loadedStash { state.stashUnsaved = true }
         state.nextSequence = max(state.nextSequence, 1)
-        if let listing {
-            // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
-            // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
-            if let highest = listing.segments[deviceID]?.max() {
-                state.nextSequence = max(state.nextSequence, highest + 1)
-            }
+        if var fetched = listing {
             do {
-                try await fetch(listing, state: &state, report: &report)
+                try await fetch(&fetched, state: &state, report: &report)
             } catch let error as SyncTransportError where error.stopsSync {
                 report.noteTransportFailure(error)
             }
+            // Never reuse a number this stream has used: state may be older than the transport (a restored backup, a
+            // rolled-back file), and a collected number would otherwise be free to create again, unseen by anyone.
+            // Taken from this stream's objects that verify, never from a name: anyone who can create a file under the
+            // vault's prefix can list one, and a number taken from it would leave a hole no device can fill, or put
+            // every later segment out of range (review finding Z24).
+            state.nextSequence = max(state.nextSequence, fetched.ownVerified + 1)
+            listing = fetched
         }
+        // The furthest this device's own stream can have got: what it remembers publishing or merging of it, and
+        // its own objects on the transport that verify. A snapshot's word for it counts no further (review finding
+        // Z21).
+        let ownHead = max(state.lastPublishedSequence, state.merged[deviceID] ?? 0, listing?.ownVerified ?? 0)
         do {
-            try await mergeStaged(state: &state, retired: retired, reconciling: reconcile, report: &report)
+            try await mergeStaged(
+                state: &state, retired: retired, reconciling: reconcile, ownHead: ownHead, report: &report)
             state.nextSequence = max(state.nextSequence, (state.merged[deviceID] ?? 0) + 1)
             // With everything listed merged: what this device holds that nothing on the transport stands for.
             var lacking: Set<UUID> = []
@@ -410,12 +487,17 @@ public actor SyncEngine {
                 }
             }
             try await syncState.saveState(state)
-            if !report.transportUnavailable, publishing, let listing {
+            // Where this device's state could be older than its stream, and the stream cannot show which numbers it
+            // used: publishing waits for the sync that can tell (Z24, Z31, Z32).
+            if !report.transportUnavailable, let listing {
+                report.ownStreamUnverified = ownStreamHold(state: state, listing: listing, retired: retired)
+            }
+            if !report.transportUnavailable, publishing, let listing, report.ownStreamUnverified == nil {
                 try await push(
                     state: &state, retired: retired, deferringDeletions: deferringDeletions, report: &report)
                 // While the store lacks what this device holds and the person has not answered, no snapshot (elected
                 // or owed: either would carry the whole vault) and no collection.
-                if report.ownStreamConflict == nil, configuration.maintainsLog,
+                if report.ownStreamConflict == nil, !report.ownStreamExhausted, configuration.maintainsLog,
                     handingOn || !state.storeResetSuspected
                 {
                     try await maintain(
@@ -442,7 +524,13 @@ public actor SyncEngine {
             }
         }
         state.stashUnsaved = stashIncomplete || !stashSaved
-        try await syncState.saveState(state)
+        do {
+            try await syncState.saveState(state)
+        } catch SyncKeyringError.locked {
+            // Locked meanwhile: the session cannot sign the state (review finding Z20). The row saved after the last
+            // segment merged or published stands; what this one would have added is worked out again next time.
+            report.deferredUntilUnlock = true
+        }
         return report
     }
 
@@ -482,17 +570,23 @@ public actor SyncEngine {
         let unread = state.unreadCopies
         let unreadExamined = state.unreadCopiesExamined
         do {
-            let listing = try await list(retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
-            try await fetch(listing, state: &state, report: &report)
+            var listing = try await list(retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
+            try await fetch(&listing, state: &state, report: &report)
         } catch let error as SyncTransportError where error.stopsSync {
             report.noteTransportFailure(error)
         }
-        // Which copies were looked at and found to be junk is remembered while locked too, so they are not read again,
-        // and which could not be read, so they wait behind the rest and take turns (R17, R19).
+        // Which copies were looked at and found to be junk is remembered, so they are not read again, and which could
+        // not be read, so they wait behind the rest and take turns (R17, R19): where the state can be saved, which a
+        // session that signs it (Z20) cannot do while locked.
         if state.examinedCopies != examined || state.unreadCopies != unread
             || state.unreadCopiesExamined != unreadExamined
         {
-            try await syncState.saveState(state)
+            do {
+                try await syncState.saveState(state)
+            } catch SyncKeyringError.locked {
+                // The session signs the state (review finding Z20) and cannot while locked: what was examined is
+                // examined again by the next sync, which is all this costs.
+            }
         }
         return report
     }
@@ -504,6 +598,67 @@ public actor SyncEngine {
         var snapshots: [SyncObjectLocation] = []
         /// Names the transport holds more than the one object under, and how many copies it says it holds.
         var copies: [SyncObjectLocation: Int] = [:]
+        /// The highest number in this device's own stream whose object was fetched (now or earlier) and carries this
+        /// device's own signatures (`SyncKeyring.verifyOwn`). Zero if none.
+        var ownVerified: UInt64 = 0
+        /// Numbers listed in this device's own stream, past what it has merged, whose objects could be neither
+        /// verified as this device's nor shown not to be: not fetched, unreadable, or no key to check them with.
+        var ownUndecided: [UInt64] = []
+        /// Whether the listing holds an object of this device's own stream that is known to be this device's: one
+        /// that verified as its own in this sync, or the one at the number its signed state last published. Its
+        /// segments are collected lowest first, and never the newest, so while one of them is listed none above it
+        /// has been collected: a number at or past the next one is then either free or listed, and creating at a
+        /// listed one is refused (objects are never overwritten), so publishing reuses nothing (review finding Z31).
+        var ownAnchored = false
+    }
+
+    /// Whether a failure to stage or check an object of this device's own stream shows that this device did not write
+    /// it: it was read in full and is not a signed object, it is over the size cap, or its signatures are not this
+    /// device's (`untrustedAuthor` included: another account's device under this ID, Z30). Anything else (it could not
+    /// be read, there is no key to check it with) leaves the question open.
+    static func isNotOwn(_ error: any Error) -> Bool {
+        switch error {
+        case is SyncFormatError: return true
+        case SyncKeyringError.authenticationFailed: return true
+        case SyncKeyringError.untrustedAuthor: return true
+        case SyncTransportError.objectTooLarge: return true
+        default: return false
+        }
+    }
+
+    /// Whether this device's own stream holds back its publishing in this vault, and from which number (review
+    /// findings Z24, Z31, Z32, Z145). A device whose state may be older than the transport (a restored backup, an
+    /// earlier row put back) must not publish at a number it used and collected, where no reader looks. With an object
+    /// of its own stream known to be its own listed (`Listing.ownAnchored`) that cannot happen: its genuine head is
+    /// never collected (Z135), so nothing above a listed own object has gone. Without one it holds back:
+    ///
+    /// - while an object of its stream at or past its next number cannot be told from its own (`ownUndecided`): a
+    ///   name shown to be someone else's (junk, another's signatures) is not one, since anyone who can create a file
+    ///   can list it, and with a snapshot's claim it held for good a device that never published there (Z145, Z139);
+    /// - and, for a device that has published in a vault whose log is collected (`maintainsLog`; a shared vault's is
+    ///   not, so nothing there was freed for reuse, Z154), while a device still trusted says, by a snapshot's
+    ///   coverage or a segment's acknowledgement, that it merged this stream further than this state's next number.
+    ///   A current state's head is listed unless the store withholds it, and nobody can have merged beyond it; an older
+    ///   state whose head is missing from this listing (withheld, a stale listing, A8) would otherwise publish over a
+    ///   collected number, unread by every device that merged past it (Z145). Read from the state as it is now, so a
+    ///   signer revoked, or the head listed again, ends it; it never moves the numbering. A device that never
+    ///   published (its signed state says so) is not held by a claim: a lost state is Z32's residual, and a claim about
+    ///   a device that never wrote, which an honest device carries on, would hold it for good (Z139).
+    private func ownStreamHold(state: SyncState, listing: Listing, retired: Set<UUID>) -> UInt64? {
+        guard !listing.ownAnchored else { return nil }
+        let next = state.nextSequence
+        if let undecided = listing.ownUndecided.filter({ $0 >= next }).min() { return undecided }
+        // A vault that keeps its whole log (a shared vault) collects nothing, so no number of this stream was freed
+        // for reuse, and creating at a used one is refused: a claim guards nothing there, and a member's
+        // acknowledgement, re-made by every replay, held the device for good once its head was gone (review finding
+        // Z154).
+        guard state.lastPublishedSequence > 0, configuration.maintainsLog else { return nil }
+        let covered =
+            state.snapshots.filter { !retired.contains($0.key.author) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
+        let acknowledged =
+            state.acknowledgements.filter { $0.key != deviceID && !retired.contains($0.key) }.values
+            .map { $0[deviceID] ?? 0 }.max() ?? 0
+        return max(covered, acknowledged) >= next ? next : nil
     }
 
     /// What the transport lists for this vault: metadata only, nothing fetched.
@@ -535,14 +690,19 @@ public actor SyncEngine {
         return listing
     }
 
-    /// Downloads and checks what a listing holds that this device has not merged, and stages it.
-    private func fetch(_ listing: Listing, state: inout SyncState, report: inout SyncReport) async throws {
+    /// Downloads and checks what a listing holds that this device has not merged, and stages it; and files what it
+    /// learns of this device's own stream in `listing` (`ownVerified`, `ownUndecided`, `ownAnchored`).
+    private func fetch(_ listing: inout Listing, state: inout SyncState, report: inout SyncReport) async throws {
         // What was decided about copies is remembered only for names that still have them.
         state.examinedCopies = state.examinedCopies.filter { listing.copies[$0.key] != nil }
         state.unreadCopies = state.unreadCopies.filter { listing.copies[$0.key] != nil }
         state.unreadCopiesExamined = state.unreadCopiesExamined.filter { state.unreadCopies[$0.key] != nil }
         // Above every turn taken so far: what is examined in this sync goes behind every name examined before (R19).
         let turn = (state.unreadCopiesExamined.values.max() ?? 0) &+ 1
+        let listedOwn = Set(listing.segments[deviceID] ?? [])
+        if state.lastPublishedSequence > 0, listedOwn.contains(state.lastPublishedSequence) {
+            listing.ownAnchored = true
+        }
 
         // Every snapshot not yet merged, not only the newest: which one is newest is not which one covers most, and a
         // device's own garbage collection may rely on any of them.
@@ -564,32 +724,61 @@ public actor SyncEngine {
         // Half for the names this sync waits on, the rest (and whatever they left) for copies found late (R13).
         let allowance = max(0, configuration.maximumCopiesPerSync)
         var budget = allowance - allowance / 2
+        let isOwn = { (location: SyncObjectLocation) in location.kind == .segment && location.author == self.deviceID }
         for location in wanted where !alreadyStaged.contains(location) {
+            var decided = false
             do {
                 // Several copies under one name: each is checked alone, and what verifies is staged together. With
                 // the sync's bound spent, the current file alone, as for any name; its copies are looked at later.
                 if let count = listing.copies[location], budget > 0 {
                     try await examine(
-                        location, listed: count, late: false, turn: turn, budget: &budget, state: &state,
-                        report: &report)
+                        location, listed: count, late: false, turn: turn, budget: &budget, listing: &listing,
+                        state: &state, report: &report)
                     continue
                 }
                 guard
                     let bytes = try await transport.fetch(
                         location.name, maximumLength: configuration.maximumObjectLength)
-                else { continue }
+                else {
+                    // Listed and not there (not downloaded yet, or deleted since): of this device's own stream,
+                    // not known to be anyone else's.
+                    if isOwn(location) { listing.ownUndecided.append(location.number) }
+                    continue
+                }
                 report.fetched += 1
                 let object = try SignedObject.parse(bytes)
+                if isOwn(location) {
+                    // Whether this device wrote it, asked apart from whether the vault accepts it: in a shared vault
+                    // another member's device can be listed under this ID, and its object verifies (Z30).
+                    decided = true
+                    await classifyOwn(object, at: location, listed: true, into: &listing)
+                }
                 try await keyring.verify(object.signature, over: object.envelope, at: location)
                 try await syncState.stage(StagedObject(location: location, object: object))
             } catch let error as SyncTransportError where error.stopsSync {
+                throw error
+            } catch let error where error is any StorageFailure {
+                // Local storage failing (staging the object, or reading what is staged) is no fault of the object:
+                // it stops the sync, as while merging (review findings Z39, Z142).
                 throw error
             } catch {
                 report.rejected.append(SyncRejection(name: location.name, reason: Self.reason(error)))
                 if location.kind == .segment {
                     report.waiting[location.author] = min(report.waiting[location.author] ?? .max, location.number)
                 }
+                if isOwn(location), !decided, !Self.isNotOwn(error) { listing.ownUndecided.append(location.number) }
             }
+        }
+        // Staged earlier (downloaded while locked, or waiting behind a gap): checked again, since the staging area is
+        // a local file (A8), before its number counts. Its name must be one a reader lists: a staged row is not bound
+        // by the listing's range check (review finding Z39). The merge checks it once more and unstages what fails.
+        for object in try await syncState.staged(vaultID: vaultID)
+        where isOwn(object.location) && alreadyStaged.contains(object.location)
+            && object.location.number <= configuration.maximumSequence
+        {
+            await classifyOwn(
+                object.object, at: object.location, listed: listedOwn.contains(object.location.number),
+                into: &listing)
         }
         // Copies under a name this device has already merged (a second copy that appeared since, or junk planted
         // beside the object): looked at once per count the transport gives, and what verifies is applied late. A
@@ -623,7 +812,8 @@ public actor SyncEngine {
             }
             do {
                 try await examine(
-                    location, listed: count, late: true, turn: turn, budget: &budget, state: &state, report: &report)
+                    location, listed: count, late: true, turn: turn, budget: &budget, listing: &listing, state: &state,
+                    report: &report)
             } catch let error as SyncTransportError where error.stopsSync {
                 throw error
             } catch {
@@ -647,7 +837,7 @@ public actor SyncEngine {
         return covered
     }
 
-    /// Keeps `collectedThrough` up to date: this device's own segments up to what a listed snapshot covers need not
+    /// Keeps `ownUnlistedThrough` up to date: this device's own segments up to what a listed snapshot covers need not
     /// be listed (it may have collected them). A state from before this was kept takes the stream as whole at its
     /// first listing: everything below the lowest segment listed was collected.
     ///
@@ -659,13 +849,13 @@ public actor SyncEngine {
     private func noteCovered(_ state: inout SyncState, listing: Listing) {
         let newest = state.lastPublishedSequence
         let belowNewest = newest > 0 ? newest - 1 : 0
-        var through = state.collectedThrough
+        var through = state.ownUnlistedThrough
         if through == nil {
             let lowest = listing.segments[deviceID]?.min() ?? (newest &+ 1)
             through = min(lowest > 0 ? lowest - 1 : 0, belowNewest)
         }
         let covered = min(listedCoverage(state, listing: listing)[deviceID] ?? 0, belowNewest)
-        state.collectedThrough = max(through ?? 0, covered)
+        state.ownUnlistedThrough = max(through ?? 0, covered)
     }
 
     /// Whether an object this device wrote, and did not delete, is no longer listed: a segment it published past
@@ -677,7 +867,7 @@ public actor SyncEngine {
         let listed = Set(listing.snapshots)
         if state.snapshots.keys.contains(where: { $0.author == deviceID && !listed.contains($0) }) { return true }
         if let handedOn = state.handedOn, !listed.contains(handedOn.snapshot) { return true }
-        let after = state.collectedThrough ?? 0
+        let after = state.ownUnlistedThrough ?? 0
         let last = state.lastPublishedSequence
         guard last > after else { return false }
         let own = Set((listing.segments[deviceID] ?? []).filter { $0 > after && $0 <= last })
@@ -717,10 +907,15 @@ public actor SyncEngine {
     /// object. In a vault with a judge, more than one verifying copy is refused (`conflictingVersions`): a write cut
     /// binds one digest per position (§8.10). `late` is a name whose position this device has already merged: nothing
     /// waits on it, a refusal is only reported, and the count is remembered so the copies are not read again.
+    ///
+    /// Each copy under a name of this device's own stream is also filed as its own, not its own, or undecided
+    /// (`classifyOwn`), as a single object is, and a copy that could not be read leaves the number undecided: a copy
+    /// says nothing about the stream that the object would not (review findings Z24, Z30, Z31).
     private func examine(
         _ location: SyncObjectLocation, listed count: Int, late: Bool, turn: UInt64, budget: inout Int,
-        state: inout SyncState, report: inout SyncReport
+        listing: inout Listing, state: inout SyncState, report: inout SyncReport
     ) async throws {
+        let isOwn = location.kind == .segment && location.author == deviceID
         let name = location.name
         let found = try await transport.fetchCopies(
             name, maximumLength: configuration.maximumObjectLength,
@@ -733,6 +928,7 @@ public actor SyncEngine {
         // remembered as examined and the next sync looks again (review finding R11), after the names whose copies
         // could be read (R17). Its author does not collect it meanwhile.
         let whole = found.unread == 0
+        if isOwn, !whole || found.omitted > 0 { listing.ownUndecided.append(location.number) }
         state.unreadCopies[location] = whole ? nil : count
         state.unreadCopiesExamined[location] = whole ? nil : turn
         report.fetched += found.copies.count
@@ -746,6 +942,7 @@ public actor SyncEngine {
             report.copiesExamined += 1
             do {
                 let object = try SignedObject.parse(bytes)
+                if isOwn { await classifyOwn(object, at: location, listed: true, into: &listing) }
                 // Kind and context need no key, so a copy sealed for another name is junk here already, whatever
                 // signed it; then the signatures.
                 let header = try EnvelopeHeader.parse(object.envelope, expecting: location.envelopeKind).header
@@ -791,6 +988,20 @@ public actor SyncEngine {
                 copies: whole ? count : 0))
     }
 
+    /// Files an object of this device's own stream as its own (it numbers the stream, and anchors it if listed), as
+    /// shown not to be its own (it moves nothing), or as undecided.
+    private func classifyOwn(
+        _ object: SignedObject, at location: SyncObjectLocation, listed: Bool, into listing: inout Listing
+    ) async {
+        do {
+            try await keyring.verifyOwn(object.signature, over: object.envelope, at: location)
+            listing.ownVerified = max(listing.ownVerified, location.number)
+            if listed { listing.ownAnchored = true }
+        } catch {
+            if !Self.isNotOwn(error) { listing.ownUndecided.append(location.number) }
+        }
+    }
+
     // MARK: - Merge
 
     /// The raw values of the record kinds this engine carries; every other kind is unknown to it (ADR 0009).
@@ -799,9 +1010,22 @@ public actor SyncEngine {
     }
 
     private func mergeStaged(
-        state: inout SyncState, retired: Set<UUID>, reconciling: Bool, report: inout SyncReport
+        state: inout SyncState, retired: Set<UUID>, reconciling: Bool, ownHead: UInt64, report: inout SyncReport
     ) async throws {
         var staged = try await syncState.staged(vaultID: vaultID)
+        // A staged name no reader lists (the staging area is a local file, A8): dropped, so no number past the bounds
+        // reaches the arithmetic below (review finding Z39).
+        let outOfRange = staged.filter {
+            $0.location.number
+                > ($0.location.kind == .segment ? configuration.maximumSequence : configuration.maximumVersion)
+        }
+        if !outOfRange.isEmpty {
+            try await syncState.unstage(outOfRange.map(\.location))
+            staged.removeAll {
+                $0.location.number
+                    > ($0.location.kind == .segment ? configuration.maximumSequence : configuration.maximumVersion)
+            }
+        }
         // Staged before its author was revoked: dropped unmerged, like anything else that device wrote.
         let fromRetired = staged.filter { retired.contains($0.location.author) }
         if !fromRetired.isEmpty {
@@ -819,6 +1043,13 @@ public actor SyncEngine {
         }
         guard !staged.isEmpty || !ready.isEmpty else { return }
         var highWater = try await vaultHighWater(state)
+        outOfReach = []
+        // A device that holds nothing of the vault has no history to measure a jump against: the snapshots it starts
+        // from are its baseline, held to `maximumVersion` alone (review finding Z25). Each is the state of a device
+        // of this account that accepted every version in it; without this, a jump every earlier device accepted, or
+        // a million honest writes, cut every later device off from all that was written since. Not in a vault with a
+        // judge, whose log is whole and replayed from its first segment.
+        let takesBaseline = highWater == 0 && judge == nil
         // A deletion made here but not yet published is as much an erasure as a published one: without it, a
         // snapshot or segment written before the deletion would put the record back on this device only.
         let pending = try await syncState.pendingDeletions(vaultID: vaultID)
@@ -828,6 +1059,48 @@ public actor SyncEngine {
                 report: &report)
         }
         let segments = Dictionary(grouping: staged.filter { $0.location.kind == .segment }, by: \.location.author)
+        // What the snapshots cover of a stream, as far as it is believed. Of another device's stream, all of it: its
+        // author signed for what it merged. Of this device's own, no further than the stream can have got (`ownHead`):
+        // this device's next sequence number follows from it, and a snapshot that claimed 2^48 would otherwise move
+        // every later segment of this device to a name no reader lists, for good (review finding Z21). Not from a
+        // segment of it merely staged here: the staging area is a local file, and a row planted there at 2^48 would
+        // count for as much (review finding Z39). A claim beyond it holds publishing back instead (`ownStreamHold`).
+        let ownLimit = ownHead
+        func covered(_ author: UUID, _ state: SyncState) -> UInt64 {
+            let claimed = state.snapshotCoverage[author] ?? 0
+            return author == deviceID ? min(claimed, ownLimit) : claimed
+        }
+
+        // A shared vault's judge sees every segment of the pass before it judges anything: which stream first carried
+        // a version decides whose work it is, and a write cut binds a run of segments (docs/02-architecture.md §8.8).
+        // Before the snapshots too, whose tombstones are judged against the same index: judged first, a device joining
+        // believed their claims about members' streams it had not yet recorded (review finding Z34).
+        if let judge {
+            for object in segments.values.joined().sorted(by: { $0.location.name < $1.location.name }) {
+                // One digest per position: a position staged with several copies (only by an edit of the file, A8;
+                // the download refuses them in a vault with a judge) is refused below, and binds nothing here.
+                guard object.alternates.isEmpty else { continue }
+                let payload: SyncPayload
+                do {
+                    payload = try await open(object)
+                } catch SyncKeyringError.unknownKey {
+                    // Signed by a device the vault's members list (`open` checks that before it asks for the key)
+                    // and sealed under a key this device does not hold. Which object it is and whose keys signed it
+                    // need no key, and every device must agree on both: a stream's first segment says whose the
+                    // stream is, and a write cut's chain runs over every object of it (review finding Z51).
+                    try await judge.recordUnopened(
+                        segment: object.location, signature: object.object.signature,
+                        envelope: object.object.envelope)
+                    continue
+                } catch {
+                    continue
+                }
+                guard (try? validate(payload, at: object.location)) != nil else { continue }
+                try await judge.record(
+                    segment: object.location, signature: object.object.signature,
+                    envelope: object.object.envelope, entries: payload.entries)
+            }
+        }
 
         // Snapshots first: they bootstrap a new device and fill gaps left by garbage collection.
         let snapshots = staged.filter { $0.location.kind == .snapshot }.sorted {
@@ -838,6 +1111,9 @@ public actor SyncEngine {
             do {
                 // Every copy that verified (nearly always the one), each checked and opened before any is applied.
                 let copies = try await openCopies(snapshot)
+                for copy in copies {
+                    try await judge?.recordSnapshot(snapshot.location, covering: copy.payload.vector)
+                }
                 // A snapshot that covers nothing new is counted, and merged all the same: merging is idempotent, and
                 // a snapshot can hold what no segment this device accepts does — what its author merged from a
                 // device revoked since (§7.8).
@@ -846,10 +1122,22 @@ public actor SyncEngine {
                 // segments each names are in the store (§7.5, "Conflict copies").
                 var coverage = state.snapshots[snapshot.location] ?? [:]
                 for copy in copies {
+                    let keyID = try EnvelopeHeader.parse(
+                        copy.object.envelope, expecting: snapshot.location.envelopeKind
+                    ).header.keyID
                     for entry in copy.payload.entries {
+                        if entry.isDeletion, let judge,
+                            !(try await judge.admitsErasure(entry, in: snapshot.location, sealedUnder: keyID))
+                        {
+                            // A snapshot's tombstone is its author's claim like a segment's, and is judged like one
+                            // (review finding Z21): not admitted, it is kept for the person and erases nothing.
+                            report.heldAside.append(entry.key)
+                            try await keepAside(entry, state: &state, report: &report)
+                            continue
+                        }
                         try await apply(
-                            entry, pending: pending[entry.key], reconciling: reconciling, state: &state,
-                            highWater: &highWater, report: &report)
+                            entry, pending: pending[entry.key], reconciling: reconciling, exemptFromJump: takesBaseline,
+                            state: &state, highWater: &highWater, report: &report)
                     }
                     keep(copy.payload.unknownEntries, from: snapshot.location, state: &state, report: &report)
                     coverage.merge(copy.payload.vector, uniquingKeysWith: max)
@@ -873,25 +1161,10 @@ public actor SyncEngine {
 
         // A stream whose next segment is not here continues from what the snapshots cover: their effects are in
         // the store. One whose next segment is here is merged from its own segments.
-        for (author, covered) in state.snapshotCoverage where covered > (state.merged[author] ?? 0) {
+        for author in state.snapshotCoverage.keys where covered(author, state) > (state.merged[author] ?? 0) {
             let next = (state.merged[author] ?? 0) + 1
             if !(segments[author] ?? []).contains(where: { $0.location.number == next }) {
-                state.merged[author] = covered
-            }
-        }
-
-        // A shared vault's judge sees every segment of the pass before it judges any: which stream first carried a
-        // version decides whose work it is, and a write cut binds a run of segments (docs/02-architecture.md §8.8).
-        if let judge {
-            for object in segments.values.joined().sorted(by: { $0.location.name < $1.location.name }) {
-                // One digest per position: a position staged with several copies (only by an edit of the file, A8;
-                // the download refuses them) is refused below, and binds nothing here.
-                guard object.alternates.isEmpty, let payload = try? await open(object.object, at: object.location),
-                    (try? validate(payload, at: object.location)) != nil
-                else { continue }
-                try await judge.record(
-                    segment: object.location, signature: object.object.signature,
-                    envelope: object.object.envelope, entries: payload.entries)
+                state.merged[author] = covered(author, state)
             }
         }
 
@@ -899,9 +1172,9 @@ public actor SyncEngine {
             var next = (state.merged[author] ?? 0) + 1
             for object in segments[author]!.sorted(by: { $0.location.number < $1.location.number }) {
                 let sequence = object.location.number
-                if sequence > next, next <= (state.snapshotCoverage[author] ?? 0) {
+                if sequence > next, next <= covered(author, state) {
                     // A gap the snapshots cover (the missing segment was collected after they were merged).
-                    state.merged[author] = state.snapshotCoverage[author]!
+                    state.merged[author] = covered(author, state)
                     next = state.merged[author]! + 1
                 }
                 if sequence < next {
@@ -926,22 +1199,32 @@ public actor SyncEngine {
                     // applied: the position is passed whole or not at all.
                     let copies = try await openCopies(object)
                     let payload = copies[0].payload
-                    switch try await judge?.admitsSegment(
-                        object.location, signature: object.object.signature, envelope: object.object.envelope)
+                    let admission =
+                        try await judge?.admitsSegment(
+                            object.location, signature: object.object.signature, envelope: object.object.envelope)
                         ?? .apply
-                    {
+                    switch admission {
                     case .apply:
                         break
                     case .wait:
                         // The write cut cannot be checked yet: wait here, as at a gap.
                         report.waiting[author] = next
                         waitsForJudge = true
-                    case .holdAside:
+                    case .holdAside, .passOver:
                         // Kept for the person, never merged, never published on; the stream carries on past it and
-                        // its acknowledgements count for nothing (docs/02-architecture.md §8.7).
-                        for entry in payload.entries {
-                            report.heldAside.append(entry.key)
-                            try await syncState.quarantine(entry, vaultID: vaultID)
+                        // its acknowledgements count for nothing (docs/02-architecture.md §8.7). Passed over, nothing
+                        // of it is kept either: its signer's work cannot count here (Z137).
+                        if admission == .holdAside {
+                            for entry in payload.entries {
+                                report.heldAside.append(entry.key)
+                                try await keepAside(entry, state: &state, report: &report)
+                            }
+                        }
+                        if author == deviceID,
+                            (try? await keyring.verifyOwn(
+                                object.object.signature, over: object.object.envelope, at: object.location)) == nil
+                        {
+                            report.ownStreamSteppedOver = min(report.ownStreamSteppedOver ?? .max, sequence)
                         }
                         state.merged[author] = sequence
                         next = sequence + 1
@@ -961,7 +1244,7 @@ public actor SyncEngine {
                                 // What its author had seen does not all count (review finding S45): kept for the
                                 // person, never applied, and judged again by a replay.
                                 report.heldAside.append(entry.key)
-                                try await syncState.quarantine(entry, vaultID: vaultID)
+                                try await keepAside(entry, state: &state, report: &report)
                                 continue
                             }
                             try await apply(
@@ -993,8 +1276,8 @@ public actor SyncEngine {
                         continue
                     }
                     report.rejected.append(SyncRejection(name: object.location.name, reason: Self.reason(error)))
-                    let covered = sequence <= (state.snapshotCoverage[author] ?? 0)
-                    if Self.requiresNewerVersion(error), !covered {
+                    let isCovered = sequence <= covered(author, state)
+                    if Self.requiresNewerVersion(error), !isCovered {
                         // A critical kind this version does not know (ADR 0009): the stream stops here and skips
                         // nothing. The segment is complete and authentic, so it stays staged for the version that
                         // can read it. (One a merged snapshot covers is passed below, as any refused segment is.)
@@ -1004,9 +1287,9 @@ public actor SyncEngine {
                         // completed.
                         try await syncState.unstage([object.location])
                     }
-                    if sequence <= (state.snapshotCoverage[author] ?? 0) {
+                    if isCovered {
                         // Its effects are in a merged snapshot already: continue past it rather than stall.
-                        state.merged[author] = state.snapshotCoverage[author]!
+                        state.merged[author] = covered(author, state)
                         next = state.merged[author]! + 1
                         continue
                     }
@@ -1028,6 +1311,58 @@ public actor SyncEngine {
                 try await syncState.unstage([object.location])
             }
         }
+        try await retryOutOfReach(
+            pending: pending, reconciling: reconciling, state: &state, highWater: &highWater, report: &report)
+    }
+
+    /// Tries again, lowest version first, what this pass refused as beyond the version-jump ceiling, now that the
+    /// rest of the pass is merged (review finding Z25). A log is read one stream after another and a segment in
+    /// record-ID order, so a version can be met before the ones written between it and the last this device knew;
+    /// measured where the device stood then, it looked like a jump. Each entry was kept in the quarantine when it
+    /// was refused, so a lock or a crash before this point loses nothing of it; and the state saved meanwhile says a
+    /// retry is owed (`SyncState.retryUnfinished`), so the next sync replays the log to offer it again (review finding
+    /// Z33). One that is merged now is taken out of the quarantine again, after the state that records its merge is
+    /// saved (a lock in between leaves it kept, never lost, Z39); one still out of reach stays for the person. One
+    /// whose merge fails now stays where it is, as it would have in the loops (Z36). Only entries of this pass,
+    /// which came from objects whose signatures were just checked: the quarantine itself is a local file and is
+    /// never merged from.
+    private func retryOutOfReach(
+        pending: [RecordKey: PendingDeletion], reconciling: Bool, state: inout SyncState, highWater: inout UInt64,
+        report: inout SyncReport
+    ) async throws {
+        guard !outOfReach.isEmpty else { return }
+        let waiting = outOfReach.sorted {
+            ($0.version, $0.device.uuidString, $0.recordID.uuidString, $0.kind.rawValue)
+                < ($1.version, $1.device.uuidString, $1.recordID.uuidString, $1.kind.rawValue)
+        }
+        outOfReach = []
+        for entry in waiting {
+            let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
+            // Ascending: once one is out of reach, so is every one after it.
+            guard overflow || entry.version <= ceiling else { break }
+            let kept = report.quarantined.count + report.heldAside.count + report.collided.count
+            do {
+                try await apply(
+                    entry, pending: pending[entry.key], reconciling: reconciling, retrying: true, state: &state,
+                    highWater: &highWater, report: &report)
+            } catch let error where Self.isFatal(error) {
+                throw error
+            } catch {
+                // It does not merge (it does not open, or the merger's result cannot be stored): it stays in the
+                // quarantine, and the rest are tried.
+                continue
+            }
+            // No longer refused as a jump: reported as whatever became of it now.
+            if let index = report.quarantined.firstIndex(of: entry.key) { report.quarantined.remove(at: index) }
+            if report.quarantined.count + report.heldAside.count + report.collided.count < kept {
+                try await syncState.saveState(state)
+                try await syncState.discardQuarantined([entry], vaultID: vaultID)
+                quarantineUsage = nil
+            }
+        }
+        // Owed by an earlier pass whose replay this sync has asked for: it stays owed until that replay has run.
+        state.retryUnfinished = retryOwedEarlier
+        try await syncState.saveState(state)
     }
 
     /// Checks and opens a staged object: kind and context before decryption, the signature again (staged objects sit
@@ -1041,6 +1376,11 @@ public actor SyncEngine {
         let payload = try SyncPayload.parse(plaintext, allowedKinds: Set(configuration.schemaVersions.keys))
         guard payload.location == location else { throw Rejection(reason: .locationMismatch) }
         return payload
+    }
+
+    /// `open` for a staged object's first copy (the only one, in a vault with a judge).
+    private func open(_ staged: StagedObject) async throws -> SyncPayload {
+        try await open(staged.object, at: staged.location)
     }
 
     /// Every staged copy of one name, each checked and opened as `open` does and its entries validated: all of
@@ -1232,7 +1572,7 @@ public actor SyncEngine {
                 // one has no segment left to judge it by: processed here, it is a revoked device's (its other kept
                 // entries wait for the replay). Held aside, as one not admitted would be: the record stays.
                 report.heldAside.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, state: &state, report: &report)
                 stash.remove(kept)
                 report.unknownEntriesProcessed += 1
                 continue
@@ -1256,7 +1596,7 @@ public actor SyncEngine {
                 throw error
             } catch {
                 report.quarantined.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, state: &state, report: &report)
             }
             // Taken out only once it is applied or quarantined: a lock part-way leaves the rest kept.
             stash.remove(kept)
@@ -1266,14 +1606,21 @@ public actor SyncEngine {
     }
 
     private func apply(
-        _ entry: SyncEntry, pending: PendingDeletion?, reconciling: Bool, state: inout SyncState,
-        highWater: inout UInt64, report: inout SyncReport
+        _ entry: SyncEntry, pending: PendingDeletion?, reconciling: Bool, exemptFromJump: Bool = false,
+        retrying: Bool = false, state: inout SyncState, highWater: inout UInt64, report: inout SyncReport
     ) async throws {
         let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
-        guard entry.version <= configuration.maximumVersion, overflow || entry.version <= ceiling else {
-            // Not merged, but kept: only the person may discard it (PRD F7.7).
+        guard entry.version <= configuration.maximumVersion, exemptFromJump || overflow || entry.version <= ceiling
+        else {
+            // Not merged, but kept: only the person may discard it (PRD F7.7). One refused only as a jump is tried
+            // once more when the pass has merged everything else (`retryOutOfReach`).
             report.quarantined.append(entry.key)
-            try await syncState.quarantine(entry, vaultID: vaultID)
+            try await keepAside(entry, state: &state, report: &report)
+            if entry.version <= configuration.maximumVersion, !retrying {
+                outOfReach.append(entry)
+                // Saved with every state from here until the retry has run, so a lock before then is noticed.
+                state.retryUnfinished = true
+            }
             return
         }
         // Every erasure of the record this device knows of, taken together: the ones it merged, and its own if it
@@ -1307,27 +1654,57 @@ public actor SyncEngine {
                 // the local version stays, the remote one is kept for the person (PRD F7.7), and the stream goes on
                 // to the entries and segments after it instead of waiting here for good.
                 report.quarantined.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, state: &state, report: &report)
+                return
+            } catch is RecordElsewhere {
+                // Another vault's record holds this ID on this device (review finding Z22). Whoever got the ID into
+                // the store first must not decide which vault's stream stops: this entry alone is kept for the
+                // person, the other vault's row stays as it is, and the object and the stream go on.
+                report.collided.append(entry.key)
+                try await keepAside(entry, state: &state, report: &report)
                 return
             } catch is HeldAside {
                 // Carries work that does not count in this shared vault (docs/02-architecture.md §8.7): kept for the
                 // person, never merged, never published on.
                 report.heldAside.append(entry.key)
-                try await syncState.quarantine(entry, vaultID: vaultID)
+                try await keepAside(entry, state: &state, report: &report)
                 return
             }
         }
-        // Only a version merged raises the high water: one held aside or quarantined is in no store, so it moves no
-        // other device's ceiling, and must not move this sync's for the entries after it (review finding S62).
+        // The ceiling moves only for what merged (review findings S62, Z140): raised before the merge was tried, each
+        // entry that then failed lifted it a step, so a chain of them one ceiling apart carried a version past U5; and
+        // one held aside or quarantined is in no store, so it moves no other device's ceiling.
         highWater = max(highWater, entry.version)
         state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
         if entry.isDeletion {
             state.erasures[entry.key] = try await join(
                 state.erasures[entry.key], Erasure(stamp: entry.stamp, summary: entry.erasure), kind: entry.kind)
         }
-        if entry.device == deviceID {
+        if entry.device == deviceID, try await isHeldAsPublished(entry, pending: pending, state: state) {
             state.published[entry.key] = max(state.published[entry.key] ?? entry.stamp, entry.stamp)
         }
+    }
+
+    /// Whether a version found in the log under this device's name is one it need not publish: exactly the row it
+    /// holds, or a deletion that is its own (pending, or already published at that stamp). The log is believed about
+    /// what this device *published* only that far (review findings Z29, Z35): an entry naming this device at a stamp
+    /// above its row, whose content the row already contains, changes nothing in the store, and marking its stamp as
+    /// published would pass over a row that holds an edit nobody else has, and every later edit below the stamp. A
+    /// row that differs is published again, which costs a segment and merges to nothing. A deletion where no row is
+    /// held is no exception (Z138): a record's ID can be predicted (a move's copy), and a planted tombstone for it,
+    /// counted as published, passed over the record's first version when this device wrote it, and a later genuine
+    /// deletion of it as already sent. One of this device's own that a replay meets again is not marked, and costs
+    /// nothing, there being no row to publish.
+    private func isHeldAsPublished(_ entry: SyncEntry, pending: PendingDeletion?, state: SyncState) async throws
+        -> Bool
+    {
+        if entry.isDeletion {
+            if let pending, pending.stamp == entry.stamp { return true }
+            return state.published[entry.key] == entry.stamp
+        }
+        guard let row = try await store.record(entry.key) else { return false }
+        return row.vaultID == vaultID && row.version == entry.version && row.deviceID == entry.device
+            && row.keyID == entry.keyID && row.envelope == entry.envelope
     }
 
     /// Returns whether the local store changed. `erasure` is the latest erasure of the record known here, published
@@ -1335,7 +1712,7 @@ public actor SyncEngine {
     private func applyOnce(_ entry: SyncEntry, erasure: Erasure?) async throws -> Bool {
         let key = entry.key
         let local = try await store.record(key)
-        if let local, local.vaultID != vaultID { throw Rejection(reason: .recordInAnotherVault(entry.recordID)) }
+        if let local, local.vaultID != vaultID { throw RecordElsewhere() }
 
         if let remote = entry.record(in: vaultID), let judge, !(try await judge.admits(remote)) {
             throw HeldAside()
@@ -1402,6 +1779,63 @@ public actor SyncEngine {
             try await store.commit(StoreChange(upserts: [merged], expectations: [key: .version(local.version)]))
         }
         return true
+    }
+
+    /// Keeps an entry aside for the person (PRD F7.7), within the quarantine's caps (review finding Z27): for the
+    /// vault, and for the versions any one device wrote, so that one writer cannot crowd the rest out. An entry
+    /// already held is found by an indexed lookup, never by reading the quarantine. Past a cap the entry is not kept
+    /// here and the report counts it; nothing else about the object changes.
+    private func keepAside(_ entry: SyncEntry, state: inout SyncState, report: inout SyncReport) async throws {
+        var usage: QuarantineUsage
+        if let known = quarantineUsage {
+            usage = known
+        } else {
+            usage = try await syncState.quarantineUsage(vaultID: vaultID)
+        }
+        quarantineUsage = usage
+        guard fits(entry.storedLength, in: usage, for: entry.device) else {
+            if !(try await syncState.holdsQuarantined(entry, vaultID: vaultID)) {
+                report.quarantineFull += 1
+                // Remembered, signed with the state: this device withholds its snapshots, and replays the log once
+                // there is room (review finding Z38).
+                state.quarantineDropped.insert(entry.device)
+            }
+            return
+        }
+        if try await syncState.quarantine(entry, vaultID: vaultID) {
+            usage.add(entry)
+            quarantineUsage = usage
+        } else if !(try await syncState.holdsQuarantined(entry, vaultID: vaultID)) {
+            // Neither kept nor held: the store would not keep it (the SQLite store's lookup digest is not keyed, and
+            // entries crafted to share it crowd it, Z39). A drop like one past a cap, counted and, where this device
+            // writes snapshots, remembered (review finding Z141). In a shared vault, which writes none and replays
+            // its whole log at every change of head, remembering it would replay at every sync while the crowding
+            // stands, for nothing a replay can bring back.
+            report.quarantineFull += 1
+            if configuration.maintainsLog {
+                state.quarantineDropped.insert(entry.device)
+                state.quarantineCrowded = max(state.quarantineCrowded ?? 0, UInt64(usage.entries))
+            }
+        }
+    }
+
+    /// Whether `length` more bytes of `device`'s versions fit the quarantine's caps. Counted without overflow: the
+    /// sizes come from a local file (A8), and a sum near `Int.max` must read as full, never trap (review finding
+    /// Z39).
+    private func fits(_ length: Int, in usage: QuarantineUsage, for device: UUID) -> Bool {
+        let share = usage.devices[device] ?? QuarantineUsage.Share()
+        let (total, totalOverflow) = usage.bytes.addingReportingOverflow(length)
+        let (own, ownOverflow) = share.bytes.addingReportingOverflow(length)
+        return usage.entries < configuration.maximumQuarantinedEntries
+            && !totalOverflow && total <= configuration.maximumQuarantinedBytes
+            && share.entries < configuration.maximumQuarantinedEntriesPerAuthor
+            && !ownOverflow && own <= configuration.maximumQuarantinedBytesPerAuthor
+    }
+
+    /// Whether the quarantine has room again for a version of `device`'s that was not kept (Z38), of the largest size
+    /// an entry can be: a replay for less would drop it again, at every sync.
+    private func hasRoom(_ usage: QuarantineUsage, for device: UUID) -> Bool {
+        fits(SyncPayload.maximumEntryEnvelopeLength + SyncPayload.maximumErasureLength, in: usage, for: device)
     }
 
     private func resolve(_ erasure: Erasure, of record: StoredRecord) async throws -> ErasureDecision {
@@ -1505,8 +1939,17 @@ public actor SyncEngine {
         var batches = chunks(entries.values.sorted(by: SyncPayload.entryOrder))
         if !later.isEmpty { batches += chunks(later.sorted(by: SyncPayload.entryOrder)) }
         if batches.count > 1, batches[0].isEmpty { batches.removeFirst() }
+        let floor = witnessedFloor(state: state, retired: retired)
         for chunk in batches {
-            let sequence = state.nextSequence
+            // Above what a device of this account says it merged of this stream (`ownStreamWitnesses`), and never
+            // saved there unless published: a claim that a later revocation discounts moves nothing for good.
+            let sequence = max(state.nextSequence, floor)
+            guard sequence <= configuration.maximumSequence else {
+                // No reader lists a name beyond this: published there, these rows would be marked as sent and never
+                // seen (review finding Z21). Nothing is written and nothing marked.
+                report.ownStreamExhausted = true
+                return
+            }
             var vector = state.merged
             vector[deviceID] = sequence - 1
             let location = SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence)
@@ -1521,9 +1964,17 @@ public actor SyncEngine {
                 report.ownStreamConflict = sequence
                 return
             }
+            // Merged through this one only if it follows on from what was merged. Published above a witnessed claim,
+            // the numbers between were used by this stream and are not here: gone from the store, or not listed yet
+            // (a lagging listing, a store holding them back). Counted as merged, they would never be read once they
+            // were listed again, and the edits they carry, made before a restore, would never come back to this
+            // device (round 6's L1). Left unmerged, they are fetched and merged in sequence when they appear, and the
+            // stream waits at the first missing one for as long as it is gone, publishing on all the same.
+            if (state.merged[deviceID] ?? 0) == sequence - 1 {
+                state.merged[deviceID] = sequence
+            }
             state.nextSequence = sequence + 1
             state.lastPublishedSequence = sequence
-            if (state.merged[deviceID] ?? 0) == sequence - 1 { state.merged[deviceID] = sequence }
             var published: [RecordKey: RecordStamp] = [:]
             for entry in chunk {
                 state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
@@ -1543,6 +1994,19 @@ public actor SyncEngine {
             try await syncState.removePendingDeletions(published, vaultID: vaultID)
         }
         try await syncState.removePendingDeletions(obsolete, vaultID: vaultID)
+    }
+
+    /// The lowest number this device may publish at given what its own account's other devices say they merged of its
+    /// stream (`SyncConfiguration.ownStreamWitnesses`): one above the furthest claim, or 1 for none.
+    private func witnessedFloor(state: SyncState, retired: Set<UUID>) -> UInt64 {
+        guard let witnesses = configuration.ownStreamWitnesses else { return 1 }
+        let counts = { (author: UUID) in
+            author != self.deviceID && witnesses.contains(author) && !retired.contains(author)
+        }
+        let covered = state.snapshots.filter { counts($0.key.author) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
+        let acknowledged = state.acknowledgements.filter { counts($0.key) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
+        let claim = max(covered, acknowledged)
+        return claim >= configuration.maximumSequence ? configuration.maximumSequence + 1 : claim + 1
     }
 
     /// Whether a pending deletion is on the transport already: this device published a deletion of the record at or
@@ -1671,10 +2135,27 @@ public actor SyncEngine {
         // that work on and makes nothing collectable.
         var vector = state.merged
         let holding = stash.authorsHoldingBackSnapshots(retired: retired)
-        if !holding.isEmpty || !stash.crowdedOut.isEmpty || stashIncomplete {
+        // The same holds for a version this device kept aside instead of merging (an implausible jump, a join that
+        // does not fit in one record, a record ID another vault holds): its segment counts as merged, so an ordinary
+        // snapshot would cover it without carrying it, and once the segment was collected a device joining later
+        // would never be shown that version (review finding Z26). While the quarantine holds a version written by a
+        // device still trusted, this device writes only the snapshot it owes.
+        var usage: QuarantineUsage
+        if let known = quarantineUsage {
+            usage = known
+        } else {
+            usage = try await syncState.quarantineUsage(vaultID: vaultID)
+        }
+        quarantineUsage = usage
+        // A version that was to be kept and found no room (Z38) is as uncarried as one kept.
+        let keptAside =
+            usage.devices.keys.contains { !retired.contains($0) }
+            || state.quarantineDropped.contains { !retired.contains($0) }
+        if !holding.isEmpty || !stash.crowdedOut.isEmpty || stashIncomplete || keptAside {
             guard owed else {
                 report.snapshotWithheld = true
                 report.snapshotWithheldBy = holding
+                report.snapshotWithheldForQuarantine = keptAside
                 return
             }
             vector = state.merged.filter { retired.contains($0.key) }
@@ -1738,8 +2219,8 @@ public actor SyncEngine {
             // Its own segments up to what this snapshot covers need not be listed any more, but for the newest, which
             // is kept, unless this is the hand-on after a reset, which stands for every segment it published (SR19).
             let newest = state.lastPublishedSequence
-            state.collectedThrough = max(
-                state.collectedThrough ?? 0,
+            state.ownUnlistedThrough = max(
+                state.ownUnlistedThrough ?? 0,
                 min(vector[deviceID] ?? 0, handingOn ? newest : newest > 0 ? newest - 1 : 0))
             if handingOn {
                 // It holds everything this device had merged, whatever it could claim to cover.
@@ -1777,20 +2258,34 @@ public actor SyncEngine {
         let others = state.merged.keys.filter { $0 != deviceID && !retired.contains($0) }
         let acknowledged = others.map { state.acknowledgements[$0]?[deviceID] ?? 0 }.min() ?? covered
         let limit = min(covered, acknowledged)
-        let own = listing.segments[deviceID] ?? []
-        let newest = own.max() ?? 0
+        // Lowest first: while any segment of this stream is listed, none above it has been collected, which is what
+        // lets a device whose state is older than its stream publish without reusing a number (`Listing.ownAnchored`,
+        // review finding Z31). A failed delete stops the loop, so a gap can never open below a listed segment; and so
+        // does a number missing from the listing (a provider's listing that left it out, or a store withholding it):
+        // deleting past it would leave it listed with higher numbers gone (review finding Z135). The newest kept is
+        // this device's own genuine head (what it published, or what verified as its own) or the highest listed number
+        // below it, never a listed name above it: anyone who can create a file can list one far ahead, and keeping
+        // that in place of the head deleted the anchor.
+        // The run starts above what this device has collected already (review finding Z149): a name planted below it,
+        // in the range already collected, was otherwise the run's start, deleted alone at each pass, and the gap above
+        // it stopped the run there for as long as the name was planted again.
         // A name of its own under which the store holds copies this device has not examined in full is never
         // collected: deleting it removes every copy (`SyncTransport.delete`), and one it has not read may be a fork
-        // that no other device has read either (review finding R11).
+        // that no other device has read either (review finding R11). It stops the run as a refused delete does.
         let examined = state.examinedCopies
         let unexamined = { (location: SyncObjectLocation) in
             listing.copies[location].map { examined[location] != $0 } ?? false
         }
-        for sequence in own where sequence <= limit && sequence < newest {
+        let own = (listing.segments[deviceID] ?? []).filter { $0 > state.collectedThrough }.sorted()
+        let newest = min(own.last ?? 0, max(state.lastPublishedSequence, listing.ownVerified))
+        var expected = own.first
+        for sequence in own {
+            guard sequence == expected, sequence <= limit, sequence < newest else { break }
             let location = SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence)
-            guard !unexamined(location) else { continue }
-            guard try await collect(location.name, report: &report) else { continue }
+            guard !unexamined(location), try await collect(location.name, report: &report) else { break }
             report.collected += 1
+            state.collectedThrough = max(state.collectedThrough, sequence)
+            expected = sequence + 1
         }
         for (location, written) in state.snapshots where location.author == deviceID && !unexamined(location) {
             // The snapshot that handed everything on after a reset stands for all it holds (§7.10), so only a
@@ -1832,13 +2327,16 @@ public actor SyncEngine {
     /// A version the judge did not admit.
     struct HeldAside: Error {}
 
+    /// An entry whose record ID a record of another vault holds on this device.
+    struct RecordElsewhere: Error {}
+
     /// Errors that stop the sync rather than reject one object: the vault locked, the transport went away, or the
     /// local store failed.
     static func isFatal(_ error: any Error) -> Bool {
         switch error {
         case SyncKeyringError.locked: return true
         case let error as SyncTransportError: return error.stopsSync
-        case is RecordStoreError: return true
+        case is any StorageFailure: return true
         default: return false
         }
     }

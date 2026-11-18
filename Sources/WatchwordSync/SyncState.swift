@@ -35,7 +35,8 @@ public struct RecordStamp: Hashable, Sendable, Comparable {
 /// What this device knows about one vault's sync streams (docs/02-architecture.md §6, `sync_state`).
 ///
 /// None of it is secret, and all of it except pending deletions (kept apart, in `SyncStateStore`) can be rebuilt from
-/// the transport by a reconciling sync, which is also what repairs it if it is damaged or rolled back.
+/// the transport by a reconciling sync, which is also what repairs it if it is damaged or rolled back. It is believed
+/// all the same, and what it says goes out signed, so production authenticates the row (`authenticator`).
 public struct SyncState: Sendable, Hashable {
     public var vaultID: UUID
     /// The sequence number of this device's next segment.
@@ -99,7 +100,7 @@ public struct SyncState: Sendable, Hashable {
     /// keeps its newest segment and sees its own objects at once), so one that is missing means the store lost it:
     /// the engine's sign of a reset (docs/02-architecture.md §7.10). `nil` in a state from before this was kept, and
     /// set from the first listing.
-    public var collectedThrough: UInt64?
+    public var ownUnlistedThrough: UInt64?
     /// The snapshot in which this device last handed on everything it held, on the person's decision to upload again
     /// after a reset, and what it had merged of each stream then. While that snapshot is listed it stands for all of
     /// that, whatever coverage it could claim.
@@ -115,6 +116,33 @@ public struct SyncState: Sendable, Hashable {
     /// listed or stood for again, or it has handed everything on. While set, and until the person answers, the
     /// engine writes no snapshot, collects nothing and replays nothing.
     public var storeResetSuspected = false
+    /// A merge pass refused versions as beyond the version-jump ceiling, to be tried again once it had merged
+    /// everything else (`SyncEngine.retryOutOfReach`, Z25), and had not done so when this state was saved: set when
+    /// the first is refused, cleared once the retry has run. The list of them lives in memory, and nothing merges
+    /// from the quarantine, so a sync that finds this set (a lock or a crash part-way through the pass) replays the
+    /// log, which offers them again (review finding Z33).
+    public var retryUnfinished = false
+    /// The devices whose versions were to be kept aside and were not, the quarantine being full (Z27): past the
+    /// vault's cap or that device's share. While a trusted one is here this device writes no ordinary snapshot, as
+    /// while one is kept (Z26), because its snapshot would cover the segment without carrying the version; and once
+    /// the quarantine has room for every one of them again, the log is replayed to offer those versions again
+    /// (review finding Z38).
+    public var quarantineDropped: Set<UUID> = []
+    /// How many entries the quarantine held when its store last refused a version because entries crafted to share
+    /// its lookup digest had crowded it (Z141), with `quarantineDropped` naming its writer; `nil` if that has not
+    /// happened since the last replay. The caps then had room, so a replay at every sync would only drop it again:
+    /// the log is offered again only once the quarantine holds fewer entries than this, which the person discarding
+    /// the entries (or anything else leaving) brings about (review finding Z147).
+    public var quarantineCrowded: UInt64?
+    /// The highest number of this device's own stream it has collected: every number from its stream's first up to
+    /// this one was deleted, lowest first. A listed name at or below it is no segment of its stream any more (a stale
+    /// listing, or a name anyone can create), so collection's contiguous run starts above it (review finding Z149).
+    public var collectedThrough: UInt64 = 0
+    /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
+    /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
+    /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the
+    /// vault and the device), which hands back no state at all for a row that does not verify. Empty in the fakes.
+    public var authenticator: [UInt8] = []
 
     public init(vaultID: UUID) {
         self.vaultID = vaultID
@@ -248,6 +276,8 @@ public struct StagedObject: Sendable, Hashable {
 /// contents are untrusted on read like the rest of the file: staged objects are re-verified before merging, and the
 /// state can be rebuilt with a reconciling sync.
 public protocol SyncStateStore: Sendable {
+    /// The state this device saved for the vault, or `nil`: none yet, or (in production) a row this device's session
+    /// did not sign, which is no state. The engine then starts from nothing and replays the log.
     func loadState(vaultID: UUID) async throws -> SyncState?
     func saveState(_ state: SyncState) async throws
 
@@ -255,6 +285,10 @@ public protocol SyncStateStore: Sendable {
     func staged(vaultID: UUID) async throws -> [StagedObject]
     func unstage(_ locations: [SyncObjectLocation]) async throws
 
+    /// A pending deletion made ready to be recorded: production signs it here (`PendingDeletion.authenticator`),
+    /// which needs the keys, so that recording it once the deletion has committed needs none. A store with nothing
+    /// to sign with hands it back as it is. Throws `SyncKeyringError.locked` while locked.
+    func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion
     /// Deletions made locally and not yet published. Kept apart from `SyncState` so that a sync in progress, which
     /// saves the state it loaded, can never drop a deletion recorded meanwhile.
     func addPendingDeletion(_ deletion: PendingDeletion) async throws
@@ -262,11 +296,20 @@ public protocol SyncStateStore: Sendable {
     /// Removes each deletion only if it is still the one given (by stamp), so a newer one recorded meanwhile survives.
     func removePendingDeletions(_ deletions: [RecordKey: RecordStamp], vaultID: UUID) async throws
 
-    /// Record versions refused as implausible (U5). Kept, never discarded by sync; only the person, explicitly, may
-    /// discard them (PRD F7.7).
-    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws
+    /// Record versions kept aside rather than merged: refused as implausible (U5), unsealable once merged (Y37),
+    /// held aside in a shared vault, or named like another vault's record (Z22). Never discarded by sync; only the
+    /// person, explicitly, may discard them (PRD F7.7). Each entry is kept once: returns whether it was added, by a
+    /// lookup that does not read what the quarantine already holds (review finding Z27). The engine holds the
+    /// quarantine to its caps before it calls this (`SyncConfiguration.maximumQuarantinedEntries`); the session's own
+    /// use, for a local version it takes out, is not capped.
+    @discardableResult
+    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool
     func quarantined(vaultID: UUID) async throws -> [SyncEntry]
     func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async throws
+    /// Whether the vault's quarantine holds exactly this entry, by the same lookup.
+    func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool
+    /// How many entries and bytes the vault's quarantine holds for each writing device, without reading an envelope.
+    func quarantineUsage(vaultID: UUID) async throws -> QuarantineUsage
 
     /// The stash (`SyncStash.encoded()`), written once per sync, apart from the state saved with every segment.
     /// Rebuildable from the log; the engine parses it as hostile.
@@ -276,11 +319,19 @@ public protocol SyncStateStore: Sendable {
     func eraseAll() async throws
 }
 
+extension SyncStateStore {
+    /// A store that signs nothing records a pending deletion as it was made.
+    public func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion {
+        deletion
+    }
+}
+
 public actor InMemorySyncStateStore: SyncStateStore {
     private var states: [UUID: SyncState] = [:]
     private var stagedObjects: [UUID: [SyncObjectLocation: StagedObject]] = [:]
     private var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
     private var quarantinedEntries: [UUID: [SyncEntry]] = [:]
+    private var quarantinedIndex: [UUID: Set<SyncEntry>] = [:]
     private var stashes: [UUID: [UInt8]] = [:]
     /// How many times each vault's stash was written: a test seam for what a flood costs.
     public private(set) var stashWrites: [UUID: Int] = [:]
@@ -326,10 +377,11 @@ public actor InMemorySyncStateStore: SyncStateStore {
         }
     }
 
-    public func quarantine(_ entry: SyncEntry, vaultID: UUID) {
-        if !(quarantinedEntries[vaultID] ?? []).contains(entry) {
-            quarantinedEntries[vaultID, default: []].append(entry)
-        }
+    @discardableResult
+    public func quarantine(_ entry: SyncEntry, vaultID: UUID) -> Bool {
+        guard quarantinedIndex[vaultID, default: []].insert(entry).inserted else { return false }
+        quarantinedEntries[vaultID, default: []].append(entry)
+        return true
     }
 
     public func quarantined(vaultID: UUID) -> [SyncEntry] {
@@ -337,7 +389,19 @@ public actor InMemorySyncStateStore: SyncStateStore {
     }
 
     public func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) {
-        quarantinedEntries[vaultID]?.removeAll { entries.contains($0) }
+        let discarded = Set(entries)
+        quarantinedEntries[vaultID]?.removeAll { discarded.contains($0) }
+        quarantinedIndex[vaultID]?.subtract(discarded)
+    }
+
+    public func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) -> Bool {
+        quarantinedIndex[vaultID]?.contains(entry) ?? false
+    }
+
+    public func quarantineUsage(vaultID: UUID) -> QuarantineUsage {
+        var usage = QuarantineUsage()
+        for entry in quarantinedEntries[vaultID] ?? [] { usage.add(entry) }
+        return usage
     }
 
     public func stash(vaultID: UUID) -> [UInt8]? {
@@ -354,6 +418,7 @@ public actor InMemorySyncStateStore: SyncStateStore {
         stagedObjects = [:]
         deletions = [:]
         quarantinedEntries = [:]
+        quarantinedIndex = [:]
         stashes = [:]
     }
 
@@ -377,7 +442,12 @@ public actor InMemorySyncStateStore: SyncStateStore {
 /// attacker with the file (A8) deleted the row, or a backup was restored — is not a deletion to propagate to every
 /// other device, but damage that a reconciling sync repairs from the log. The tombstone is recorded after the deletion
 /// commits, so a crash in between loses the tombstone (the record comes back from another device) rather than
-/// publishing a deletion that never happened.
+/// publishing a deletion that never happened. It is *made* before the deletion commits, though
+/// (`SyncStateStore.prepared`): making it needs the session's keys, and a lock that landed after the commit used to
+/// leave rows deleted here with no tombstone, so that a vault deleted as the app went to the background was deleted
+/// everywhere while its items stayed on every other device (review finding Z28). A lock while the tombstones are
+/// being made now fails the deletion before anything changes; one after the commit changes nothing, because
+/// recording a tombstone already made needs no key.
 public struct DeletionRecordingStore: RecordStore {
     public let base: any RecordStore
     public let syncState: any SyncStateStore
@@ -402,16 +472,16 @@ public struct DeletionRecordingStore: RecordStore {
     }
 
     public func commit(_ change: StoreChange) async throws {
-        var deleted: [StoredRecord] = []
+        var tombstones: [PendingDeletion] = []
         for key in change.deletions + Array(change.conditionalDeletions.keys) {
-            if let row = try await base.record(key) { deleted.append(row) }
+            guard let row = try await base.record(key), row.version < UInt64.max else { continue }
+            tombstones.append(
+                try await syncState.prepared(
+                    PendingDeletion(
+                        stamp: RecordStamp(version: row.version + 1, device: deviceID, deleted: true), record: row)))
         }
         try await base.commit(change)
-        for row in deleted where row.version < UInt64.max {
-            try await syncState.addPendingDeletion(
-                PendingDeletion(
-                    stamp: RecordStamp(version: row.version + 1, device: deviceID, deleted: true), record: row))
-        }
+        for tombstone in tombstones { try await syncState.addPendingDeletion(tombstone) }
     }
 
     public func eraseAll() async throws {

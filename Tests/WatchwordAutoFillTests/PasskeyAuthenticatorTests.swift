@@ -395,4 +395,16 @@ struct PasskeyAuthenticatorTests {
         #expect(encoded { $0.byteString([UInt8](repeating: 0, count: 300)) }.prefix(3) == [0x59, 0x01, 0x2C])
         #expect(encoded { $0.mapHeader(count: 3) } == [0xA3])
     }
+
+    /// A relying party at a shared-hosting suffix (Z63): a passkey for `wordpress.com` is WordPress's own, and is
+    /// stored for that host alone, so a tenant's subdomain is never the relying party's.
+    @Test("a relying party at a shared-hosting suffix is accepted, with a scope for its host alone")
+    func sharedHostingRelyingParty() throws {
+        let relyingParty = try RelyingPartyID("wordpress.com")
+        #expect(relyingParty.scope == ServiceScope(host: "wordpress.com", includeSubdomains: false))
+        #expect(try RelyingPartyID("example.com").scope.includeSubdomains)
+        #expect(throws: RelyingPartyIDError.self) { try RelyingPartyID("co.uk") }
+        #expect(throws: RelyingPartyIDError.self) { try RelyingPartyID("github.io") }
+    }
+
 }

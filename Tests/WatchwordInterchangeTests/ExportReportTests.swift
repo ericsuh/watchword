@@ -28,6 +28,32 @@ struct ExportReportTests {
         ]
     }
 
+    /// Z87 (X4's export half): an item sync left in the trash is nobody's discard. Every exporter left it out with
+    /// the person's trash's line, so a person migrating away was told they had thrown away an edit the never-lose-data
+    /// rule had kept. Now only the person's own trash is left out; the other is written live, with a line of its own.
+    @Test("only the person's own trash is left out; what sync left in the trash is exported live and says so")
+    func syncTrash() {
+        var kept = Item(
+            vaultID: Fixtures.vaultID, title: "Kept by sync", scopes: [ServiceScope(host: "kept.example")],
+            fields: [Field(kind: .password, label: "Password", value: "edit-made-elsewhere")])
+        kept.trashedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        kept.keptAfterDeletion = true
+        var discarded = kept
+        discarded.id = UUID()
+        discarded.title = "Thrown away"
+        discarded.keptAfterDeletion = false
+        #expect(!kept.isTrashedByPerson && discarded.isTrashedByPerson)
+        for export in exports(kept) {
+            #expect(export.text.contains("edit-made-elsewhere"), "\(export.format)")
+            #expect(export.warnings.contains(.syncTrashExported(itemID: kept.id)), "\(export.format)")
+            #expect(!export.warnings.contains(.trashedItemOmitted(itemID: kept.id)), "\(export.format)")
+        }
+        for export in exports(discarded) {
+            #expect(!export.text.contains("edit-made-elsewhere"), "\(export.format)")
+            #expect(export.warnings == [.trashedItemOmitted(itemID: discarded.id)], "\(export.format)")
+        }
+    }
+
     private func stamp(_ version: UInt64) -> GroupStamp {
         GroupStamp(
             revision: Revision(

@@ -66,10 +66,9 @@ final class ImportExportTests: XCTestCase {
         app.closeSettings()
         step("import: the accepted website on the item")
         app.itemRow("Library").firstMatch.click()
+        // By identifier: the row reads the host with its reach ("www.citylibrary.org, exact host"), as one element.
         XCTAssertTrue(
-            app.staticTexts.matching(
-                NSPredicate(format: "label == %@ OR value == %@", "www.citylibrary.org", "www.citylibrary.org")
-            ).firstMatch.appears(within: 5), app.debugDescription)
+            app.element(AccessibilityID.Detail.scope("www.citylibrary.org")).appears(within: 5), app.debugDescription)
         step("done")
     }
 

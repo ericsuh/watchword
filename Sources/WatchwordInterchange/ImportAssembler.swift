@@ -27,8 +27,11 @@ public enum ScopeDerivation {
                 || scalar == "-" || scalar == "_" || scalar == "."
         }
         guard isPlainName else { return .failure(.notAHost(.invalidHost(host.value))) }
-        // A dotted-decimal address has no subdomains to include.
-        let scope = ServiceScope(host: host.value, includeSubdomains: !isAddress(host.value))
+        // A dotted-decimal address has no subdomains to include; nor, for this item, has a shared-hosting suffix
+        // (`ScopePolicy.newScope`, review finding Z63).
+        let scope =
+            isAddress(host.value)
+            ? ServiceScope(host: host.value, includeSubdomains: false) : ScopePolicy.newScope(forHost: host.value)
         do {
             try ScopePolicy.validate(scope)
             return .success(scope)
@@ -52,7 +55,10 @@ public enum ScopeDerivation {
         let apex = String(decoding: host.dropFirst(www.count), as: UTF8.self)
         guard !isAddress(apex) else { return nil }
         let candidate = ServiceScope(host: apex, includeSubdomains: scope.includeSubdomains)
-        guard candidate.host == apex, ScopePolicy.isAcceptable(candidate) else { return nil }
+        // Never a public suffix, even as an exact host the policy would accept (`www.github.io` gives nothing).
+        guard candidate.host == apex, !PublicSuffix.isPublicSuffix(apex), ScopePolicy.isAcceptable(candidate) else {
+            return nil
+        }
         return candidate
     }
 
@@ -172,6 +178,8 @@ struct ImportAssembler {
     var totalFields = 0
     /// URLs (and, from an archive, scopes) handed to `ScopeDerivation` so far, against `maximumScopeDerivations`.
     var scopeDerivations = 0
+    /// The drafts' `StoredItemSize` estimates so far, against `maximumTotalStoredBytes` (Z81).
+    var totalStoredBytes = 0
     private(set) var entryIndex = 0
 
     init(format: InterchangeFormat, vaultID: UUID, limits: InterchangeLimits, options: ImportOptions) {
@@ -182,6 +190,19 @@ struct ImportAssembler {
     }
 
     var result: ImportResult { ImportResult(entries: entries, report: report) }
+
+    /// Measures `item` as the vault will store it: `false` when the one item is too large (skipped, and nothing is
+    /// counted); throws when the import as a whole would pass `maximumTotalStoredBytes` (Z81). Once it returns
+    /// `true` the size is counted, so call it last, just before the draft is kept.
+    mutating func countStored(_ item: Item) throws -> Bool {
+        let size = StoredItemSize.estimate(item)
+        guard size <= limits.maximumStoredItemBytes else { return false }
+        guard size <= limits.maximumTotalStoredBytes - totalStoredBytes else {
+            throw limits.exceeded(.totalStoredBytes)
+        }
+        totalStoredBytes += size
+        return true
+    }
 
     /// Counts one more array element against the item limit, before anything is done with it.
     mutating func visit() throws {
@@ -402,7 +423,7 @@ struct ImportAssembler {
             archived: record.state == .archived, history: history)
         // Measured as the vault will store it, not as the file wrote it: a draft listed as imported must be one
         // the vault accepts.
-        guard StoredItemSize.estimate(item) <= limits.maximumStoredItemBytes else {
+        guard try countStored(item) else {
             skip(reference, .tooLarge(.storedItemBytes, limit: limits.maximumStoredItemBytes))
             return
         }

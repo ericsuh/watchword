@@ -1,3 +1,4 @@
+import WatchwordModel
 import XCTest
 
 @testable import WatchwordMatching
@@ -18,6 +19,16 @@ final class HostNormalizerTests: XCTestCase {
 
     func testIPv6LiteralIsAccepted() throws {
         XCTAssertEqual(try normalize("http://[::1]:8080/", kind: .url), "::1")
+    }
+
+    /// Review finding Z64: the IPv6 branch accepted hex-only dotted tails and skipped the length bound.
+    func testHexDottedTailIsNotAnIPv6Literal() throws {
+        XCTAssertThrowsError(try normalize("a::b.cafe.de"))
+        let scope = ServiceScope(host: "cafe.de")
+        if let host = try? HostNormalizer.normalize(ServiceIdentifier("a::b.cafe.de", kind: .domain)) {
+            XCTAssertNil(ScopeMatcher.match(scope, host: host))
+        }
+        XCTAssertThrowsError(try normalize(String(repeating: "a:", count: 500_000)))
     }
 
     func testEmptyIdentifierIsRejected() {

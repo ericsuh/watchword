@@ -55,20 +55,31 @@ public actor FakeKeychain: KeychainStore {
         case releaseBytes([UInt8])
         /// The item is gone, as after `biometryCurrentSet` invalidation.
         case invalidated
+        /// The prompt never ends: the app is killed while it is up. The read returns nothing to its caller, ever;
+        /// it ends only when the task that made it is cancelled.
+        case neverReturns
     }
 
     private var items: [KeychainItem: [UInt8]] = [:]
     private var outcomes: [BiometricOutcome] = []
     public private(set) var biometricPrompts = 0
     public private(set) var prompts: [String] = []
+    private var readHook: (@Sendable (KeychainItem) async -> Void)?
+    private var storeHook: (@Sendable (KeychainItem) async -> Void)?
+    private var heldPrompts: [AsyncStream<Void>.Continuation] = []
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Prompts that went up and never ended (`BiometricOutcome.neverReturns`), counted from the start.
+    public var promptsHeld: Int { heldPrompts.count }
 
     public init() {}
 
-    public func store(_ value: SecureBytes, for item: KeychainItem) {
+    public func store(_ value: SecureBytes, for item: KeychainItem) async {
+        if let storeHook { await storeHook(item) }
         items[item] = value.unprotectedCopy()
     }
 
-    public func read(_ item: KeychainItem, prompt: String) throws -> SecureBytes? {
+    public func read(_ item: KeychainItem, prompt: String) async throws -> SecureBytes? {
+        if let readHook { await readHook(item) }
         guard case .quickUnlockKey = item else {
             return items[item].map { SecureBytes(copying: $0) }
         }
@@ -83,6 +94,13 @@ public actor FakeKeychain: KeychainStore {
         case .invalidated:
             items[item] = nil
             return nil
+        case .neverReturns:
+            let (stream, continuation) = AsyncStream<Void>.makeStream()
+            heldPrompts.append(continuation)
+            for waiter in heldWaiters { waiter.resume() }
+            heldWaiters = []
+            for await _ in stream {}
+            throw CancellationError()
         }
     }
 
@@ -94,6 +112,24 @@ public actor FakeKeychain: KeychainStore {
 
     public func script(_ outcomes: BiometricOutcome...) {
         self.outcomes.append(contentsOf: outcomes)
+    }
+
+    /// Runs `hook` at the start of every read, before the item is looked up: where a test lands a `lock()`, or a
+    /// write to the store, in the middle of an operation that is waiting on the Keychain. `nil` removes it.
+    public func onRead(_ hook: (@Sendable (KeychainItem) async -> Void)?) {
+        readHook = hook
+    }
+
+    /// As `onRead`, at the start of every store, before the item is written.
+    public func onStore(_ hook: (@Sendable (KeychainItem) async -> Void)?) {
+        storeHook = hook
+    }
+
+    /// Returns once `count` prompts have gone up that will never end.
+    public func waitUntilPromptsHeld(_ count: Int) async {
+        while heldPrompts.count < count {
+            await withCheckedContinuation { heldWaiters.append($0) }
+        }
     }
 
     /// Drops every biometry-bound item, as the OS does when the enrolled set changes.
@@ -129,6 +165,14 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
 
     public init(seed: UInt64 = 1) {
         generator = SeededGenerator(seed: seed)
+    }
+
+    public func createDevice(accountID: UUID) throws -> DeviceIdentity {
+        let key = SoftwareDeviceKey.generate(using: &generator)
+        let publicKey = try key.publicKey()
+        let deviceID = DeviceIdentifier.derive(accountID: accountID, key: publicKey)
+        held[accountID] = (deviceID, key)
+        return DeviceIdentity(id: deviceID, key: publicKey)
     }
 
     public func create(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey {

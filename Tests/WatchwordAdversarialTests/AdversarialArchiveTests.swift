@@ -255,6 +255,60 @@ struct AdversarialSessionInterchangeTests {
             ])
     }
 
+    /// A7's archive (with its Kit), or a 1PUX or CXF file, dates its item in the year 9000 and, in the archive,
+    /// gives a field an `autofill.lastReport` far in the future (Z85). Kept as written, the date pinned the item's
+    /// `modifiedAt` on every device for good (sync takes the later), kept the "old password" check from firing, and
+    /// the metadata rate-limited that field's relying-party reports for ever. Now the session bounds every date the
+    /// file keeps by its clock, and the archive's AutoFill state is not restored; both are reported.
+    @Test("a file cannot date an item in the future or restore the AutoFill extension's state")
+    func futureDatesAndDeviceState() async throws {
+        let (vault, personal) = try await Self.vault()
+        let future = Date(timeIntervalSince1970: 221_845_392_000)
+        var forged = Self.bank(personal)
+        forged.createdAt = future
+        forged.modifiedAt = future
+        forged.fields[1].meta = ["autofill.lastReport": "221845392000", "autofill.reportedUnused": "1", "keep": "x"]
+        forged.history = [
+            ItemHistoryEntry(
+                replacedAt: future, version: 1,
+                fields: [Field(kind: .password, label: "Password", value: "old", meta: ["autofill.lastReport": "1"])])
+        ]
+        let attackerKey = SecretKey.generate()
+        var generator = SeededGenerator(seed: 10)
+        let archive = try AccountArchive.seal(
+            [SecureBytes.concatenating([SecureBytes(copying: [2]), try ItemCodec.encode(forged)])], archiveID: UUID(),
+            accountID: UUID(), createdAt: Date(timeIntervalSince1970: 0), passphrase: Self.passphrase,
+            secretKey: attackerKey, parameters: .baseline, using: &generator)
+        let restored = try await vault.session.createVault(name: "Restored")
+        let preview = try await vault.session.previewArchiveImport(
+            archive, passphrase: Self.passphrase, secretKey: attackerKey.formatted, into: restored.id)
+        let warnings = preview.report.warnings.map(\.warning)
+        #expect(warnings.contains(.futureDateBounded) && warnings.contains(.autoFillStateNotRestored(count: 3)))
+        let outcome = try await vault.session.commitImport(preview.id, decisions: [:])
+        let created = try await vault.session.item(id: try #require(outcome.created.first))
+        let now = await vault.clock.now()
+        #expect(created.createdAt <= now && created.modifiedAt <= now)
+        #expect(created.history.allSatisfy { $0.replacedAt <= now })
+        #expect(created.fields[1].meta == ["keep": "x"])
+        #expect(created.history.allSatisfy { $0.fields.allSatisfy { $0.meta.isEmpty } })
+        // An edit afterwards is dated by this device's clock, not pinned in the year 9000.
+        await vault.clock.advance(by: 60)
+        var edited = created
+        edited.title = "Bank, edited"
+        let saved = try await vault.session.save(edited)
+        #expect(saved.modifiedAt == (await vault.clock.now()))
+
+        // A plaintext file's dates are bounded the same way.
+        let file =
+            #"{"version":{"major":1,"minor":0},"exporterRpId":"x.example","exporterDisplayName":"X","timestamp":1,"#
+            + #""accounts":[{"id":"YQ","username":"","email":"","collections":[],"items":[{"id":"aQ","title":"Dated","#
+            + #""creationAt":221845392000,"modifiedAt":221845392000,"credentials":["#
+            + #"{"type":"basic-auth","username":{"fieldType":"string","value":"pat"}}]}]}]}"#
+        let plain = try await vault.session.previewImport(
+            Array(file.utf8), format: .credentialExchange, into: restored.id)
+        #expect(plain.report.warnings.map(\.warning).contains(.futureDateBounded), "\(plain.report.warnings)")
+    }
+
     /// A7's archive, sealed under an account of the attacker's own and handed over with its Secret Key: it names an
     /// item ID the victim already holds, a vault ID of the victim's, sync metadata claiming huge counters and a
     /// conflict, and a scope the policy refuses. None of it reaches the vault: the import is a new item, with a new

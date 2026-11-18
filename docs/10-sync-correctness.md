@@ -395,15 +395,25 @@ failed each time.
   it. `ItemRecordMerger` then throws `ItemMergeError.resultNotSealable`, and the engine treats it like a U5
   quarantine: the local version stays, the remote entry is kept for the person (PRD F7.7), and the stream carries on,
   so unrelated items keep arriving (`mergeOverThePayloadLimit`). On that device the item no longer converges with
-  the others until a person resolves it: the price of a bound on record size.
+  the others until a person resolves it: the price of a bound on record size. A device holding such a version in
+  its quarantine (or one refused as an implausible jump, or one whose record ID another vault holds) counts the
+  segment that carried it as merged without having merged it, so, like a device holding entries it cannot read
+  (below), it writes no ordinary snapshot while the quarantine holds a version a trusted device wrote
+  (`06-adversarial-review.md` Z26): the collection rule below would otherwise let that segment go while no snapshot
+  carried the version. The same holds for a version it was to keep there and could not, the quarantine being full:
+  which devices' versions found no room is part of its signed state, and it writes no ordinary snapshot while that
+  names a trusted device (Z38). And a version it refused only as a jump for now is tried again in the same pass; a
+  pass cut short before that leaves a retry owed in the state, and the next sync replays the log (Z33), so the order
+  in which a log was read never leaves an honest version out for good.
 - **Kinds a device does not know** (ADR 0009, N7). The argument above is about items, on devices that read every kind
   in the log. A device of an earlier version keeps the entries of an ignorable kind it cannot read aside, unmerged,
   and merges everything else, so its items converge with everyone's; its state of that kind is simply behind, and
   catches up when it is updated and processes what it kept (or replays the log, if it had to drop some, or its stash
   was not saved after a crash). What makes that safe for the *other* devices is that it writes no ordinary snapshot
-  while it holds entries a trusted device carried: every ordinary snapshot is then the state of a device that merged
-  everything it covers, which is all §7.5's collection rule relies on. The one snapshot it still writes, for a revoked
-  device's work, covers only revoked streams, which nobody collects, so it changes nothing that rule relies on; and
+  while it holds entries a trusted device carried, or a version of one in its quarantine: every ordinary snapshot is
+  then the state of a device that merged everything it covers, which is all §7.5's collection rule relies on. The
+  one snapshot it still writes, for a revoked device's work, covers only revoked streams, which nobody collects, so
+  it changes nothing that rule relies on; and
   what a revoked device carried is forgotten (except its own versions, which nothing else carries), so a device
   revoked after planting an unreadable entry cannot hold snapshots back for good. A critical
   kind it cannot read stops that stream at the object, as a gap does; nothing past it is applied, so nothing is merged
@@ -429,12 +439,52 @@ discard by its resolution's revision, each history entry once per write that rec
 stamp included, against the segment that carried them (S36); and (3) every edit its clock says it contains, of any
 device but its own writer's, was published in a segment of that device's stream that counts: one carried a version of
 the record at or above the clock's count (S44 for a device whose account's work does not all count, S46 for a current
-member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head and the stream index,
-which every device holding the same segments computes alike; it does not depend on when or where the version was
-merged. Where (3) cannot be decided yet (the claimed device's stream is not here that far) the version waits, held
-aside until that stream grows; a claim about the judging device's own edits beyond what it published is false at once.
-A current member's device whose stream this device cannot read from its first segment (collected before the vault was
-shared, or sealed under keys this account was never given, S42) is not checked, and its edits are believed as before.
+member's). Call it `J(v)`. It depends on exactly these (review finding Z157):
+
+- the version's bytes;
+- the accepted membership chain: its head (who may write now, and each ended account's cut), the roles and keys along
+  it (which keys this account was entitled to, for vouching, and the latest record that ended a permission);
+- the stream index: for each device's stream, the segments recorded, each with its digest, its signer (always the
+  account the device's ID commits to), whether it opened and what it carried (versions and attributed values); the
+  coverage of the owner's snapshots merged (`collected`); and the devices judgements waited for or asked about
+  (`awaiting`, `relied`), which bind the judged basis;
+- the registries the chain anchors, each counted only for the devices whose IDs commit to its account
+  (`committedDevicesOnly`), less every ID two of them list (`countedRegistries`, Z165): which account a device is (one
+  at most), and which devices are revoked (the union, since each registry revokes only its own account's devices). A
+  stream recorded while only one of two such registries was here is forgotten when the second arrives, and the log
+  replayed, so the index too ends as it would had both come first.
+
+It no longer depends on which account signed a stream's lowest segment, on which accounts the current head passes
+over, on who could write when a segment's key was current, or on the order segments arrived in: a stream holds one
+account's segments, the one its device ID commits to, and an index records nothing an account that cannot count
+signed (Z146, Z152, Z155 are superseded). Every device holding the same segments, snapshots and registries computes it
+alike; it does not depend on when or where the version was merged. Nothing in the index is a function of the head
+any more (`passedOver` and its refiling are gone): a change of head changes `J` through the chain alone, and takes out
+and replays.
+
+Each input that can change without a change of head asks for the judgement again, so that a device that learnt it late
+ends where one that knew it first began: a lower segment that lowers a stream's first number (Z151), a new segment of
+a device a version waited for (`awaiting`), a snapshot whose coverage grows for one (Z151), and a counted revocation of a device a
+judgement waited for or asked about starting or stopping to count (Z153): the replay settles the *judged basis*, the
+head together with those revocations, and a change of it takes out and replays as a change of head does. Registries
+otherwise change `J` without a replay (which accounts list a device): only a later change of basis brings two such
+devices together, which is recorded in Z153. Where (3) cannot be decided yet (the
+claimed device's stream is not here that far) the version waits, held aside until that stream grows; a claim about the
+judging device's own edits beyond what it published is false at once, asked before anything else (Z136). A current
+member's device whose first segment this device holds and cannot open (sealed under keys this account was never given,
+S42) is not checked, and its edits are believed as before; one with no segment here has not published yet (a shared
+vault keeps its whole log, Z42), and a claim about it waits (Z136). A stream that will never grow here is never waited
+for (Z144): a revoked device's, which no device reads after it learns of the revocation, and a device of the owner's
+account whose first segments were collected before the vault was shared, which only an owner's snapshot merged here that
+covers them shows (Z151; otherwise they have not arrived), and only for versions of the same record no higher than that
+stream carried of it (Z160). Claims about them and values naming them are
+believed for an account that may write, so a device that recorded none of such a stream (enrolled, joined or rebuilt
+since) judges as one that recorded it all does: waiting, it held aside for good what every other device kept, which is
+divergence, not only loss. For an account that may no longer write the same still holds (tracked, Z158): a device
+that built its index after the revocation lacks the stream, and holds aside what devices that recorded it admit,
+until a revoked device's segments are read for the index up to its account's cut. Until a device learns of a revocation it reads the stream and waits for it like any other,
+so the two judgements meet once the registry has reached every device: learning it changes the judged basis, which
+replays (Z153).
 
 **Completeness: every effect of a write leaves a trace that names it.** Take a write `w` and any version `v` made, by
 any sequence of merges and updates, from a state that contains `w`'s result.

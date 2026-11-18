@@ -55,6 +55,8 @@ struct ImportView: View {
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
         .task { await model.load() }
+        // Revealed merge values are hidden again when the app resigns active or the screen is captured (Z95).
+        .onChange(of: app.privacy.concealments) { model.revealed.removeAll() }
         .onChange(of: model.stage) { focus = nil }
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: contentTypes) { read($0) }
         .confirmationDialog(
@@ -106,10 +108,21 @@ struct ImportView: View {
                     Text("Credential Exchange (CXF)").tag(ImportFileFormat.credentialExchange)
                 }
                 .accessibilityIdentifier(AccessibilityID.Import.format)
+                // `ImportOptions`, chosen before the file is read (owner decision K6: the apex is opt-out).
+                Toggle("Also offer each www address without www", isOn: $model.addsApexOfWWWHosts)
+                    .accessibilityIdentifier(AccessibilityID.Import.addsApex)
+                Toggle("Also import what the other app kept in its trash", isOn: $model.includesTrash)
+                    .accessibilityIdentifier(AccessibilityID.Import.includesTrash)
+            } else {
+                // The backup's trash is the person's to restore or not (Z82); the review lists what it leaves out.
+                Toggle("Also restore what was in the trash", isOn: $model.includesTrash)
+                    .accessibilityIdentifier(AccessibilityID.Import.includesTrash)
             }
         } footer: {
             if restoring {
-                Text("Every item in the backup goes into the vault you choose, naming the vault it came from.")
+                Text(
+                    "Every item in the backup goes into the vault you choose, naming the vault it came from. What "
+                        + "you had put in the trash comes back only if you choose it above.")
             } else {
                 Text("Export your passwords from the other app first. Nothing is saved until you review the import.")
             }
@@ -171,6 +184,9 @@ struct ImportView: View {
             }
         }
         Section(model.formatName) {
+            if !model.optionsLine.isEmpty {
+                Text(model.optionsLine).font(.footnote)
+            }
             ForEach(Array(model.reportLines.enumerated()), id: \.offset) { _, line in
                 Text(line).font(.footnote)
             }
@@ -190,12 +206,33 @@ struct ImportView: View {
                 Text("Choose what to do with each. A merge adds a website or a sign-in detail only if you accept it.")
             }
         }
+        if !model.concernsOfNewEntries.isEmpty {
+            Section {
+                ForEach(model.concernsOfNewEntries) { concern in
+                    ConcernBlock(model: model, concern: concern)
+                }
+            } header: {
+                Text("Would change AutoFill")
+            } footer: {
+                Text("Import one of these only if you know why the file has it. Skipping it leaves AutoFill as it is.")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(AccessibilityID.Import.concerns)
+        }
         Section("Items in the file") {
             ForEach(model.entries) { entry in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.title)
-                    if !entry.hosts.isEmpty {
-                        Text(entry.hosts.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+                    // Each host in ASCII with its registrable domain picked out: an entry's hosts need not be one
+                    // site's (review finding Z62).
+                    ForEach(entry.sites) { site in
+                        HostLine(host: site)
+                    }
+                    if entry.isArchived {
+                        Text("Archived in the file").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if entry.needsDecision && !entry.isDuplicate {
+                        Text("Would change AutoFill: see above").font(.caption).foregroundStyle(.orange)
                     }
                     if !entry.apexScopesAdded.isEmpty {
                         Text(
@@ -214,7 +251,10 @@ struct ImportView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(AccessibilityID.Import.entries)
         Section {
-            Button(model.undecided.isEmpty ? "Import" : "Choose for every duplicate first") {
+            Button(
+                model.undecided.isEmpty && model.undecidedConcerns.isEmpty
+                    ? "Import" : "Choose for every item above first"
+            ) {
                 Task { await model.commit() }
             }
             .disabled(!model.canCommit)
@@ -267,6 +307,11 @@ struct DuplicateBlock: View {
             ForEach(duplicate.options) { option in
                 Text(option.summary).font(.footnote)
             }
+            if let concern = model.concern(for: duplicate.id) {
+                ForEach(Array(concern.explanation.enumerated()), id: \.offset) { _, line in
+                    Banner(text: "Kept as a separate item: " + line)
+                }
+            }
             choice("Skip", .skip, id: "skip")
             choice("Keep Both", .keepBoth, id: "keepBoth")
             ForEach(duplicate.options) { option in
@@ -302,6 +347,7 @@ struct DuplicateBlock: View {
 /// What a merge would add to the existing item, each website, sign-in field and URL with its own switch, all off.
 /// Secret values are hidden until shown.
 struct MergeReviewView: View {
+    @Environment(AppModel.self) private var app
     let model: ImportModel
     let importedID: UUID
     let review: MergeReview
@@ -330,10 +376,22 @@ struct MergeReviewView: View {
                     fieldToggle(field)
                 }
             }
-            let added = review.otherFields + review.tags.map { "tag \($0)" } + (review.addsNotes ? ["notes"] : [])
-            if !added.isEmpty {
-                Text("The merge also adds: \(added.joined(separator: ", ")).").font(.footnote).foregroundStyle(
-                    .secondary)
+            // Added by the merge with no switch of their own, so shown in full before it is chosen (review finding
+            // Z67): a link or a phone number in a text field is read as the item's own.
+            if !review.otherFieldValues.isEmpty || !review.tags.isEmpty || review.addsNotes {
+                Text("The merge also adds these, as they are:").font(.footnote)
+                ForEach(review.otherFieldValues) { field in
+                    fieldValue(field)
+                }
+                if !review.tags.isEmpty {
+                    Text("Tags: " + review.tags.joined(separator: ", ")).font(.footnote)
+                }
+                if review.addsNotes {
+                    VStack(alignment: .leading) {
+                        Text("Notes").font(.caption).foregroundStyle(.secondary)
+                        Text(review.notes).font(.footnote).textSelection(.disabled)
+                    }
+                }
             }
         }
         .padding(.leading, 8)
@@ -363,12 +421,37 @@ struct MergeReviewView: View {
         }
     }
 
+    private func fieldValue(_ field: AdditionField) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(field.label).font(.caption).foregroundStyle(.secondary)
+                if field.isSecret && !(model.revealed.contains(field.id) && app.privacy.mayReveal) {
+                    Text("••••••••").accessibilityLabel("Hidden")
+                } else {
+                    Text(field.value).font(.footnote).textSelection(.disabled)
+                }
+            }
+            .accessibilityIdentifier(AccessibilityID.Import.field(field.label))
+            if field.isSecret {
+                Button(model.revealed.contains(field.id) ? "Hide" : "Show") {
+                    if model.revealed.contains(field.id) {
+                        model.revealed.remove(field.id)
+                    } else if app.privacy.mayReveal {
+                        model.revealed.insert(field.id)
+                    }
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier(AccessibilityID.Import.reveal(field.label))
+            }
+        }
+    }
+
     private func fieldToggle(_ field: AdditionField) -> some View {
         HStack {
             Toggle(isOn: fieldBinding(field.id)) {
                 VStack(alignment: .leading) {
                     Text(field.label).font(.caption).foregroundStyle(.secondary)
-                    if field.isSecret && !model.revealed.contains(field.id) {
+                    if field.isSecret && !(model.revealed.contains(field.id) && app.privacy.mayReveal) {
                         Text("••••••••").accessibilityLabel("Hidden")
                     } else {
                         Text(field.value)
@@ -382,7 +465,7 @@ struct MergeReviewView: View {
                 Button(model.revealed.contains(field.id) ? "Hide" : "Show") {
                     if model.revealed.contains(field.id) {
                         model.revealed.remove(field.id)
-                    } else {
+                    } else if app.privacy.mayReveal {
                         model.revealed.insert(field.id)
                     }
                 }
@@ -402,5 +485,69 @@ struct MergeReviewView: View {
         Binding(
             get: { model.isAccepted(field: id, for: importedID) },
             set: { model.setField(id, accepted: $0, for: importedID) })
+    }
+}
+
+/// A host as the person should read it before trusting it: ASCII, the registrable domain in bold, its reach, and the
+/// session's look-alike warning where there is one.
+struct HostLine: View {
+    let host: MergeHost
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 0) {
+                Text(host.prefix).foregroundStyle(.secondary)
+                Text(host.registrable).bold()
+            }
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.disabled)
+            Text(host.reach).font(.caption2).foregroundStyle(.secondary)
+            if let warning = host.warning {
+                Banner(text: warning).accessibilityIdentifier(AccessibilityID.Import.hostWarning(host.host))
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(host.ascii), \(host.reach)")
+    }
+}
+
+/// An entry that duplicates nothing and would still change AutoFill (`ImportConcernRow`): what it would do, then
+/// the two answers. There is no merge: it is not the same account as anything saved.
+struct ConcernBlock: View {
+    let model: ImportModel
+    let concern: ImportConcernRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(concern.title).font(.headline)
+            ForEach(concern.sites) { site in
+                HostLine(host: site)
+            }
+            ForEach(Array(concern.explanation.enumerated()), id: \.offset) { _, line in
+                Banner(text: line)
+            }
+            choice("Skip", .skip, id: "skip")
+            choice("Import Anyway", .keepBoth, id: "keepBoth")
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(AccessibilityID.Import.concern(concern.title))
+    }
+
+    private func choice(_ title: String, _ value: ImportChoice, id: String) -> some View {
+        Button {
+            model.choose(value, forConcern: concern.id)
+        } label: {
+            HStack {
+                Text(title)
+                Spacer()
+                if model.choices[concern.id] == value {
+                    Image(systemName: "checkmark").accessibilityLabel("Chosen")
+                }
+            }
+        }
+        .buttonStyle(.borderless)
+        .disabled(model.isWorking)
+        .accessibilityIdentifier(AccessibilityID.Import.choice(concern.title) + "." + id)
     }
 }

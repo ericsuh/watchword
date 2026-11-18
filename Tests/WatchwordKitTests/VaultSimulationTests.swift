@@ -88,7 +88,10 @@ struct LongRunningVaultSimulationTests {
             TestVault(
                 sync: SyncSettings(
                     state: InMemorySyncStateStore(), transport: await server.transport(for: Fleet.deviceID(index)),
-                    configuration: configuration), seed: seed &+ UInt64(index) &* 7_919, deviceName: "Device \(index)")
+                    configuration: configuration),
+                // Never the run's own seed: device 0's session drew the same UUIDs as `generator`, and a copy's new ID
+                // landed on an item the run had created (a collision of the harness, not of the session).
+                seed: seed &+ UInt64(index + 1) &* 7_919, deviceName: "Device \(index)")
         }
 
         var passwords = [TestVault.password]
@@ -187,7 +190,8 @@ struct LongRunningVaultSimulationTests {
                     // IDs from the run's own generator, so a seed replays the same run.
                     draft.id = Self.uuid(using: &generator)
                     for index in draft.fields.indices { draft.fields[index].id = Self.uuid(using: &generator) }
-                    let made = try await session.save(draft)
+                    // The simulation's hosts differ by one digit, which is a near miss to the look-alike check.
+                    let made = try await session.save(draft, confirmingHosts: Set(draft.scopes.map(\.host)))
                     note(step, device, "create \(made.id) in \(vault.id)")
                 case 12..<40:
                     guard var item = pick(try await session.items().items.filter { !$0.isTrashed }) else { break }

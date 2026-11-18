@@ -8,11 +8,12 @@ import WatchwordPresentation
 /// since it is what the person reads before deleting anything; and the bytes are dropped once saved. The CSV holds
 /// every value exactly as stored (owner decision, 2026-11-16).
 ///
-/// The file is written by the app itself, into a folder of its own in the temporary directory, with
+/// The file is written by the app itself, into the app's staging folder (`StagingFolder`), with
 /// `completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves it where the person
-/// chooses; whatever is left of it is removed when the mover is done, when the screen closes and at every lock. On
-/// macOS there is no protection class: the file is as safe as the folder the person picks (docs/02-architecture.md
-/// §14.1).
+/// chooses; whatever is left of it is removed when the mover is done, when the screen closes and at every lock, and
+/// the whole folder is swept at launch, unlock, lock and termination, so a process that dies with the mover up leaves
+/// it no later than the next launch (Z80). On macOS there is no protection class: the file is as safe as the folder
+/// the person picks (docs/02-architecture.md §14.1).
 struct ExportView: View {
     @Environment(AppModel.self) private var app
     @State private var model: ExportModel
@@ -182,7 +183,7 @@ struct ExportView: View {
             let options: Data.WritingOptions = []
         #endif
         do {
-            staged = try model.stage(in: FileManager.default.temporaryDirectory, options: options)
+            staged = try model.stage(options: options)
             moving = true
         } catch {
             model.errorMessage = "The file could not be prepared. Nothing was saved."

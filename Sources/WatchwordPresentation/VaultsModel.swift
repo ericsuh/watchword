@@ -19,9 +19,12 @@ public struct VaultSharing: Hashable, Sendable {
     /// Versions held aside in this vault, for the quarantine screen (review finding S49).
     public let heldAside: Int
     public let rotationPending: Bool
+    /// The account's own devices disagree about whose the vault is (review finding Z59): held closed here.
+    public let ownerDisputed: Bool
 
     public init(_ status: SharedVaultStatus) {
         role = status.role
+        ownerDisputed = status.ownerDisputed
         memberCount = status.membership.members.count
         requiresNewerVersion = status.requiresNewerVersion
         switch status.writePermission {
@@ -37,6 +40,16 @@ public struct VaultSharing: Hashable, Sendable {
     public var roleName: String {
         role.map(MemberRow.name(of:)) ?? "Not a member"
     }
+
+    /// This account left the vault or was removed from it. What this device already held of it is still here.
+    public var membershipEnded: Bool { role == nil }
+
+    /// What a vault this account is no longer in says of itself, wherever it is listed (PRD F4.3, F4.4; review
+    /// finding Z45). Nothing removes its items from the device; the person does, on the vault's screen.
+    public static let endedBadge = "No longer shared with you"
+    public static let endedDetail =
+        "You are no longer a member of this vault. What this device already holds of it stays on this device until "
+        + "you remove it; it is no longer updated, and AutoFill does not offer it."
 }
 
 /// One vault in the vault list (PRD F2.1).
@@ -49,14 +62,41 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     /// `nil` for a vault that is not shared, or for one that is unavailable here (`unavailability`).
     public let sharing: VaultSharing?
     /// A shared vault with no verified ledger on this device, and why: shared, and closed here until the owner is
-    /// checked again or the vault is set up on this device again (`VaultSession.unavailableSharedVaults`; V19, V31,
-    /// V33). Never shown as one of the account's own.
+    /// checked again or the vault is set up on this device again (`VaultSession.unavailableSharedVaults`; review
+    /// finding Z41, V19, V31, V33). Never shown as one of the account's own.
     public let unavailability: SharedVaultUnavailability?
+    /// The account's own devices disagree about whose this shared vault is (`VaultInfo.isOwnerDisputed`, review
+    /// finding Z59): held closed on all of them, with or without a ledger here.
+    public let isOwnerDisputed: Bool
 
     /// Shared and unavailable on this device.
     public var awaitingOwnerCheck: Bool { unavailability != nil }
 
-    public var isReadOnly: Bool { awaitingOwnerCheck || sharing?.readOnlyReason != nil }
+    /// The vault is shared and this device holds no membership ledger for it (`VaultInfo.isSharedUnavailable`): its
+    /// account's other device shared or joined it, or this device's sharing data was lost. Never labelled "Only
+    /// you": other accounts read it. Nothing can be changed in it from here until it is set up here.
+    public var isSharedUnavailable: Bool { unavailability != nil }
+
+    public var isReadOnly: Bool { readOnlyReason != nil }
+
+    /// Why nothing can be written to this vault from this device now, worded; `nil` while it can.
+    public var readOnlyReason: String? {
+        if isOwnerDisputed { return Self.ownerDisputedReason }
+        guard let unavailability else { return sharing?.readOnlyReason }
+        if case .notSetUp = unavailability { return Self.notSetUpReason }
+        return ErrorWording.unavailable(unavailability)
+    }
+
+    public static let ownerDisputedBadge = "Shared · your devices disagree about its owner"
+    public static let ownerDisputedReason =
+        "Your devices were given two different owners for this shared vault, so one of them joined a vault that is "
+        + "not the one you meant, and nothing here can tell which. It cannot be changed from any of your devices. Its "
+        + "items can still be read and copied into a vault of your own, which you can share again after checking "
+        + "the owner's safety number with them in person."
+    public static let notSetUpBadge = "Shared · not set up here"
+    public static let notSetUpReason =
+        "This shared vault is not set up on this device, so it cannot be changed from here. Set it up on this device, "
+        + "or accept its invitation here, to use it."
 
     /// Whether this account may rename the vault: always for one that is not shared, and for a shared one only as its
     /// owner or an administrator (docs/02-architecture.md §8.7). The session's answer, not the screen's.
@@ -64,7 +104,8 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
 
     /// Why this account cannot rename the vault, worded; `nil` while it can.
     public var renameRefusal: String? {
-        unavailability.map(ErrorWording.unavailable) ?? sharing?.renameRefusal
+        if isOwnerDisputed { return Self.ownerDisputedReason }
+        return unavailability.map(ErrorWording.unavailable) ?? sharing?.renameRefusal
     }
 
     /// Whose vault this is and this account's part in it, from the session's facts rather than the name: an
@@ -72,12 +113,14 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     /// can try (review of the account screens, finding 4). Shown wherever a vault is named, beside the name.
     public var badge: String {
         if isPersonal { return "Your own vault" }
+        if isOwnerDisputed { return Self.ownerDisputedBadge }
         switch unavailability {
         case .ownerNotChecked?: return "Shared · check its owner"
-        case .notSetUp?: return "Shared · not set up here"
+        case .notSetUp?: return Self.notSetUpBadge
         case nil: break
         }
         guard let sharing else { return "Only you" }
+        if sharing.membershipEnded { return VaultSharing.endedBadge }
         if sharing.role == .owner { return "Shared by you" }
         return "Shared with you · " + sharing.roleName
     }
@@ -86,17 +129,19 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
     public var label: String { "\(name) (\(badge))" }
 
     /// Whether other accounts can read what is saved here.
-    public var isShared: Bool { sharing != nil || awaitingOwnerCheck }
+    public var isShared: Bool { sharing != nil || awaitingOwnerCheck || isOwnerDisputed }
 
     /// What the row says under the name.
     public var detail: String {
         if isPersonal { return "Your own vault. It is never shared." }
+        if isOwnerDisputed { return Self.ownerDisputedReason }
         switch unavailability {
         case .ownerNotChecked?: return "Shared. Check its owner again before it can be used here."
         case .notSetUp?: return "Shared. Set it up on this device before it can be used here."
         case nil: break
         }
         guard let sharing else { return "Only you" }
+        if sharing.membershipEnded { return VaultSharing.endedDetail }
         if sharing.requiresNewerVersion { return "Read-only: update Watchword" }
         let members = sharing.memberCount == 1 ? "1 member" : "\(sharing.memberCount) members"
         return "Shared, \(members). You: \(sharing.roleName)"
@@ -109,8 +154,10 @@ public struct VaultRow: Hashable, Sendable, Identifiable {
         createdAt = info.createdAt
         self.sharing = sharing
         // The session's word, from either source: a vault it lists as unavailable is never shown as the account's own.
+        // A ledger this device holds is the better fact; without one, the session's own answer.
         self.unavailability =
-            unavailability ?? (info.isSharedUnavailable && sharing == nil ? .notSetUp(owner: nil) : nil)
+            sharing == nil ? (unavailability ?? (info.isSharedUnavailable ? .notSetUp(owner: nil) : nil)) : nil
+        isOwnerDisputed = info.isOwnerDisputed || sharing?.ownerDisputed == true
     }
 }
 

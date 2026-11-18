@@ -21,6 +21,37 @@ struct WordingTests {
         #expect(SyncSummary.describe(report).contains("could not be reached"))
     }
 
+    @Test("a device whose own changes are not going out is told so, without the words the UI tests wait for")
+    func ownStreamHeldBack() {
+        var report = SyncReport()
+        report.ownStreamUnverified = 7
+        let held = SyncSummary.describe(report)
+        #expect(held.contains("held back"))
+        report.ownStreamExhausted = true
+        let exhausted = SyncSummary.describe(report)
+        #expect(exhausted.contains("cannot go out"))
+        // Its next place in a vault's sync storage is taken (review finding Z137): the person used to read
+        // "Up to date." while nothing went out and deletions were held back.
+        report = SyncReport()
+        report.ownStreamConflict = 9
+        let taken = SyncSummary.describe(report)
+        #expect(taken.contains("already taken"))
+        // Another account wrote in this device's place in a shared vault (review finding Z146): told, where it was
+        // told nothing while every other device held its work aside.
+        report = SyncReport()
+        report.ownStreamSteppedOver = 1
+        let steppedOver = SyncSummary.describe(report)
+        #expect(steppedOver.contains("wrote in this device's place"))
+        report = SyncReport()
+        report.quarantineFull = 3
+        report.collided = [RecordKey(recordID: UUID(), kind: .item)]
+        let full = SyncSummary.describe(report)
+        #expect(full.contains("3 more could not be kept") && full.contains("another vault"))
+        for line in [held, exhausted, taken, steppedOver, full] {
+            #expect(!line.contains("sent") && !line.contains("received"))
+        }
+    }
+
     @Test("a sync stopped by a newer format says to update the app (ADR 0009)")
     func updateRequired() {
         var vault = SyncReport()
@@ -55,6 +86,22 @@ struct WordingTests {
         let notice = try #require(summary.notices.first { $0.id == "snapshotWithheld" })
         #expect(notice == .snapshotWithheld(by: ["Pat's iPad", "a device of another member (1A2B3C4D)"]))
         #expect(notice.text.contains("Pat's iPad"))
+    }
+
+    /// Review finding Z37: a device that holds snapshots back for what it keeps aside said nothing, and the summary
+    /// read "Up to date." while the stall lasted.
+    @Test("a snapshot withheld for what is held aside is a notice, whichever vault said so")
+    func snapshotWithheldForReview() {
+        var vault = SyncReport()
+        vault.snapshotWithheld = true
+        vault.snapshotWithheldForQuarantine = true
+        var report = AccountSyncReport()
+        report.vaults[UUID()] = SyncReport()
+        report.vaults[UUID()] = vault
+        #expect(report.combined.snapshotWithheldForQuarantine)
+        let summary = SyncSummary(report)
+        #expect(summary.notices.contains(.snapshotWithheldForReview))
+        #expect(SyncNotice.snapshotWithheldForReview.text.contains("Held-Aside Changes"))
     }
 
     @Test("a password changed elsewhere is a notice, not a promise that changes will be applied at unlock")

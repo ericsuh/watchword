@@ -39,24 +39,35 @@ mise run test --filter WatchwordMatchingTests.ItemRankerTests   # one XCTest cla
 mise run test --coverage                               # also writes an llvm-cov report to coverage.txt
 mise run test:adversarial                              # security suite only (its own CI job)
 mise run test:long --seed 1234                         # the nightly long randomised run; replay a nightly's seed
-mise run test:scripts                                  # the repository's own scripts (screenshots.yml's steps, app:screenshots), against stand-in tools
+mise run test:scripts                                  # the repository's own scripts (workflow steps, app tasks, audits, cloud-setup.sh), against stand-in tools
 mise run fuzz --max-total-time 60                      # libFuzzer over every target in Fuzz/ (--target <name>, --list)
 
 mise run lint                                          # swift format lint --strict (alias fmt:check)
 mise run fmt                                           # swift format --in-place
 mise run audit                                         # dependency, unsafe, strict-build, action-pin, mise-pin tripwires
+mise run audit:actions                                 # every `uses:` a 40-hex SHA; reads the workflows as YAML and refuses what it cannot read
 mise run build:strict                                  # -strict-memory-safety, warnings as errors; skips before Swift 6.2
 
 # Apps (macOS only; mirrors the app-tests CI job). Each regenerates the project from Apps/project.yml first.
 mise run app:generate                                  # xcodegen; refuses an XcodeGen other than mise.toml's
 mise run app:build [ios|macos]                         # both by default; --configuration Release
 mise run app:test [ios|macos]                          # both by default; --only-testing/--skip-testing <ids,…> (need a platform), --results, --simulator
+mise run app:release [ios|macos]                       # Release builds, read for the Debug-only UI-test switch (the release-build CI job)
 mise run app:diagnose [TestResults]                    # a failed run's summary, runner logs, crash reports; ends in STEP lines and "UI-test summary"
 mise run app:screenshots [ios|macos]                   # the screenshot tour: Screenshots/<set>/*.png, index and a one-PNG contact sheet; --appearance dark, --device ipad
 mise run app:test-keychain --team <ID>                 # real Keychain round trip, signed with your team (local only)
 mise run clean                                         # .build, generated project, logs, result bundles
 mise run ci:gate <gate> [--filter=…] [--platform …]   # one gate as its ci.yml job runs it, plus a failure summary: what mac-run.yml runs (app:screenshots too)
 ```
+
+The root `Package.resolved` does not govern an Xcode build, and Xcode writes none of its own for this project. So every
+`xcodebuild` call in an app task is given `"${package_arguments[@]}"` (`mise-tasks/app/packages.sh`: one
+`-clonedSourcePackagesDirPath`, `.build/app-source-packages`), and each task has Xcode resolve first and refuses to
+build unless the git checkouts under that directory are exactly the packages and commits `assert-no-dependencies.sh`
+names, unchanged (`--checkouts`). A new task that runs `xcodebuild` sources `packages.sh`, calls `resolve_packages` and
+`check_resolved_packages`, and passes the arguments on every call; `test:scripts` fails one that does not. Unproven
+until a Mac run passes: a failure prints what Xcode left there. Xcode resolves live, so a new swift-asn1 release
+turns the app jobs red until `ALLOWED_PINS` and `Package.resolved` are bumped: that is the bump's trigger, not a flake.
 
 UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-memory ports and the KDF floor, and syncs
 over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only Settings
@@ -169,7 +180,8 @@ Fifteen shipped modules, dependency-ordered, plus test support:
   its amendments).
 - **`WatchwordCrypto`** — Secret Key, 2SKD, KDF calibration, keyset, vault keys, HPKE grants, signatures,
   fingerprints, record sealing; device keys and signatures (`DevicePublicKey`, `DeviceSignatures`,
-  `SoftwareDeviceKey`, `EnrolmentKey`), the device registry (`RegistryEntry`, `DeviceRegistry.evaluate`), the
+  `SoftwareDeviceKey`, `EnrolmentKey`), device IDs that commit to their account (`DeviceIdentifier`), the device
+  registry (`RegistryEntry`, `DeviceRegistry.evaluate`), the
   published account header (`AccountHeaderObject`), `DeviceLocalKeys` (the hygiene reuse key and the key and
   record names of a device's unsynced local records), `HygieneKeys` (the binding key of a vault's synced scan
   results, from a vault key), and the encrypted Watchword archive (`AccountArchive`,
@@ -243,8 +255,10 @@ Fifteen shipped modules, dependency-ordered, plus test support:
   `WatchwordMatching`; Foundation only, no keys, files or clocks. `WatchwordKit` depends on it, never the reverse.
 - **`WatchwordPresentation`** — the apps' screen models: one main-actor `@Observable` model per account screen
   (`VaultsModel`, `SharedVaultModel`, `InvitationModel`, `AcceptInvitationModel`, `DevicesModel`, `QuarantineModel`,
-  `HygieneModel`, `ImportModel`, `ExportModel`) over a `ScreenContext` (the session, and the app's activity and lock
-  hooks), and the wording (`ErrorWording`, `SyncSummary`, `InterchangeWording`, `SharingCodes`). Depends on
+  `HygieneModel`, `ImportModel`, `ExportModel`, `EmergencyKitModel`) over a `ScreenContext` (the session, and the
+  app's activity and lock hooks), `StagingFolder` and `StagingSweeper` (the one folder files are written into for the
+  file mover, Z80), `ScreenPrivacy` and `RevealedSecrets` (when revealed secrets are hidden again, F5.7, Z95), and the
+  wording (`ErrorWording`, `SyncSummary`, `InterchangeWording`, `SharingCodes`). Depends on
   `WatchwordKit` and the modules whose types it shows; `WatchwordPresentationTests` drives it over real sessions on
   Linux. It decides nothing about security: every refusal stays in `VaultSession`, and the model words it.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
@@ -279,7 +293,9 @@ lists what is open (file protection and the screens, Credential Exchange, restor
 - Only five hexadecimal characters of a password's SHA-1 ever leave the device, in
   `GET https://api.pwnedpasswords.com/range/XXXXX` with `Add-Padding: true` and the `User-Agent`. The hosts are the two
   constants of `HygieneHost`; `HTTPSURL` has no public initialiser. Never add a configurable host, follow a
-  redirect, or put anything else in a request.
+  redirect, or put anything else in a request. That is a statement about each request. Across a vault's weekly
+  checks the service holds a linkable set of prefixes, its size, its changes and which belong to one item
+  (`docs/02-architecture.md` §13.1): never describe the checks as telling the service nothing.
 - A response that could not be read is an error, never "not breached": the parser's bounds (bytes, lines) fail closed
   and counts saturate. Suffix comparison (`PwnedRange.result`) scans every entry without branching on a match. The
   breached-account response is bounded *while reading* (entry 2,001 ends the read); never decode a whole array and
@@ -310,7 +326,10 @@ lists what is open (file protection and the screens, Credential Exchange, restor
 - "Clear" is about every password in the item: more than 16 password fields is `incomplete`, and two password
   fields sharing an ID share the worse result. An unknown result is never "not breached".
 - The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts; bindings). They are
-  persisted only sealed, per device, unsynced. Nothing here writes to disk.
+  persisted only sealed, per device, unsynced. Nothing here writes to disk. The cache is **partitioned by vault**
+  (`PwnedRangeCache` takes the partition, `HygieneEngine` passes the item's vault): a cache hit costs no token and
+  scan times are synced, so a range fetched for one vault must never answer another's check (Z88). Sealed range
+  records are padded (`encodedPadded`, Z89).
 - **Synced results only postpone, never hide** (owner decision 10; ADR 0005, amendment of 2026-11-16; §13.9). Results
   and scan times are also synced, as `SyncedScanRecord` (kind `scanStatus`, beside the item, never an item version or
   history entry), a join of each device's latest observation. Every result is under a `ScanBinding` (a keyed digest of
@@ -351,13 +370,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `ImportReport`. Never drop, change or refuse something without a line in the report, on import or on export
   (`ExportReport`, `ExportSupport`).
 - Per-entry and per-file limits do not bound their product, so the import as a whole has budgets
-  (`maximumTotalFields`, `maximumScopeDerivations`), counted in `ImportAssembler.add` before an entry is built. A new
+  (`maximumTotalFields`, `maximumScopeDerivations`, counted in `ImportAssembler.add` before an entry is built, and
+  `maximumTotalStoredBytes`, the drafts' stored-size estimates summed as each is kept, Z81). A new
   per-entry cost needs a place in one of them. CSV rows are streamed (`CSVReader.forEachRecord`), never held beside
   the drafts. A draft is measured as the vault will store it (`StoredItemSize`, checked against `ItemMerge.stamped`
   and `ItemCodec` by the adversarial suite): if the stored form of an item changes, that estimate changes with it.
 - A merge never widens (`DuplicateDetector`), here or in a file exported afterwards: scopes, sign-in fields and
   `url` fields from a file reach an existing item only through `MergeChoices`, one host or field at a time, and an
-  accepted URL stays a website (`InterchangeMeta.websiteType`) only where the merged item is scoped to its host.
+  accepted URL stays a website (`InterchangeMeta.websiteType`) only where the merged item is scoped to its host. A
+  host a merge adds that would hide or stand beside another account, or resembles a saved site, also needs
+  `MergeChoices.confirmedHosts`, checked by the session (`checkMergedHosts`, Z75), never by the screen alone.
   Don't add an "accept all", and don't make `merged` add any of them by default.
 - An export never widens either: `ExportSupport.websites` is the one place that decides what a format writes as a
   sign-in URL, and it writes none for a host the item is not scoped to (reported as `websiteNotScoped`). Don't let an
@@ -440,11 +462,19 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   context, AEAD, then payload, in that order. A stream is merged strictly in sequence: never skip a gap.
 - A segment carries only its author's versions, and each record envelope's own context must match its entry
   before anything is applied. Record versions above `maximumVersion` or jumps beyond `maximumVersionJump` are
-  quarantined (U5).
+  quarantined (U5); a jump is measured against what the pass has merged (`retryOutOfReach` tries again, lowest first,
+  what was refused on the way, and a pass cut short leaves `SyncState.retryUnfinished` set so the next sync replays,
+  Z33; an entry whose retry fails stays aside, Z36), and a device that holds nothing of a vault with no judge takes the
+  snapshots it starts from as its baseline (Z25). Never merge from the quarantine itself: it is a local file.
 - **Never lose data (PRD F7.6, F7.7).** `ItemMerge` is a multi-value register per group: a value is replaced only
   by one written *knowing about it* (its `GroupStamp.seen` vector contains it); concurrent values all stay, in
   `Item.conflicts`, until the person edits the group or calls `ItemMerge.resolve`. Notes merge line by line
-  (`NoteText`). Merges never shorten a history; quarantined versions are kept. A permanent deletion carries an
+  (`NoteText`). Merges never shorten a history; quarantined versions are kept, up to a cap per vault and per writing
+  device, past which a version is not kept on this device and the report counts it (`quarantineFull`, Z27: the
+  quarantine is found by lookup and never reread; sizes are summed without overflow, Z39), and the state remembers
+  whose (`SyncState.quarantineDropped`, Z38): no ordinary snapshot while it names a trusted device, and a replay once
+  there is room; for a version the store refused for a crowded digest, only once the quarantine holds fewer entries
+  than it did then (`SyncState.quarantineCrowded`, Z147), never at every sync. A permanent deletion carries an
   erasure summary and removes only what its author had seen; anything else is kept, trashed
   (`Item.keptAfterDeletion`). Every discard is the person's: a permanent deletion, `ItemMerge.resolve`, and the 30-day
   trash purge (F1.5). Sync can leave an item in the trash that nobody chose to discard, so the purge removes only
@@ -482,15 +512,42 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   on the copy in question: the merger believes no summary naming a later row (Y28) and writes a kept version above
   that stamp and the row, through `ItemMerge.written`.
 - Deletions are explicit (`DeletionRecordingStore`), never inferred from a missing row, and a pending deletion
-  counts as an erasure while merging. The outbox compares rows with `SyncState.published`, not `known`.
+  counts as an erasure while merging. Its tombstone is signed *before* the deletion commits and recorded after
+  (`SyncStateStore.prepared`, Z28): never add a step that needs keys between the commit and the record. The outbox
+  compares rows with `SyncState.published`, not `known`, and a version found in the log under this device's name
+  counts as published only if it is the row the device holds, and a deletion only if it is this device's own, pending
+  or published at that stamp, never because no row is held (Z29, Z35, Z138).
 - A record can be erased more than once. A device remembers the join of every erasure of a record
   (`RecordMerger.joinErasureSummaries`; for items the union of `ItemErasures`, stamped with the later stamp) and
   judges versions against that, so arrival order decides nothing. A pending
   deletion is done only when this device published a deletion at or after its stamp *and* the join already holds
   what it had seen; never skip one because another device's erasure, or this device's own earlier one, is stamped
   later (W13, W18).
-- The next sequence number is never below the stream's highest on the transport; every listed snapshot is merged;
-  a segment is collected only once every other stream acknowledges it and a listed snapshot covers it.
+- The next sequence number is never below the highest object of this device's own stream that carries this device's
+  *own* signatures (`SyncKeyring.verifyOwn`; in a shared vault once another member's device could verify there, S33, Z30, and since Z157 none can),
+  and comes from nothing else: never from a listed name (anyone can create one, Z24), a staged row (Z39), or a
+  snapshot's coverage beyond what the stream can have got (Z21). Publishing is held back (`ownStreamUnverified`) only
+  where the state could be behind the stream: no own object listed (`Listing.ownAnchored`, Z31), and an own-stream
+  object at or past the next number that cannot be told from this device's own, or, for a device whose signed state
+  says it published there, a trusted snapshot's coverage or segment's acknowledgement of its stream reaching the next
+  number (Z32, Z139, Z145), the latter only where the vault's log is collected (`maintainsLog`; a shared vault collects
+  nothing, so there it guarded nothing and could hold a device for good, Z154). A name shown not to be this device's own is evidence of nothing, and a device that never
+  published is held by no claim: either brought back a hold nothing could end. One exception moves the number, never
+  holds it: where the log is kept whole, a device of this account's own (`SyncConfiguration.ownStreamWitnesses`, not
+  revoked) whose snapshot or acknowledgement says it merged this stream at or past the next number puts the next
+  publication above that claim (`push`, `witnessedFloor`; saved only once published), since those numbers were used and
+  removed (round 5's L-M2, Z159); never take another account's word for it (Z154). It never counts the numbers between
+  as merged: `merged[self]` moves only with a publication that follows on from it, so what the stream holds there is
+  merged in sequence once listed (a lagging listing, Z163).
+  `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
+  every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that starts
+  above what this device collected already (`SyncState.collectedThrough`, Z149) and stops at the first number the
+  listing lacks, and never this device's own genuine head (what it published or verified as its own), whatever names
+  are listed above it (Z135; the anchor rests on that order).
+- A failure of local storage is a `StorageFailure` (`RecordStoreError`, `SQLiteConnection.Failure`) and stops a sync;
+  never let one reject the object being merged or downloaded (Z39, Z142).
+- A record ID that a record of another vault holds on this device costs that entry alone (`SyncReport.collided`,
+  kept in the quarantine): never reject an object, or stop a stream, for it (Z22).
 - Store writes name the version they read (`StoreChange.expectations`), because the merger awaits.
 - Every object carries two signatures over `name ‖ 0x00 ‖ envelope` under `SignatureDomain.logSegment`: the
   account key's and the writing device's own (`DualSignature`). `verify` accepts only a device the registry holds
@@ -513,7 +570,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   entry from being kept again. A
   device holding entries carried by a trusted device writes no ordinary snapshot, only the one it owes a revoked
   device's work, covering revoked streams alone; what a revoked device carried is forgotten except its own versions,
-  which hold nothing back and survive a replay. `stashUnsaved` makes a sync after a crash replay the log. A critical
+  which hold nothing back and survive a replay. The same goes for the quarantine: while it holds a version a trusted
+  device wrote, no ordinary snapshot (`snapshotWithheldForQuarantine`, Z26). `stashUnsaved` makes a sync after a
+  crash replay the log. A critical
   kind stops the stream at the object, skips nothing and sets `requiresNewerVersion`. Never let a stashed entry reach
   the store or a merger except through `processStashed`, which drops any critical kind (only A8 can plant one). In a
   shared vault nothing a held-aside segment carried is kept, a trusted device's kept entries are judged by the replay
@@ -521,6 +580,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   segment to judge it by).
 - Pending deletions in the state store are signed by the session (`AuthenticatedSyncState`,
   `SignatureDomain.pendingDeletion`); one that does not verify is ignored, so a row planted in the file erases nothing.
+- The state row is signed too (`SyncState.authenticator`, `SignatureDomain.syncState`, bound to the vault and the
+  device, Z20): its erasures become this device's signed tombstones and its merged vector signed coverage, so a row
+  the session did not sign is no state and the log is replayed. A field added to `SyncState` goes into
+  `authenticatedBytes` (appended only when set, as `retryUnfinished` and `quarantineDropped` are, so that older rows
+  still verify); read the row through the session's `syncState`, never `syncSettings.state`, wherever what
+  it says is acted on.
 
 ### `WatchwordSharing` invariants
 
@@ -551,7 +616,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (`owedRemovals`): the member's writes count only as far as that record's cut, `recordsToReseal` is empty, and
   any device that may sign it
   plans it again. Everything else that loses is proposed again by its author (`status(of:)`); a device ingests
-  before it proposes and never publishes a record that is not `awaitingPublication`.
+  before it proposes and never publishes a record that is not `awaitingPublication`. **Except an addition its own
+  branch went on to undo** (`wasUndoneOnItsBranch`, Z43): that is let go, never replayed alone, and if the key that
+  branch wrapped to the member is the accepted head's they are in `exposedKeyHolders`: `recordsToReseal` is empty,
+  `pendingRotation` says so, and an administrator's device rotates. Both are functions of the records held, and both
+  believe a branch only as far as accounts with standing on the accepted head signed it, with the key matched by the
+  record that introduced it, on the accepted chain, never by its ID (Z53, as S29 for owed removals).
 - A record's hash covers its signed content, not its signature; candidates sharing a hash are each examined until
   one verifies (S3, S4). Every object *name* ends in a digest of the whole object, signature included, so nobody can
   take a predictable record's name (S20).
@@ -577,6 +647,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (a rotation, `makeGrant`) takes a `MemberKeyCheck` made on the current head, which only
   `MembershipLedger.checkMemberKeys` makes: a member whose listed keys differ from the pin is refused.
   (`MemberKeyCheck.unchecked` is for `WatchwordTestSupport`; no production target calls it.)
+- **Evidence names the keys it is about** (Z40): the key directory is asked again between a lookup and a pin, so
+  every kind of evidence is checked against the bundle being pinned (`fingerprintMismatch`): a typed full code, a
+  scanned code, a session's `SharingCodeEvidence`. Z40's `comparedByEye(shown:)` is gone with the comparison by eye
+  itself (ADR 0010, V15). Never add evidence that is a bare "yes", and never pin a bundle fetched after the one checked.
 - Bundles are compared with `hasSameKeys`, never `==`: Ed25519 signing is randomised on CryptoKit, so the same keyset
   gives a different self-signature each time. A Linux pass cannot show a mistake here.
 - A grant's vault, key ID and recipient come from its storage location, and its sender must be the one account
@@ -616,11 +690,33 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 
 - Nothing unlocks on a boolean. `BiometricGate` reports enrolment only; quick unlock needs the Keychain to release
   the Local Unlock Key, that key to open the wrapped AUK, and the AUK to open the keyset. Keep it that way.
-- A refused quick unlock *deletes* the Local Unlock Key; it is not merely ignored.
+- A refused quick unlock *deletes* the Local Unlock Key; it is not merely ignored. An attempt is counted in the
+  Keychain **before** the prompt is shown and taken back only when the released key has opened the keyset (Z7):
+  never move the count behind the read, which does not return if the app is killed.
+- **Which vault is Personal is the header's to say, not the row's** (Z5): both unlock paths call
+  `requirePersonalVaultBinding` before a key is installed, and the Personal vault's key is never one that
+  `arrivedByGrant`. A new unlock path does the same.
+- **The device's own header first** (Z1, `openAccount`). A typed password is tried against the header this device
+  has before anything else, and never against a candidate when it opens that or when `ignoringPasswordChange` is
+  set. Candidates are pending changes only, one attempt per authoring device, those whose registration the followed
+  checkpoint sealed first (Z13); a fork is followed only from an unlocked session, with the password the device
+  follows re-derived under its own header (`followPasswordChange(by:current:password:)`, Z8, Z14). Never try a
+  candidate ahead of the trusted header, and never adopt one whose branch revokes this device. A candidate's
+  derivation runs off the actor (`AwayWork.candidateDerivation`).
+- **A header ahead of the anchor is no step of this device's unless the Keychain named it** (Z9). `adopt` and
+  `rotateCredentials` commit through `commitOwnStep`, which writes the intent (credential entry, SHA-256 of the
+  header row) into the anchor first; decisions read `trustedAnchor`, which completes or drops it. Never move an
+  existing anchor from what the file holds, and never decide on `readAnchor` directly.
 - The actor is re-entrant across `await`: after every suspension, re-check the lock epoch (`requireKeys(since:)`)
   before touching key material, so `lock()` always wins.
 - Read contexts come from the store row, and a decrypted item's `id`/`vaultID`/`version` must equal the row's.
-- Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends (and in `resolveConflict`).
+- Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends (and in `resolveConflict`). A host a save
+  adds is judged against `SavedSites` (what the gate ranks among, every vault): one that resembles a saved site or
+  cannot be read by eye is refused (`hostsNeedConfirmation`) unless the call names it in `confirmingHosts` (F11.7,
+  Z61). It is recognised only by the person's own vaults or the item's own (`standing(…, inVault:)`, Z76): pass the
+  item's vault wherever a host is about to be added. `ItemEditorModel` asks; a view that skips it is refused all the
+  same. `saveCredentialItem` judges the same way (`confirmingHosts`: only a host whose warning the model's sheet
+  showed, Z78): no caller answers for every host.
 - The vault owns sync metadata: every write goes through `ItemMerge.stamped` and commits conditionally on the row it
   read (`commitItem`); a caller's `revisions`, `clock` or `conflicts` are never trusted. The session's deletions go
   through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.
@@ -640,12 +736,24 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   or a transport, and every hygiene query reconciles the engine with the store first. No timer: the UI or a
   background task calls `runHygieneStep()`.
 - Imports are preview then commit (§14.1). The drafts stay in the actor (`pendingImport`) and `lock()` drops them;
-  what leaves the actor before a commit holds no secret but what `importAdditions` hands the duplicate screen. A
+  what leaves the actor before a commit holds no secret but what `importAdditions` hands the duplicate screen. The
+  preview judges every entry against `SavedSites`, in every vault (`ImportConcern`, Z62): one that would hide or
+  stand beside a saved account, or name a look-alike host (of a saved site, or of another host of the same entry,
+  compared for resemblance only, Z74), needs a decision like a duplicate; an entry from the source's trash is judged
+  too and created in the trash in its one write (Z73). A
   commit checks every decision before writing, saves new items through `ItemMerge.stamped`, `ScopePolicy` and
   `commitItem` (keeping the file's history and times, never its IDs, vault or sync metadata), and merges over the
   item as the write reads it. Never add a path that writes an imported item another way.
-- A plaintext export or an archive needs the account password in the same call, re-derived under the stored
-  header (`verifyAccountPassword`), never a remembered "recently verified". File protection is the app's.
+- A plaintext export, an archive or the Emergency Kit needs the account password in the same call, re-derived under
+  the stored header (`verifyAccountPassword`), never a remembered "recently verified" (`emergencyKit(password:)`, Z86;
+  only `unconfirmedEmergencyKit` skips it, for keys opened with the password while the kit is unconfirmed). File
+  protection is the app's: every file the app writes for the file mover goes into `StagingFolder` (portable, in
+  `WatchwordPresentation`), swept at launch, unlock, lock and termination (Z80); never `fileExporter`.
+- An archive this app wrote must restore: `ArchivedItems` uses `InterchangeLimits.archive`, sized to the vault and
+  the format, and `exportArchive` reports what a restore would still not bring back (`restoreCheck`, Z82). Only for an
+  archive opened with this device's own Secret Key: one opened with a typed Kit key gets
+  `InterchangeLimits.archiveOfAnotherAccount` (a file's import-wide budgets, Z128), and the check says when this
+  account's archive would not restore into a new account (`limitReachedInAnotherAccount`).
 - The archive is sealed under the archive passphrase *and* the Secret Key (ADR 0008); `AccountArchive.parse`
   checks everything, KDF bounds and every envelope's place included, before a key is derived, and every failure
   after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.
@@ -653,10 +761,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   export its type (`.watchwordbackup`, `ExportKind.archiveTypeIdentifier`) and open no documents: never add
   `CFBundleDocumentTypes`, so a backup reaches the parser only through the restore screen's picker.
 - `lock()` never queues behind interchange work: a plaintext file's parse, an archive's parse, derivation and
-  decoding, and an export's password and archive derivations run off the actor (`awayFromSession`, named by
+  decoding, the bounding of an import's dates (Z132), and an export's password and archive derivations run off the actor (`awayFromSession`, named by
   `AwayWork`) on copied inputs, touching no session state, and the epoch is checked on return (`requireKeys(since:)`).
   IDs drawn there come from a `ForkedGenerator`, never a copy of `random`; key material, salts and nonces only from
-  `random`, on the actor. A new long step goes there too, with a test that holds it (`awayWorkHook`) and locks.
+  `random`, on the actor. A new long step goes there too, with a test that holds it (`awayWorkHook`) and locks. So do
+  a candidate header's derivation (Z14) and another member's registry replays (Z10), which may run while locked
+  (`awayFromSession(_:unlessLockedSince:)`, which drops the result after a `lock()`).
 - A vault's description is a last-writer-wins register on **the stamp of the write that chose it**
   (`VaultMetadata.descriptionStamp`: `writtenBy`, or the row's own), never on the stamp of the row that carries it
   (`VaultMetadataMerger`, §7.7; review finding S54). Every path that stores a description again (the merger's
@@ -669,7 +779,22 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   *shown* trashed and kept after a deletion (`VaultSession.presented`), never written that way: an automatic write
   per device is an edit the next deletion elsewhere has not seen.
 - A move is a copy (derived ID) plus the original trashed in **one commit**, then the original deleted like any
-  permanent deletion. Never move by changing a row's vault, and never move an item with unresolved values.
+  permanent deletion. Never move by changing a row's vault, and never move an item with unresolved values. It writes
+  in both vaults, so both keys come from `writableVaultKey`; and every deletion the session makes (`deletePermanently`,
+  the purge, a vault's deletion) asks `checkSharedWrite` or `checkSharedDeletion` first (Z44). A new path that
+  commits through `writer(for:)` asks too. A copy or move out of a shared vault brings a member's scopes into the
+  destination as the person's, so `transfer` judges it like an import entry (`transferConcern`: overlap and
+  look-alikes by `SavedSites`) and refuses (`transferNeedsConfirmation`) unless `confirming` names that concern (Z72).
+- A sync publishes no vault's deletions while any vault holds an item that exists nowhere else
+  (`holdsUnpublishedWork`): the copy half of a move that was not published, or was held aside (Z44, PRD F7.6). Held
+  aside means what this device's own take-out noted in its own signed row (`OwnTakenOutRow`, never in the stream
+  index, which a rebuild cannot refill, Z121), never an entry's `device` field, which is its writer's claim (Z54);
+  until that row loads, the rule before Z54 holds, and a quarantine that cannot be read holds deletions back. A row the
+  sync state knows only by a deletion counts while it holds an edit of this device's above what it published (a
+  tombstone for a move's derivable copy ID can be in the log before the copy, Z148): never let a stamp in `known`
+  alone release the gate. In a shared vault, every row of a device whose ID does not commit that holds an edit of its
+  own counts, whatever its state says: nothing it published there reached anyone (Z162). Every engine pass in
+  `syncAll`, replays included, defers deletions; they go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
 
@@ -677,25 +802,57 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 
 - A shared vault's records are sealed under the key its chain names (`currentVaultKey` asks `sharedCurrentKey`), and
   every write the person makes asks `writePermission` (in `writableVaultKey`). Keys from grants are stored as
-  `vaultKeyWrap` rows like any other; their identity comes from where the grant is filed.
-- **"Shared" does not depend on the sharing state a device happens to hold** (V31, ported from the security-audit
-  branch's Z41; `VaultSession+SharedMarker.swift`). A key opened from a grant is `arrivedByGrant`, which its wrap's
-  context authenticates on every device of the account; the account signs a marker beside the vault's directory
-  entry (`AccountObjectLocation.vaultShared`) naming the chain's owner. Nothing in the sharing state marks a vault:
-  its rows are not all signed (V32). A vault either names with no verified ledger loaded is **unavailable**:
-  `sharedCurrentKey` gives it no key (never the lowest key ID), its engine only downloads, `syncVerify` refuses its
-  objects, and `checkSharedWrite`/`checkSharedRename`/`checkSharedDeletion` and `shareVault` throw
-  `ledgerUnavailable`. Never add a path that asks only `sharing.vaults[vaultID]` to decide a vault is private; ask
-  `isMarkedShared`. Until the markers are read every vault but the Personal one is held closed, so call
-  `loadSharedMarkersIfNeeded()` before a path that picks a key. The way out is `acceptInvitation` (the invitation from
-  `sharedVaultInvitation`, whose owner is the marker's; `knownOwner` throws `ownerUnknown` for a granted key with no
-  marker; `setUpSharedVaultAgain` for the screens); the held-key fallback in `IncomingInvitation.accept` is for an
-  invitation whose owner is this account. `unavailableSharedVaults` says why a vault is closed (V33: `ownerNotChecked`
-  when only the owner's pin is missing from an intact saved ledger, otherwise `notSetUp`); the Personal vault is never
-  among them. A pin is refused replacement on a session's word only for the owner of a vault unavailable here (or for
-  everyone while such a vault's owner cannot be named), never for every contact.
+  `vaultKeyWrap` rows; their identity comes from where the grant is filed.
+- **"Shared" does not depend on the ledger a device happens to hold** (Z41; `VaultSession+SharedMarker.swift`). A key
+  opened from a grant is `arrivedByGrant`, which its wrap's context authenticates on every device of the account; the
+  account signs a marker beside the vault's directory entry (`AccountObjectLocation.vaultShared`) naming the chain's
+  owner. Nothing in the sharing state marks a vault: its rows are not all signed (Z50). A vault either names with no
+  verified ledger loaded is **unavailable**: `sharedCurrentKey` gives it no key (never the lowest key ID), its engine
+  only downloads, and `checkSharedWrite`/`checkSharedDeletion` throw `ledgerUnavailable`. Never add a path that asks
+  only `sharing.vaults[vaultID]` to decide a vault is private; ask `isMarkedShared`. Until the markers are read every
+  vault but the Personal one is held closed, so call `loadSharedMarkersIfNeeded()` before a path that picks a key.
+  For AutoFill (and `savedSites()`), a vault other than Personal holding an item whose clock names a device outside
+  this account is shared too (`vaultsWrittenOutsideTheAccount`, Z77): on the owner's devices the marker row and the
+  sharing state are rows A8 can delete. A
+  second device gets out by `acceptInvitation`, whose `knownOwner` comes from the marker. `knownOwner` **throws**
+  when a granted key is held and the owner cannot be named (`ownerUnknown`, Z48), and when the account's markers name
+  two owners (`markerConflicts`); never let it answer `nil` for a vault a key of which is held, nor before this session
+  has listed the account's vault directory, nor for a vault that listing names (`directoryVaults`, Z59). The held-key
+  fallback in `IncomingInvitation.accept` is for an invitation whose owner is this account, and for nothing else.
+- On this branch the unavailable vault also refuses a rename (`checkSharedRename`) and is refused `shareVault`
+  unless it is this account's own unfinished share (Z50, Z122); `shareVault` also refuses a vault with no marker here
+  whose transport already lists a chain not rooted at this account (V31). `unavailableSharedVaults` says why a vault
+  is closed (V33: `ownerNotChecked` when only the owner's pin is missing from an intact saved ledger, otherwise
+  `notSetUp`), and `setUpSharedVaultAgain` is the screens' way out (the invitation from `sharedVaultInvitation`); the
+  Personal vault is never among them and never loaded from the sharing state. A pin is refused replacement on a
+  session's word only for the owner of a vault unavailable here (or for everyone while such a vault's owner cannot be
+  named), never for every contact.
+- **A key is used for a vault with a ledger only if that ledger hands it to this account** (Z59,
+  `VaultSession+SharedKeys.swift`): a granted key only if this device opened it from a grant the ledger entitles the
+  account to, or a grant shows the directory's copy to be the same bytes (`verifiedKeys`, `admitVaultKeys`); the
+  account's own genesis key only where the ledger's owner is this account. `withholdUnvouchedKeys` runs whenever keys
+  are made resident from the store and whenever ledgers load; never match a key to a chain by its ID alone.
+- **A vault whose owner the account's devices disagree about is held closed, ledger or not** (`isOwnerDisputed`, Z59):
+  no current key, no write (`ownerDisputed`), no proposal, plan, reseal, invitation or acceptance, not given to
+  AutoFill, listed as disputed. Nothing ends a dispute in this version (no marker is retired: a revoked device keeps
+  the account key); never let a device with a ledger go on by it while its account's markers disagree.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
-  key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
+  key from the chain (`sharedVerify`), whatever that account's standing, for segments; `writeStanding` decides, never
+  the envelope's signer alone. **A registry counts there only the devices whose IDs commit to its account**
+  (`DeviceRegistryState.committedDevicesOnly`, through `memberRegistries` and `committedOwnState`, this account's own
+  registry included; Z157), less every device ID two of them list (`countedRegistries`, Z165: colluding accounts can
+  find colliding IDs, and a stream recorded before the second registry arrived is forgotten and replayed); never read
+  `sharing.registries` or the own view's `devices`/`revoked` directly in shared vault code, but in `ownStreamSigner`,
+  which names who signed an object that counts nowhere and decides nothing (Z164).
+- **This device takes part in a shared vault only if its own ID commits** (`thisDeviceCommits`, Z162): otherwise
+  `checkSharedWrite`, `checkSharedDeletion`, `shareVault` and `acceptInvitation` throw `deviceIDDoesNotCommit`, the
+  engine publishes nothing there (`sharedEngineOptions(ownIDCommits:)`, reported), and `syncVerifyOwn` leaves its own
+  objects there undecided. A device of an account from before IDs committed takes part once enrolled again as a new
+  device (owner decision). `playModifiedClient` (package only) is for tests playing an adversary's device under another
+  device's ID; nothing in production sets it. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
+  (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever step over it. It is not
+  recorded at all (no cut runs over it; the change of head that lets its account write replays the log, which records
+  it then), so a never-writing member grows no index (Z146 and Z155, superseded by Z157).
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
   (`ItemMerge.attributedValues`, note-line removals, discards and history entries included, S32 and S43; a vault's
   description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*, through a segment of the stream of the
@@ -703,13 +860,26 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   writer chose (S36). Then its clock (`knowledgeCounts`): every edit it contains, of any device but its own writer's,
   must have been published in a segment of that device's stream that counts, so a version built on a late write is
   held aside with it (S44), and one claiming a current member's edits their stream has not published waits for it
-  (S46; a claim beyond this device's own published edits is refused). A tombstone's erasure summary is judged the same
+  (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z136; a stream with
+  no first segment here is waited for, never taken for one that cannot be read; a stream that will never grow here, a
+  revoked device's or an owner's device's whose first segments were collected before sharing, is never waited for, and
+  what names it is believed for an account that may write, Z144). The revoked devices (`revokedDevices`, the same set
+  the engine stops reading) are the union of the committed registries' revocations, each one its own account's
+  (Z157; Z150's account-of-stream test is superseded). "Collected" only where an owner's snapshot merged here covers
+  the gap (`SharedStreamIndex.collected`, `WriteJudge.recordSnapshot`) and for no version above what the stream carried
+  of the same record (Z151, Z160). What a replay settles is the judged basis (`judgedBasis`: the head, and the counted revocations of the devices
+  a judgement waited for or asked about, `awaiting` and `relied`), and a change of it takes out and replays like a
+  change of head (Z153); a judgement made under the settled basis moves it with itself. With this account's registry
+  unreadable there is no basis (`nil`): nothing is taken out and nothing settled (Z161). A tombstone's erasure summary is judged the same
   way before it is applied or remembered (`WriteJudge.admitsErasure`, S45): a deletion built on a late write is held
   aside and the item stays. A value naming this device that it never published
   counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
   does not count is held aside in the quarantine and never published; a change of head takes out what no longer
   counts and replays the log, which rebuilds the engine's erasures too (S40), and a replay asked for is written down
-  (`requestReplay`, S41). Do not judge by who sealed a version, and do not keep what was merged "for good" (S28).
+  (`requestReplay`, S41) and counted: a replaying pass settles the judged basis only if no replay was asked for while
+  it ran (`sharedEngineDidRun(requestsBefore:)`, Z120) and the take-out before it, its start and its end saw one
+  membership head (`judgedAgainst`, `takenOutAgainst`, S65). Do not judge by who sealed a version, and do not keep what was
+  merged "for good" (S28).
 - **A vault's description counts only as an administrator's work** (§8.7, §8.10; `06-adversarial-review.md` §T).
   `renameVault` refuses a shared vault's member who holds neither role (`SharedVaultError.renameRefused`,
   `checkSharedRename`, after `writableVaultKey`), but the rule is the judge's: the segment that carried the
@@ -725,17 +895,71 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   membership between the sync's take-out and its re-seal. `resealSharedVault` therefore calls
   `takeOutWhatNoLongerCounts` first and seals nothing while the index is being rebuilt. A new path that seals a
   record of a shared vault again under the current key (any kind) must do the same, or go through it.
+- `shareVault` can always be finished (Z50): the marker is written first, and a vault whose only mark is this
+  account's own marker naming this account, with no granted key, is shared again from there, taking up a chain rooted
+  at this account that the store already lists and signing a genesis only when none is (Z122: a second root wherever
+  signing is randomised); the owner's device republishes its genesis record while the store does not list it. Never add a state between "private" and "shared
+  with a ledger" that `shareVault` or `acceptInvitation` cannot leave.
+- A vault is shared with `indexRebuilding` set, so its index is built from the log before any row it already holds is
+  judged, and one whose log was compacted (a snapshot listed, or merged) is not shared at all (`historyCompacted`,
+  Z42): a value that survives only in a snapshot has no attribution. Do not lift that without a rule for such values.
+  The marker is on the transport before the chain's first record and before the first grant (`publishSharedMarker`),
+  and `invite` asks `requireWholeLog` again while the chain is its owner's alone (Z56).
+- A chain that has never listed anyone but its owner is not judged **on the owner's own devices**
+  (`isOwnersAloneHere`: `MembershipLedger.isOwnersAlone` and this account is the owner, Z56, Z124): the judge admits
+  everything, as for a vault that is not shared, because only the owner's account can sign what verifies there. On a
+  member's device whose addition lost a fork its own signatures verify too, so there it is judged. It must stay a
+  function of the accepted chain and the device's account, so that it changes only with the head, which is what
+  takes out and replays; never widen it to a chain that listed someone once.
 - A chain stopped at a later format (`continuesInLaterFormat`, §8.9) makes the vault read-only in the session and is
   reported (`SharedVaultStatus.requiresNewerVersion`): no proposal published, no plan resumed or made, nothing sealed
   again, no leave request. A later-format object is offered again until the ledger holds it; never add it to
   `refusedNames` before then.
 - Member registries are anchored per vault (`memberRegistries`, S39), and a vault key whose ID this device holds for
   another vault is refused (`keyIDInUse`, S38).
+- **Another member's registry moves only forward** (Z6, `evaluateMemberRegistry`): from the genesis and credential
+  entry this device anchored (`MemberRegistryPin`, saved signed as `WWMD`), one credential entry at a time, and only
+  where exactly one change follows. Two changes from one generation are symmetric to an outsider, so no rule picks
+  one: where two follow, only devices every branch keeps count, and the fork is reported
+  (`membersWithDisagreeingDevices`). The pin keeps the entry first anchored (`base`) apart from the tip, and a
+  change beside a followed entry from the base on competes with it (Z12): being published first earns a branch
+  nothing. Never follow the highest generation, never drop the anchor for a second genesis, and never move an anchor
+  sideways: nothing in this version settles a contested registry (the twelve-digit code was removed, Z11; that is
+  for ADR 0010's vault sharing code session). One refresh follows at most `memberRegistryStepsPerRefresh` changes,
+  off the actor (Z10).
+- **A stream is one account's, by identity** (Z157): a device's ID commits to its account under its key
+  (`DeviceIdentifier`; production makes a device only through `DeviceKeyStore.createDevice`), so every object that
+  verifies in a device's stream is signed by that device's account (`signingAccount`), and the stream's account is the
+  one its ID commits to (`SharedStreamIndex.account(ofStream:)`), the same on every device whatever arrives first and
+  whatever the head. Another account's object there verifies nowhere and is refused at download like junk;
+  `SharedStreamIndex.record` refuses a second account's segment in a stream. Never bring back an inference of whose a
+  stream is (lowest segment, `passedOver`, naming keys, a rotation after a promotion, a revocation's stream test: Z46,
+  Z146, Z150, Z152, Z155, all superseded), and never let a non-committing device ID count in a shared vault. Every
+  device records every signed segment of an account that may have written, opened or not
+  (`WriteJudge.recordUnopened`, Z51), so a cut's chain is the same everywhere; a stream's first sequence falling asks
+  for a replay (Z151). Never exempt a version's writer from `knowledgeCounts` unless its own stream carried the version
+  or this device wrote it. An object anyone can create (junk, or signed by any key that does not commit) at a device's
+  next number stops that device's stream there, reported (`ownStreamConflict`), losing nothing, until it is removed:
+  the A1 residual, which a member with write access to the folder has too. Another member's signed object there is
+  named (`SharedVaultSyncReport.ownStreamSquattedBy`, Z164); the author-signed skip is open (Z24).
+- A segment sealed under a key that only a losing branch introduced is passed over, not waited for (Z47).
+- Once the chain no longer lists this account, the vault's items are withheld from `credentialItems()`
+  (`vaultsWithheldFromAutoFill`, which also withholds a vault with no ledger), the vault stays listed while items of
+  it are here, and only `removeLocalCopies` takes them off the device, without publishing anything (Z45). Leaving does
+  not remove them, and no screen may say it does; read-only is worded as a client rule, never as encryption (F4.5).
+  What this device wrote there and nobody else has is not a copy: `removeLocalCopies` refuses (`unsharedWork`) unless
+  given the number the person was shown (an item whose clock holds an edit of this device's above what it published,
+  never a merge it merely sealed, Z123), and the take-out at a change of head withdraws a deletion this device had
+  queued and not published when its account's permission to write ended, never leaving it for a later day (Z57).
 - A write cut is a chain of segment digests per device (`SyncWriteCut`), so a shared vault keeps its whole log:
   `maintainsLog` is off (no snapshots, no collection). Do not turn it on for shared vaults without another way to
-  judge a cut.
-- Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`) or re-verified on load; the owner's pin
-  anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from (S26).
+  judge a cut. The only snapshots a shared vault reads are its owner's account's, from before it was shared, for
+  the gap collection left; their tombstones are judged like a segment's (Z21), with nobody exempt, since a
+  snapshot's signer chose the device its entry names, and with the pass's segments recorded first (Z34). Do not
+  refuse them outright: a stream whose first segments were collected would stop at every replay.
+- Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`, `WWMD`, `WWVK`, `WWTO`) or re-verified on
+  load; the owner's pin anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from
+  (S26).
 
 ### Device registry and account objects (`docs/02-architecture.md` §7.7, §7.8)
 
@@ -743,16 +967,32 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   deterministic function of the entries, the pinned genesis entry and the pinned credential entry. Keep it that
   way: no clock, no arrival order, no local state.
 - Password changes are checkpoints: what a credential entry had seen is replayed before what it had not. A
-  candidate change is judged by replaying with it as the last checkpoint, never by its place among unsealed
-  entries (a revoked device can back-date entries in front of it; review finding W1).
+  candidate change is **followed** only by replaying with it as the last checkpoint (`evaluate(credential:)`),
+  never by its place among unsealed entries (a revoked device can back-date entries in front of it; review
+  finding W1). It is **listed** (`pendingCredentials`, `forkedCredentials`) from its own signatures and its links
+  back to the chain alone, one verification each and no replay, so that no number of planted entries hides the
+  genuine change (Z2). Never put a budget on the list, and never treat "listed" as "can be followed".
+  `pendingPasswordChanges` lists every author too, those the followed checkpoint sealed first (Z13); only the
+  replay that describes a row is bounded, and `describePasswordChange` does it for any other.
 - Every entry needs the account key's signature and its author's (a registered device, or the current enrolment
   key); a credential entry also the previous generation's enrolment key. A revoked ID or key never returns.
+- A device's ID is derived from the account and its key (`DeviceIdentifier.derive`, Z157): make the key first
+  (`DeviceKeyStore.createDevice`) and take the ID it gives. `create(accountID:deviceID:)` is for an ID already chosen
+  (an account from before, a test naming a device): such a device counts in no shared vault and takes no part in one
+  (Z162). `approveDevice` and `enrol(as:)` refuse an identity whose ID does not commit (`VaultError.deviceIDDoesNotCommit`).
+  The registry's own rules do not ask (a private vault has no other account); a shared vault does, for every registry.
 - What a device trusts is in the Keychain (`deviceRegistryAnchor`, `accountSigningKey`), never in the database.
   The local store must still hold everything the anchor names, or the registry is unavailable and nothing verifies.
+  The anchor also names the pending password changes seen (`RegistryAnchor.pending`, Z3), kept until the device
+  follows another credential entry: ask `passwordChangePending`, never whether a candidate header row exists. A
+  non-empty list, an unsettled intent or a header row ahead of the anchor is pending, before anything else (Z9).
 - Everything fetched before a key is held is hostile: headers are bounded and KDF-validated before any derivation,
   authenticated by the binding under the derived AUK, and the genesis entry comes from that binding only.
 - A device with a password change it has not been given neither merges nor publishes, refuses the old password
-  once it holds the new header, and adopts the change only when the person's password opens it.
+  from the moment the registry lists the change (header or no header), and adopts the change only when the
+  person's password opens it and does not open the device's own header. To such a device a change by a revoked
+  device that knew the old password is indistinguishable from the genuine one: the person chooses
+  (`pendingPasswordChanges`, `followPasswordChange`), the code never does.
 - Revocation stops writing, not reading: do not describe it as more (§7.8 states the limits; the re-key is open).
 
 ### `CredentialProviderModel` invariants
@@ -771,6 +1011,18 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   items do neither. The gate ranks among items with only the scopes `ScopePolicy` accepts, so a stored `com` scope
   matches nothing; the stored item is not rewritten. An item ID two readable items share names neither
   (`VaultSnapshot.duplicatedIDs`): both rank, neither is released. Use `snapshot.itemInUse(_:)`, not `all.first`.
+- **A vault is a trust domain** (Z60). `CredentialVault.credentialSnapshot()` returns the items *and* whose each
+  vault is (`CredentialVaultInfo.isShared`, the session's `isMarkedShared` through `VaultInfo.isShared`; a vault it
+  does not describe counts as shared). An item of a shared vault says what a member said (A4), so: it never shadows
+  an item of another vault (`ItemRanker`; the person's own items still shadow it, and each other); where the two
+  classes meet the answer is `chooseAmong`, never a suggestion or a silent fill; its scope does not vouch for a host
+  that resembles another vault's site, or that cannot be read (`FillRefusal.resemblesSavedSite`, the warning in place
+  of a list, until the person scopes an item of their own to the host); nothing writes to it without UI (the
+  conditional passkey upgrade, silent saves; a relying party's reports and largeBlob writes still do, carrying no
+  secret of the person's and bounded by `remoteWriteItemBudget`, Z79); it is never the pre-selected destination of a new passkey; a new item
+  never copies its scope; and every entry, candidate and proposal carries its `EntryVault`. In `WatchwordAutoFill`
+  never hand `snapshot.rankable` to `ItemRanker`, `AutoFillGate` or `PhishingDetector` yourself: use
+  `VaultSnapshot.candidates(on:)`, `offered(on:)`, `decide(for:)` and `assess(_:)`, which pass `sharedVaults`.
 - **The page, or nothing.** The gate is asked about a host only when the system named it for this request (list
   identifiers, a passkey's relying party, a save's identifier). A QuickType tap hands back the identity Watchword
   published and *not the page*, and the system chooses where to offer an identity (assume: anywhere under the
@@ -779,8 +1031,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   never pass a page URL there, and build test inputs with `handedBack`. A passkey needs only the gate.
 - `CredentialIdentityPlanner` is a whole-vault function: a password or code identity exists only for a scope that
   covers its whole site (host equal to `PublicSuffix.broadestSite`, subdomains on, nothing excluded), with no other
-  item scoped below that host and none at that host sharing the suggested name; a passkey identity only when the
-  gate would release it. One item's change is published as the difference between the whole sets before and after.
+  item (of any vault) scoped below that host, none at that host sharing the suggested name, and none of the other
+  trust class at that host at all (`VaultSnapshot.crossesTrust`, Z70: a name can differ by bytes and not to the eye);
+  a passkey identity only when the gate would release it and, for a shared vault's item, nothing of another vault is
+  offered beside it (`meetsAnotherTrustClass`, also asked of a passkey identity handed back). So a member of a shared
+  vault can take a suggestion out of the keyboard and never direct one. One item's change is published as the difference between the whole sets before and after.
 - No host, no secret. With no service identifier every gated request is refused (`noServiceIdentifier`), text
   included. The system's host-less text insertion is `textInsertionListWithoutHost()` /
   `textToInsertWithoutHost(for:)`, through `ManualChoice`, which gives only fields whose kind is not a secret. Do not
@@ -796,11 +1051,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   offers their scope instead (`newItemBesideExisting`); the model never picks between the two unasked. No
   registration adds a scope to an item (F11.7); a login scoped under the relying party is only named
   (`relatedLogins`). A conditional registration adds a passkey to the one saved password login for that relying
-  party and user, and only if the item holds no passkey yet; an item holds at most `maximumPasskeysPerItem`.
+  party and user, in a vault only this account reads, and only if the item holds no passkey yet; an item holds at
+  most `maximumPasskeysPerItem`.
 - A remote party never deletes: reports set or clear `Field.meta` flags or rename a passkey's account, only on items
   the gate would release to the reporter, at most once per field per `reportInterval` (history is never pruned).
+  **Every write the model makes for a remote party** (a report, a largeBlob write, a conditional upgrade) is refused
+  if it would take the item past `remoteWriteItemBudget` (`admitsRemoteWrite`: the item as written plus one history
+  entry, Z71). A new such write asks it too.
 - Locked is a state the model reports (`vaultLocked`, `requiresInteraction(.vaultLocked)`). Each request reads the
-  items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:)`); and every
+  items once; writes are compare-and-swap on the version read (`saveCredentialItem(_:replacingVersion:confirmingHosts:)`,
+  which names only a host the person was warned about and confirmed); and every
   request that hands a secret back does so through `releasing(_:)`, which calls `CredentialVault.confirmUnlocked()`
   as the last suspension, so a lock that lands after the read wins.
 - Published identities are plaintext outside the app: `CredentialIdentityPlanner` emits hosts, user names, credential
@@ -808,6 +1068,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   archived or trashed items.
 - Everything a page can influence is bounded here (identifier count, allow-list length, `prf` input, blob, password
   rules, names), and `PasswordRules` cannot take a generated password outside the generator's 4 to 128 characters.
+  A relying party's largeBlob writes are bounded in number too (Z66): one per field per `largeBlobInterval`, and none
+  that would take the item past `remoteWriteItemBudget`, since each keeps the old blob in a history never pruned.
 
 ### The matching pipeline is the whole point of `WatchwordMatching`
 
@@ -820,16 +1082,23 @@ ServiceIdentifier (OS-supplied, attacker-influenced)
   → AutoFillGate.page          a URL whose scheme is http → .insecurePage (F6.9); domains pass
   → ScopeMatcher.match         exclusions first; exact = 2·labels+1, subdomain = 2·labels
   → ItemRanker.rank            top specificity wins; less specific matches are *shadowed*
-                               (keeps Amazon retail off the AWS console), ties are ambiguous
+                               (keeps Amazon retail off the AWS console), ties are ambiguous;
+                               an item of a shared vault shadows only within its own vault
+  → AutoFillGate.candidates    refuses a host only shared vaults are scoped to that resembles
+                               another vault's site (.resemblesSavedSite)
   → AutoFillGate.decide        .fill / .chooseAmong / .refuse(FillRefusal)
   → AutoFillGate.authorize     re-checks scope even for an explicit user choice (SEC6)
 ```
 
-Three invariants to preserve when touching this module:
+Four invariants to preserve when touching this module:
 
 - Comparison functions take `NormalizedHost`, never `String`, so an un-normalised identifier cannot
   reach a match. Keep that typing.
 - Normalisation may never *invent* a match. If an input is not unambiguously a hostname, throw.
+- A vault is a trust domain (Z60). `rank`, `candidates`, `decide`, `authorize` and `PhishingDetector.assess` take
+  `sharedVaults`, the vaults accounts other than this one may write: a scope there is a member's statement, so it
+  shadows nothing outside its vault and recognises a host for its own vault only. The default (`[]`) is for one
+  vault's items and for tests; anything that holds several vaults' items passes the session's answer.
 - Only `https` pages are filled (PRD F6.9, owner decision 2026-11-16). `decide` and `authorize` both start with
   `AutoFillGate.page`, which refuses an `http` URL as `FillRefusal.insecurePage` before matching, so no choice gets
   past it; anything in `WatchwordAutoFill` that lists, saves or generates for a page reads it through `page` too.
@@ -894,8 +1163,17 @@ directions are tested; keep both when adjusting constants.
 - **No third-party dependencies, ever, without an ADR.** The one exception is swift-crypto (ADR 0006).
   `.github/scripts/assert-no-dependencies.sh` fails CI on any other package or product, a version or
   `Package.resolved` commit other than the ones it names, `CryptoExtras` linked on a non-Linux platform,
-  `.binaryTarget`, `.plugin(` or `unsafeFlags`. Shipped crypto comes only from CryptoKit, Security.framework and
-  CommonCrypto.
+  `.binaryTarget`, `.plugin(` or `unsafeFlags`, a manifest with a block comment, an `import` line other than
+  `import PackageDescription`, or one of a list of names that tell machines apart (`#if`, `Context`, `ProcessInfo`,
+  `getenv`, `#file`, `random`, `hashValue`, `MemoryLayout`, `FileManager`, ...: it must evaluate to the same package
+  everywhere, and the list is a tripwire that cannot be complete), and a language mode
+  other than Swift 6. Shipped crypto comes only from CryptoKit, Security.framework and CommonCrypto.
+- **`Apps/project.yml` is held to an allowlist** (`.github/scripts/yaml-audit.py`, run by the same script): every key,
+  target type, dependency kind and build setting the spec may hold is named there, source paths stay inside `Apps/`,
+  and the strict-memory-safety, warnings-as-errors, script-sandboxing and Swift 6 settings must be present. A new
+  key or setting is refused until it is added to that list in the same pull request. The reader takes a subset of
+  YAML (block mappings and sequences, one-line scalars, one-line flow sequences) and refuses the rest, so write the
+  spec and the workflows plainly: no anchors, flow mappings, quoted keys or values continued on the next line.
 - **No unsafe constructs** outside `SecureMemory` — enforced by the `strict-memory-safety` job plus the
   `.github/scripts/assert-unsafe-confined.sh` tripwire (a marked construct would compile anywhere, and
   `@_silgen_name`-style bindings are not flagged by the compiler at all). No symlinks or non-Swift files
@@ -930,7 +1208,10 @@ directions are tested; keep both when adjusting constants.
   `"account enrolment and device registry"`, `"hygiene in the vault session"`,
   `"shared vaults through the session"`, `"encrypted Watchword archive"`, `"interchange through the session"`,
   `"synced breach-check results"`, `"device-local store files"`), so **renaming a suite breaks CI deliberately** — update
-  `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). Each adversarial test's doc comment states the concrete threat
+  `mise-tasks/test/adversarial-suites.txt` alongside it (both `test` and `test:adversarial` read it). The suite's
+  display name is `"Adversarial: <area>"`, and the check wants Swift Testing's own `Suite "Adversarial: <area>" passed`
+  line, once: a suite that is disabled or skipped counts as missing, as does one whose name merely contains
+  another's, and `test:adversarial` fails on any skipped test. Don't disable an adversarial test to get a run through. Each adversarial test's doc comment states the concrete threat
   (which adversary from `docs/02-architecture.md` §2, with what access) it checks. A suite only an Apple platform can
   build (`"local vault store"`, `"Keychain item protection"`, `"Apple adapters: HTTP client"`, `"…: iCloud Drive
   transport"`, `"…: CloudKit transport"`) has a `darwin:` line: required on macOS, reported as not required on Linux
@@ -952,10 +1233,13 @@ directions are tested; keep both when adjusting constants.
   implementation (Python `hashlib`/`cryptography`), never from round-tripping our own code.
 
 - **Script tests** (`Tests/ScriptTests`, Python `unittest`, `mise run test:scripts`) cover the scripts Swift tests
-  cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, and the inline steps of
-  `screenshots.yml`, each run
-  as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun` and `sips`. Standard library only, Python 3.9 syntax
-  (Xcode's `python3`), and bash that macOS's 3.2 runs.
+  cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, the inline steps of
+  `screenshots.yml` and `ci.yml`'s `Required checks`, and the supply-chain gates themselves (`audit:actions`, the adversarial-suite check,
+  `audit:mise-pins`, `assert-no-dependencies.sh` with its `Apps/project.yml` allowlist, the app tasks' resolved-package
+  check and `app:release`, `cloud-setup.sh`), each run
+  as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun`, `sips`, `swift`, `xcodebuild` and `gpg`. Standard library
+  only, Python 3.9 syntax (Xcode's `python3`), and bash that macOS's 3.2 runs. A change to one of those scripts needs
+  its test here; a gate nobody tests is how a `grep` came to stand for a parser.
 
 `docs/04-test-plan.md` maps every requirement to its obligated tests and is the place to check before
 claiming a layer is covered.
@@ -963,14 +1247,21 @@ claiming a layer is covered.
 ## CI
 
 `.github/workflows/ci.yml` — `package-tests` (2-runner matrix), `adversarial-tests`,
-`strict-memory-safety`, `lint`, `app-tests` (a macOS leg and four iOS-simulator legs, each a group of UI-test classes
-passed to `app:test` as `--only-testing`/`--skip-testing`), and `required` (`Required checks`), which
-fails unless every other job succeeded and is the one check branch protection names, so renaming a matrix leg for a
-runner bump never strands `main` waiting on a check that no longer reports. Everything Xcode-, AppKit- or
+`strict-memory-safety`, `lint` (swift-format, the script tests, and the action-pinning and mise-pin audits),
+`app-tests` (a macOS leg and four iOS-simulator legs, each a group of UI-test classes
+passed to `app:test` as `--only-testing`/`--skip-testing`), `release-build` (`app:release` for macOS and the iOS
+simulator: the only job that compiles the Release configuration, read afterwards for the Debug-only UI-test switch),
+and `required` (`Required checks`), the one check branch protection names, so renaming a matrix leg for a runner bump
+never strands `main` waiting on a check that no longer reports. It needs every other job, but does not trust
+`needs.*.result`, which reads `success` for a matrix job whose leg was cancelled before it ran (run 44175108735,
+`docs/06-adversarial-review.md` Z119): its inline `gh api` step (`actions: read`, no checkout) lists every job of the
+run attempt and fails unless each but itself (recognised by its name, `SELF`) is completed and successful and the names
+are exactly `EXPECTED`. A job or matrix leg added, renamed or removed in `ci.yml` is added to `EXPECTED` and `needs:` in
+the same change; `test_required_checks.py` fails until it is. Everything Xcode-, AppKit- or
 screen-dependent runs on `xcode-27`; only the Xcode 16.4 floor leg stays on `macos-15`. Each step after checkout and Xcode selection is
 `mise run <task>`; put new CI logic in a task, not inline in a workflow. `security-nightly.yml` — long randomised
-runs, the libFuzzer harness in `Fuzz/` (`mise run fuzz`), and an audit that every `uses:` is a 40-hex
-commit SHA. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS runner (`mise run ci:gate`), so a cloud
+runs, the libFuzzer harness in `Fuzz/` (`mise run fuzz`), and the audit that every `uses:` is a 40-hex
+commit SHA, which also gates pull requests in `lint`. `mac-run.yml` — dispatch-only, one gate on one branch on a macOS runner (`mise run ci:gate`), so a cloud
 session can run Mac-only gates before opening a pull request; it gates nothing. A dispatch runs the workflow and
 `ci:gate` as they are on that branch (one cut before mac-run.yml merged needs a rebase first), so `ci:gate`'s refusals
 catch mistyped requests, not attackers: write access, no secrets and the read-only token are the controls.
@@ -979,7 +1270,10 @@ in a PR comment, review or review comment (in the thread, or on the whole PR for
 with a secret and a write-scoped token (`pull-requests: write`, never `contents: write`); its Claude job alone runs in
 the `staging` environment, which holds that secret. Its controls are in
 `docs/07-supply-chain.md` §3.2. `issue_comment` runs the default branch's copy of the file; the other triggers run the
-PR's. Its action is the one third-party action, so it needs its own entry in the repository's allowed-actions list
+PR's, so the `authorize` job's "admin only" binds `issue_comment` alone, and what keeps the secret from an account
+that can push is the environment's required reviewer (`docs/08-repository-hardening.md` §1.2), a setting the tree
+cannot show. The allowlist bounds what Claude can change, not what a comment can say: a steered review could post
+the job's secrets, which §3.2 records as open. Don't describe either control as more. Its action is the one third-party action, so it needs its own entry in the repository's allowed-actions list
 (`docs/08-repository-hardening.md` §1).
 `screenshots.yml` — captures the tour's screens for a PR and attaches them: on the `screenshots` label (and each push
 while it is on), on a same-repository head commit whose message has a line that is exactly `[screenshots]` (never a
@@ -990,9 +1284,10 @@ platform) and uploads each set and, unzipped, its one-PNG contact sheet; `commen
 (pattern, 40 characters, 99 names), finds the artifacts itself by name among the run's own, links the sheet only if
 GitHub will serve it as `image/png`, and creates or updates one sticky comment, recognised by its whole header and
 never by the bot author alone (`claude-pr.yml` posts as the same account). It is not a required check, and there is
-deliberately no comment command (`docs/07-supply-chain.md` §3.2). Its two no-checkout jobs are inline `gh api`, the one
-place a mise task cannot go; `mise run test:scripts` (in the `lint` job) runs those two scripts as they are in the file
-against a stand-in `gh`, so a change to either needs its test in `Tests/ScriptTests`.
+deliberately no comment command (`docs/07-supply-chain.md` §3.2). Its two no-checkout jobs are inline `gh api`, as is `ci.yml`'s
+`Required checks` step: a job that checks nothing out is the one place a mise task cannot go; `mise run test:scripts`
+(in the `lint` job) runs those scripts as they are in the file against a stand-in `gh`, so a change to any of them
+needs its test in `Tests/ScriptTests`.
 The same capture is the `app:screenshots` gate of `mac-run.yml`.
 
 One check on every PR has **no workflow file**: `Analyze (swift)`, from CodeQL *default setup*,
@@ -1014,19 +1309,27 @@ silently drops it from any branch-protection list that named the old one.
 Supply-chain rules that apply to edits in `.github/`:
 
 - **Pin actions to full commit SHAs**, never tags; add the `# v4`-style comment and the mapping in the
-  header block. The nightly audit fails the build otherwise.
+  header block. `audit:actions` fails the pull request otherwise (`lint` job), and the nightly again. No local
+  actions (`uses: ./…`): the audit refuses every one, because the manifest it would run is the pull request's own.
 - Keep `permissions: contents: read` at workflow and job level, `persist-credentials: false` on every
   checkout, and the trigger as `pull_request` — never `pull_request_target`. The two jobs with more
   (`pull-requests: write` in `claude-pr.yml` and in `screenshots.yml`'s `comment`) check out and run nothing from
-  the pull request; a job that runs the pull request's code never holds a write token.
+  the pull request; a job that runs the pull request's code never holds a write token. `ci.yml`'s `required` adds
+  `actions: read` (read-only, to list its own run's jobs) and checks nothing out either.
 - Xcode selection goes through `.github/scripts/select-xcode.sh`, not a third-party action.
 - Build tools reach CI only through mise with `MISE_LOCKED=1`, so every tool needs a `mise.lock` entry
   (URL and SHA-256). Bump a tool by editing `mise.toml` and running
   `mise lock --platform macos-arm64,linux-x64`; commit both files. mise itself is pinned by version and
-  SHA-256 in `.github/scripts/install-mise.sh` (and again in `cloud-setup.sh`; `mise run audit:mise-pins` fails if
-  they differ), and a bump is reviewed like an action pin. That script also writes mise's CI settings to
+  SHA-256 in `.github/scripts/install-mise.sh` (and again in `cloud-setup.sh`; `mise run audit:mise-pins`, in the
+  `lint` job, fails if they differ), and a bump is reviewed like an action pin. That script also writes mise's CI settings to
   `$GITHUB_ENV`, including `MISE_TASK_RUN_AUTO_INSTALL=0`, so a job that needs a tool installs it by name
   (`mise install xcodegen`).
+
+- `cloud-setup.sh` installs a toolchain as root on a cloud session's VM. A download that does not verify against the
+  pinned key, or is not the release asked for, ends the attempt: never add a fallback that runs after a failed
+  verification, and keep the unverified swiftly installer behind `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` (an `export`
+  line above the pasted script: a setup script is not given the environment's variables) until it is pinned by a
+  checksum checked against the publisher's.
 
 `.claude/` and other agent/editor configuration is intentionally uncommitted
 (`docs/07-supply-chain.md` §5). `docs/08-repository-hardening.md` is the `gh` runbook for branch

@@ -73,17 +73,19 @@ public struct TestVault: Sendable {
 
     /// Another device of this vault's account, enrolled the way a real one is (PRD F5.2): this device publishes the
     /// account header, the device registry and the vault directory with a sync, and the new one joins from the
-    /// transport alone, with the account password and the Secret Key off the Emergency Kit. `deviceID` names the new
-    /// device, so a test can address its stream. Returned locked, as a device is until someone unlocks it.
+    /// transport alone, with the account password and the Secret Key off the Emergency Kit. Its ID commits to the
+    /// account under its key, as every production device's does (`DeviceIdentifier`, Z157); `deviceID` names the new
+    /// device instead, so a test can address its stream, and such a device counts for nothing in a shared vault.
+    /// Returned locked, as a device is until someone unlocks it.
     public func enrolledDevice(
-        deviceID: UUID, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64? = nil,
+        deviceID: UUID? = nil, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64? = nil,
         password: String = TestVault.password, name: String = "", hygiene: HygieneSettings? = nil
     ) async throws -> TestVault {
         try await session.sync()
-        let kit = try await session.emergencyKit()
+        let kit = try await session.emergencyKit(password: password)
         // Each device its own randomness, and so its own signing key: the registry refuses one key for two devices.
         let ownSeed =
-            seed ?? deviceID.uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }
+            seed ?? (deviceID ?? UUID()).uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }
         let device = TestVault(
             clock: clock ?? self.clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport),
             seed: ownSeed, deviceName: name, hygiene: hygiene)

@@ -170,8 +170,18 @@ extension AdversarialSharedVaultTests {
     func lateRenameLaunderedThroughAMember() async throws {
         let household = SharedVaultHousehold()
         let owner = try await household.account(seed: 2_200)
-        let (demoted, demotedView) = try await household.withheldAccount(seed: 2_217)
         let (member, memberView) = try await household.withheldAccount(seed: 2_234)
+        // Device IDs follow from the devices' keys (Z157), so whose device orders after the owner's is a matter of the
+        // seed: the first account whose device does is the former administrator.
+        let ownersDevice = try #require(await owner.session.deviceIDForTest())
+        var later: (account: SharingAccount, view: WithholdingTransport)?
+        for seed in stride(from: UInt64(2_217), to: 3_217, by: 17) where later == nil {
+            let candidate = try await household.withheldAccount(seed: seed)
+            if ownersDevice.precedes(try #require(await candidate.account.session.deviceIDForTest())) {
+                later = candidate
+            }
+        }
+        let (demoted, demotedView) = try #require(later)
         let vaultID = try await owner.session.createVault(name: "Household").id
         try await owner.session.shareVault(vaultID)
         try await owner.invite(demoted, to: vaultID, as: .administrator, owner: owner)
@@ -190,7 +200,8 @@ extension AdversarialSharedVaultTests {
         let key = RecordKey(recordID: vaultID, kind: .vaultMetadata)
         let ownersRow = try #require(await owner.session.storedRowForTest(key))
         let lateRow = try #require(await demoted.session.storedRowForTest(key))
-        try #require(ownersRow.version == lateRow.version && ownerDevice.precedes(demotedDevice))
+        try #require(ownersRow.version == lateRow.version, "\(ownersRow.version) \(lateRow.version)")
+        try #require(ownerDevice.precedes(demotedDevice))
         try await owner.session.sync()
         try await member.session.sync()
         try await demoted.session.sync()
@@ -634,7 +645,8 @@ extension AdversarialSharedVaultTests {
         for account in [newcomer, owner, bystander] {
             #expect(try await Self.name(of: vaultID, on: account) == "Household")
         }
-        #expect(try await Self.holdsDescriptionAside(vaultID, on: newcomer))
+        // A member's snapshot is not read in a shared vault at all (the security-audit branch's Z21), so the forged row
+        // is refused outright rather than held aside: only the owner's name is ever stored.
         #expect(try await newcomer.session.storedRowForTest(key)?.envelope == ownersRow.envelope)
     }
 
@@ -664,6 +676,9 @@ extension AdversarialSharedVaultTests {
         #expect(ownersRow.deviceID == ownerDevice, "the rotation's re-seal")
 
         let impostor = try await hostile.vault.enrolledDevice(deviceID: ownerDevice, over: household.transport)
+        // An honest client whose ID does not commit to its account refuses to take part (Z162): this one does not keep
+        // the rule.
+        await impostor.session.playModifiedClient()
         await impostor.session.configureSharing(
             SharingSettings(
                 state: InMemorySharingStateStore(), contacts: InMemoryVerifiedContactStore(),
@@ -689,14 +704,14 @@ extension AdversarialSharedVaultTests {
         for account in [newcomer, owner, bystander] {
             #expect(try await Self.name(of: vaultID, on: account) == "Household")
         }
-        // Devices holding every key judge it and hold it aside; the newcomer applies none of the description, and the
-        // member's item counts as their write there and on the other member's device.
-        for account in [owner, bystander] {
-            #expect(try await Self.holdsDescriptionAside(vaultID, on: account))
-        }
+        // Since device IDs commit to their account (the security-audit branch's Z157), an object of another account in
+        // the owner's device's stream verifies nowhere: the segment is refused at download, so neither the description
+        // nor the item beside it reaches any device. Before Z157 it verified, was judged, and the description alone was
+        // held aside (S61).
         #expect(try await newcomer.session.storedRowForTest(key)?.envelope == ownersRow.envelope)
-        for account in [newcomer, bystander] {
-            #expect(try await account.session.item(id: item.id).title == item.title, "the segment was judged")
+        for account in [newcomer, owner, bystander] {
+            #expect(
+                (try? await account.session.item(id: item.id)) == nil, "a segment that verifies nowhere was applied")
         }
     }
 
@@ -932,7 +947,9 @@ extension VaultSession {
         guard let account = try await loadAccount(), let syncSettings else { return nil }
         sharing.vaults[vaultID]?.needsReconcile = true
         try await takeOutWhatNoLongerCounts(vaultID)
-        return sharedEngineOptions(vaultID, base: syncSettings.configuration, account: account).head
+        return sharedEngineOptions(
+            vaultID, base: syncSettings.configuration, account: account, ownDevices: [], ownIDCommits: true
+        ).head
     }
 
     func ingestMembershipForTest(_ vaultID: UUID) async throws {
@@ -940,8 +957,10 @@ extension VaultSession {
     }
 
     /// The end of that replay, finished and settled.
-    func endReplayForTest(_ vaultID: UUID, judgedAgainst head: [UInt8]?) {
-        sharedEngineDidRun(vaultID, reconciled: true, judgedAgainst: head, report: SyncReport())
+    func endReplayForTest(_ vaultID: UUID, judgedAgainst head: [UInt8]?) async {
+        await sharedEngineDidRun(
+            vaultID, reconciled: true, judgedAgainst: head, report: SyncReport(),
+            requestsBefore: sharedReplayRequests(vaultID))
     }
 
     func judgedHeadForTest(_ vaultID: UUID) -> [UInt8]? {

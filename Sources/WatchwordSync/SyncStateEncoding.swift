@@ -47,10 +47,18 @@ struct EncodedState: Codable {
     /// Absent in a row written before unread names took turns (R19).
     var unreadCopiesExamined: [String: UInt64]?
     /// Absent in a row written before a reset could be answered (§7.10).
-    var collectedThrough: UInt64?
+    var ownUnlistedThrough: UInt64?
     var handedOn: Snapshot?
     var storeResetSuspected: Bool?
     var highestOwnSnapshot: UInt64?
+    /// Absent in a row written before review findings Z33 and Z38.
+    var retryUnfinished: Bool?
+    var quarantineDropped: [String]?
+    /// Absent in a row written before review findings Z147 and Z149.
+    var quarantineCrowded: UInt64?
+    var collectedThrough: UInt64?
+    /// Absent in a row written before the state was signed (review finding Z20): such a row does not verify.
+    var authenticator: Data?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -83,10 +91,15 @@ struct EncodedState: Codable {
         unreadCopiesExamined =
             state.unreadCopiesExamined.isEmpty
             ? nil : Dictionary(uniqueKeysWithValues: state.unreadCopiesExamined.map { ($0.key.name, $0.value) })
-        collectedThrough = state.collectedThrough
+        ownUnlistedThrough = state.ownUnlistedThrough
         handedOn = state.handedOn.map { Snapshot(name: $0.snapshot.name, coverage: Self.strings($0.holding)) }
         storeResetSuspected = state.storeResetSuspected
         highestOwnSnapshot = state.highestOwnSnapshot
+        retryUnfinished = state.retryUnfinished
+        quarantineDropped = state.quarantineDropped.map(\.uuidString).sorted()
+        quarantineCrowded = state.quarantineCrowded
+        collectedThrough = state.collectedThrough
+        authenticator = Data(state.authenticator)
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -137,7 +150,7 @@ struct EncodedState: Codable {
             guard let location = SyncObjectLocation(name: name) else { return nil }
             state.unreadCopiesExamined[location] = examined
         }
-        state.collectedThrough = collectedThrough
+        state.ownUnlistedThrough = ownUnlistedThrough
         if let handedOn {
             guard let location = SyncObjectLocation(name: handedOn.name), location.kind == .snapshot,
                 let holding = Self.uuids(handedOn.coverage)
@@ -146,6 +159,14 @@ struct EncodedState: Codable {
         }
         state.storeResetSuspected = storeResetSuspected ?? false
         state.highestOwnSnapshot = highestOwnSnapshot ?? 0
+        state.retryUnfinished = retryUnfinished ?? false
+        for device in quarantineDropped ?? [] {
+            guard let id = UUID(uuidString: device) else { return nil }
+            state.quarantineDropped.insert(id)
+        }
+        state.quarantineCrowded = quarantineCrowded
+        state.collectedThrough = collectedThrough ?? 0
+        state.authenticator = authenticator.map { Array($0) } ?? []
         return state
     }
 

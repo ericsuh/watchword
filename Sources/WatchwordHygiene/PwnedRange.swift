@@ -238,6 +238,35 @@ extension CachedPwnedRange {
         self.init(
             range: PwnedRange(prefix: prefix, packed: packed), fetchedAt: Date(timeIntervalSince1970: Double(signed)))
     }
+
+    /// The length every sealed cache record is padded to: comfortably above the largest range the service serves
+    /// today (about a thousand suffixes, 22 bytes each). A range larger than this is padded to the next multiple.
+    /// Without it a record's length said how many breached suffixes its range holds, a public property that narrows
+    /// which prefix it is (review §Z, Z89).
+    public static let paddingBucket = 32 * 1024
+
+    /// `encoded()` followed by zero bytes up to a multiple of `paddingBucket` (at least one bucket), so that what is
+    /// sealed has the same length for every range up to the bucket.
+    public func encodedPadded() -> [UInt8] {
+        var out = encoded()
+        let bucket = Self.paddingBucket
+        let padded = max(bucket, (out.count + bucket - 1) / bucket * bucket)
+        out.append(contentsOf: repeatElement(0, count: padded - out.count))
+        return out
+    }
+
+    /// Reads what `encodedPadded()` wrote: the entry, exactly as `init(decoding:)` reads it, then nothing but zeros.
+    public init(decodingPadded bytes: [UInt8]) throws {
+        guard bytes.count >= Self.headerSize else { throw PwnedRangeCodecError.malformed }
+        var count = 0
+        for index in 16..<20 { count = count << 8 | Int(bytes[index]) }
+        guard count <= Self.maximumEntries else { throw PwnedRangeCodecError.malformed }
+        let length = Self.headerSize + count * PwnedRange.entrySize
+        guard bytes.count >= length, bytes[length...].allSatisfy({ $0 == 0 }) else {
+            throw PwnedRangeCodecError.malformed
+        }
+        try self.init(decoding: Array(bytes[..<length]))
+    }
 }
 
 /// The prefix cache port (PRD F9.1, docs/02-architecture.md §13).
@@ -253,13 +282,21 @@ extension CachedPwnedRange {
 /// under a key that is gone when the vault locks, drops its plaintext copies, and reads and writes nothing until
 /// the session unlocks it again. `CachedPwnedRange.encoded()` is the plaintext to seal. It should also stay on the
 /// device: it is a cache.
+///
+/// Every entry belongs to a partition, the vault whose item's check fetched it (`HygieneEngine` passes the item's
+/// vault ID), and answers checks for that vault only. A check answered from the cache costs no request and so no
+/// pacing token, and its time is published with the vault's synced scan results; with one cache for every vault, a
+/// member of a shared vault (A4) could plant items there and read from those times whether some password in a vault
+/// they are not in shares a prefix with a candidate of theirs (review §Z, Z88). The same prefix in two vaults is two
+/// entries, and two requests.
 public protocol PwnedRangeCache: Sendable {
-    /// The entry for `prefix`, however old, or `nil`.
-    func cachedRange(for prefix: PwnedRangePrefix) async -> CachedPwnedRange?
-    /// Stores `entry`, replacing any entry for the same prefix. Failing to store is not an error.
-    func store(_ entry: CachedPwnedRange) async
-    /// Forgets the entry for `prefix`, if there is one.
-    func remove(_ prefix: PwnedRangePrefix) async
+    /// The entry for `prefix` stored for `partition`, however old, or `nil`.
+    func cachedRange(for prefix: PwnedRangePrefix, in partition: UUID) async -> CachedPwnedRange?
+    /// Stores `entry` for `partition`, replacing any entry for the same prefix there. Failing to store is not an
+    /// error.
+    func store(_ entry: CachedPwnedRange, in partition: UUID) async
+    /// Forgets the entry for `prefix` in `partition`, if there is one.
+    func remove(_ prefix: PwnedRangePrefix, in partition: UUID) async
     /// Forgets everything, at rest included.
     func removeAll() async
     /// The vault is locking. When this returns, nothing the cache holds can be read without the vault's keys.
@@ -278,7 +315,7 @@ public actor InMemoryPwnedRangeCache: PwnedRangeCache {
 
     private let capacity: Int
     private let maximumBytes: Int
-    private var entries: [PwnedRangePrefix: CachedPwnedRange] = [:]
+    private var entries: [PwnedRangeCacheKey: CachedPwnedRange] = [:]
     private var bytes = 0
 
     public init(
@@ -289,19 +326,20 @@ public actor InMemoryPwnedRangeCache: PwnedRangeCache {
         self.maximumBytes = max(0, maximumBytes)
     }
 
-    public func cachedRange(for prefix: PwnedRangePrefix) -> CachedPwnedRange? {
-        entries[prefix]
+    public func cachedRange(for prefix: PwnedRangePrefix, in partition: UUID) -> CachedPwnedRange? {
+        entries[PwnedRangeCacheKey(partition: partition, prefix: prefix)]
     }
 
-    public func store(_ entry: CachedPwnedRange) {
-        bytes -= entries[entry.range.prefix]?.range.packed.count ?? 0
-        entries[entry.range.prefix] = entry
+    public func store(_ entry: CachedPwnedRange, in partition: UUID) {
+        let key = PwnedRangeCacheKey(partition: partition, prefix: entry.range.prefix)
+        bytes -= entries[key]?.range.packed.count ?? 0
+        entries[key] = entry
         bytes += entry.range.packed.count
         while entries.count > capacity || (bytes > maximumBytes && !entries.isEmpty) {
-            // Oldest first; the prefix breaks ties so eviction is deterministic.
+            // Oldest first; the key breaks ties so eviction is deterministic.
             let oldest = entries.min { lhs, rhs in
                 if lhs.value.fetchedAt != rhs.value.fetchedAt { return lhs.value.fetchedAt < rhs.value.fetchedAt }
-                return lhs.key.value < rhs.key.value
+                return lhs.key < rhs.key
             }
             guard let oldest else { break }
             bytes -= oldest.value.range.packed.count
@@ -309,8 +347,9 @@ public actor InMemoryPwnedRangeCache: PwnedRangeCache {
         }
     }
 
-    public func remove(_ prefix: PwnedRangePrefix) {
-        bytes -= entries.removeValue(forKey: prefix)?.range.packed.count ?? 0
+    public func remove(_ prefix: PwnedRangePrefix, in partition: UUID) {
+        let key = PwnedRangeCacheKey(partition: partition, prefix: prefix)
+        bytes -= entries.removeValue(forKey: key)?.range.packed.count ?? 0
     }
 
     public func removeAll() {
@@ -322,12 +361,29 @@ public actor InMemoryPwnedRangeCache: PwnedRangeCache {
         removeAll()
     }
 
-    /// Every entry, ordered by prefix: what a persisting session would seal.
+    /// Every entry, ordered by prefix, then partition: what a persisting session would seal.
     public func snapshot() -> [CachedPwnedRange] {
-        entries.values.sorted { $0.range.prefix.value < $1.range.prefix.value }
+        entries.sorted { $0.key < $1.key }.map(\.value)
     }
 
     public var count: Int {
         entries.count
+    }
+}
+
+/// Where a cached range is filed: the partition (the vault whose check fetched it) and the prefix.
+public struct PwnedRangeCacheKey: Hashable, Sendable, Comparable {
+    public var partition: UUID
+    public var prefix: PwnedRangePrefix
+
+    public init(partition: UUID, prefix: PwnedRangePrefix) {
+        self.partition = partition
+        self.prefix = prefix
+    }
+
+    /// By prefix, then by the partition's bytes.
+    public static func < (lhs: PwnedRangeCacheKey, rhs: PwnedRangeCacheKey) -> Bool {
+        if lhs.prefix.value != rhs.prefix.value { return lhs.prefix.value < rhs.prefix.value }
+        return lhs.partition.uuidString < rhs.partition.uuidString
     }
 }

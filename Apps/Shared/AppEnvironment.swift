@@ -2,6 +2,7 @@ import Foundation
 import WatchwordHygiene
 import WatchwordKit
 import WatchwordPlatform
+import WatchwordPresentation
 import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
@@ -61,6 +62,9 @@ enum AppEnvironment {
             case dark
         }
 
+        /// Whether this is a Debug `--uitest` launch (macOS keeps its windows capturable for the screenshot tour).
+        static var isUITestLaunch: Bool { ProcessInfo.processInfo.arguments.contains("--uitest") }
+
         static func uiTestAppearance(arguments: [String] = ProcessInfo.processInfo.arguments) -> UITestAppearance? {
             let prefix = "--uitest-appearance="
             guard arguments.contains("--uitest"), let argument = arguments.last(where: { $0.hasPrefix(prefix) }) else {
@@ -71,6 +75,9 @@ enum AppEnvironment {
     #endif
 
     static func make(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
+        // First, before a session or any UI exists: whatever a process that died with the file mover up left in the
+        // staging folder (a plaintext export, the Emergency Kit) goes (review §Z, Z80).
+        StagingFolder.standard.sweep()
         #if DEBUG
             if arguments.contains("--uitest") {
                 let store = InMemoryRecordStore()

@@ -83,9 +83,10 @@ extension AdversarialSharedVaultTests {
     }
 
     /// Threat: A8 deletes the sharing state of a vault on its owner's own device. The owner made the vault's key, so no
-    /// key of it arrived by grant; only the account's marker says it is shared. It stays shared and closed (no second
-    /// genesis, no write), and the owner sets it up again by accepting an invitation naming themself, with the key
-    /// the account's directory holds for it.
+    /// key of it arrived by grant; only the account's marker says it is shared. It stays shared and closed (no write),
+    /// and is set up again with no second genesis either way: by `shareVault`, which finishes this account's own share
+    /// from the chain the store lists (the security-audit branch's Z50 and Z122, which replaced this branch's refusal
+    /// at the merge), or by accepting an invitation naming the owner, with the key the account's directory holds.
     @Test("an owner's shared vault whose sharing state is deleted stays shared and is set up again from the marker")
     func ownersDeletedSharingState() async throws {
         let household = SharedVaultHousehold()
@@ -96,20 +97,24 @@ extension AdversarialSharedVaultTests {
         let membership = Set(await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID)))
 
         await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
-            try await session.shareVault(vaultID)
-        }
-        await #expect(throws: SharedVaultError.ledgerUnavailable(vaultID)) {
             _ = try await session.save(Self.bank(in: vaultID))
         }
+        try await session.shareVault(vaultID)
         let membershipAfter = Set(
             await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID)))
         #expect(membershipAfter == membership, "no second genesis")
-
-        let invitation = try #require(try await session.sharedVaultInvitation(vaultID))
-        #expect(invitation.ownerAccountID == owner.accountID)
-        try await session.acceptInvitation(invitation)
         #expect(try await session.sharedVaultStatus(vaultID).role == .owner)
+        #expect(try await session.sharedVaultStatus(vaultID).membership.members.count == 2, "the chain was taken up")
         _ = try await session.save(Self.bank(in: vaultID))
+
+        // The other way back, on a device whose sharing state is erased again: the invitation from the marker.
+        await Self.eraseSharingState(owner.state, vaultID: vaultID)
+        let again = try await Self.relaunch(owner, directory: household.directory).session
+        let invitation = try #require(try await again.sharedVaultInvitation(vaultID))
+        #expect(invitation.ownerAccountID == owner.accountID)
+        try await again.acceptInvitation(invitation)
+        #expect(try await again.sharedVaultStatus(vaultID).role == .owner)
+        _ = try await again.save(Self.bank(in: vaultID))
     }
 
     /// Threat: a second device of a member (or of the owner) holds a shared vault's key from the account's directory
@@ -121,7 +126,7 @@ extension AdversarialSharedVaultTests {
         let household = SharedVaultHousehold()
         let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 1_460)
         let member = members[0]
-        let second = try await member.vault.enrolledDevice(deviceID: UUID(), over: household.transport)
+        let second = try await member.vault.enrolledDevice(over: household.transport)
         let state = InMemorySharingStateStore()
         await second.session.configureSharing(
             SharingSettings(state: state, contacts: member.contacts, directory: household.directory))

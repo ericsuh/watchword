@@ -148,8 +148,9 @@ public struct VerifiedContacts: Sendable {
 
     /// Confirms `bundle`'s fingerprint with what the person supplied and pins it.
     ///
-    /// - Throws: `fingerprintMismatch` if a typed number or scanned code is not this bundle's; `keySubstituted` if a
-    ///   different bundle is already pinned for the account and `replacingPin` is false.
+    /// - Throws: `fingerprintMismatch` if a typed number or a scanned code is not this bundle's (every kind of
+    ///   evidence names the keys it is about, review finding Z40); `keySubstituted` if a different bundle is already pinned for the account and
+    ///   `replacingPin` is false.
     public func verify(
         _ bundle: PublicKeyBundle, evidence: VerificationEvidence, signedBy keyset: Keyset, at now: Date,
         replacingPin: Bool = false

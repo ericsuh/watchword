@@ -27,12 +27,22 @@
 
         public func store(_ value: SecureBytes, for item: KeychainItem) throws {
             try delete(item)
+            // The Security framework takes the secret as CFData; this copy is the price of using the Keychain at all.
+            // One copy, made straight from protected storage (no intermediate array), in an `NSMutableData` that the
+            // query holds as it is (no bridging) and that is zeroed through the object once the call returns, so the
+            // zeros reach the one buffer whoever retained it (review §Z, Z98 and Z126; a `Data` wiped with
+            // `resetBytes` copies a shared buffer first). Whatever Security.framework copies internally is beyond
+            // reach.
+            let status = try value.withMutableDataCopy { secret in try add(secret, for: item) }
+            guard status == errSecSuccess else { throw Self.error(for: status) }
+        }
+
+        /// `SecItemAdd` with `secret` as the value; the query (and its reference to `secret`) ends with this call.
+        private func add(_ secret: NSMutableData, for item: KeychainItem) throws -> OSStatus {
             var attributes = baseQuery(for: item)
             attributes.merge(try Self.protectionAttributes(for: item)) { _, new in new }
-            // The Security framework takes the secret as CFData; this copy is the price of using the Keychain at all.
-            attributes[kSecValueData as String] = Data(value.unprotectedCopy())
-            let status = SecItemAdd(attributes as CFDictionary, nil)
-            guard status == errSecSuccess else { throw Self.error(for: status) }
+            attributes[kSecValueData as String] = secret
+            return SecItemAdd(attributes as CFDictionary, nil)
         }
 
         public func read(_ item: KeychainItem, prompt: String) throws -> SecureBytes? {

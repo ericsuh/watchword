@@ -10,8 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Least privilege by default; no job in this workflow needs more. Note the trigger is
-# `pull_request`, not `pull_request_target`, so a fork's code never runs with repository secrets.
+# Least privilege by default. One job has more: `required` adds `actions: read`, to list this run's own jobs, and checks
+# nothing out. Note the trigger is `pull_request`, not `pull_request_target`, so a fork's code never runs with
+# repository secrets.
 permissions:
   contents: read
 
@@ -132,9 +133,11 @@ jobs:
         run: mise run audit:unsafe
 
   lint:
+    # swift-format, the script tests and the two audits that need no build. The name is what the check has always been
+    # called; nothing but `required` below depends on it.
     name: swift-format lint
     runs-on: xcode-27
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -148,10 +151,18 @@ jobs:
       - name: mise run lint
         run: mise run lint
 
-      # The scripts CI is made of (screenshots.yml's inline steps, app:screenshots and its helper), run against
-      # stand-ins for the tools they call. Here because it is as quick as the lint and needs no build.
+      # The scripts CI is made of (screenshots.yml's inline steps, the app tasks, the audits and cloud-setup.sh), run
+      # against stand-ins for the tools they call. Here because it is as quick as the lint and needs no build.
       - name: mise run test:scripts
         run: mise run test:scripts
+
+      # The two audits that need no build, on every pull request: an unpinned action, or a mise bump that reached CI
+      # but not cloud sessions, turns `Required checks` red here instead of being found by the nightly, or by nobody
+      # (docs/07-supply-chain.md §3.1, §3.3).
+      - name: mise run audit:actions
+        run: mise run audit:actions
+      - name: mise run audit:mise-pins
+        run: mise run audit:mise-pins
 
   app-tests:
     # The Xcode app, unit and UI test suites (milestone 2 in docs/03-implementation-plan.md): AppKit and UIKit, the
@@ -247,23 +258,72 @@ jobs:
           path: TestResults
           if-no-files-found: ignore
 
+  release-build:
+    # The Release configuration of both apps, which no other job compiles: every scheme and every test leg builds
+    # Debug. It finds a Release-only build error before a release does, and the task then reads the built app and its
+    # AutoFill extension for the text of the Debug-only UI-test facilities (the `--uitest` switch with its in-memory
+    # ports, KDF floor and no auto-lock; `UITestPeer`), failing if any is there. Unsigned on the simulator and ad hoc on
+    # macOS, as the test legs are; nothing is uploaded or shipped from here.
+    name: Release build (${{ matrix.name }})
+    runs-on: xcode-27
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            platform: macos
+          - name: iOS simulator
+            platform: ios
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        run: .github/scripts/select-xcode.sh 27.0
+
+      - name: Install mise
+        run: .github/scripts/install-mise.sh
+
+      # As in app-tests: XcodeGen at the version and SHA-256 in mise.lock; the task regenerates the project first.
+      - name: Install XcodeGen (mise, locked)
+        run: mise install xcodegen
+
+      - name: mise run app:release ${{ matrix.platform }}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: mise run app:release "$PLATFORM"
+
   required:
     # The one check branch protection on `main` requires (docs/08-repository-hardening.md §5). Matrix legs are named
     # after their runner and Xcode, or (app-tests) their group of tests, so a runner bump or a regrouping renames them,
-    # and a required check that never reports again blocks every pull request; this job's name does not change. A
-    # matrix job's result is its legs' together (failure if any leg failed), so needing the job needs every leg. It fails unless every job above succeeded:
-    # `always()` makes it run (and fail) when one failed or was cancelled, where a plain `needs` would skip it, and a
+    # and a required check that never reports again blocks every pull request; this job's name does not change.
+    # `always()` makes it run (and fail) when a job failed or was cancelled, where a plain `needs` would skip it, and a
     # skipped required check counts as passing.
+    #
+    # It judges the run's jobs, not `needs.*.result`. This comment used to say that a matrix job's result is its legs'
+    # together, so that needing the job needs every leg. Run 44175108735 showed otherwise: the Xcode 16.4 leg of
+    # package-tests waited 33 minutes for a runner and was cancelled by the platform without running a step, every
+    # other job succeeded, `needs.package-tests.result` was `success`, and this check went green on a pull request
+    # whose oldest-toolchain tests had never run. So the second step below asks the API for every job of this attempt
+    # and fails unless each one it expects is there, once, completed and successful. `needs:` stays: it is what makes
+    # this job wait for the others.
     name: Required checks
     if: always()
-    needs: [package-tests, adversarial-tests, strict-memory-safety, lint, app-tests]
+    needs: [package-tests, adversarial-tests, strict-memory-safety, lint, app-tests, release-build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
+      # To list this run's own jobs; nothing else in this workflow has it, and it reads nothing but run metadata.
+      actions: read
     steps:
       # GitHub-side plumbing with nothing to reproduce locally, so an expression rather than a mise task; each job it
-      # gates names its own. A job result is one of success, failure, cancelled or skipped.
+      # gates names its own. A job result is one of success, failure, cancelled or skipped. It is not enough alone: a
+      # matrix job's result can be `success` with a leg the platform cancelled before it started (run 44175108735),
+      # which is what the next step is for.
       - name: Fail unless every gate job succeeded
         if: >-
           contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
@@ -271,3 +331,91 @@ jobs:
         run: |
           echo "::error::A required job did not succeed; its own check on this pull request has the failure"
           exit 1
+
+      # Every job of this run attempt, as the API lists them: one entry for each matrix leg, whatever became of it.
+      # This job checks nothing out, so the few lines of `gh api` are inline, as in screenshots.yml's two such jobs;
+      # values reach the script only through `env:`, and `mise run test:scripts` runs it as it is here against a
+      # stand-in `gh` (Tests/ScriptTests/test_required_checks.py).
+      #
+      # EXPECTED is every other job's name as GitHub reports it, one a line: a job's `name:` with each matrix leg's
+      # values filled in. It is what catches a leg GitHub never created (a mistyped `include`) and a listing that
+      # is short, and the same script test fails if it and the jobs above ever differ, or if `needs:` misses one.
+      # SELF is this job's own name, which the listing includes (still running, so it is set aside by name, and must
+      # be there exactly once: a listing without it is not this run's, and of two jobs so named one would go unjudged,
+      # so either fails). No context gives a job its own `name:` (`github.job` is the key, `required`), so SELF is written out;
+      # renaming the job already means changing branch protection's setting, and the script test fails until SELF
+      # is renamed with it.
+      #
+      # A re-run is a new attempt, and its listing is what is judged. GitHub's REST description does not say whether
+      # a later attempt lists the jobs it carried over without running them again; run 44175108735's attempt 2 (a
+      # re-run of the failed leg) listed all thirteen, every one as attempt 2, completed and successful. That is
+      # assumed to hold. If it ever stops holding, the jobs not listed fail the EXPECTED check: the gate goes red, never
+      # green.
+      - name: Fail unless every job of this run succeeded
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SELF: Required checks
+          EXPECTED: |
+            Package tests (Xcode 16.4 / macOS 15)
+            Package tests (Xcode 27 / macOS 27)
+            Adversarial security tests
+            Strict memory safety
+            swift-format lint
+            App tests (macOS)
+            App tests (iOS simulator, tour)
+            App tests (iOS simulator, import and export)
+            App tests (iOS simulator, sharing and devices)
+            App tests (iOS simulator, the rest)
+            Release build (macOS)
+            Release build (iOS simulator)
+        run: |
+          set -euo pipefail
+          if ! [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ && "$RUN_ID" =~ ^[0-9]{1,20}$ && "$RUN_ATTEMPT" =~ ^[0-9]{1,6}$ ]]; then
+            echo "::error::The repository, run id or attempt is not what it should be; nothing was checked."
+            exit 1
+          fi
+          # A failed request fails the step here (`set -e`): no listing is not a pass. Up to 100 jobs a page, and
+          # every page: a run with more jobs than one page holds must not be judged by its first.
+          jobs=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '(.jobs // [])[] | [.name, .status, (.conclusion // "none")] | @tsv')
+          failed=0 selves=0 seen=""
+          while IFS=$'\t' read -r name status conclusion; do
+            [ -n "$name" ] || continue
+            if [ "$name" = "$SELF" ]; then
+              selves=$((selves + 1))
+              continue
+            fi
+            seen+="$name"$'\n'
+            if ! grep -Fxq -- "$name" <<<"$EXPECTED"; then
+              echo "::error::Job \"$name\" is not one this gate expects: add it to EXPECTED and to needs in ci.yml"
+              failed=1
+            fi
+            # Not waited for: every job above is in `needs:`, so one still queued or running here is one that `needs:`
+            # missed (or a listing out of date), and a gate that passed without it would be the hole this step closes.
+            if [ "$status" != completed ] || [ "$conclusion" != success ]; then
+              echo "::error::Job \"$name\" did not succeed: status $status, conclusion $conclusion"
+              failed=1
+            fi
+          done <<<"$jobs"
+          if [ "$selves" -ne 1 ]; then
+            echo "::error::Expected this job (\"$SELF\") once among the run's jobs and found it $selves times: the listing is empty or is not this run's"
+            failed=1
+          fi
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            count=$(grep -Fxc -- "$name" <<<"$seen" || true)
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected job \"$name\" once among the run's jobs and found it $count times: a leg that was never created has not passed"
+              failed=1
+            fi
+          done <<<"$EXPECTED"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::Not every job of this run succeeded; a job that was cancelled before it ran is not a job that passed"
+            exit 1
+          fi
+          echo "Every job of run $RUN_ID, attempt $RUN_ATTEMPT, completed and succeeded:"
+          printf '%s' "$seen"

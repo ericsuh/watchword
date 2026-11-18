@@ -14,7 +14,9 @@ if grep -Eq "Test run with 0 tests|Executed 0 tests" "$log"; then
   exit 1
 fi
 
-# Every adversarial area's @Suite must have run (adversarial-suites.txt says why).
+# Every adversarial area's @Suite must have run (adversarial-suites.txt says why), and none of its tests may have
+# been skipped: a suite of disabled tests still reports as passed.
 # shellcheck source=adversarial-suites.sh
 source "$(dirname "${BASH_SOURCE[0]}")/adversarial-suites.sh"
 check_adversarial_suites "$log"
+no_skipped_tests "$log"

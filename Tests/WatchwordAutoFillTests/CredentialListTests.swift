@@ -1,9 +1,10 @@
 import Foundation
 import Testing
-import WatchwordAutoFill
 import WatchwordMatching
 import WatchwordModel
 import WatchwordTestSupport
+
+@testable import WatchwordAutoFill
 
 @Suite("Request model: credential list and passwords")
 struct CredentialListTests {
@@ -445,11 +446,12 @@ struct CredentialListTests {
     @Test("a vault that fails is a refusal, and one that locks mid-request yields nothing")
     func vaultFailures() async {
         struct Broken: CredentialVault {
-            func credentialItems() async throws -> [Item] { throw CredentialVaultError.noAccount }
-            func defaultVaultID() async throws -> UUID { throw CredentialVaultError.noAccount }
+            func credentialSnapshot() async throws -> CredentialSnapshot { throw CredentialVaultError.noAccount }
             func confirmUnlocked() async throws { throw CredentialVaultError.noAccount }
             func isBackedUp() async throws -> Bool { throw CredentialVaultError.noAccount }
-            func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
+            func saveCredentialItem(
+                _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+            ) async throws -> Item {
                 throw CredentialVaultError.noAccount
             }
         }

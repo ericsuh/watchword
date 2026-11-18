@@ -371,7 +371,7 @@ public enum OnePUX {
     /// Exports `items` as a `.1pux` archive that 1Password's importer reads (PRD F8.4): `export.attributes` and
     /// `export.data`, stored uncompressed. The bytes are plaintext (`ExportResult`).
     ///
-    /// A passkey has no place in the format and is left out, with a warning; trashed items are left out likewise.
+    /// A passkey has no place in the format and is left out, with a warning; the person's own trash is left out likewise (`ExportSupport.exports`).
     public static func exportArchive(
         _ items: [Item], options: ExportOptions, limits: InterchangeLimits = .standard
     ) throws -> ExportResult {
@@ -395,10 +395,7 @@ public enum OnePUX {
         var report = ExportReport()
         var exported: [JSONValue] = []
         for item in items {
-            guard !item.isTrashed else {
-                report.warnings.append(.trashedItemOmitted(itemID: item.id))
-                continue
-            }
+            guard ExportSupport.exports(item, report: &report) else { continue }
             exported.append(.object(export(item, options: options, report: &report)))
             report.exportedCount += 1
         }

@@ -250,6 +250,40 @@ struct PasswordChangedElsewhereTests {
         #expect(!model.awaitingNewPassword)
         #expect(model.rows.first { $0.id == other.id }?.isRevoked == true)
     }
+
+    /// The other answer (review findings Z1, Z8): the change was the person's own, and they unlocked this device with
+    /// the password it still had. The Devices screen says which device changed it and what following that does, and
+    /// follows it with that change's password and no other.
+    @Test("the person follows the change they made on the other device, by naming that device")
+    func followTheChange() async throws {
+        let devices = try await TwoDevices.make()
+        let newPassword = "the person's own new password"
+        try await devices.second.session.changePassword(current: TestVault.password, new: newPassword)
+        try await devices.second.session.sync()
+        let model = DevicesModel(context: ContextProbe().context(devices.first.session))
+        await model.syncNow()
+        await devices.first.session.lock()
+        try await devices.first.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
+        await model.load()
+        #expect(model.awaitingNewPassword)
+        let change = try #require(model.passwordChanges.first)
+        #expect(model.passwordChanges.count == 1 && change.mayFollow)
+        #expect(change.summary.hasPrefix("The account password was changed on “"), "\(change.summary)")
+
+        #expect(await !model.follow(change, current: TestVault.password, password: TestVault.password))
+        #expect(model.errorMessage == "Incorrect password.")
+        #expect(await !model.follow(change, current: newPassword, password: newPassword))
+        #expect(model.errorMessage == "Incorrect password.")
+        #expect(
+            await model.follow(change, current: TestVault.password, password: newPassword),
+            "\(model.errorMessage ?? "")")
+        #expect(!model.awaitingNewPassword && model.passwordChanges.isEmpty)
+        await devices.first.session.lock()
+        await #expect(throws: CryptoError.authenticationFailed) {
+            try await devices.first.session.unlock(password: TestVault.password)
+        }
+        try await devices.first.session.unlock(password: newPassword)
+    }
 }
 
 @Suite("Screen models: held-aside changes after sharing")

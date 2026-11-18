@@ -80,9 +80,14 @@ extension VaultSession {
         let view = try? await registry(record)
         let standing = view?.state.standing(of: record.deviceID)
         report.deviceStanding = standing
-        report.awaitingNewPassword = !(view?.state.pendingCredentials.isEmpty ?? true)
+        // The registry's pending entries, and what the Keychain remembers of one whose rows the file has lost (Z3).
+        let changePending = await passwordChangePending(record)
+        report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
         let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
+        let ownDevices: Set<UUID> = view.map { Set($0.state.devices.keys) } ?? []
+        // A device whose ID does not commit to its account publishes nothing in a shared vault, and says so (Z162).
+        let ownIDCommits = await thisDeviceCommits(record)
 
         let adapter = VaultSyncAdapter(session: self)
         let merger = KindRoutingMerger([
@@ -104,8 +109,15 @@ extension VaultSession {
         } else {
             sharingReports = await syncSharedVaultsBeforeLogs(account: record)
         }
+        if !ownIDCommits {
+            for vaultID in sharing.vaults.keys {
+                sharingReports[vaultID, default: SharedVaultSyncReport()].deviceIDDoesNotCommit = true
+            }
+        }
         func engine(_ vaultID: UUID) -> SyncEngine {
-            let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+            let shared = sharedEngineOptions(
+                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
+                ownIDCommits: ownIDCommits)
             return SyncEngine(
                 vaultID: vaultID, deviceID: record.deviceID, store: store, syncState: syncState,
                 transport: syncSettings.transport, keyring: adapter, merger: merger,
@@ -121,21 +133,29 @@ extension VaultSession {
         var stopped = report.transportFailure ?? sharingReports.values.lazy.compactMap(\.transportFailure).first
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
-            let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
+            let shared = sharedEngineOptions(
+                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
+                ownIDCommits: ownIDCommits)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
+                let requests = sharedReplayRequests(vaultID)
                 vaultReport = try await engine(vaultID).sync(
                     reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
                     transportStopped: stopped, handingOn: reuploadAnswered(epoch))
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
-                sharedEngineDidRun(
+                await sharedEngineDidRun(
                     vaultID, reconciled: (reconcile || shared.reconcile) && !vaultReport.replayPostponed,
-                    judgedAgainst: shared.head, report: vaultReport)
+                    judgedAgainst: shared.head, report: vaultReport, requestsBefore: requests)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
                 if vaultReport.deletionsDeferred > 0 { deferred.append(vaultID) }
+                if let conflict = vaultReport.ownStreamConflict, sharing.vaults[vaultID] != nil {
+                    sharingReports[vaultID, default: SharedVaultSyncReport()].ownStreamSquattedBy =
+                        await ownStreamSigner(at: conflict, in: vaultID, account: record)
+                }
                 if vaultReport.transportUnavailable || vaultReport.deferredUntilUnlock
-                    || vaultReport.ownStreamConflict != nil
+                    || vaultReport.ownStreamConflict != nil || vaultReport.ownStreamExhausted
+                    || vaultReport.ownStreamUnverified != nil
                 {
                     restPublished = false
                 }
@@ -143,11 +163,48 @@ extension VaultSession {
                 vaultReport = try await engine(vaultID).download(transportStopped: stopped)
                 vaultReport.deferredUntilUnlock = true
             }
+            // A vault may hold the copy half of a move that this sync did not publish: it is not published to (this
+            // account may not write there now, or it is shared with no ledger here), or the copy was taken out and
+            // held aside before it went out. While any vault holds an item that exists nowhere else, no vault's
+            // deletions go out (Z44).
+            if restPublished, mayWrite, await holdsUnpublishedWork(in: vaultID, account: record) {
+                restPublished = false
+                report.deletionsHeldBack.insert(vaultID)
+            }
             if stopped == nil, let failure = vaultReport.transportFailure, failure.stopsSync { stopped = failure }
             vaultReport.deviceRevoked = standing == .revoked
             vaultReport.deviceNotRegistered = standing == .unknown
             vaultReport.awaitingNewPassword = report.awaitingNewPassword
             report.vaults[vaultID] = vaultReport
+        }
+        // A shared vault's second replay, before any deletion goes out: its take-out can put a move's copy aside,
+        // and a replay defers deletions like any other pass (review finding Z55).
+        if mayWrite, stopped == nil {
+            for vaultID in sharedVaultsNeedingReplay() {
+                guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
+                await prepareSharedReplay(vaultID)
+                let shared = sharedEngineOptions(
+                    vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
+                    ownIDCommits: ownIDCommits)
+                let requests = sharedReplayRequests(vaultID)
+                let second = try await engine(vaultID).sync(
+                    reconcile: true, deferringDeletions: true, publishing: shared.publishing)
+                // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
+                await sharedEngineDidRun(
+                    vaultID, reconciled: !second.replayPostponed, judgedAgainst: shared.head, report: second,
+                    requestsBefore: requests)
+                if second.deletionsDeferred > 0, !deferred.contains(vaultID) { deferred.append(vaultID) }
+                if second.transportUnavailable || second.ownStreamConflict != nil || second.ownStreamExhausted
+                    || second.ownStreamUnverified != nil
+                {
+                    restPublished = false
+                }
+                if restPublished, await holdsUnpublishedWork(in: vaultID, account: record) {
+                    restPublished = false
+                    report.deletionsHeldBack.insert(vaultID)
+                }
+                report.vaults[vaultID] = Self.report(first, followedBy: second)
+            }
         }
         if restPublished {
             for vaultID in deferred {
@@ -156,21 +213,85 @@ extension VaultSession {
             }
         }
         if mayWrite, stopped == nil {
-            for vaultID in sharedVaultsNeedingReplay() {
-                guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
-                await prepareSharedReplay(vaultID)
-                let shared = sharedEngineOptions(vaultID, base: syncSettings.configuration, account: record)
-                let second = try await engine(vaultID).sync(reconcile: true, publishing: shared.publishing)
-                sharedEngineDidRun(
-                    vaultID, reconciled: !second.replayPostponed, judgedAgainst: shared.head, report: second)
-                report.vaults[vaultID] = Self.report(first, followedBy: second)
-            }
             await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
         }
         report.sharing = sharingReports
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
         try? await reconcileHygiene()
         return report
+    }
+
+    /// Whether `vaultID` holds an item that exists nowhere but on this device: one it created, of which the sync layer
+    /// has neither published nor merged any version, in the vault, or taken out of it by this device and held aside
+    /// (a copy made before this device was shown the record that ended its account's permission to write). The
+    /// other half of such an item may be a deletion in another vault. Not every row this device sealed: the result of
+    /// a merge is its row too, in a vault it only reads, and holds nothing the others lack. And not every held-aside
+    /// entry that names this device: that is its writer's claim, which a member who can have this device hold
+    /// something aside would use to hold its deletions back everywhere (review finding Z54). Only what the take-out
+    /// itself put aside counts (`SharedVault.ownTakenOut`, signed in a row of its own), for as long as the quarantine
+    /// still keeps it: once the person has discarded it, it is theirs to have discarded.
+    ///
+    /// Fails closed (review finding Z121): a quarantine that cannot be read holds the deletions back and forgets
+    /// nothing of the set, and while the set's own row has not loaded (deleted, refused, never written by this build)
+    /// every held-aside entry naming this device that the sync state does not know counts, as before Z54, until the
+    /// quarantine holds none and the set is known to be all there is.
+    /// Whether `row`, this device's, holds an edit of its own above every version of the record it published: its
+    /// clock's entry for this device (`ItemMerge.effectiveClock`), never merely that it sealed the row. One that does
+    /// not open here counts.
+    func holdsUnpublishedEdit(_ row: StoredRecord, published: RecordStamp?, account: AccountRecord) -> Bool {
+        guard let keys, let item = try? openItem(row, keys: keys) else { return true }
+        let own = ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[account.deviceID] ?? 0
+        return own > (published?.version ?? 0)
+    }
+
+    func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
+        guard let syncState, let base = syncSettings?.state else { return false }
+        let state = try? await syncState.loadState(vaultID: vaultID)
+        let known = state?.known ?? [:]
+        // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
+        // (review finding Z162): an edit of its own in a row it holds is unpublished whatever its state says, such as a
+        // move's copy published by a build from before this was refused.
+        let receivedNowhere = sharing.vaults[vaultID] != nil ? !(await thisDeviceCommits(account)) : false
+        for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
+            if receivedNowhere, holdsUnpublishedEdit(row, published: nil, account: account) { return true }
+            guard let stamp = known[row.key] else { return true }
+            // Known only as a deletion: the log says nothing of a version of it. A move's copy has an ID anyone who
+            // reads the source vault can derive, and a tombstone for it, found in the log before the copy was written,
+            // made the copy look known; if the copy's vault then could not publish, the original's deletion went out
+            // ahead of it (review finding Z148). Such a row holds the deletions back while it holds an edit of this
+            // device's above what it published, as `unsharedWorkCount` measures it: a version a merge kept after a
+            // deletion holds none, and holds nothing back.
+            if stamp.deleted, holdsUnpublishedEdit(row, published: state?.published[row.key], account: account) {
+                return true
+            }
+        }
+        guard let vault = sharing.vaults[vaultID], !vault.ownTakenOut.isEmpty || !vault.ownTakenOutComplete else {
+            return false
+        }
+        let entries: [SyncEntry]
+        do {
+            entries = try await base.quarantined(vaultID: vaultID)
+        } catch {
+            return true
+        }
+        let own = entries.filter { $0.kind == .item && !$0.isDeletion && $0.device == account.deviceID }
+        if !vault.ownTakenOutComplete {
+            if own.contains(where: { known[$0.key] == nil }) { return true }
+            // Nothing of this device's that the sync state does not know is held aside: whatever the lost row listed
+            // and the quarantine still keeps is among `own`, and none of it is waited for any more.
+            sharing.vaults[vaultID]?.ownTakenOutComplete = true
+            sharing.vaults[vaultID]?.indexChanged = true
+        }
+        var kept: Set<VersionKey> = []
+        for entry in own {
+            let version = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
+            if vault.ownTakenOut.contains(version) { kept.insert(version) }
+        }
+        if kept != vault.ownTakenOut {
+            sharing.vaults[vaultID]?.ownTakenOut = kept
+            sharing.vaults[vaultID]?.indexChanged = true
+        }
+        return !kept.isEmpty
     }
 
     /// One vault's report for two engine runs in one sync: counts added up, state as the second left it.
@@ -185,6 +306,7 @@ extension VaultSession {
         total.rejected = first.rejected + second.rejected
         total.quarantined = first.quarantined + second.quarantined
         total.heldAside = first.heldAside + second.heldAside
+        total.collided = first.collided + second.collided
         total.staleSnapshots += first.staleSnapshots
         total.ignoredNames = max(first.ignoredNames, second.ignoredNames)
         total.retiredObjects = max(first.retiredObjects, second.retiredObjects)
@@ -196,6 +318,7 @@ extension VaultSession {
         total.unknownEntriesProcessed += first.unknownEntriesProcessed
         total.snapshotWithheld = total.snapshotWithheld || first.snapshotWithheld
         total.snapshotWithheldBy.formUnion(first.snapshotWithheldBy)
+        total.snapshotWithheldForQuarantine = total.snapshotWithheldForQuarantine || first.snapshotWithheldForQuarantine
         // Either run's: a stop the second did not reach (it replayed instead, say) is still a stop to report.
         total.requiresNewerVersion = total.requiresNewerVersion || first.requiresNewerVersion
         total.replayNeeded = total.replayNeeded || first.replayNeeded
@@ -207,6 +330,11 @@ extension VaultSession {
         // postponed still happened.
         total.reuploadRefused = second.reuploadRefused ?? first.reuploadRefused
         total.replayPostponed = total.replayPostponed || first.replayPostponed
+        total.ownStreamExhausted = total.ownStreamExhausted || first.ownStreamExhausted
+        total.ownStreamConflict = total.ownStreamConflict ?? first.ownStreamConflict
+        total.ownStreamSteppedOver = [total.ownStreamSteppedOver, first.ownStreamSteppedOver].compactMap { $0 }.min()
+        total.ownStreamUnverified = total.ownStreamUnverified ?? first.ownStreamUnverified
+        total.quarantineFull += first.quarantineFull
         return total
     }
 
@@ -283,11 +411,16 @@ extension VaultSession {
                 for row in try await store.records(in: vaultID, kind: kind) { highWater = max(highWater, row.version) }
             }
             let (ceiling, overflow) = highWater.addingReportingOverflow(configuration.maximumVersionJump)
-            let shared = sharedIDs.contains(vaultID) || sharing.vaults[vaultID] != nil
+            let shared =
+                sharedIDs.contains(vaultID) || sharing.vaults[vaultID] != nil || sharing.markers[vaultID] != nil
             for entry in entries {
                 let implausible = entry.version > configuration.maximumVersion || (!overflow && entry.version > ceiling)
-                let reason: QuarantineReason =
+                var reason: QuarantineReason =
                     implausible ? .implausibleVersion : shared ? .heldAside : .unmerged
+                // Told from the store as it is now, like the others: the ID is another vault's record's (Z22).
+                if let holder = try await store.record(entry.key), holder.vaultID != vaultID {
+                    reason = .recordInAnotherVault
+                }
                 versions.append(QuarantinedVersion(vaultID: vaultID, entry: entry, reason: reason))
             }
         }
@@ -398,10 +531,41 @@ extension VaultSession {
             author: location.author, view: view)
     }
 
+    /// Whether an object at a location in this device's own stream carries this device's own signatures: the account
+    /// key's and this device's key's, under this account's registry, in a private vault and a shared one alike. In a
+    /// shared vault `syncVerify` also accepts another member's device listed under this device's ID (S33), whose
+    /// object is then held aside by the judge; this device must not number its stream from such an object, which
+    /// would leave a hole every reader waits at, or move its next number out of range (review finding Z30). A
+    /// registry or key that cannot be read, or this device missing from the registry as read, leaves the question
+    /// open (`trustedKeyUnavailable`): the engine then neither numbers from the object nor rules it out.
+    ///
+    /// In a shared vault this device's own objects count only if its ID commits to its account (review finding Z162):
+    /// no other device counts them otherwise, so its stream there is no stream of anyone's. The question is left open
+    /// (`trustedKeyUnavailable`), so the engine numbers from nothing there and holds its publishing back while its
+    /// state could be behind the stream; it publishes nothing there anyway (`sharedEngineOptions`).
+    func syncVerifyOwn(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
+        guard let record = try await loadAccount(), let view = try? await registry(record),
+            view.state.devices[record.deviceID] != nil
+        else { throw SyncKeyringError.trustedKeyUnavailable }
+        guard location.author == record.deviceID else { throw SyncKeyringError.untrustedAuthor(location.author) }
+        if sharing.vaults[location.vaultID] != nil, !playsModifiedClient,
+            Self.committedOwnState(view)?.devices[record.deviceID] == nil
+        {
+            throw SyncKeyringError.trustedKeyUnavailable
+        }
+        try Self.verifyDual(
+            signature, over: Self.syncSignedMessage(envelope, at: location), domain: .logSegment,
+            author: location.author, view: view)
+    }
+
     /// The devices revoked from the account, whose streams sync no longer reads or waits for (review finding Y6).
     func syncRetiredAuthors(vaultID: UUID? = nil) async -> Set<UUID> {
         guard let record = try? await loadAccount(), let view = try? await registry(record) else { return [] }
-        return Set(view.state.revoked.keys).union(vaultID.map(sharedRetiredAuthors) ?? [])
+        // A shared vault's are those whose revocation counts there, by the same rule as the judge's (Z150).
+        if let vaultID, sharing.vaults[vaultID] != nil {
+            return sharedRetiredAuthors(vaultID, ownView: view, account: record)
+        }
+        return Set(view.state.revoked.keys)
     }
 
     /// What a sync object's signature covers: its name and its envelope. The envelope already binds the location
@@ -533,27 +697,76 @@ extension VaultSession {
         return stash
     }
 
+    // MARK: - The state row (review finding Z20)
+
+    /// `"WWSS" ‖ vault ID ‖ device ID ‖ state`: bound to the vault and to this device, under its own domain.
+    static func syncStateMessage(_ state: SyncState, deviceID: UUID) -> [UInt8] {
+        var message = Array("WWSS".utf8)
+        message.append(contentsOf: state.vaultID.byteArray)
+        message.append(contentsOf: deviceID.byteArray)
+        message.append(contentsOf: state.authenticatedBytes)
+        return message
+    }
+
+    /// The state with this session's signature over all of it. Throws `SyncKeyringError.locked` while locked: a state
+    /// is saved only by a sync that merged or published, which needs the keys anyway.
+    func signedSyncState(_ state: SyncState) throws -> SyncState {
+        let (keys, record) = try syncKeys()
+        var signed = state
+        signed.authenticator = try keys.keyset.sign(
+            Self.syncStateMessage(state, deviceID: record.deviceID), domain: .syncState)
+        return signed
+    }
+
+    /// `state` if this session signed it for its vault on this device, or `nil`: a row it did not write is no state.
+    /// Checked with the Keychain's copy of the account key while locked, as downloads are.
+    func verifiedSyncState(_ state: SyncState, vaultID: UUID) async -> SyncState? {
+        var record = account
+        if record == nil { record = try? await loadAccount() }
+        guard state.vaultID == vaultID, let record, let signingKey = await trustedAccountSigningKey(record) else {
+            return nil
+        }
+        let message = Self.syncStateMessage(state, deviceID: record.deviceID)
+        guard
+            (try? Signatures.verify(state.authenticator, for: message, domain: .syncState, signingKey: signingKey))
+                != nil
+        else { return nil }
+        return state
+    }
+
     /// Copies the account's public signing key to the Keychain, for checking downloads while locked.
+    ///
+    /// Called after an unlock has installed `keys` and then waited on the Keychain, so a `lock()` may have zeroised
+    /// them by now, and reading a zeroised key traps (review finding Z4, as W22): checked here, before the keyset is
+    /// read, with no suspension between the check and the read.
     func refreshSigningKey(account: AccountRecord, keys: UnlockedKeys) async throws {
+        guard !keys.keyset.isZeroised else { throw VaultError.locked }
         var signingKey = try keys.keyset.publicKeyBundle().signingKey
         try await keychain.store(
             SecureBytes(wiping: &signingKey), for: .accountSigningKey(accountID: account.accountID))
     }
 }
 
-/// The sync state store the session and its engine use: everything passes through to `base`, except that pending
-/// deletions are signed by the session as they are recorded and checked as they are read
-/// (`PendingDeletion.authenticator`, review of milestone 3).
+/// The sync state store the session and its engine use. Everything the engine acts on rather than checks again is
+/// signed by the session as it is written and checked as it is read: pending deletions
+/// (`PendingDeletion.authenticator`, review of milestone 3), the stash (N14) and the state row itself (Z20), whose
+/// erasures, merged positions and published stamps go out signed in this device's snapshots and segments. Staged
+/// objects pass through, because the engine verifies each again before merging it, and so does the quarantine, which
+/// is shown to the person and never merged.
 struct AuthenticatedSyncState: SyncStateStore {
     let base: any SyncStateStore
     let session: VaultSession
 
+    /// The state as this session signed it for this vault on this device, or `nil` for any other row: the engine
+    /// then starts from nothing and replays the log, which rebuilds the erasures too.
     func loadState(vaultID: UUID) async throws -> SyncState? {
-        try await base.loadState(vaultID: vaultID)
+        guard let state = try await base.loadState(vaultID: vaultID) else { return nil }
+        return await session.verifiedSyncState(state, vaultID: vaultID)
     }
 
+    /// Signs the state with the account key before it is stored; throws `SyncKeyringError.locked` while locked.
     func saveState(_ state: SyncState) async throws {
-        try await base.saveState(state)
+        try await base.saveState(try await session.signedSyncState(state))
     }
 
     func stage(_ object: StagedObject) async throws {
@@ -568,7 +781,15 @@ struct AuthenticatedSyncState: SyncStateStore {
         try await base.unstage(locations)
     }
 
+    /// Signs the deletion now, while the keys are there, so that recording it after its commit needs none (Z28).
+    func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion {
+        try await session.authenticatePendingDeletion(deletion)
+    }
+
+    /// Records a deletion `prepared` signed; one that carries no signature yet is signed here. Either way it counts
+    /// only if it verifies when it is read.
     func addPendingDeletion(_ deletion: PendingDeletion) async throws {
+        guard deletion.authenticator.isEmpty else { return try await base.addPendingDeletion(deletion) }
         try await base.addPendingDeletion(try await session.authenticatePendingDeletion(deletion))
     }
 
@@ -581,8 +802,17 @@ struct AuthenticatedSyncState: SyncStateStore {
         try await base.removePendingDeletions(deletions, vaultID: vaultID)
     }
 
-    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws {
+    @discardableResult
+    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
         try await base.quarantine(entry, vaultID: vaultID)
+    }
+
+    func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
+        try await base.holdsQuarantined(entry, vaultID: vaultID)
+    }
+
+    func quarantineUsage(vaultID: UUID) async throws -> QuarantineUsage {
+        try await base.quarantineUsage(vaultID: vaultID)
     }
 
     func quarantined(vaultID: UUID) async throws -> [SyncEntry] {
@@ -634,6 +864,10 @@ struct VaultSyncAdapter: SyncKeyring, ItemSealer {
 
     func verify(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
         try await session.syncVerify(signature, over: envelope, at: location)
+    }
+
+    func verifyOwn(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
+        try await session.syncVerifyOwn(signature, over: envelope, at: location)
     }
 
     func retiredAuthors(vaultID: UUID) async -> Set<UUID> {
@@ -689,6 +923,8 @@ public enum QuarantineReason: Sendable, Hashable {
     /// Its merge with the local version could not be sealed (Y37), or it is no longer implausible as the vault has
     /// caught up with it.
     case unmerged
+    /// A record of another vault holds its record ID on this device (the store keys records across vaults, Z22).
+    case recordInAnotherVault
 }
 
 /// What one sync of the account did: the account's own objects, and each vault's log.
@@ -709,6 +945,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     public var transportFailure: SyncTransportError?
     /// What the sharing pass did for each shared vault (docs/02-architecture.md §8.8).
     public var sharing: [UUID: SharedVaultSyncReport] = [:]
+    /// A vault that holds an item of this device's that exists nowhere else (a move's copy that could not be
+    /// published, or was held aside): while there is one, no vault's deletions are published, so that an original is
+    /// never erased ahead of its copy (PRD F7.6; review findings Z44, Z54). The first such vault found.
+    public var deletionsHeldBack: Set<UUID> = []
 
     public init() {}
 
@@ -734,6 +974,7 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.rejected += report.rejected
             total.quarantined += report.quarantined
             total.heldAside += report.heldAside
+            total.collided += report.collided
             total.waiting.merge(report.waiting, uniquingKeysWith: min)
             total.staleSnapshots += report.staleSnapshots
             total.ignoredNames += report.ignoredNames
@@ -743,12 +984,15 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.transportUnavailable = total.transportUnavailable || report.transportUnavailable
             total.transportFailure = total.transportFailure ?? report.transportFailure
             total.ownStreamConflict = total.ownStreamConflict ?? report.ownStreamConflict
+            total.ownStreamSteppedOver = total.ownStreamSteppedOver ?? report.ownStreamSteppedOver
             total.requiresNewerVersion = total.requiresNewerVersion || report.requiresNewerVersion
             total.unknownEntriesKept += report.unknownEntriesKept
             total.unknownEntriesDropped += report.unknownEntriesDropped
             total.unknownEntriesProcessed += report.unknownEntriesProcessed
             total.snapshotWithheld = total.snapshotWithheld || report.snapshotWithheld
             total.snapshotWithheldBy.formUnion(report.snapshotWithheldBy)
+            total.snapshotWithheldForQuarantine =
+                total.snapshotWithheldForQuarantine || report.snapshotWithheldForQuarantine
             total.replayNeeded = total.replayNeeded || report.replayNeeded
             total.copiesExamined += report.copiesExamined
             total.copiesRefused += report.copiesRefused
@@ -757,6 +1001,9 @@ public struct AccountSyncReport: Sendable, Equatable {
             total.handOnOwed = total.handOnOwed || report.handOnOwed
             total.storeLacksObjects = total.storeLacksObjects || report.storeLacksObjects
             total.replayPostponed = total.replayPostponed || report.replayPostponed
+            total.ownStreamExhausted = total.ownStreamExhausted || report.ownStreamExhausted
+            total.ownStreamUnverified = total.ownStreamUnverified ?? report.ownStreamUnverified
+            total.quarantineFull += report.quarantineFull
         }
         return total
     }
@@ -814,6 +1061,8 @@ struct VaultMetadataMerger: RecordMerger {
         var copy = incoming
         // Still the remote writer's description: in a shared vault the judge attributes it to them (review S37).
         copy.writtenBy = chosen
+        // A local row at the last version (an edited file, Z23) has nothing above it: the object is refused.
+        guard local.version < UInt64.max else { throw ItemMergeError.versionOverflow }
         copy.version = local.version + 1
         return .replace(try await sealer.sealMetadata(copy))
     }

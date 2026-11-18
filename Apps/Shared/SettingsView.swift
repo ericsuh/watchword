@@ -7,7 +7,7 @@ import WatchwordPresentation
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var kit: EmergencyKit?
+    @State private var showingKit = false
     @State private var askingPassword = false
     @State private var password = ""
     @State private var screen: AccountScreen?
@@ -78,8 +78,14 @@ struct SettingsView: View {
                         screenButton("Restore from a Backup", .restore, AccessibilityID.Settings.restore)
                     }
                 }
-                Section("Emergency Kit") {
-                    Button("Show Emergency Kit…") { Task { kit = await model.emergencyKit() } }
+                Section {
+                    // The kit's own screen asks for the account password before it shows anything (Z86).
+                    Button("Show Emergency Kit…") { showingKit = true }
+                        .accessibilityIdentifier("settings.emergencyKit")
+                } header: {
+                    Text("Emergency Kit")
+                } footer: {
+                    Text("Your account password is asked for first.")
                 }
                 ErrorText(message: model.errorMessage)
             }
@@ -101,8 +107,10 @@ struct SettingsView: View {
             } message: {
                 Text("Quick unlock starts a new 14-day period before your password is asked for again.")
             }
-            .sheet(item: $kit) { kit in
-                EmergencyKitView(kit: kit, isOnboarding: false)
+            .sheet(isPresented: $showingKit) {
+                if let context = model.screenContext {
+                    EmergencyKitView(context: context, privacy: model.privacy, kit: nil)
+                }
             }
             .sheet(item: $screen) { screen in
                 if let context = model.screenContext {
@@ -196,7 +204,3 @@ struct SyncNoticeText: View {
         }
     }
 #endif
-
-extension EmergencyKit: @retroactive Identifiable {
-    public var id: UUID { accountID }
-}

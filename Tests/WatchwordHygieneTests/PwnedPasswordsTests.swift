@@ -319,7 +319,8 @@ struct PwnedRangeCacheTests {
             let range = try PwnedRangeParser.parse(Array("\(RangeFixtures.passwordSuffix):1".utf8), prefix: prefix)
                 .range
             await cache.store(
-                CachedPwnedRange(range: range, fetchedAt: Self.fetched.addingTimeInterval(Double(value))))
+                CachedPwnedRange(range: range, fetchedAt: Self.fetched.addingTimeInterval(Double(value))),
+                in: Partition.vault)
         }
         #expect(await cache.count == 3)
         #expect(await cache.snapshot().map(\.range.prefix.value) == [2, 3, 4])
@@ -336,15 +337,16 @@ struct PwnedRangeCacheTests {
             let range = try PwnedRangeParser.parse(Array("\(RangeFixtures.passwordSuffix):1".utf8), prefix: prefix)
                 .range
             await cache.store(
-                CachedPwnedRange(range: range, fetchedAt: Self.fetched.addingTimeInterval(Double(value))))
+                CachedPwnedRange(range: range, fetchedAt: Self.fetched.addingTimeInterval(Double(value))),
+                in: Partition.vault)
         }
         #expect(await cache.snapshot().map(\.range.prefix.value) == [1, 2, 3])
         // Replacing an entry does not count it twice.
-        for _ in 0..<10 { await cache.store(try Self.entry("\(RangeFixtures.passwordSuffix):1")) }
+        for _ in 0..<10 { await cache.store(try Self.entry("\(RangeFixtures.passwordSuffix):1"), in: Partition.vault) }
         #expect(await cache.count >= 2)
         // A range larger than the whole budget is not kept.
         let tiny = InMemoryPwnedRangeCache(capacity: 100, maximumBytes: 10)
-        await tiny.store(try Self.entry())
+        await tiny.store(try Self.entry(), in: Partition.vault)
         #expect(await tiny.count == 0)
     }
 }
@@ -364,7 +366,7 @@ struct PwnedPasswordsClientTests {
     func request() async throws {
         let rig = Rig()
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
-        let check = try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+        let check = try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         #expect(check.result == .found(occurrences: 10_434_004))
         #expect(check.source == .network)
         let requests = await rig.http.requests
@@ -380,7 +382,8 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
         // SHA-1("unbreached-Zq7!example") starts D5D43; any range without its suffix will do.
-        let check = try await rig.client.check(PasswordDigest(utf8Of: "unbreached-Zq7!example"), now: Self.now)
+        let check = try await rig.client.check(
+            PasswordDigest(utf8Of: "unbreached-Zq7!example"), in: Partition.vault, now: Self.now)
         #expect(check.result == .notFound)
         #expect(await rig.http.requests[0].url.path == "/range/D5D43")
     }
@@ -390,9 +393,9 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
         let digest = PasswordDigest(utf8Of: "password")
-        _ = try await rig.client.check(digest, now: Self.now)
+        _ = try await rig.client.check(digest, in: Partition.vault, now: Self.now)
         let later = Self.now.addingTimeInterval(7 * 86400 - 1)
-        let second = try await rig.client.check(digest, now: later)
+        let second = try await rig.client.check(digest, in: Partition.vault, now: later)
         #expect(second == PwnedCheck(result: .found(occurrences: 10_434_004), source: .cache, rangeFetchedAt: Self.now))
         #expect(await rig.http.requests.count == 1)
         #expect(await rig.cache.stores.count == 1)
@@ -404,8 +407,8 @@ struct PwnedPasswordsClientTests {
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
         await rig.http.enqueue(RangeFixtures.response("\(RangeFixtures.passwordSuffix):11000000"))
         let digest = PasswordDigest(utf8Of: "password")
-        _ = try await rig.client.check(digest, now: Self.now)
-        let check = try await rig.client.check(digest, now: Self.now.addingTimeInterval(7 * 86400))
+        _ = try await rig.client.check(digest, in: Partition.vault, now: Self.now)
+        let check = try await rig.client.check(digest, in: Partition.vault, now: Self.now.addingTimeInterval(7 * 86400))
         #expect(check.source == .network)
         #expect(check.result == .found(occurrences: 11_000_000))
         #expect(await rig.http.requests.count == 2)
@@ -417,9 +420,9 @@ struct PwnedPasswordsClientTests {
         let planted = try PwnedRangeCacheTests.entry("0A1B2C3D4E5F60718293A4B5C6D7E8F9012:1")
         await rig.cache.plant(
             CachedPwnedRange(range: planted.range, fetchedAt: Self.now.addingTimeInterval(3600)),
-            under: RangeFixtures.prefix)
+            under: RangeFixtures.prefix, in: Partition.vault)
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
-        let check = try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+        let check = try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         #expect(check.source == .network)
         #expect(check.result.isBreached)
     }
@@ -429,9 +432,10 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         let other = PwnedRangePrefix("00000")!
         let range = try PwnedRangeParser.parse(Array(RangeFixtures.unpadded.utf8), prefix: other).range
-        await rig.cache.plant(CachedPwnedRange(range: range, fetchedAt: Self.now), under: RangeFixtures.prefix)
+        await rig.cache.plant(
+            CachedPwnedRange(range: range, fetchedAt: Self.now), under: RangeFixtures.prefix, in: Partition.vault)
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
-        let check = try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+        let check = try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         #expect(check.source == .network)
     }
 
@@ -441,11 +445,13 @@ struct PwnedPasswordsClientTests {
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
         let digest = PasswordDigest(utf8Of: "password")
-        _ = try await rig.client.check(digest, now: Self.now)
+        _ = try await rig.client.check(digest, in: Partition.vault, now: Self.now)
         let passStart = Self.now.addingTimeInterval(86400)
-        let first = try await rig.client.check(digest, now: passStart.addingTimeInterval(5), freshAfter: passStart)
+        let first = try await rig.client.check(
+            digest, in: Partition.vault, now: passStart.addingTimeInterval(5), freshAfter: passStart)
         #expect(first.source == .network)
-        let second = try await rig.client.check(digest, now: passStart.addingTimeInterval(9), freshAfter: passStart)
+        let second = try await rig.client.check(
+            digest, in: Partition.vault, now: passStart.addingTimeInterval(9), freshAfter: passStart)
         #expect(second.source == .cache)
         #expect(await rig.http.requests.count == 2)
     }
@@ -459,7 +465,7 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(status: 429, headers: ["retry-after": header])
         await #expect(throws: PwnedPasswordsError.rateLimited(retryAfter: expected)) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
         #expect(PwnedPasswordsError.rateLimited(retryAfter: expected).isRetryable)
         #expect(await rig.cache.stores.isEmpty)
@@ -470,7 +476,7 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(status: 429)
         await #expect(throws: PwnedPasswordsError.rateLimited(retryAfter: 60)) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
     }
 
@@ -480,7 +486,7 @@ struct PwnedPasswordsClientTests {
         await rig.http.enqueue(status: status, body: RangeFixtures.padded)
         let expected = PwnedPasswordsError.serverUnavailable(status: status, retryAfter: 300)
         await #expect(throws: expected) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
         #expect(expected.isRetryable)
         #expect(expected.retryAfter == 300)
@@ -492,7 +498,7 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(status: 503, headers: ["Retry-After": "120"])
         await #expect(throws: PwnedPasswordsError.serverUnavailable(status: 503, retryAfter: 120)) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
     }
 
@@ -504,7 +510,7 @@ struct PwnedPasswordsClientTests {
         await rig.http.enqueue(
             status: status, headers: ["Location": "https://evil.example/range/5BAA6"], body: RangeFixtures.padded)
         await #expect(throws: PwnedPasswordsError.unexpectedStatus(status)) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
         #expect(!PwnedPasswordsError.unexpectedStatus(status).isRetryable)
         #expect(await rig.http.requests.count == 1)
@@ -516,7 +522,7 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(.failure)
         await #expect(throws: PwnedPasswordsError.transport) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
         #expect(PwnedPasswordsError.transport.isRetryable)
         #expect(await rig.cache.stores.isEmpty)
@@ -528,7 +534,7 @@ struct PwnedPasswordsClientTests {
         let body = [UInt8](repeating: UInt8(ascii: "\n"), count: 2 * 1024 * 1024 + 1)
         await rig.http.enqueue(.response(HTTPResponse(status: 200, body: body)))
         await #expect(throws: PwnedPasswordsError.responseTooLarge) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
         #expect(await rig.cache.stores.isEmpty)
     }
@@ -538,7 +544,7 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(status: 200, body: "<html><body>Access denied by policy</body></html>")
         await #expect(throws: PwnedPasswordsError.malformedResponse) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now)
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now)
         }
         #expect(await rig.cache.stores.isEmpty)
     }
@@ -548,7 +554,7 @@ struct PwnedPasswordsClientTests {
         let rig = Rig()
         await rig.http.enqueue(RangeFixtures.response(RangeFixtures.padded))
         await #expect(throws: PwnedPasswordsError.interrupted) {
-            try await rig.client.check(PasswordDigest(utf8Of: "password"), now: Self.now) { false }
+            try await rig.client.check(PasswordDigest(utf8Of: "password"), in: Partition.vault, now: Self.now) { false }
         }
         #expect(await rig.cache.stores.isEmpty)
     }
@@ -582,4 +588,10 @@ struct PwnedPasswordsClientTests {
         #expect(!printed.contains("1.2.3"))
         #expect(Mirror(reflecting: request).children.isEmpty)
     }
+}
+
+/// The vault the client's checks are filed under in these tests (`PwnedRangeCache`'s partitions, Z88).
+enum Partition {
+    static let vault = UUID(uuidString: "0BADCAFE-0000-4000-8000-000000000088")!
+    static let other = UUID(uuidString: "0BADCAFE-0000-4000-8000-000000000089")!
 }
