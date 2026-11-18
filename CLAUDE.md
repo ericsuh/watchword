@@ -750,7 +750,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   writer chose (S36). Then its clock (`knowledgeCounts`): every edit it contains, of any device but its own writer's,
   must have been published in a segment of that device's stream that counts, so a version built on a late write is
   held aside with it (S44), and one claiming a current member's edits their stream has not published waits for it
-  (S46; a claim beyond this device's own published edits is refused). A tombstone's erasure summary is judged the same
+  (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z127; a stream with
+  no first segment here is waited for, never taken for one that cannot be read). A tombstone's erasure summary is judged the same
   way before it is applied or remembered (`WriteJudge.admitsErasure`, S45): a deletion built on a late write is held
   aside and the item stays. A value naming this device that it never published
   counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
