@@ -24,8 +24,8 @@
         func newerSchemaRefused() throws {
             let url = StoreFixtures.temporaryDatabaseURL()
             _ = try SQLiteRecordStore(url: url)
-            try SQLiteConnection(path: SQLiteRecordStore.resolvingSymlinks(url.path)).execute("PRAGMA user_version = 2")
-            #expect(throws: RecordStoreError.unsupportedSchemaVersion(2)) {
+            try SQLiteConnection(path: SQLiteRecordStore.resolvingSymlinks(url.path)).execute("PRAGMA user_version = 3")
+            #expect(throws: RecordStoreError.unsupportedSchemaVersion(3)) {
                 _ = try SQLiteRecordStore(url: url)
             }
         }

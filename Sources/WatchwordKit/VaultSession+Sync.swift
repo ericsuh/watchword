@@ -51,6 +51,13 @@ extension VaultSession {
         } catch SyncKeyringError.locked {
             // Locked while vouching for the directory: the rest of the sync is a download.
         }
+        // A move of an earlier device ID's sync state that an unlock could not finish is tried again; until it is
+        // complete this device publishes nothing, since the move starts each vault's state over (Z181).
+        if keys != nil, record.migration != nil {
+            try? await completeDeviceMigration(account: record)
+            record = try await loadAccount() ?? record
+        }
+        report.deviceMigrationIncomplete = record.migration != nil
         // A device whose registration no longer counts registers again, now that it has seen why.
         if let keys, let view = try? await registry(record), view.state.pendingCredentials.isEmpty,
             view.state.standing(of: record.deviceID) == .unknown
@@ -66,7 +73,8 @@ extension VaultSession {
         let changePending = await passwordChangePending(record)
         report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
-        let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
+        let mayWrite =
+            keys != nil && standing == .active && !report.awaitingNewPassword && !report.deviceMigrationIncomplete
         let epoch = lockEpoch
         // Deletions an earlier ID of this installation made, parked while a shared vault holds an edit of that ID that
         // nobody received, go out once none remains; until then they are reported held back (Z167).
@@ -998,6 +1006,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// releases the deletions by moving each item out of the shared vault from this device, which writes it as this
     /// device's, or by deleting it.
     public var copiesNobodyReceived: [UUID: Set<UUID>] = [:]
+    /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
+    /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
+    /// unlock and sync.
+    public var deviceMigrationIncomplete = false
 
     public init() {}
 

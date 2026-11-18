@@ -108,6 +108,8 @@ actor InterceptingStateStore: SyncStateStore {
     var refused: Set<RecordKey> = []
     /// While set, the pending deletions of a vault read for the second time since then are not read: thrown, once.
     private var pendingReads: [UUID: Int]?
+    /// While set, the next pending deletion written is not written: thrown, once.
+    private var pendingWriteFails = false
 
     func intercept(afterSave: (@Sendable (SyncState) async -> Void)?) { self.afterSave = afterSave }
     func report(usage: QuarantineUsage?) { self.usage = usage }
@@ -116,6 +118,8 @@ actor InterceptingStateStore: SyncStateStore {
     func fail(staging failure: any Error) { stageFailure = failure }
     /// The next pass over every vault's pending deletions reads them; the one after fails at its first vault.
     func failSecondPendingDeletionRead() { pendingReads = [:] }
+    /// The next pending deletion written fails, as a database that cannot be written would; the one after succeeds.
+    func failNextPendingDeletionWrite() { pendingWriteFails = true }
 
     func loadState(vaultID: UUID) async -> SyncState? { await base.loadState(vaultID: vaultID) }
     func saveState(_ state: SyncState) async {
@@ -128,7 +132,13 @@ actor InterceptingStateStore: SyncStateStore {
     }
     func staged(vaultID: UUID) async -> [StagedObject] { await base.staged(vaultID: vaultID) }
     func unstage(_ locations: [SyncObjectLocation]) async { await base.unstage(locations) }
-    func addPendingDeletion(_ deletion: PendingDeletion) async { await base.addPendingDeletion(deletion) }
+    func addPendingDeletion(_ deletion: PendingDeletion) async throws {
+        if pendingWriteFails {
+            pendingWriteFails = false
+            throw PendingDeletionsUnreadable()
+        }
+        await base.addPendingDeletion(deletion)
+    }
     func pendingDeletions(vaultID: UUID) async throws -> [RecordKey: PendingDeletion] {
         if var reads = pendingReads {
             reads[vaultID, default: 0] += 1

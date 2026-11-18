@@ -767,6 +767,11 @@ extension VaultSession {
         // made with a password since changed) registers again under the same ID.
         guard view.state.pendingCredentials.isEmpty, !(await passwordChangePending(account)), epoch == lockEpoch
         else { return }
+        // A move of an earlier ID's sync state that did not finish is made first, so that a registration below starts
+        // from a whole state; one that fails again throws, and runs again at the next unlock (Z181).
+        try await completeDeviceMigration(account: account)
+        let account = (try await loadAccount()) ?? account
+        guard epoch == lockEpoch else { return }
         let ownKey = try await deviceKeys.publicKey(accountID: accountID, deviceID: account.deviceID)
         if ownKey == nil {
             try await registerThisDevice(account: account, keys: keys, asNewDevice: true)
@@ -824,13 +829,16 @@ extension VaultSession {
     ///
     /// As a new device (a store restored onto other hardware), what the old device ID wrote and never published is
     /// carried over, or nobody would ever publish it (`SyncEngine` publishes only rows of its own device): each such
-    /// row is written again by the new ID, unchanged (`ItemMerge.written`), in the commit that registers it, and
-    /// each of the old ID's pending deletions is recorded again as the new ID's (PRD F7.7) — unless a shared vault
-    /// holds an edit nobody received of the old ID or of any device ID of the registry that does not commit
-    /// (`vaultsHoldingEditsNobodyReceived`, review findings Z167, Z170): then they are parked for the new ID
-    /// (`parkedDeletionDevice`), and go out only once no such edit remains (`releaseParkedDeletions`). What the old ID
-    /// had parked itself is parked again for the new ID whatever registration finds: only that release lets it go.
+    /// row is written again by the new ID, unchanged (`ItemMerge.written`), in the commit that registers it, and that
+    /// commit records the move of the old ID's sync state (`AccountRecord.migration`, signed), which
+    /// `completeDeviceMigration` then makes: the old ID's pending deletions recorded again as the new ID's (PRD F7.7),
+    /// or parked for it (Z167, Z170). A move that fails part way is made again at each unlock, and at each sync, until
+    /// it is complete, and until then this device publishes nothing (review of round 10, Z181).
     func registerThisDevice(account: AccountRecord, keys: UnlockedKeys, asNewDevice: Bool) async throws {
+        // A new ID over a move that is not complete would replace its record, and the earlier ID's deletions would
+        // stay stamped by an ID this installation never publishes again: the move comes first
+        // (`reconcileAccountObjects` makes it, and throws if it fails), and registration waits for it (Z181).
+        guard !asNewDevice || account.migration == nil else { return }
         let epoch = lockEpoch
         // Before a current key is picked for any row carried over.
         await loadSharedMarkersIfNeeded()
@@ -838,20 +846,12 @@ extension VaultSession {
         var updated = account
         // What the old ID left, read before anything is made or committed: one read that fails ends the registration
         // with nothing written and no device key made (review of round 10, I1; Z182), and it runs again at the next
-        // unlock, rather than leaving the old ID's parked deletions parked for an ID nobody releases (Z177).
+        // unlock (Z177). The move reads the deletions again (`completeDeviceMigration`), and decides what it parks.
         let unpublished = asNewDevice ? try await unpublishedRows(of: account) : (rows: [], deletions: [:])
-        let parked = asNewDevice ? try await parkedDeletions(of: account) : []
+        if asNewDevice { _ = try await parkedDeletions(of: account) }
         // Then a new device's key, so that its ID can commit to the account under it (review finding Z157).
         let created = asNewDevice ? try await deviceKeys.createDevice(accountID: account.accountID) : nil
         if let created { updated.deviceID = created.id }
-        // The old ID's deletions wait while a shared vault holds an edit that nobody received, of it or of any device
-        // ID of the registry that does not commit (Z167, Z170): the release's own predicate, so that an ID which commits
-        // (a second restore) does not let go of what an earlier one left.
-        var parksDeletions = false
-        if asNewDevice, !unpublished.deletions.isEmpty {
-            let nobodyReceived = Self.idsNobodyReceives(account: account, view: view, including: account.deviceID)
-            parksDeletions = !(await vaultsHoldingEditsNobodyReceived(of: nobodyReceived, account: account)).isEmpty
-        }
         let now = await clock.now()
         let keys = try requireKeys(since: epoch)
         let enrolment = EnrolmentKey.derive(from: keys.accountUnlockKey, accountID: account.accountID)
@@ -876,6 +876,9 @@ extension VaultSession {
             keyset: keyset, enrolment: enrolment)
         var change = StoreChange(upserts: [Self.registryRow(entry, account: updated)])
         if asNewDevice {
+            if syncSettings != nil {
+                updated.migration = try signedMigration(from: account.deviceID, to: updated, keyset: keyset)
+            }
             change.account = .update(updated, expectedKeysetVersion: account.keysetVersion)
             for row in try carriedOver(unpublished.rows, keys: try requireKeys(since: epoch), as: updated) {
                 change.upserts.append(row.row)
@@ -888,13 +891,14 @@ extension VaultSession {
             for row in change.upserts where row.kind == .item || row.kind == .vaultMetadata {
                 highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, row.version)
             }
-            try? await startNewDeviceSyncState(
-                carrying: unpublished.deletions, parked: parked, as: updated, parking: parksDeletions)
         }
         registryView = nil
         if let refreshed = try? await registry(updated) {
             try? await pinRegistry(refreshed, accountID: account.accountID)
         }
+        // After the registry is pinned again, so that the move reads the registry that lists the new ID. A move that
+        // fails throws, and is made again at the next unlock or sync (Z181).
+        if asNewDevice { try await completeDeviceMigration(account: updated) }
     }
 
     /// The rows this device wrote that its sync state does not record as published, and its pending deletions
@@ -953,31 +957,85 @@ extension VaultSession {
         return result
     }
 
-    /// The sync state of a new device ID: what the old ID published and acknowledged is not this device's to
-    /// continue (its stream, its sequence numbers), so each vault starts over — but the old ID's pending deletions
-    /// are recorded again as this device's, each stamped above the old one so that it replaces it in one write.
-    /// With `parking` (review finding Z167) they are parked for the new ID instead (`parkedDeletionDevice`), which the
-    /// engine neither publishes nor applies. Those the old ID had parked itself (`parked`) are always parked again
-    /// (Z170): registration never releases one, `releaseParkedDeletions` alone does.
-    func startNewDeviceSyncState(
-        carrying deletions: [UUID: [RecordKey: PendingDeletion]], parked: [PendingDeletion] = [],
-        as updated: AccountRecord, parking: Bool = false
-    ) async throws {
-        guard let base = syncSettings?.state, let syncState else { return }
-        let carried =
-            deletions.values.flatMap(\.values).map { (deletion: $0, parks: parking) } + parked.map { ($0, true) }
-        for (deletion, parks) in carried where deletion.stamp.version < .max - 1 {
-            if parks {
-                try await base.addPendingDeletion(
-                    try signedPendingDeletion(
-                        Self.restamped(deletion, device: Self.parkedDeletionDevice(of: updated.deviceID))))
-            } else {
-                try await syncState.addPendingDeletion(Self.restamped(deletion, device: updated.deviceID))
+    /// The move of an earlier device ID's sync state to `account`'s (review of round 10, Z181), recorded by
+    /// registration with the account record that names the new ID (`AccountRecord.migration`) and made here, again
+    /// at each unlock and each sync until it is complete; a failure throws, and the record stays. What the old ID
+    /// published and acknowledged is not this device's to continue (its stream, its sequence numbers), so each vault's
+    /// state is first saved empty. Then the old ID's pending deletions are recorded again as this
+    /// device's, each stamped above the old one so that it replaces it in one write, so a move made twice finds only
+    /// what the first did not do; or, while a shared vault holds an edit nobody received of the old ID or of any
+    /// device ID of the registry that does not commit (`vaultsHoldingEditsNobodyReceived`, Z167, Z170), parked for the
+    /// new ID (`parkedDeletionDevice`), which the engine neither publishes nor applies. Those the old ID had parked
+    /// itself are always parked again (Z170): only `releaseParkedDeletions` lets one go. Last, the record is cleared.
+    /// Until then the sync publishes nothing (`AccountSyncReport.deviceMigrationIncomplete`), so a state started over
+    /// again by a second attempt loses nothing this device published.
+    ///
+    /// A record the session did not sign (`DeviceMigration.authenticator` over the account, the new ID and the old,
+    /// under `SignatureDomain.deviceMigration`) moves nothing: planted in the database (A8), it would make this
+    /// device take another device's genuine pending deletions, copied into its state file, for its own. It is cleared.
+    /// Without sync configured there is nothing to move, and the record waits for a session that has it.
+    func completeDeviceMigration(account: AccountRecord) async throws {
+        guard let migration = account.migration, let base = syncSettings?.state, let syncState else { return }
+        let epoch = lockEpoch
+        let previous = migration.previousDeviceID
+        if try verifiedMigration(migration, to: account, keyset: try requireKeys(since: epoch).keyset) {
+            let view = try await registry(account)
+            for vaultID in try await vaultDirectory(account).keys {
+                _ = try requireKeys(since: epoch)
+                try await base.saveState(SyncState(vaultID: vaultID))
+            }
+            let deletions = try await signedPendingDeletions(stampedBy: previous, account: account)
+            let parked = try await signedPendingDeletions(
+                stampedBy: Self.parkedDeletionDevice(of: previous), account: account)
+            // The old ID's deletions wait while a shared vault holds an edit that nobody received, of it or of any
+            // device ID of the registry that does not commit: the release's own predicate, so that an ID which commits
+            // (a second restore) does not let go of what an earlier one left.
+            var parking = false
+            if !deletions.isEmpty {
+                let nobodyReceived = Self.idsNobodyReceives(account: account, view: view, including: previous)
+                parking = !(await vaultsHoldingEditsNobodyReceived(of: nobodyReceived, account: account)).isEmpty
+            }
+            let carried = deletions.map { (deletion: $0, parks: parking) } + parked.map { ($0, true) }
+            for (deletion, parks) in carried where deletion.stamp.version < .max - 1 {
+                _ = try requireKeys(since: epoch)
+                if parks {
+                    try await base.addPendingDeletion(
+                        try signedPendingDeletion(
+                            Self.restamped(deletion, device: Self.parkedDeletionDevice(of: account.deviceID))))
+                } else {
+                    try await syncState.addPendingDeletion(Self.restamped(deletion, device: account.deviceID))
+                }
             }
         }
-        for vaultID in try await vaultDirectory(updated).keys {
-            try await base.saveState(SyncState(vaultID: vaultID))
-        }
+        _ = try requireKeys(since: epoch)
+        guard let current = try await store.loadAccount(), current.deviceID == account.deviceID,
+            current.migration == migration
+        else { return }
+        var done = current
+        done.migration = nil
+        try await store.commit(StoreChange(account: .update(done, expectedKeysetVersion: current.keysetVersion)))
+        self.account = done
+    }
+
+    /// The move from `previous` to `updated`'s device ID, signed by the account key (Z181).
+    func signedMigration(from previous: UUID, to updated: AccountRecord, keyset: Keyset) throws -> DeviceMigration {
+        DeviceMigration(
+            previousDeviceID: previous,
+            authenticator: try keyset.sign(
+                Self.migrationMessage(from: previous, to: updated), domain: .deviceMigration))
+    }
+
+    /// Whether this session signed `migration` for `account`'s current device ID.
+    func verifiedMigration(_ migration: DeviceMigration, to account: AccountRecord, keyset: Keyset) throws -> Bool {
+        let message = Self.migrationMessage(from: migration.previousDeviceID, to: account)
+        let signingKey = try keyset.publicKeyBundle().signingKey
+        return
+            (try? Signatures.verify(
+                migration.authenticator, for: message, domain: .deviceMigration, signingKey: signingKey)) != nil
+    }
+
+    static func migrationMessage(from previous: UUID, to account: AccountRecord) -> [UInt8] {
+        Array("WW-device-migration-v1".utf8) + bytes(account.accountID) + bytes(account.deviceID) + bytes(previous)
     }
 
     /// `deletion` stamped by `device`, above the original so that it replaces it in one write.
@@ -1009,10 +1067,15 @@ extension VaultSession {
     /// The deletions parked for `account`'s device (`parkedDeletionDevice`) that the account key signed. Throws what
     /// the state store threw, and `VaultError.locked` while locked: never an empty list for one it could not read.
     func parkedDeletions(of account: AccountRecord) async throws -> [PendingDeletion] {
+        try await signedPendingDeletions(stampedBy: Self.parkedDeletionDevice(of: account.deviceID), account: account)
+    }
+
+    /// The pending deletions stamped by `device` that the account key signed, in every vault of `account`'s directory.
+    /// Throws what the state store threw, and `VaultError.locked` while locked.
+    func signedPendingDeletions(stampedBy device: UUID, account: AccountRecord) async throws -> [PendingDeletion] {
         guard let base = syncSettings?.state else { return [] }
         let keys = try requireKeys()
         let signingKey = try keys.keyset.publicKeyBundle().signingKey
-        let device = Self.parkedDeletionDevice(of: account.deviceID)
         var parked: [PendingDeletion] = []
         for vaultID in try await vaultDirectory(account).keys {
             for (key, deletion) in try await base.pendingDeletions(vaultID: vaultID)
@@ -1085,8 +1148,8 @@ extension VaultSession {
     /// does not commit (the earlier ID among them; `vaultsHoldingEditsNobodyReceived`), they stay parked, and this
     /// returns the vaults holding one (the sync reports them in `deletionsHeldBack`, and the deletion gate holds every
     /// other deletion back too, Z170); once none remains (the person moved the copy out, or deleted it),
-    /// each is recorded again as this device's, as at registration (`startNewDeviceSyncState`), and goes out like any
-    /// other. Fails closed: with no registry, or parked deletions that cannot be read, nothing is released.
+    /// each is recorded again as this device's, as a device move does (`completeDeviceMigration`), and goes out like
+    /// any other. Fails closed: with no registry, or parked deletions that cannot be read, nothing is released.
     func releaseParkedDeletions(account: AccountRecord, view: RegistryView?) async -> Set<UUID> {
         guard let syncState, let parked = try? await parkedDeletions(of: account), !parked.isEmpty else { return [] }
         guard let view else { return [account.personalVaultID] }

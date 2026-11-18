@@ -91,6 +91,20 @@ struct RecordStoreContractTests {
         #expect(try await store.loadAccount() == account)
     }
 
+    /// Review of round 10 (Z181): the move of an earlier device ID's sync state is recorded with the account record
+    /// and cleared with it, in the one commit each.
+    @Test("a device migration is written and cleared with the account record", arguments: StoreKind.allCases)
+    func migrationRoundTrip(_ kind: StoreKind) async throws {
+        let store = try kind.make()
+        try await store.commit(StoreChange(account: .create(StoreFixtures.account())))
+        var moving = StoreFixtures.account()
+        moving.migration = DeviceMigration(previousDeviceID: StoreFixtures.vaultB, authenticator: Array(0..<64))
+        try await store.commit(StoreChange(account: .update(moving, expectedKeysetVersion: 0)))
+        #expect(try await store.loadAccount() == moving)
+        try await store.commit(StoreChange(account: .update(StoreFixtures.account(), expectedKeysetVersion: 0)))
+        #expect(try await store.loadAccount()?.migration == nil)
+    }
+
     @Test("creating an account never overwrites an existing one", arguments: StoreKind.allCases)
     func createIsExclusive(_ kind: StoreKind) async throws {
         let store = try kind.make()
