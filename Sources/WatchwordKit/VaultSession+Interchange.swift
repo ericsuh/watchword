@@ -254,6 +254,9 @@ enum AwayWork: Sendable, Hashable {
     /// Another account's device registry replayed along the password changes it publishes (Z10): up to
     /// `maximumMemberBranches` replays a step, of a registry its account fills.
     case memberRegistry
+    /// A candidate account header's derivation under its own KDF parameters (up to the ceiling, its author's
+    /// choice), at the lock screen or in `followPasswordChange` (Z14).
+    case candidateDerivation
 }
 
 /// What an archive entry holds: the first byte of its plaintext.

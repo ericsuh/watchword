@@ -95,7 +95,7 @@ public enum VaultError: Error, Equatable, Sendable {
     /// More devices have published a password change than one unlock tries (`maximumHeaderAttempts`; each costs a
     /// key derivation whose parameters its author chose), and none of those tried opened. The password may be right
     /// for one that was not tried: unlock with the password this device still has (`ignoringPasswordChange`) and
-    /// name the device that made the change (`followPasswordChange(by:password:)`).
+    /// name the device that made the change (`followPasswordChange(by:current:password:)`).
     case tooManyPasswordChangesPending
     /// `followPasswordChange` named a device that has published no password change this device could follow.
     case noPasswordChangeToFollow(UUID)

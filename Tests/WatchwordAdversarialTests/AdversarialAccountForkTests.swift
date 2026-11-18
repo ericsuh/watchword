@@ -269,12 +269,15 @@ extension AdversarialAccountTests {
 
         try await b.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
         await #expect(throws: VaultError.noPasswordChangeToFollow(Self.deviceB)) {
-            try await b.session.followPasswordChange(by: Self.deviceB, password: Self.newPassword)
+            try await b.session.followPasswordChange(
+                by: Self.deviceB, current: TestVault.password, password: Self.newPassword)
         }
         await #expect(throws: CryptoError.authenticationFailed) {
-            try await b.session.followPasswordChange(by: Self.deviceC, password: TestVault.password)
+            try await b.session.followPasswordChange(
+                by: Self.deviceC, current: TestVault.password, password: TestVault.password)
         }
-        try await b.session.followPasswordChange(by: Self.deviceC, password: Self.newPassword)
+        try await b.session.followPasswordChange(
+            by: Self.deviceC, current: TestVault.password, password: Self.newPassword)
         #expect(try await f.registryView(b).state.credential.id == genuine)
         #expect(try await b.session.state() == .unlocked)
         #expect(try await !b.session.isAwaitingNewPassword())
@@ -316,7 +319,8 @@ extension AdversarialAccountTests {
         try await b.session.unlock(password: Self.newPassword)
         #expect(try await b.session.pendingPasswordChanges().map(\.isFork) == [true])
         // Bringing this device over to the other change is the person's to do, unlocked, with that change's password.
-        try await b.session.followPasswordChange(by: Self.deviceP1, password: TestVault.password)
+        try await b.session.followPasswordChange(
+            by: Self.deviceP1, current: Self.newPassword, password: TestVault.password)
         #expect(try await f.registryView(b).state.credential.id == rogue.credentials[0].id)
         await b.session.lock()
         try await b.session.unlock(password: TestVault.password)

@@ -217,13 +217,14 @@ public final class DevicesModel: LockSensitive {
         return done
     }
 
-    /// Follows the password change made on the device the person names, with that change's password: for someone
-    /// who unlocked with the password this device still had (`ignoringPasswordChange`), and for bringing this
-    /// device over to a change made at the same time as the one it follows.
-    public func follow(_ change: PasswordChangeRow, password: String) async -> Bool {
+    /// Follows the password change made on the device the person names, with the password this device follows now
+    /// and that change's password: for someone who unlocked with the password this device still had
+    /// (`ignoringPasswordChange`), and for bringing this device over to a change made at the same time as the one it
+    /// follows. Both passwords are asked for every time, as for removing a device (Z14).
+    public func follow(_ change: PasswordChangeRow, current: String, password: String) async -> Bool {
         var done = false
         await perform {
-            try await context.session.followPasswordChange(by: change.id, password: password)
+            try await context.session.followPasswordChange(by: change.id, current: current, password: password)
             if isSyncConfigured { _ = try? await context.session.syncAll() }
             try await reload()
             notice = "This device now uses the password set on \(change.deviceName)."

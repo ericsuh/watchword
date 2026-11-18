@@ -275,15 +275,21 @@ extension VaultSession {
     /// As `awayFromSession`, for work on public data that may run while the session is locked (another member's
     /// registry is refreshed by a locked sync too): `work` runs off the actor, and its result is `nil` if a `lock()`
     /// came meanwhile.
+    /// `discarding` is given what `work` produced when it is dropped, to zeroise any key in it.
     func awayFromSession<T: Sendable>(
-        _ step: AwayWork, unlessLockedSince epoch: UInt64, _ work: @escaping @Sendable () -> T
+        _ step: AwayWork, unlessLockedSince epoch: UInt64, discarding: (T) -> Void = { _ in },
+        _ work: @escaping @Sendable () -> T
     ) async -> T? {
         let hook = awayWorkHook
         let value = await Task.detached(priority: Task.currentPriority) {
             hook?(step)
             return work()
         }.value
-        return epoch == lockEpoch ? value : nil
+        guard epoch == lockEpoch else {
+            discarding(value)
+            return nil
+        }
+        return value
     }
 
     /// Every entry under an account's registry prefix on the transport, or `nil` if it cannot be listed.

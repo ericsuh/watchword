@@ -432,4 +432,120 @@ extension AdversarialAccountTests {
         try await b.session.unlock(password: Self.newPassword)
         #expect(try await f.registryView(b).state.credential.id == genuine)
     }
+
+    // MARK: - Following a change takes the password this device follows (Z14)
+
+    /// Threat: Z8's adversary (a registered device in hands that know a retired password, which has published a fork
+    /// made with it), with a minute at the person's unlocked device, or one opened by quick unlock (A3). Following a
+    /// change asked only for an unlocked session, so they moved the device onto their fork. It now takes the
+    /// password the device follows, re-derived under the stored header, as removing a device does.
+    @Test("following a password change from a quick-unlocked session takes the password this device follows")
+    func followNeedsTheCurrentPassword() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        let insider = try await f.enrolled(Self.deviceP1)
+        let rogue = try await Self.rogueChange(from: insider, passwords: ["the insider's password"])
+        try await f.a.session.changePassword(current: TestVault.password, new: Self.newPassword)
+        try await f.a.session.sync()
+        try await b.session.sync()
+        await b.session.lock()
+        try await b.session.unlock(password: Self.newPassword)
+        try await b.session.enableQuickUnlock(password: Self.newPassword)
+        await Self.plant(rogue, in: f)
+        try await b.session.sync()
+        await b.session.lock()
+        try await b.session.quickUnlock()
+        let followed = try #require(await b.session.readAnchor(f.accountID))
+
+        for current in ["the insider's password", TestVault.password] {
+            await #expect(throws: CryptoError.authenticationFailed) {
+                try await b.session.followPasswordChange(
+                    by: Self.deviceP1, current: current, password: "the insider's password")
+            }
+        }
+        #expect(await b.session.readAnchor(f.accountID) == followed)
+        try await b.session.followPasswordChange(
+            by: Self.deviceP1, current: Self.newPassword, password: "the insider's password")
+        #expect(try await f.registryView(b).state.credential.id == rogue.credentials[0].id)
+    }
+
+    /// Not an attack: a sync that receives a vault key, or a vault created, while a change is being followed puts
+    /// another object in the session's keys. The follow had committed, and returned success with the retired
+    /// Account Unlock Key still resident (so an enrolment of quick unlock, or a registration, made with it later
+    /// would be under credentials the account no longer has). What must match is the keyset, not the object.
+    @Test("keys replaced while a change is followed still end with the new Account Unlock Key resident")
+    func followWithKeysReplacedMeanwhile() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        try await f.a.session.changePassword(current: TestVault.password, new: Self.newPassword)
+        try await f.a.session.sync()
+        try await b.session.sync()
+        await b.session.lock()
+        try await b.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
+        let session = b.session
+        let fired = Flag()
+        await b.keychain.onStore { item in
+            guard case .deviceRegistryAnchor = item, !fired.isSet else { return }
+            fired.set()
+            _ = try? await session.createVault(name: "Meanwhile")
+        }
+        let phone = try #require(await f.a.session.account?.deviceID)
+        try await b.session.followPasswordChange(by: phone, current: TestVault.password, password: Self.newPassword)
+        await b.keychain.onStore(nil)
+        #expect(fired.isSet, "nothing replaced the keys: nothing is tested")
+        let account = try #require(await b.session.account)
+        #expect(await b.session.keys?.accountUnlockKey.keyID == account.unlockKeyID)
+        #expect(try await b.session.vaults().contains { $0.name == "Meanwhile" })
+    }
+
+    /// A3 or auto-lock locks while a candidate header's derivation runs, at its author's parameters: from an
+    /// unlocked session following a change, and at the lock screen. The derivation is off the actor, so the lock
+    /// takes effect at once, and nothing is adopted after it. The hook holds the derivation until the test has
+    /// locked; with the derivation back on the actor the lock waits out the hook's 60-second bound.
+    @Test("a lock while a candidate header's key is derived takes effect at once, and nothing is adopted")
+    func lockWinsDuringCandidateDerivation() async throws {
+        for fromLockScreen in [false, true] {
+            let f = try await Self.fixture()
+            let b = try await f.enrolled(Self.deviceB)
+            try await f.a.session.changePassword(current: TestVault.password, new: Self.newPassword)
+            try await f.a.session.sync()
+            try await b.session.sync()
+            await b.session.lock()
+            if !fromLockScreen {
+                try await b.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
+            }
+            let before = try #require(await b.session.readAnchor(f.accountID))
+            let phone = try #require(await f.a.session.account?.deviceID)
+
+            let (reached, reaching) = AsyncStream.makeStream(of: Void.self)
+            let release = DispatchSemaphore(value: 0)
+            let released = Flag()
+            await b.session.setAwayWorkHook { current in
+                guard current == .candidateDerivation else { return }
+                reaching.yield()
+                if release.wait(timeout: .now() + 60) == .success { released.set() }
+            }
+            let session = b.session
+            let work = Task {
+                if fromLockScreen {
+                    try await session.unlock(password: Self.newPassword)
+                } else {
+                    try await session.followPasswordChange(
+                        by: phone, current: TestVault.password, password: Self.newPassword)
+                }
+            }
+            var iterator = reached.makeAsyncIterator()
+            _ = await iterator.next()
+            await b.session.lock()
+            #expect(await b.session.keys == nil)
+            release.signal()
+            await #expect(throws: fromLockScreen ? VaultError.lockedDuringUnlock : VaultError.locked) {
+                try await work.value
+            }
+            #expect(released.isSet, "lock() returned only after the derivation had given up waiting")
+            #expect(await b.session.readAnchor(f.accountID) == before)
+            #expect(await b.session.account?.credentialGeneration == 0)
+            await b.session.setAwayWorkHook(nil)
+        }
+    }
 }

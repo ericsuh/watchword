@@ -496,6 +496,7 @@ public actor VaultSession: SharesExecutor {
     private func openAccount(
         password: String, secretKey: SecretKey, account record: AccountRecord, ignoringPasswordChange: Bool
     ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord) {
+        let epoch = lockEpoch
         do {
             let unlockKey = try deriveUnlockKey(password: password, secretKey: secretKey, account: record)
             let keyset: Keyset
@@ -522,7 +523,10 @@ public actor VaultSession: SharesExecutor {
             guard !ignoringPasswordChange else { throw CryptoError.authenticationFailed }
             let pending = await candidateHeaders(record).pending
             for candidate in pending.prefix(Self.maximumHeaderAttempts) {
-                if let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record) {
+                if let adopted = try await adopt(
+                    candidate, password: password, secretKey: secretKey, account: record, since: epoch,
+                    lockError: .lockedDuringUnlock)
+                {
                     return adopted
                 }
             }
@@ -540,22 +544,42 @@ public actor VaultSession: SharesExecutor {
     /// A change whose own history revokes this device is refused with `passwordChangeRevokesThisDevice` (Z1):
     /// following it would have this device hold itself revoked and its revoker's entries as final, on the word of
     /// whoever wrote the branch.
+    ///
+    /// The derivation, under the candidate's parameters (up to the ceiling, its author's choice), runs off the actor
+    /// (`AwayWork.candidateDerivation`, review finding Z14), so `lock()` never waits for it; a lock meanwhile zeroises
+    /// what it derived and throws `lockError`.
     private func adopt(
-        _ candidate: AccountHeaderObject, password: String, secretKey: SecretKey, account record: AccountRecord
+        _ candidate: AccountHeaderObject, password: String, secretKey: SecretKey, account record: AccountRecord,
+        since epoch: UInt64, lockError: VaultError
     ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord)? {
-        guard let view = try? await registry(record),
-            let unlockKey = try? TwoSecretKeyDerivation.accountUnlockKey(
-                password: password, secretKey: secretKey, accountID: record.accountID, parameters: candidate.kdf,
-                salt: candidate.salt, keyID: candidate.unlockKeyID)
-        else { return nil }
-        guard
-            let keyset = try? Keyset.unwrap(
-                candidate.wrappedKeyset, accountID: record.accountID, with: unlockKey,
-                recordVersion: candidate.keysetVersion)
-        else {
-            unlockKey.zeroise()
-            return nil
-        }
+        guard let view = try? await registry(record) else { return nil }
+        guard epoch == lockEpoch else { throw lockError }
+        let accountID = record.accountID
+        let derived = await awayFromSession(
+            .candidateDerivation, unlessLockedSince: epoch,
+            discarding: {
+                $0?.unlockKey.zeroise()
+                $0?.keyset.zeroise()
+            },
+            { () -> (unlockKey: EncryptionKey, keyset: Keyset)? in
+                guard
+                    let unlockKey = try? TwoSecretKeyDerivation.accountUnlockKey(
+                        password: password, secretKey: secretKey, accountID: accountID, parameters: candidate.kdf,
+                        salt: candidate.salt, keyID: candidate.unlockKeyID)
+                else { return nil }
+                guard
+                    let keyset = try? Keyset.unwrap(
+                        candidate.wrappedKeyset, accountID: accountID, with: unlockKey,
+                        recordVersion: candidate.keysetVersion)
+                else {
+                    unlockKey.zeroise()
+                    return nil
+                }
+                return (unlockKey, keyset)
+            })
+        guard let derived else { throw lockError }
+        guard let opened = derived else { return nil }
+        let (unlockKey, keyset) = (opened.unlockKey, opened.keyset)
         let rows = try await store.records(in: record.accountID, kind: .deviceRegistry)
         guard (try? candidate.openBinding(with: unlockKey)) == record.personalVaultID,
             (try? keyset.publicKeyBundle().signingKey) == view.state.accountSigningKey,
@@ -627,17 +651,21 @@ public actor VaultSession: SharesExecutor {
     /// That is a change that branches off *before* the credentials this device follows: two devices changed the
     /// password at once and the person is bringing this one over to the other, or it was made with a password since
     /// retired. From the lock screen such a change would let anyone who knows a retired password, and holds a
-    /// registered device to publish the fork from, open this device with it; here they must first have unlocked it
-    /// with the password it follows now. It is also how a pending change is reached when more devices have
-    /// published one than an unlock tries (`tooManyPasswordChangesPending`): unlock with `ignoringPasswordChange`,
-    /// then name the device. The header is fetched from the transport if a sync has not kept it.
+    /// registered device to publish the fork from, open this device with it; here they must also give `current`, the
+    /// password this device follows now, re-derived under the stored header as `changePassword` does (review finding
+    /// Z14): an unlocked session alone, or one opened by quick unlock, is not enough. It is also how a pending change
+    /// is reached when more devices have published one than an unlock tries (`tooManyPasswordChangesPending`):
+    /// unlock with `ignoringPasswordChange`, then name the device. The header is fetched from the transport if a
+    /// sync has not kept it.
     ///
     /// `password` is the one that change set. On success this device follows it: the old password is wrong from
-    /// now on, and quick unlock is enrolled again under the new credentials if it was enrolled.
-    public func followPasswordChange(by device: UUID, password: String) async throws {
+    /// now on, and quick unlock is enrolled again under the new credentials if it was enrolled. Both derivations run
+    /// off the actor; a `lock()` meanwhile wins.
+    public func followPasswordChange(by device: UUID, current: String, password: String) async throws {
         let epoch = lockEpoch
-        let current = try requireKeys()
-        guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        _ = try requireKeys()
+        // The password this device follows now, under the header it has, not anything in memory.
+        let record = try await verifyAccountPassword(current, since: epoch)
         let secretKey = try await storedSecretKey(accountID: record.accountID)
         defer { secretKey.zeroise() }
         let view = try await registry(record)
@@ -663,18 +691,25 @@ public actor VaultSession: SharesExecutor {
         for candidate in candidates.prefix(Self.maximumHeaderAttempts) {
             _ = try requireKeys(since: epoch)
             guard
-                let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record)
+                let adopted = try await adopt(
+                    candidate, password: password, secretKey: secretKey, account: record, since: epoch,
+                    lockError: .locked)
             else { continue }
             // The same keyset under a new Account Unlock Key: the copy just opened is not needed.
+            let adoptedKeyset = adopted.keyset.symmetricKey.keyID
             adopted.keyset.zeroise()
-            // Committed: this device follows the change whatever became of the session meanwhile.
-            guard epoch == lockEpoch, let now = keys, now === current else {
+            // Committed: this device follows the change whatever became of the session meanwhile. The keys resident
+            // now may be another object than when this began (a vault created or a key received meanwhile); what
+            // must match is the keyset (Z14), and the retired Account Unlock Key never stays.
+            guard epoch == lockEpoch, let now = keys, !now.keyset.isZeroised,
+                now.keyset.accountID == record.accountID, now.keyset.symmetricKey.keyID == adoptedKeyset
+            else {
                 adopted.unlockKey.zeroise()
                 return
             }
             keys = UnlockedKeys(
                 accountUnlockKey: adopted.unlockKey, keyset: now.keyset, vaultKeys: now.vaultKeys)
-            current.accountUnlockKey.zeroise()
+            now.accountUnlockKey.zeroise()
             try? await refreshQuickUnlock(after: await clock.now(), account: adopted.account)
             guard epoch == lockEpoch, let installed = keys else { return }
             try? await reconcileAccountObjects(account: adopted.account, keys: installed)

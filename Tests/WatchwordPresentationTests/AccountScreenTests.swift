@@ -270,9 +270,13 @@ struct PasswordChangedElsewhereTests {
         #expect(model.passwordChanges.count == 1 && change.mayFollow)
         #expect(change.summary.hasPrefix("The account password was changed on “"), "\(change.summary)")
 
-        #expect(await !model.follow(change, password: TestVault.password))
+        #expect(await !model.follow(change, current: TestVault.password, password: TestVault.password))
         #expect(model.errorMessage == "Incorrect password.")
-        #expect(await model.follow(change, password: newPassword), "\(model.errorMessage ?? "")")
+        #expect(await !model.follow(change, current: newPassword, password: newPassword))
+        #expect(model.errorMessage == "Incorrect password.")
+        #expect(
+            await model.follow(change, current: TestVault.password, password: newPassword),
+            "\(model.errorMessage ?? "")")
         #expect(!model.awaitingNewPassword && model.passwordChanges.isEmpty)
         await devices.first.session.lock()
         await #expect(throws: CryptoError.authenticationFailed) {
