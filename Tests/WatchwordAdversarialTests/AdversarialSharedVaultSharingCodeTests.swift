@@ -6,46 +6,75 @@ import WatchwordSharing
 import WatchwordSync
 import WatchwordTestSupport
 
-/// The sharing board as A1 runs it, able to hold one fetch until released, so a test can act while a session's step
-/// is suspended there. Test code only.
+/// The sharing board as A1 runs it, able to hold one fetch and one create until each is released, so a test can act
+/// while a session's step is suspended there. Test code only.
 actor GatedBoard: SharingBoard {
     let base: InMemorySharingBoard
-    private var holding = false
-    private var reached: CheckedContinuation<Void, Never>?
-    private var held: CheckedContinuation<Void, Never>?
-    private var arrived = false
+    private var fetchGate = Gate()
+    private var createGate = Gate()
+
+    /// One operation held: whether the next call is to be held, whether one arrived, and who waits on what.
+    struct Gate {
+        var holding = false
+        var arrived = false
+        var reached: CheckedContinuation<Void, Never>?
+        var held: CheckedContinuation<Void, Never>?
+    }
 
     init(base: InMemorySharingBoard) {
         self.base = base
     }
 
     func holdNextFetch() {
-        holding = true
-        arrived = false
+        fetchGate.holding = true
+        fetchGate.arrived = false
+    }
+
+    func holdNextCreate() {
+        createGate.holding = true
+        createGate.arrived = false
     }
 
     /// Returns once a held fetch has arrived.
     func waitUntilHeld() async {
-        if arrived { return }
-        await withCheckedContinuation { reached = $0 }
+        if fetchGate.arrived { return }
+        await withCheckedContinuation { fetchGate.reached = $0 }
+    }
+
+    /// Returns once a held create has arrived.
+    func waitUntilCreateHeld() async {
+        if createGate.arrived { return }
+        await withCheckedContinuation { createGate.reached = $0 }
     }
 
     func release() {
-        held?.resume()
-        held = nil
+        fetchGate.held?.resume()
+        fetchGate.held = nil
+    }
+
+    func releaseCreate() {
+        createGate.held?.resume()
+        createGate.held = nil
     }
 
     func create(_ name: String, contents: [UInt8]) async throws {
+        if createGate.holding {
+            createGate.holding = false
+            createGate.arrived = true
+            createGate.reached?.resume()
+            createGate.reached = nil
+            await withCheckedContinuation { createGate.held = $0 }
+        }
         try await base.create(name, contents: contents)
     }
 
     func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
-        if holding {
-            holding = false
-            arrived = true
-            reached?.resume()
-            reached = nil
-            await withCheckedContinuation { held = $0 }
+        if fetchGate.holding {
+            fetchGate.holding = false
+            fetchGate.arrived = true
+            fetchGate.reached?.resume()
+            fetchGate.reached = nil
+            await withCheckedContinuation { fetchGate.held = $0 }
         }
         return try await base.fetch(name, maximumLength: maximumLength)
     }
@@ -309,5 +338,86 @@ extension AdversarialSharedVaultTests {
         let confirmed = try await joiner.session.confirmScannedSharingPartner(starter.accountID)
         #expect(confirmed.step == .verified && confirmed.pinned)
         #expect(try await pins.pinned(starter.accountID)?.method == .scannedCode)
+    }
+
+    /// Threat: a lock while the joiner's step waits on the board or the directory, which A1 can stretch (ADR 0010,
+    /// "Lock"; the joiner's half of V9, `beforeReply`). The lock wins: no reply reaches the board, no session is
+    /// installed, and nothing is pinned.
+    @Test("a lock while a joiner waits on the board publishes no reply and installs nothing")
+    func lockWhileJoining() async throws {
+        let household = SharedVaultHousehold()
+        let starter = try await household.account(seed: 1_281)
+        let gated = GatedBoard(base: household.board)
+        let joiner = try await Self.account(household, seed: 1_282, board: gated)
+        let started = try await starter.session.startSharingCodeSession()
+        let number = try Self.number(started)
+
+        await gated.holdNextFetch()
+        let joining = Task { try await joiner.session.joinSharingCodeSession(number: try #require(started.number)) }
+        await gated.waitUntilHeld()
+        await joiner.session.lock()
+        await gated.release()
+        await #expect(throws: VaultError.locked) { _ = try await joining.value }
+        #expect(await household.board.allObjects[SharingBoardName.reply(number)] == nil, "no reply was published")
+        #expect(await joiner.session.sharingCodeStatus() == nil)
+        let pins = VerifiedContacts(store: joiner.contacts, account: joiner.bundle)
+        #expect(try await pins.pinned(starter.accountID) == nil)
+    }
+
+    /// Threat: the person cancels (Start Over, "Paste an Invitation Instead", or another window starting a session)
+    /// while a start or a join waits on the board, which A1 can hold as long as it likes (V20). The cancel wins: the
+    /// step that resumes installs no session, and the screen is not taken back to it.
+    @Test("an end while a start or a join waits on the board is not undone when the board answers")
+    func endWhileStartingOrJoining() async throws {
+        let household = SharedVaultHousehold()
+        let gatedStarter = GatedBoard(base: household.board)
+        let starter = try await Self.account(household, seed: 1_291, board: gatedStarter)
+        let gatedJoiner = GatedBoard(base: household.board)
+        let joiner = try await Self.account(household, seed: 1_292, board: gatedJoiner)
+
+        await gatedStarter.holdNextCreate()
+        let starting = Task { try await starter.session.startSharingCodeSession() }
+        await gatedStarter.waitUntilCreateHeld()
+        await starter.session.endSharingCodeSession()
+        await gatedStarter.releaseCreate()
+        await #expect(throws: SharingCodeError.notReady) { _ = try await starting.value }
+        #expect(await starter.session.sharingCodeStatus() == nil, "the ended start was installed after all")
+
+        let started = try await starter.session.startSharingCodeSession()
+        await gatedJoiner.holdNextCreate()
+        let joining = Task { try await joiner.session.joinSharingCodeSession(number: try #require(started.number)) }
+        await gatedJoiner.waitUntilCreateHeld()
+        await joiner.session.endSharingCodeSession()
+        await gatedJoiner.releaseCreate()
+        await #expect(throws: SharingCodeError.notReady) { _ = try await joining.value }
+        #expect(await joiner.session.sharingCodeStatus() == nil, "the ended join was installed after all")
+    }
+
+    /// Threat: a starter's step of a session the person has just replaced with a new one resumes while the new one is
+    /// still being put on the board (A1 holds both answers; V20, "a restart abandons the old session"). The old step
+    /// finds another session in place and reveals nothing for the session the person abandoned.
+    @Test("a step of a replaced session reveals nothing, even while the new session is still being published")
+    func replacedSessionRevealsNothing() async throws {
+        let household = SharedVaultHousehold()
+        let gated = GatedBoard(base: household.board)
+        let starter = try await Self.account(household, seed: 1_301, board: gated)
+        let joiner = try await household.account(seed: 1_302)
+        let old = try await starter.session.startSharingCodeSession()
+        _ = try await joiner.session.joinSharingCodeSession(number: try #require(old.number))
+
+        await gated.holdNextFetch()
+        let oldStep = Task { try await starter.session.refreshSharingCodeSession() }
+        await gated.waitUntilHeld()
+        await gated.holdNextCreate()
+        let replacing = Task { try await starter.session.startSharingCodeSession() }
+        await gated.waitUntilCreateHeld()
+        await gated.release()
+        await #expect(throws: SharingCodeError.notReady) { _ = try await oldStep.value }
+        #expect(
+            await household.board.allObjects[SharingBoardName.reveal(try Self.number(old))] == nil,
+            "a reveal was published for the abandoned session")
+        await gated.releaseCreate()
+        let replaced = try await replacing.value
+        #expect(replaced.step == .showNumber && replaced.number != old.number)
     }
 }

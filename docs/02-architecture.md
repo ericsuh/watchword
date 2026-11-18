@@ -1506,7 +1506,9 @@ its account key and bound to the session, its number and the joiner (`inviteThro
 only under the bundle the session authenticated (`sharingCodeInvitation`) and accepts with every existing check. **No
 vouching:** an invitation whose owner is not the starter is accepted only once the joiner has pinned the owner by a
 session (or the full code) of their own. The session lives in memory in the actor (`sharingCodeRun`), runs one step
-at a time (a second is `busy`), checks the lock before anything reaches the board, and `lock()` drops it.
+at a time (a second is `busy`), checks the lock before anything reaches the board, and `lock()` drops it. A start or a
+join ends the running session first and re-checks the lock and the session's generation after every wait, so an end, a
+lock or another start that lands meanwhile wins (V20).
 
 **What the screens accept as a check** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). A vault sharing code
 session, or the fallback: the full vault sharing code typed (`.safetyNumber`), behind a secondary action, for two

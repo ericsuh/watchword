@@ -104,19 +104,22 @@ extension VaultSession {
         let (board, _) = try sharingCodeSettings()
         let epoch = lockEpoch
         let bundle = try requireKeys().keyset.publicKeyBundle()
-        sharingCodeRun = nil
+        // The session this replaces is ended now, not once the new one is on the board: a step of the old one that
+        // resumes meanwhile finds another generation and publishes nothing (review finding V20).
+        endSharingCodeSession()
+        let generation = sharingCodeGeneration
         for _ in 0..<SharingCodeLimits.numberDraws {
             let now = await clock.now()
-            _ = try requireKeys(since: epoch)
+            try requireSharingCodeUnchanged(epoch: epoch, generation: generation)
             var starter = SharingCodeStarter.draw(as: bundle, using: &random, at: now)
             do {
                 try await starter.publish(on: board, at: now)
             } catch SharingCodeError.sessionTaken {
                 continue
             }
-            _ = try requireKeys(since: epoch)
-            sharingCodeGeneration &+= 1
-            sharingCodeRun = SharingCodeRun(side: .starter(starter), generation: sharingCodeGeneration)
+            // An end, a lock or another start while the board answered wins: this session is not installed.
+            try requireSharingCodeUnchanged(epoch: epoch, generation: generation)
+            sharingCodeRun = SharingCodeRun(side: .starter(starter), generation: generation)
             return try sharingCodeStatusOrThrow()
         }
         throw SharingCodeError.numbersExhausted
@@ -140,16 +143,18 @@ extension VaultSession {
         let (board, directory) = try sharingCodeSettings()
         let epoch = lockEpoch
         let bundle = try requireKeys().keyset.publicKeyBundle()
-        sharingCodeRun = nil
+        // As for a start: the session this replaces ends now, and an end, a lock or another start or join while this
+        // one waits on the board or the directory wins (V20).
+        endSharingCodeSession()
+        let generation = sharingCodeGeneration
         let nonce = SharingNonce.draw(using: &random)
         let now = await clock.now()
-        let generation = sharingCodeGeneration
+        try requireSharingCodeUnchanged(epoch: epoch, generation: generation)
         let joiner = try await SharingCodeJoiner.join(
             number, scanned: scanned, as: bundle, board: board, directory: directory, nonce: nonce, at: now
         ) { try await self.requireSharingCodeUnchanged(epoch: epoch, generation: generation) }
-        _ = try requireKeys(since: epoch)
-        sharingCodeGeneration &+= 1
-        sharingCodeRun = SharingCodeRun(side: .joiner(joiner), generation: sharingCodeGeneration)
+        try requireSharingCodeUnchanged(epoch: epoch, generation: generation)
+        sharingCodeRun = SharingCodeRun(side: .joiner(joiner), generation: generation)
         try await pinSharingCodeEvidence(epoch: epoch)
         return try sharingCodeStatusOrThrow()
     }
