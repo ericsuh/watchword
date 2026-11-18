@@ -101,3 +101,85 @@ extension AdversarialSharedVaultTests {
         }
     }
 }
+
+// Review finding Z128: a read-only member's object in another member's stream squatted there for good.
+extension AdversarialSharedVaultTests {
+    /// Threat: a member the vault never let write (read-only from the start, A4), with a device registered under the
+    /// victim's device ID (S33), who signs one segment a little past the victim's head in the victim's stream,
+    /// carrying a deletion of an item in the vault. Nothing that member signs counts, so every device refused the
+    /// object as it downloaded it and waited at it, and never staged it, so no device ever stepped over it. Z30 kept
+    /// the victim publishing until it reached that number; from there every sync met the planted name
+    /// (`ownStreamConflict`), for good, the victim's later work reached nobody, its deletions were held back in every
+    /// vault, the person read "Up to date.", and it outlasted the member's removal. A segment signed by any account
+    /// the chain lists is taken in and passed over in sequence, keeping nothing of it: whatever it carries counts
+    /// for nothing while its signer's work cannot count.
+    @Test("a read-only member's segment in another member's stream is stepped over, and nothing of it is kept")
+    func readOnlyMemberPlantIsSteppedOver() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3240)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let victim = try await household.account(seed: 3241)
+        let reader = try await household.account(seed: 3242)
+        try await owner.invite(victim, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(reader, to: vaultID, as: .readOnly, owner: owner)
+        let bank = try await victim.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, victim, reader])
+        let victimDevice = try await Self.deviceID(of: victim)
+        let rogue = try await household.secondDevice(of: reader, deviceID: victimDevice)
+        try await rogue.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await rogue.session.sync()
+
+        let head = try await Self.head(of: victim, in: vaultID)
+        let plantedAt = head + 3
+        let summary = try ItemErasure(
+            seen: VersionVector([victimDevice: 1000]), row: 1000, device: victimDevice, date: nil
+        ).summary()
+        let deletion = SyncEntry.tombstone(
+            RecordKey(recordID: bank.id, kind: .item),
+            stamp: RecordStamp(version: 1001, device: victimDevice, deleted: true), erasure: summary)
+        let location = SyncObjectLocation.segment(vaultID: vaultID, author: victimDevice, sequence: plantedAt)
+        let payload = SyncPayload(
+            kind: .segment, vaultID: vaultID, author: victimDevice, number: plantedAt, vector: [:],
+            entries: [deletion])
+        let adapter = VaultSyncAdapter(session: rogue.session)
+        let envelope = try await adapter.seal(payload.encoded(), at: location)
+        let signature = try await adapter.sign(envelope, at: location)
+        try await household.transport.create(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+
+        // The victim writes on, one segment a sync, past the planted number.
+        var titles: [String] = []
+        for index in 0..<5 {
+            var item = Self.bank(in: vaultID)
+            item.title = "The victim's own, number \(index)"
+            titles.append(try await victim.session.save(item).title)
+            try await victim.session.syncAll()
+            try await owner.session.syncAll()
+        }
+        let personal = try #require(await victim.session.personalVaultID)
+        let own = try await victim.session.save(Self.bank(in: personal))
+        try await victim.session.sync()
+        try await victim.session.trash(id: own.id)
+        try await victim.session.deletePermanently(id: own.id)
+        let last = try #require(try await victim.session.syncAll().vaults[vaultID])
+        #expect(last.ownStreamConflict == nil, "the victim's stream is stopped at the planted number")
+        #expect(try await Self.head(of: victim, in: vaultID) > plantedAt)
+        let syncState = try #require(victim.vault.sync?.state)
+        #expect(
+            try await syncState.pendingDeletions(vaultID: personal).isEmpty,
+            "the victim's deletion in another vault is held back by an object someone else wrote")
+        try await Self.syncAll([owner, reader])
+        for account in [owner, reader] {
+            let shown = try await account.session.items(in: vaultID).items.map(\.title)
+            #expect(Set(titles).isSubset(of: Set(shown)), "the victim's later work reached nobody")
+            #expect(try await account.session.item(id: bank.id).title == bank.title, "the planted deletion counted")
+        }
+        for account in [owner, victim, reader] {
+            let kept = try await #require(account.vault.sync?.state).quarantined(vaultID: vaultID)
+            #expect(kept.isEmpty, "what a member whose writes never count signed was kept")
+        }
+    }
+}

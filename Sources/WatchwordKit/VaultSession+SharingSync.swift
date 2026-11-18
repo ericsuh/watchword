@@ -597,8 +597,9 @@ extension VaultSession {
     // MARK: - Verifying a shared vault's objects (`SyncKeyring.verify`)
 
     /// `syncVerify` for a shared vault: the object must carry the dual signature of a device registered to an
-    /// account the chain lists, under that account's key in the chain, and that account's writes must be able to
-    /// count (`writeStanding` is not `nothingCounts`). A snapshot needs the owner's account: no device writes one in
+    /// account the chain lists, under that account's key in the chain. A segment of an account whose writes cannot
+    /// count (`nothingCounts`) verifies too, and the judge passes over it in sequence (Z128). A snapshot needs the
+    /// owner's account: no device writes one in
     /// a shared vault (`maintainsLog` is off), so the only honest ones are from before the vault was shared, when its
     /// owner's devices were its only writers, and a member's would have its coverage believed unjudged (review
     /// finding Z21). Whether a segment of an account whose permission ended is inside its cut is the judge's
@@ -629,13 +630,14 @@ extension VaultSession {
         guard location.kind == .segment || signer == vault.ledger.owner.accountID else {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
+        // A segment of an account whose work cannot count here at all is taken in too, and the judge passes over it in
+        // sequence (review finding Z128): refused here, it was never staged anywhere, so every device waited at it,
+        // and in another device's stream it squatted at that number for good.
         switch vault.ledger.writeStanding(of: signer) {
         case .mayWrite:
             return
-        case .ended:
+        case .ended, .nothingCounts:
             guard location.kind == .segment else { throw SyncKeyringError.untrustedAuthor(location.author) }
-        case .nothingCounts:
-            throw SyncKeyringError.untrustedAuthor(location.author)
         }
     }
 
@@ -767,12 +769,16 @@ extension VaultSession {
         // Nobody but the owner has ever been listed, on the owner's own device: every object that verifies is the
         // owner's account's, and the vault is judged as that account's other vaults are, which is not at all (Z56).
         if Self.isOwnersAloneHere(current.ledger, account: account.accountID) { return .apply }
+        // An account whose work cannot count here at all (a member never let write) has its segments passed over in
+        // sequence, in its own stream or anyone's, and nothing of them kept (review finding Z128): refused at download
+        // as before, such a segment squatted at its number in another device's stream for good.
+        if case .nothingCounts = current.ledger.writeStanding(of: signer) { return .passOver }
         guard Self.streamAdmits(signer, at: location, in: current, account: account) else { return .holdAside }
         switch current.ledger.writeStanding(of: signer) {
         case .mayWrite:
             return .apply
         case .nothingCounts:
-            return .holdAside
+            return .passOver
         case .ended(let cut, _, _):
             switch SyncWriteCut(cut).contains(device: location.author, sequence: location.number, index: current.index)
             {
@@ -877,11 +883,12 @@ extension VaultSession {
     /// That holds for a current member's edits too (S46): a claim to have seen edits their device has not published
     /// yet is a claim about edits that do not exist, and it would supersede them when they are made, concurrent as
     /// they are. Until that device's stream carries them the version waits (`awaited`); a claim about this device's
-    /// own edits beyond what it published is refused at once, since it knows what it wrote. A device whose stream this
-    /// device cannot read from its first segment (collected before the vault was shared, or sealed under keys this
-    /// account was never given) cannot be checked, and a current member's edits there are believed as before; a
-    /// version that vouches (S42) vouches for these as for its values. A device no account lists names nobody's work
-    /// and is passed over.
+    /// own edits beyond what it published is refused at once, before anything else, since it knows what it wrote
+    /// (Z127). A device whose first segment is here and sealed under keys this account was never given cannot be
+    /// checked, and a current member's edits there are believed as before; one whose first segment is not here has not
+    /// published it yet (a shared vault keeps its whole log), and the claim waits for it (Z127). A version that vouches
+    /// (S42) vouches for others' edits as for its values. A device no account lists names nobody's work and is passed
+    /// over.
     ///
     /// `author` is the device whose own edits are not asked about: the version's writer, where the version is known
     /// to be its work (`judgeAdmits`), or the device whose stream carried a tombstone. `nil` exempts nobody.

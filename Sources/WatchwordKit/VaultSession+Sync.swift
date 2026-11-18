@@ -247,6 +247,8 @@ extension VaultSession {
         total.requiresNewerVersion = total.requiresNewerVersion || first.requiresNewerVersion
         total.replayNeeded = total.replayNeeded || first.replayNeeded
         total.ownStreamExhausted = total.ownStreamExhausted || first.ownStreamExhausted
+        total.ownStreamConflict = total.ownStreamConflict ?? first.ownStreamConflict
+        total.ownStreamUnverified = total.ownStreamUnverified ?? first.ownStreamUnverified
         total.quarantineFull += first.quarantineFull
         return total
     }

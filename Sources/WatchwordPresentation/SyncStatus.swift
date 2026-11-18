@@ -143,6 +143,12 @@ public struct SyncSummary: Hashable, Sendable {
             parts.append("this device's own changes cannot go out in one of its vaults")
         } else if report.ownStreamUnverified != nil {
             parts.append("this device's own changes are held back until its place in the sync storage is clear")
+        } else if report.ownStreamConflict != nil {
+            // Its next place is taken (review finding Z128): a crash after publishing, a restored copy of this device,
+            // or an object someone else put there. Nothing is lost, and deletions wait with the rest.
+            parts.append(
+                "this device found its place in the sync storage already taken; some of its own changes, and its "
+                    + "deletions, wait for the next sync")
         }
         if report.awaitingNewPassword { parts.append("waiting for the new account password") }
         return parts.isEmpty ? "Up to date." : sentence(parts)

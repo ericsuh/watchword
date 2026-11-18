@@ -742,7 +742,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   AutoFill, listed as disputed. Nothing ends a dispute in this version (no marker is retired: a revoked device keeps
   the account key); never let a device with a ledger go on by it while its account's markers disagree.
 - A shared vault's objects verify under a device in the registry of an account the chain lists, with that account's
-  key from the chain (`sharedVerify`); `writeStanding` decides, never the envelope's signer alone.
+  key from the chain (`sharedVerify`), whatever that account's standing, for segments; `writeStanding` decides, never
+  the envelope's signer alone. A segment of an account whose work cannot count at all is passed over in sequence and
+  nothing of it kept (`SegmentAdmission.passOver`, Z128): never refuse one at download, where no device would ever
+  step over it.
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
   (`ItemMerge.attributedValues`, note-line removals, discards and history entries included, S32 and S43; a vault's
   description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*, through a segment of the stream of the

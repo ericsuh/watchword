@@ -788,22 +788,26 @@ public actor SyncEngine {
                 do {
                     let payload = try await open(object)
                     try validate(payload, at: object.location)
-                    switch try await judge?.admitsSegment(
-                        object.location, signature: object.object.signature, envelope: object.object.envelope)
+                    let admission =
+                        try await judge?.admitsSegment(
+                            object.location, signature: object.object.signature, envelope: object.object.envelope)
                         ?? .apply
-                    {
+                    switch admission {
                     case .apply:
                         break
                     case .wait:
                         // The write cut cannot be checked yet: wait here, as at a gap.
                         report.waiting[author] = next
                         waitsForJudge = true
-                    case .holdAside:
+                    case .holdAside, .passOver:
                         // Kept for the person, never merged, never published on; the stream carries on past it and
-                        // its acknowledgements count for nothing (docs/02-architecture.md §8.7).
-                        for entry in payload.entries {
-                            report.heldAside.append(entry.key)
-                            try await keepAside(entry, state: &state, report: &report)
+                        // its acknowledgements count for nothing (docs/02-architecture.md §8.7). Passed over, nothing
+                        // of it is kept either: its signer's work cannot count here (Z128).
+                        if admission == .holdAside {
+                            for entry in payload.entries {
+                                report.heldAside.append(entry.key)
+                                try await keepAside(entry, state: &state, report: &report)
+                            }
                         }
                         state.merged[author] = sequence
                         next = sequence + 1

@@ -30,12 +30,18 @@ struct WordingTests {
         report.ownStreamExhausted = true
         let exhausted = SyncSummary.describe(report)
         #expect(exhausted.contains("cannot go out"))
+        // Its next place in a vault's sync storage is taken (review finding Z128): the person used to read
+        // "Up to date." while nothing went out and deletions were held back.
+        report = SyncReport()
+        report.ownStreamConflict = 9
+        let taken = SyncSummary.describe(report)
+        #expect(taken.contains("already taken"))
         report = SyncReport()
         report.quarantineFull = 3
         report.collided = [RecordKey(recordID: UUID(), kind: .item)]
         let full = SyncSummary.describe(report)
         #expect(full.contains("3 more could not be kept") && full.contains("another vault"))
-        for line in [held, exhausted, full] {
+        for line in [held, exhausted, taken, full] {
             #expect(!line.contains("sent") && !line.contains("received"))
         }
     }
