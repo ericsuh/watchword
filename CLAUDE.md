@@ -367,7 +367,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   and `ItemCodec` by the adversarial suite): if the stored form of an item changes, that estimate changes with it.
 - A merge never widens (`DuplicateDetector`), here or in a file exported afterwards: scopes, sign-in fields and
   `url` fields from a file reach an existing item only through `MergeChoices`, one host or field at a time, and an
-  accepted URL stays a website (`InterchangeMeta.websiteType`) only where the merged item is scoped to its host.
+  accepted URL stays a website (`InterchangeMeta.websiteType`) only where the merged item is scoped to its host. A
+  host a merge adds that would hide or stand beside another account, or resembles a saved site, also needs
+  `MergeChoices.confirmedHosts`, checked by the session (`checkMergedHosts`, Z75), never by the screen alone.
   Don't add an "accept all", and don't make `merged` add any of them by default.
 - An export never widens either: `ExportSupport.websites` is the one place that decides what a format writes as a
   sign-in URL, and it writes none for a host the item is not scoped to (reported as `websiteNotScoped`). Don't let an

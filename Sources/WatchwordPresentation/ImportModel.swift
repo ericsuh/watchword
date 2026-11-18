@@ -113,10 +113,20 @@ public struct MergeReview: Hashable, Sendable {
     public let notes: String
 
     /// `sites` is what the hosts are compared with for look-alikes: what is saved in every vault, as the gate sees it
-    /// (`VaultSession.savedSites()`), the existing item included.
-    public init(existingID: UUID, additions: MergeAdditions, sites: SavedSites.Prepared, inSharedVault: Bool = false) {
+    /// (`VaultSession.savedSites()`), the existing item included. With `existing` (the item merged into), a host that
+    /// would hide or stand beside another account carries a warning too, and needs the second confirmation the
+    /// session requires (`MergeChoices.confirmedHosts`, review finding Z75).
+    public init(
+        existingID: UUID, additions: MergeAdditions, sites: SavedSites.Prepared, inSharedVault: Bool = false,
+        existing: Item? = nil
+    ) {
         self.existingID = existingID
-        hosts = additions.scopes.map { MergeHost($0, among: sites, inSharedVault: inSharedVault) }
+        hosts = additions.scopes.map { scope in
+            guard let existing else { return MergeHost(scope, among: sites, inSharedVault: inSharedVault) }
+            return MergeHost(
+                scope, among: sites, beside: existing.scopes, inSharedVault: inSharedVault,
+                mergingInto: (existing.id, existing.vaultID))
+        }
         func row(_ field: Field) -> AdditionField {
             AdditionField(
                 id: field.id, label: field.label.isEmpty ? field.kind.rawValue : field.label, value: field.value,
@@ -302,7 +312,7 @@ public final class ImportModel: LockSensitive {
                 let sites = try await context.session.savedSites().prepared()
                 merges[importedID] = MergeReview(
                     existingID: existingID, additions: additions, sites: sites,
-                    inSharedVault: sites.sites.sharedVaults.contains(existing.vaultID))
+                    inSharedVault: sites.sites.sharedVaults.contains(existing.vaultID), existing: existing)
             } else {
                 merges[importedID] = nil
             }
@@ -334,20 +344,27 @@ public final class ImportModel: LockSensitive {
         apply(host, accepted: isAccepted, for: importedID)
     }
 
-    /// The person confirmed the look-alike host a second time, having read its warning.
+    /// The person confirmed the host a second time, having read its warning: what the session's
+    /// `MergeChoices.confirmedHosts` records (Z75).
     public func confirmAwaitingHost() {
         guard let (importedID, host) = hostAwaitingConfirmation else { return }
         hostAwaitingConfirmation = nil
-        apply(host.host, accepted: true, for: importedID)
+        apply(host.host, accepted: true, for: importedID, confirmed: true)
     }
 
     public func cancelAwaitingHost() {
         hostAwaitingConfirmation = nil
     }
 
-    private func apply(_ host: String, accepted isAccepted: Bool, for importedID: UUID) {
+    private func apply(_ host: String, accepted isAccepted: Bool, for importedID: UUID, confirmed: Bool = false) {
         var current = accepted[importedID] ?? .none
-        if isAccepted { current.hosts.insert(host) } else { current.hosts.remove(host) }
+        if isAccepted {
+            current.hosts.insert(host)
+            if confirmed { current.confirmedHosts.insert(host) }
+        } else {
+            current.hosts.remove(host)
+            current.confirmedHosts.remove(host)
+        }
         accepted[importedID] = current
     }
 

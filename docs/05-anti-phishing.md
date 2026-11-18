@@ -207,7 +207,11 @@ address only", and its exclusions), and `PhishingDetector`'s assessment against 
 (`SavedSites`: trashed items and policy-refused scopes left out, and a shared vault's scope vouching only for its own
 vault, so a member's item scoped to the look-alike does not make it recognised; review finding Z65). A host that
 resembles a saved site, or uses another alphabet at all, carries a warning that names the site, and switching it on
-asks a second time ("Accept Anyway"). The switch is off to begin with, as every addition is (`MergeChoices`). Before
+asks a second time ("Accept Anyway"); so does a host that would make the item hide or stand beside another saved
+account, named in the warning (review finding Z75). The session holds the rule, not the screen: `commitImport`
+judges every host a merge adds against `SavedSites` and refuses one that needs it unless
+`MergeChoices.confirmedHosts` names it (`mergeNeedsConfirmation`). The switch is off to begin with, as every
+addition is (`MergeChoices`). Before
 this, the screen showed the host as the file spelled it, so a file could offer the bank's item a look-alike that
 rendered as the bank (review of the account screens, finding 3).
 

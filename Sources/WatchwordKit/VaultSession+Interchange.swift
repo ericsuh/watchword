@@ -55,6 +55,10 @@ public enum InterchangeSessionError: Error, Equatable, Sendable {
     /// `lock()` ran during a commit. The first `saved` entries were written; the rest were not, and the preview is
     /// gone with the lock.
     case importInterrupted(saved: Int)
+    /// A merge accepts hosts that would hide or stand beside an account AutoFill offers, or that resemble a saved
+    /// site, and `MergeChoices.confirmedHosts` does not name them (review finding Z75). `concern` says what each would
+    /// do; nothing was written and the preview is kept.
+    case mergeNeedsConfirmation(importedID: UUID, concern: ImportConcern)
 }
 
 /// What an import would do, for the person to review before anything is written. Holds no secret: the drafts stay
@@ -416,6 +420,7 @@ extension VaultSession {
         where pending.concerned.contains(entry.item.id) && decisions[entry.item.id] == nil {
             throw InterchangeSessionError.decisionRequired(importedID: entry.item.id)
         }
+        try await checkMergedHosts(pending, decisions: decisions)
         pendingImport = nil
 
         var outcome = ImportOutcome()
@@ -565,6 +570,82 @@ extension VaultSession {
     }
 
     // MARK: - Helpers
+
+    /// A host a merge adds makes the existing item offered there, which can hide or stand beside another account as a
+    /// new entry's host can (review finding Z75): a duplicate of the Shop login that adds `login.bank.example` takes
+    /// the bank's sign-in page from the saved Bank login. The screen asks a second time for a look-alike only, so the
+    /// session judges every accepted host like a new entry's, against `SavedSites`, and refuses the first merge whose
+    /// host needs a confirmation that `MergeChoices.confirmedHosts` does not give. Before anything is written; the
+    /// preview is kept.
+    private func checkMergedHosts(_ pending: PendingImport, decisions: [UUID: ImportDecision]) async throws {
+        let merging = pending.result.entries.compactMap { entry -> (Item, ImportDecision)? in
+            guard let decision = decisions[entry.item.id], decision.resolution == .merge,
+                !decision.choices.hosts.isEmpty
+            else { return nil }
+            return (entry.item, decision)
+        }
+        guard !merging.isEmpty else { return }
+        let existing = Dictionary(
+            try await items(inVaults: [pending.vaultID]).items.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let sites = try await savedSites()
+        let targetIsShared =
+            try await vaults(includingDeleted: true).first { $0.id == pending.vaultID }?.isShared ?? true
+        _ = try requireKeys(since: pending.epoch)
+        let requests = merging.compactMap { imported, decision -> MergedHosts? in
+            guard let existingID = decision.existingID, let item = existing[existingID] else { return nil }
+            let held = Set(item.scopes.map(\.host))
+            let added = imported.scopes.filter { decision.choices.hosts.contains($0.host) && !held.contains($0.host) }
+            guard !added.isEmpty else { return nil }
+            return MergedHosts(
+                importedID: imported.id, existing: item, added: added, confirmed: decision.choices.confirmedHosts)
+        }
+        guard !requests.isEmpty else { return }
+        let concerns = try await awayFromSession(.importReview, since: pending.epoch) {
+            Self.mergeConcerns(requests, among: sites, isOwnVault: !targetIsShared)
+        }
+        if let first = concerns.first {
+            throw InterchangeSessionError.mergeNeedsConfirmation(importedID: first.importedID, concern: first)
+        }
+    }
+
+    /// The hosts one merge adds to an existing item, and those the person confirmed.
+    struct MergedHosts: Sendable {
+        let importedID: UUID
+        let existing: Item
+        let added: [ServiceScope]
+        let confirmed: Set<String>
+    }
+
+    /// What the unconfirmed hosts of each merge would do, for the merges where that is anything. Pure; run off the
+    /// actor. The existing item is among what is saved: it is left out of what a host would hide or stand beside, and
+    /// its own scopes are the item's (the person's word in a vault of their own) beside the new host.
+    nonisolated static func mergeConcerns(
+        _ merges: [MergedHosts], among sites: SavedSites, isOwnVault: Bool
+    ) -> [ImportConcern] {
+        let prepared = sites.prepared()
+        var concerns: [ImportConcern] = []
+        for merge in merges {
+            var concern = ImportConcern(
+                importedID: merge.importedID, hidden: [], beside: [], overlapIsTruncated: false, lookAlikeHosts: [],
+                uncheckedHosts: [], isArchived: merge.existing.archived,
+                isExcludedFromSuggestions: merge.existing.excludedFromSuggestions)
+            for scope in merge.added.filter(ScopePolicy.isAcceptable) where !merge.confirmed.contains(scope.host) {
+                let overlap = prepared.overlap(
+                    ofAdding: [scope], inVault: merge.existing.vaultID, isOwnVault: isOwnVault)
+                concern.hidden += overlap.hidden.filter { $0.itemID != merge.existing.id }
+                concern.beside += overlap.beside.filter { $0.itemID != merge.existing.id }
+                concern.overlapIsTruncated = concern.overlapIsTruncated || overlap.isTruncated
+                if case .needsConfirmation(let resembles) = prepared.standing(
+                    ofNewHost: scope.host, beside: merge.existing.scopes, inSharedVault: !isOwnVault)
+                {
+                    concern.lookAlikeHosts.append(HostConfirmation(host: scope.host, resembles: resembles))
+                }
+            }
+            if !concern.isEmpty { concerns.append(concern) }
+        }
+        return concerns
+    }
 
     private func requireWritableVault(_ vaultID: UUID, since epoch: UInt64) async throws {
         let keys = try requireKeys(since: epoch)

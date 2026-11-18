@@ -154,6 +154,37 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
             resembles: confirmation?.resembles.sorted() ?? [])
     }
 
+    /// A host a merge would add, with what it would do to the accounts AutoFill offers (`SavedSites.Prepared.overlap`,
+    /// the existing item itself left out): a look-alike warning first, and otherwise, where it would hide or stand
+    /// beside an account, a warning naming them, which needs the second confirmation too (review finding Z75).
+    init(
+        _ scope: ServiceScope, among sites: SavedSites.Prepared, beside otherScopes: [ServiceScope],
+        inSharedVault: Bool,
+        mergingInto existing: (id: UUID, vaultID: UUID)
+    ) {
+        let lookAlike = MergeHost(scope, among: sites, beside: otherScopes, inSharedVault: inSharedVault)
+        guard lookAlike.warning == nil else {
+            self = lookAlike
+            return
+        }
+        let overlap = sites.overlap(ofAdding: [scope], inVault: existing.vaultID, isOwnVault: !inSharedVault)
+        let hidden = overlap.hidden.filter { $0.itemID != existing.id }
+        let beside = overlap.beside.filter { $0.itemID != existing.id }
+        func titles(_ accounts: [AffectedAccount]) -> String {
+            Array(Set(accounts.map { $0.title.isEmpty ? "Untitled" : "“\($0.title)”" })).sorted()
+                .joined(separator: ", ")
+        }
+        var parts: [String] = []
+        if !hidden.isEmpty {
+            parts.append("Accepting it would stop AutoFill offering \(titles(hidden)) there.")
+        }
+        if !beside.isEmpty {
+            parts.append("Accepting it would offer this item beside \(titles(beside)) there.")
+        }
+        if overlap.isTruncated { parts.append("It covers more of your saved sites than were checked.") }
+        self.init(scope, warning: parts.isEmpty ? nil : parts.joined(separator: " "), resembles: [])
+    }
+
     /// A host the session reported as needing confirmation (`VaultError.hostsNeedConfirmation`), for the editor's
     /// dialog: shown in ASCII with the same words.
     public init(_ scope: ServiceScope, resembling names: [String]) {

@@ -90,3 +90,57 @@ extension AdversarialSessionInterchangeTests {
         #expect(InterchangeLimits.standard.maximumURLsPerItem <= 32, "the pairwise comparison is bounded")
     }
 }
+
+extension AdversarialSessionInterchangeTests {
+    /// Threat (Z75): A7's entry duplicates the victim's Shop login (`shop.example`, `wendy`) and adds
+    /// `login.bank.example`, which the merge screen shows as ordinary because it sits under a saved `bank.example`.
+    /// Accepted, it made the Shop item the most specific match on the bank's sign-in page: the shop's password was
+    /// offered there, the Bank login hidden, and the next bank password typed there went into the Shop item. The
+    /// look-alike confirmation of a merge existed only in the screen model, and `commitImport` took any
+    /// `MergeChoices.hosts`. Now the session judges every host a merge adds like a new entry's and refuses one that
+    /// needs confirmation unless `confirmedHosts` names it.
+    @Test("a merge that adds a host taking over another saved login, or a look-alike, needs the host confirmed")
+    func mergedHostIsJudgedInTheSession() async throws {
+        let (vault, personal) = try await Self.vault()
+        let bank = try await vault.session.save(Self.bank(personal))
+        let shop = try await vault.session.save(
+            Item(
+                vaultID: personal, title: "Shop", scopes: [ServiceScope(host: "shop.example")],
+                fields: [
+                    Field(kind: .username, label: "Username", value: "wendy"),
+                    Field(kind: .password, label: "Password", value: "shop-password"),
+                ]))
+        let lookAlike = "b\u{0430}nk.example"
+        let file = Self.cxf(
+            items: Self.cxfLogin(
+                title: "Shop",
+                urls: ["https://shop.example/", "https://login.bank.example/", "https://\(lookAlike)/"],
+                username: "wendy", password: "shop-password"))
+        let preview = try await vault.session.previewImport(file, format: .credentialExchange, into: personal)
+        let match = try #require(preview.matches.first { $0.existingID == shop.id })
+
+        for hosts: Set<String> in [["login.bank.example"], [lookAlike]] {
+            let decision = ImportDecision.merge(into: shop.id, accepting: MergeChoices(hosts: hosts))
+            do {
+                _ = try await vault.session.commitImport(preview.id, decisions: [match.importedID: decision])
+                Issue.record("\(hosts) merged unconfirmed")
+                return
+            } catch InterchangeSessionError.mergeNeedsConfirmation(let importedID, let concern) {
+                #expect(importedID == match.importedID)
+                if hosts == ["login.bank.example"] {
+                    #expect(concern.hidden.map(\.itemID) == [bank.id])
+                    #expect(concern.lookAlikeHosts.isEmpty)
+                } else {
+                    #expect(concern.lookAlikeHosts.map(\.host) == [lookAlike])
+                }
+            }
+            // Nothing was written, and the preview is still there.
+            #expect(try await vault.session.item(id: shop.id).scopes == shop.scopes)
+        }
+        // Confirmed, it is the person's to do.
+        let confirmed = MergeChoices(hosts: ["login.bank.example"], confirmedHosts: ["login.bank.example"])
+        let outcome = try await vault.session.commitImport(
+            preview.id, decisions: [match.importedID: .merge(into: shop.id, accepting: confirmed)])
+        #expect(outcome.merged == [shop.id])
+    }
+}

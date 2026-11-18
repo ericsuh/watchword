@@ -221,6 +221,8 @@ public enum ErrorWording {
         case .importInterrupted(let saved):
             return
                 "Watchword locked during the import. \(saved) item(s) were saved; choose the file again for the rest."
+        case .mergeNeedsConfirmation:
+            return "An address a merge would add changes which account AutoFill offers. Confirm it, or leave it out."
         }
     }
 }

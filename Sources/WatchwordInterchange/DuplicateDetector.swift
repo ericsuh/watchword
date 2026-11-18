@@ -89,10 +89,15 @@ public struct MergeChoices: Hashable, Sendable {
     /// Accepting a URL accepts a field, never a host: it becomes one of the item's websites only where the item is
     /// scoped to its host (`DuplicateDetector.merged`).
     public var fieldIDs: Set<UUID>
+    /// Hosts of `hosts` the person accepted a second time, after the warning that they resemble a saved site or would
+    /// hide or stand beside an account AutoFill offers. The session refuses a merge that adds such a host without
+    /// it here (review finding Z75), whatever a screen did.
+    public var confirmedHosts: Set<String>
 
-    public init(hosts: Set<String> = [], fieldIDs: Set<UUID> = []) {
+    public init(hosts: Set<String> = [], fieldIDs: Set<UUID> = [], confirmedHosts: Set<String> = []) {
         self.hosts = hosts
         self.fieldIDs = fieldIDs
+        self.confirmedHosts = confirmedHosts
     }
 
     public static let none = MergeChoices()

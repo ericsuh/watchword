@@ -3204,7 +3204,11 @@ live in between, and a later restore from the trash asks nothing, so the decisio
 and need the decision as well. `commitImport` refuses without a decision for every such entry (`decisionRequired`):
 `keepBoth` imports it, knowing what it does, `skip` leaves it out. The import screen lists them with the accounts
 they would hide, named with their vaults, and shows every entry's hosts through `MergeHost` (ASCII, registrable
-domain, reach). Duplicates are still looked for in the chosen vault only; the concern covers the other vaults.
+domain, reach). Duplicates are still looked for in the chosen vault only; the concern covers the other vaults. A
+merge's accepted hosts are judged the same way at commit (review finding Z75): a host that would make the existing
+item hide or stand beside another account, or that resembles a saved site, is refused
+(`mergeNeedsConfirmation`, the preview kept) unless `MergeChoices.confirmedHosts` names it, which the screen sets
+when the person accepts it a second time after a warning naming those accounts.
 
 The duplicate screen also shows, in full, the values a merge adds with no per-field choice (other fields, tags and
 the notes text; secrets behind Show), not only their labels (review finding Z67): a link or a phone number in a text
