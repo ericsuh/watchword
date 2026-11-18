@@ -717,3 +717,47 @@ extension AdversarialAccountTests {
         }
     }
 }
+
+// Review finding Z162 (round 6's L-M1): a device ID must commit to its account under its key (Z157), or the device
+// counts in no shared vault and what it writes there reaches nobody.
+extension AdversarialAccountTests {
+    /// Threat: a new device's identity shown to a registered device (a QR code, say) that was made by an older build,
+    /// or edited by whoever relays it (A1 has no part in the code, but anyone between the two screens might). Approved
+    /// as it was, the device would be registered under an ID no shared vault counts, and everything it wrote there
+    /// would be refused by every other device. The approver refuses an ID that does not commit to the account under
+    /// the key shown with it: a random ID, and the ID the same key gives under another account.
+    @Test("a registered device approves no identity whose ID does not commit to the account")
+    func approvalRefusesNonCommittingIdentity() async throws {
+        let f = try await Self.fixture(seed: 16_230)
+        let b = f.fresh(seed: 16_231)
+        let identity = try await b.session.prepareDeviceIdentity(accountID: f.accountID)
+        let elsewhere = DeviceIdentifier.derive(accountID: UUID(), key: identity.key)
+        for id in [UUID(), elsewhere] {
+            await #expect(throws: VaultError.deviceIDDoesNotCommit) {
+                try await f.a.session.approveDevice(id: id, key: identity.key, name: "Tablet")
+            }
+        }
+        #expect(try await f.a.session.devices().count == 1, "a device was registered")
+        // The identity as made goes through.
+        try await f.a.session.approveDevice(id: identity.id, key: identity.key, name: "Tablet")
+        #expect(try await f.a.session.devices().count == 2)
+    }
+
+    /// Threat: as above, on the new device's side: an installation holding a key for an ID chosen before IDs
+    /// committed (an older build's `prepareDeviceIdentity`) enrols as that device. It is refused, and makes its
+    /// identity again.
+    @Test("a new device does not enrol as an identity whose ID does not commit")
+    func enrolmentRefusesNonCommittingIdentity() async throws {
+        let f = try await Self.fixture(seed: 16_232)
+        let b = f.fresh(seed: 16_233)
+        let chosen = UUID()
+        let key = try await b.deviceKeys.create(accountID: f.accountID, deviceID: chosen)
+        await #expect(throws: VaultError.deviceIDDoesNotCommit) {
+            try await b.session.enrol(
+                password: TestVault.password, secretKey: f.kit.setupCode, as: DeviceIdentity(id: chosen, key: key))
+        }
+        #expect(try await b.store.loadAccount() == nil, "the device enrolled")
+        try await b.session.enrol(password: TestVault.password, secretKey: f.kit.setupCode)
+        #expect(try await b.session.deviceStanding() == .active)
+    }
+}

@@ -63,11 +63,15 @@ public struct SharingAccount: Sendable {
 
     /// Another device of this account (PRD F5.2), enrolled from the transport with the password and the Secret Key,
     /// unlocked, with sharing configured over sharing state and contacts of its own: pins, ledgers and stream
-    /// indexes are per device (review finding S35), so it starts with none.
+    /// indexes are per device (review finding S35), so it starts with none. `modifiedClient` makes it an adversary's
+    /// modified client (`VaultSession.playModifiedClient`, Z162): it writes, accepts and publishes in a shared vault
+    /// whatever its ID, where an honest client whose ID does not commit refuses to.
     public func enrolledDevice(
-        deviceID: UUID? = nil, over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory
+        deviceID: UUID? = nil, over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory,
+        modifiedClient: Bool = false
     ) async throws -> SharingAccount {
         let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport)
+        if modifiedClient { await device.session.playModifiedClient() }
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
         let shareAccess = RecordingShareAccess()
@@ -174,10 +178,12 @@ public actor WithholdingTransport: SyncTransport {
 }
 
 extension SharedVaultHousehold {
-    /// Another device of `account`, enrolled over the household's transport (`SharingAccount.enrolledDevice`).
-    /// Another device of `account`, its ID committing to the account (Z157) unless `deviceID` names it.
+    /// Another device of `account`, its ID committing to the account (Z157) unless `deviceID` names it. A device
+    /// named that way is an adversary's, under another device's ID (S33), so it is a modified client too (Z162): an
+    /// honest one would refuse to accept an invitation or write in a shared vault with an ID that commits to nothing.
     public func secondDevice(of account: SharingAccount, deviceID: UUID? = nil) async throws -> SharingAccount {
-        try await account.enrolledDevice(deviceID: deviceID, over: transport, directory: directory)
+        try await account.enrolledDevice(
+            deviceID: deviceID, over: transport, directory: directory, modifiedClient: deviceID != nil)
     }
 
     /// An account whose view of the transport the store controls.

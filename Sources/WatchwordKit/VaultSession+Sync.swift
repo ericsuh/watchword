@@ -68,6 +68,8 @@ extension VaultSession {
         report.registryUnavailable = view == nil
         let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
         let ownDevices: Set<UUID> = view.map { Set($0.state.devices.keys) } ?? []
+        // A device whose ID does not commit to its account publishes nothing in a shared vault, and says so (Z162).
+        let ownIDCommits = await thisDeviceCommits(record)
 
         let adapter = VaultSyncAdapter(session: self)
         let merger = KindRoutingMerger([
@@ -77,9 +79,15 @@ extension VaultSession {
         ])
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
+        if !ownIDCommits {
+            for vaultID in sharing.vaults.keys {
+                sharingReports[vaultID, default: SharedVaultSyncReport()].deviceIDDoesNotCommit = true
+            }
+        }
         func engine(_ vaultID: UUID) -> SyncEngine {
             let shared = sharedEngineOptions(
-                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices)
+                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
+                ownIDCommits: ownIDCommits)
             return SyncEngine(
                 vaultID: vaultID, deviceID: record.deviceID, store: store, syncState: syncState,
                 transport: syncSettings.transport, keyring: adapter, merger: merger,
@@ -96,7 +104,8 @@ extension VaultSession {
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
             let shared = sharedEngineOptions(
-                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices)
+                vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
+                ownIDCommits: ownIDCommits)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 let requests = sharedReplayRequests(vaultID)
                 vaultReport = try await engine(vaultID).sync(
@@ -139,7 +148,8 @@ extension VaultSession {
                 guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
                 await prepareSharedReplay(vaultID)
                 let shared = sharedEngineOptions(
-                    vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices)
+                    vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
+                    ownIDCommits: ownIDCommits)
                 let requests = sharedReplayRequests(vaultID)
                 let second = try await engine(vaultID).sync(
                     reconcile: true, deferringDeletions: true, publishing: shared.publishing)
@@ -199,7 +209,12 @@ extension VaultSession {
         guard let syncState, let base = syncSettings?.state else { return false }
         let state = try? await syncState.loadState(vaultID: vaultID)
         let known = state?.known ?? [:]
+        // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
+        // (review finding Z162): an edit of its own in a row it holds is unpublished whatever its state says, such as a
+        // move's copy published by a build from before this was refused.
+        let receivedNowhere = sharing.vaults[vaultID] != nil ? !(await thisDeviceCommits(account)) : false
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
+            if receivedNowhere, holdsUnpublishedEdit(row, published: nil, account: account) { return true }
             guard let stamp = known[row.key] else { return true }
             // Known only as a deletion: the log says nothing of a version of it. A move's copy has an ID anyone who
             // reads the source vault can derive, and a tombstone for it, found in the log before the copy was written,
@@ -471,11 +486,21 @@ extension VaultSession {
     /// would leave a hole every reader waits at, or move its next number out of range (review finding Z30). A
     /// registry or key that cannot be read, or this device missing from the registry as read, leaves the question
     /// open (`trustedKeyUnavailable`): the engine then neither numbers from the object nor rules it out.
+    ///
+    /// In a shared vault this device's own objects count only if its ID commits to its account (review finding Z162):
+    /// no other device counts them otherwise, so its stream there is no stream of anyone's. The question is left open
+    /// (`trustedKeyUnavailable`), so the engine numbers from nothing there and holds its publishing back while its
+    /// state could be behind the stream; it publishes nothing there anyway (`sharedEngineOptions`).
     func syncVerifyOwn(_ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation) async throws {
         guard let record = try await loadAccount(), let view = try? await registry(record),
             view.state.devices[record.deviceID] != nil
         else { throw SyncKeyringError.trustedKeyUnavailable }
         guard location.author == record.deviceID else { throw SyncKeyringError.untrustedAuthor(location.author) }
+        if sharing.vaults[location.vaultID] != nil, !playsModifiedClient,
+            Self.committedOwnState(view)?.devices[record.deviceID] == nil
+        {
+            throw SyncKeyringError.trustedKeyUnavailable
+        }
         try Self.verifyDual(
             signature, over: Self.syncSignedMessage(envelope, at: location), domain: .logSegment,
             author: location.author, view: view)

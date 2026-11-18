@@ -85,6 +85,11 @@ public enum VaultError: Error, Equatable, Sendable {
     case cannotRevokeThisDevice
     /// Enrolling a device needs an empty store and a configured sync transport.
     case enrolmentUnavailable
+    /// The device ID offered for a new device does not commit to the account under the key offered with it
+    /// (`DeviceIdentifier`, review findings Z157 and Z162): it was made by an older build, or edited. Such a device
+    /// would count in no shared vault, and what it wrote there would reach nobody, so it is not registered; the new
+    /// device makes its identity again (`prepareDeviceIdentity`).
+    case deviceIDDoesNotCommit
     /// The transport holds no account header for the account, no usable device registry, or no key for the
     /// personal vault: there is nothing to enrol from (yet).
     case accountNotOnTransport

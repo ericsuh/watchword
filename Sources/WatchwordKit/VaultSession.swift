@@ -170,6 +170,12 @@ public actor VaultSession: SharesExecutor {
     /// Tests only: called inside every step `awayFromSession` runs, off the actor, before the step itself, so a test
     /// can hold one there and show that `lock()` does not wait for it. `nil` in production.
     var awayWorkHook: (@Sendable (AwayWork) -> Void)?
+    /// Tests only: this session stands in for an adversary's modified client (A4, A5), which would not refuse to
+    /// write, accept or publish in a shared vault as a device whose ID does not commit to its account (review finding
+    /// Z162). The refusals are client rules; what other devices do with such a device's objects is what the
+    /// adversarial suites check. `false` in production, and settable only from this package
+    /// (`playModifiedClient()`).
+    var playsModifiedClient = false
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(

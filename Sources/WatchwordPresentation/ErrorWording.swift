@@ -106,6 +106,8 @@ public enum ErrorWording {
             return "Sync between your devices is not available in this version yet."
         case .hygieneNotConfigured:
             return "The security report is not available in this version yet."
+        case .deviceIDDoesNotCommit:
+            return "That device's code was made by an older version of Watchword. Make a new one on that device."
         case .deviceRegistryUnavailable:
             return "This device cannot check your other devices yet. Sync, then try again."
         case .accountHeaderRolledBack:
@@ -150,6 +152,9 @@ public enum ErrorWording {
         case .ledgerUnavailable:
             return "This shared vault is not set up on this device yet, so it cannot be changed from here. "
                 + "Accept its invitation on this device first."
+        case .deviceIDDoesNotCommit:
+            return "This device was set up by an older version of Watchword and cannot change shared vaults. "
+                + "Set it up again as a new device to share, join or change them."
         }
     }
 

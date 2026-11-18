@@ -141,4 +141,11 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// The vault is held closed on every device of the account, ledger or not: readable, and nothing written,
     /// sealed again, published or proposed, and its keys given to nobody.
     case ownerDisputed(UUID)
+    /// This device's ID does not commit to its account under its key (`DeviceIdentifier`, review findings Z157 and
+    /// Z162): a device of an account made before IDs committed (its registry started under the device's old random
+    /// ID), or one an older build approved. Every other device of a shared vault counts no device whose ID does not
+    /// commit, so nothing this device wrote there would reach anyone, and a move into the vault would leave the item
+    /// on this device alone (PRD F7.6). Nothing is written, shared, accepted or published there from this device until
+    /// it is enrolled again as a new device, whose ID commits.
+    case deviceIDDoesNotCommit
 }

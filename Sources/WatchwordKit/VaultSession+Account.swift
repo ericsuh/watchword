@@ -1070,10 +1070,18 @@ extension VaultSession {
     /// Registers another device from this one, before it has the Secret Key: the registered, unlocked device vouches
     /// for the new device's key (shown as a QR code, say). The new device still needs the password and the Secret
     /// Key to open the keyset; this only spares it registering itself.
+    ///
+    /// The ID must commit to the account under the key (`DeviceIdentifier`, review findings Z157 and Z162), as
+    /// `prepareDeviceIdentity` makes it: a device whose ID does not would count in no shared vault, and what it wrote
+    /// there would reach nobody. An identity from an older build, or an edited one, is refused
+    /// (`deviceIDDoesNotCommit`).
     public func approveDevice(id: UUID, key: DevicePublicKey, name: String) async throws {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        guard DeviceIdentifier.commits(id, to: account.accountID, key: key) else {
+            throw VaultError.deviceIDDoesNotCommit
+        }
         let view = try await registry(account)
         guard view.state.standing(of: account.deviceID) == .active else { throw VaultError.deviceRevoked }
         let now = await clock.now()
@@ -1127,13 +1135,20 @@ extension VaultSession {
     ///
     /// `identity` is for a device that a registered device has already vouched for (`approveDevice`): it enrols as
     /// that device, with the key `prepareDeviceIdentity` made. Without it the device takes a new ID and key and
-    /// registers itself with the enrolment key, which the password and Secret Key yield.
+    /// registers itself with the enrolment key, which the password and Secret Key yield. An identity whose ID does not
+    /// commit to the account under its key is refused (`deviceIDDoesNotCommit`, Z162).
     public func enrol(
         password: String, secretKey: String, accountID: UUID? = nil, as identity: DeviceIdentity? = nil
     ) async throws {
-        if let identity, let accountID = accountID ?? EmergencyKit.parseSetupCode(secretKey)?.accountID {
+        if let identity {
+            guard let accountID = accountID ?? EmergencyKit.parseSetupCode(secretKey)?.accountID else {
+                throw VaultError.enrolmentUnavailable
+            }
             guard try await deviceKeys.publicKey(accountID: accountID, deviceID: identity.id) == identity.key else {
                 throw VaultError.enrolmentUnavailable
+            }
+            guard DeviceIdentifier.commits(identity.id, to: accountID, key: identity.key) else {
+                throw VaultError.deviceIDDoesNotCommit
             }
         }
         try await enrol(
@@ -1148,7 +1163,10 @@ extension VaultSession {
         return try await deviceKeys.createDevice(accountID: accountID)
     }
 
-    /// As `enrol`, with the new device's ID chosen by the caller: for tests that need to name the device.
+    /// As `enrol`, with the new device's ID chosen by the caller: for tests that need to name the device. An ID with a
+    /// key this installation prepared must commit to the account under it, as for `enrol(as:)` (Z162); an ID a test
+    /// names with no prepared key is given a key of its own and commits to nothing, so it counts in no shared vault and
+    /// writes nothing there (`SharedVaultError.deviceIDDoesNotCommit`). No production path names an ID.
     package func enrol(password: String, secretKey text: String, accountID: UUID?, assigningDeviceID: UUID?)
         async throws
     {
@@ -1260,6 +1278,9 @@ extension VaultSession {
         if let assigningDeviceID {
             deviceID = assigningDeviceID
             if let prepared = try await deviceKeys.publicKey(accountID: accountID, deviceID: deviceID) {
+                guard DeviceIdentifier.commits(deviceID, to: accountID, key: prepared) else {
+                    throw VaultError.deviceIDDoesNotCommit
+                }
                 deviceKey = prepared
             } else {
                 deviceKey = try await deviceKeys.create(accountID: accountID, deviceID: deviceID)

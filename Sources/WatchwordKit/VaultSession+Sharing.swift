@@ -229,6 +229,10 @@ public struct SharedVaultSyncReport: Sendable, Equatable {
     /// The transport stopped the pass (`SyncTransportError.stopsSync`: offline, throttled with the wait it asked,
     /// signed out). The rest of the sync asks the transport no more (`AutoSyncOutcome` reads it).
     public var transportFailure: SyncTransportError?
+    /// This device's ID does not commit to its account (review finding Z162): nothing of this device's is published in
+    /// the vault, where no other device would receive it, and nothing is written there until the device is enrolled
+    /// again as a new device (`SharedVaultError.deviceIDDoesNotCommit`).
+    public var deviceIDDoesNotCommit = false
 
     public init() {}
 }
@@ -770,6 +774,8 @@ extension VaultSession {
         await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         guard vaultID != account.personalVaultID else { throw SharedVaultError.personalVaultCannotBeShared }
+        // Its items' values would be stamped by a device no member counts, and held aside everywhere (Z162).
+        try await requireCommittingDevice(account)
         if let shared = sharing.vaults[vaultID] {
             try requireOwnerUndisputed(vaultID)
             // Shared already. What an interruption may have left undone is done again: the state saved, and the
@@ -915,6 +921,8 @@ extension VaultSession {
         let contacts = try verifiedContacts(settings)
         await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        // A device no member counts takes no part (Z162) until it is enrolled again as a new device, whose ID commits.
+        try await requireCommittingDevice(account)
         let vaultID = invitation.vaultID
         let knownOwner = try await knownOwner(of: vaultID, account: account, settings: settings)
         var incoming = try await IncomingInvitation.begin(
@@ -1412,8 +1420,36 @@ extension VaultSession {
         return .some(key?.vaultID == vaultID ? key : nil)
     }
 
+    /// Whether this device's ID commits to its account under the key this installation holds for it
+    /// (`DeviceIdentifier`, review findings Z157 and Z162). Every device of a shared vault counts only the devices whose
+    /// IDs commit, so a device whose ID does not (an account made before IDs committed, a device an older build
+    /// approved) writes nothing there that anyone receives. `false` with no key held: such a device registers again,
+    /// as a new device, at its next unlock.
+    func thisDeviceCommits(_ account: AccountRecord) async -> Bool {
+        if playsModifiedClient { return true }
+        guard let key = try? await deviceKeys.publicKey(accountID: account.accountID, deviceID: account.deviceID)
+        else { return false }
+        return DeviceIdentifier.commits(account.deviceID, to: account.accountID, key: key)
+    }
+
+    /// Refuses what a device whose ID does not commit would do in a shared vault (`deviceIDDoesNotCommit`, Z162): write,
+    /// share a vault, accept an invitation. Nothing it published there would be received, and its rows would count as
+    /// published, so the original of a move into such a vault would be deleted with the copy on this device alone
+    /// (PRD F7.6). A device of an account from before IDs committed takes part once it is enrolled again as a new device
+    /// (an owner decision, docs/06-adversarial-review.md Z162).
+    func requireCommittingDevice(_ account: AccountRecord) async throws {
+        guard await thisDeviceCommits(account) else { throw SharedVaultError.deviceIDDoesNotCommit }
+    }
+
+    /// For `playsModifiedClient`; `false` makes it the honest client again (a build that refuses, after one that did
+    /// not).
+    package func playModifiedClient(_ playing: Bool = true) {
+        playsModifiedClient = playing
+    }
+
     /// The client's half of F4.5: a write the person makes to a shared vault needs `writePermission`. A shared vault
-    /// with no ledger loaded here takes no write at all (`ledgerUnavailable`).
+    /// with no ledger loaded here takes no write at all (`ledgerUnavailable`), and none from a device whose ID does
+    /// not commit to its account (`deviceIDDoesNotCommit`, Z162).
     func checkSharedWrite(_ vaultID: UUID, account: AccountRecord) async throws {
         await loadSharedVaultsIfNeeded()
         guard let vault = sharing.vaults[vaultID] else {
@@ -1423,6 +1459,7 @@ extension VaultSession {
             return
         }
         try requireOwnerUndisputed(vaultID)
+        try await requireCommittingDevice(account)
         if case .refused(let refusal) = vault.ledger.writePermission(for: account.accountID) {
             throw SharedVaultError.writeRefused(refusal)
         }
@@ -1440,6 +1477,7 @@ extension VaultSession {
             return
         }
         try requireOwnerUndisputed(vaultID)
+        try await requireCommittingDevice(account)
         guard vault.ledger.owner.accountID == account.accountID else { throw SharedVaultError.notOwner }
         if !vault.ledger.state.isDeleted {
             let record = try vault.ledger.proposeDeletion(signedBy: try requireKeys().keyset)

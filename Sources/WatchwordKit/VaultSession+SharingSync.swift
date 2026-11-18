@@ -81,8 +81,10 @@ extension VaultSession {
     /// log"), publishes only while this account may write, and replays its log when what counts has changed.
     /// `ownDevices` are this account's registered devices: in a vault whose log is kept whole, the only devices whose
     /// word about this device's own stream moves its numbering (`SyncConfiguration.ownStreamWitnesses`, L-M2).
+    /// `ownIDCommits` is `thisDeviceCommits`: a device whose ID does not commit to its account publishes nothing in a
+    /// shared vault, where nobody would receive it (review finding Z162).
     func sharedEngineOptions(
-        _ vaultID: UUID, base: SyncConfiguration, account: AccountRecord, ownDevices: Set<UUID>
+        _ vaultID: UUID, base: SyncConfiguration, account: AccountRecord, ownDevices: Set<UUID>, ownIDCommits: Bool
     ) -> (configuration: SyncConfiguration, judge: (any WriteJudge)?, publishing: Bool, reconcile: Bool) {
         guard let vault = sharing.vaults[vaultID] else {
             // Shared, with no ledger here (Z41): there is no judge to give it, so it is never published to and its
@@ -107,7 +109,7 @@ extension VaultSession {
         }
         return (
             configuration, VaultSyncAdapter(session: self),
-            vault.ledger.writePermission(for: account.accountID).isAllowed, vault.needsReconcile
+            ownIDCommits && vault.ledger.writePermission(for: account.accountID).isAllowed, vault.needsReconcile
         )
     }
 

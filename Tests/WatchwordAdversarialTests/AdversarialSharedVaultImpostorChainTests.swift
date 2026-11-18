@@ -261,7 +261,7 @@ extension AdversarialSharedVaultTests {
         let view = NamesOnlyTransport(
             base: household.transport,
             prefix: AccountObjectLocation.vaultsPrefix(member.accountID) + "\(vaultID.uuidString)/")
-        let laptop = try await member.vault.enrolledDevice(deviceID: UUID(), over: view)
+        let laptop = try await member.vault.enrolledDevice(over: view)
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
         await laptop.session.configureSharing(
