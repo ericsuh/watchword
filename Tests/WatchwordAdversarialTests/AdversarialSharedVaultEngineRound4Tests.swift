@@ -15,13 +15,9 @@ extension VaultSession {
         await syncRetiredAuthors(vaultID: vaultID)
     }
 
-    /// For tests: whether this device recorded the segment at `sequence` of `device`'s stream, and what it skipped.
+    /// For tests: whether this device recorded the segment at `sequence` of `device`'s stream.
     func recordedSegment(_ device: UUID, _ sequence: UInt64, in vaultID: UUID) -> Bool {
         sharing.vaults[vaultID]?.index.segment(device: device, sequence: sequence) != nil
-    }
-
-    func skippedSegment(_ device: UUID, in vaultID: UUID) -> UInt64? {
-        sharing.vaults[vaultID]?.index.skippedPassedOver[device]
     }
 
     /// For tests: whether the vault's items were last judged against the basis as it stands, with no replay due.
@@ -40,8 +36,8 @@ extension AdversarialSharedVaultTests {
     /// registry's revocations were unioned: every device stopped reading the victim's stream, and the victim's own
     /// device was told it was revoked and synced nothing in that vault. Since Z144 a revoked device's values are also
     /// believed without its stream, so a member who may write could have claims stamped with the victim's device
-    /// believed. A revocation counts only from the account the device is: whose stream it is, or, for a stream
-    /// nothing was recorded of, every registry that lists it having revoked it.
+    /// believed. Z150 counted a revocation only from the account whose stream it was; round 5 (M2) found that
+    /// test met by a captured stream. Since Z157 no registry but the device's own account's counts the device at all.
     @Test("a member's revocation of another member's device ID stops nothing")
     func memberRevokesAnotherMembersDevice() async throws {
         let household = SharedVaultHousehold()
@@ -212,11 +208,12 @@ extension AdversarialSharedVaultTests {
 extension AdversarialSharedVaultTests {
     /// Threat: a read-only member (A4) who registers a device under a writer's device ID (S33) and signs segment 1 of
     /// that device's stream before the writer has published, and then an ordinary promotion by the owner. Z146 passed
-    /// over that segment only while its signer's work could not count, a function of the current head: once the
-    /// member was let write, the planted segment named the stream on every device, its tombstone counted, and every
-    /// segment the writer had published there was held aside. A segment names a stream ahead of another's only if its
-    /// signer first appeared under the key it was sealed under in a role that could write, a function of the chain;
-    /// the key is rotated after a promotion, and the promoted member's later work counts as anyone's.
+    /// over that segment only while its signer's work could not count: once the member was let write, the planted
+    /// segment named the stream on every device, its tombstone counted, and every segment the writer published there
+    /// was held aside; Z152 then named streams by who could write when a key was current, and rotated after a
+    /// promotion. The writer's device ID commits to the writer's account (Z157): the plant verifies on no device,
+    /// before the promotion or after, no rotation is needed, and the promoted member's own later work counts as
+    /// anyone's.
     @Test("a planted segment does not take a writer's stream when its read-only signer is promoted")
     func promotionAfterAPlant() async throws {
         let household = SharedVaultHousehold()
@@ -241,37 +238,31 @@ extension AdversarialSharedVaultTests {
         let deletion = SyncEntry.tombstone(
             RecordKey(recordID: bank.id, kind: .item),
             stamp: RecordStamp(version: 1001, device: victimDevice, deleted: true), erasure: summary)
-        let location = SyncObjectLocation.segment(vaultID: vaultID, author: victimDevice, sequence: 1)
-        let payload = SyncPayload(
-            kind: .segment, vaultID: vaultID, author: victimDevice, number: 1, vector: [:], entries: [deletion])
-        let adapter = VaultSyncAdapter(session: rogue.session)
-        let envelope = try await adapter.seal(payload.encoded(), at: location)
-        let signature = try await adapter.sign(envelope, at: location)
-        try await household.transport.create(
-            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+        try await Self.plantSegment(
+            by: rogue, as: victimDevice, sequence: 1, in: vaultID, entries: [deletion], on: household.transport)
+        let planted = SyncObjectLocation.segment(vaultID: vaultID, author: victimDevice, sequence: 1).name
 
+        let keyBefore = try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID
+        try await owner.session.changeRole(of: reader.accountID, in: vaultID, to: .readWrite)
+        try await Self.syncAll([owner, victim, reader], rounds: 3)
+        #expect(try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID == keyBefore)
+        for (name, account) in [("owner", owner), ("reader", reader), ("victim", victim)] {
+            #expect(Self.refused(planted, in: try await account.session.syncAll().vaults[vaultID]))
+            #expect(
+                (try? await account.session.item(id: bank.id))?.title == bank.title,
+                "the planted deletion counted on the \(name)'s device")
+        }
+        // Gone from the store, the plant leaves the victim's stream as it was, and the victim's work counts.
+        await Self.remove(planted, from: household.transport)
         var item = Self.bank(in: vaultID)
         item.title = "The victim's own"
         let own = try await victim.session.save(item)
         try await Self.syncAll([victim, owner, reader])
-        let keyBefore = try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID
-
-        try await owner.session.changeRole(of: reader.accountID, in: vaultID, to: .readWrite)
-        try await Self.syncAll([owner, victim, reader], rounds: 3)
-        #expect(
-            try await owner.session.sharedVaultStatus(vaultID).membership.vaultKeyID != keyBefore,
-            "the key was not rotated after the promotion")
-        for (name, account) in [("owner", owner), ("reader", reader), ("victim", victim)] {
-            #expect(
-                await account.session.streamOwner(victimDevice, in: vaultID) == victim.accountID
-                    || name == "victim",
-                "the planted segment took the victim's stream on the \(name)'s device")
+        for (name, account) in [("owner", owner), ("reader", reader)] {
+            #expect(await account.session.streamOwner(victimDevice, in: vaultID) == victim.accountID)
             #expect(
                 (try? await account.session.item(id: own.id))?.title == own.title,
                 "the victim's work is held aside on the \(name)'s device")
-            #expect(
-                (try? await account.session.item(id: bank.id))?.title == bank.title,
-                "the planted deletion counted on the \(name)'s device")
         }
         // The promoted member's own later work counts.
         var later = Self.bank(in: vaultID)
@@ -301,14 +292,13 @@ extension AdversarialSharedVaultTests {
             location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
     }
 
-    /// Threat: a read-only member (A4) who signs segment after segment into the streams of devices of their own, or
-    /// at numbers ahead of another member's stream. Since Z146 each was recorded, by digest and signer, in every
-    /// device's signed index, about 60 bytes apiece with no limit: past the index's 64 MiB bound it is refused and
-    /// rebuilt from the log at every load. Such a segment names no stream and is filed nowhere; it is needed only
-    /// where a write cut's chain runs over it, below a segment of another account's in the same stream. So it is
-    /// recorded only there, and a segment of the stream's own above one that was skipped asks for the replay that
-    /// records it.
-    @Test("a read-only member's segments are recorded only where a write cut can need them")
+    /// Threat: a read-only member (A4) who signs segment after segment into the stream of a device of their own.
+    /// Since Z146 each was recorded, by digest and signer, in every device's signed index, about 60 bytes apiece with
+    /// no limit: past the index's 64 MiB bound it is refused and rebuilt from the log at every load; Z155 recorded them
+    /// only below another account's segment in the same stream. A stream is one account's now (Z157), and nothing a
+    /// member who may never write signs is recorded at all: no cut runs over it, and a promotion replays the log. The
+    /// stream is passed over all the same, and the other streams go on.
+    @Test("a read-only member's segments are passed over and never recorded")
     func readOnlyFloodIsNotRecorded() async throws {
         let household = SharedVaultHousehold()
         let owner = try await household.account(seed: 3900)
@@ -320,38 +310,28 @@ extension AdversarialSharedVaultTests {
         try await owner.invite(reader, to: vaultID, as: .readOnly, owner: owner)
         _ = try await victim.session.save(Self.bank(in: vaultID))
         try await Self.syncAll([owner, victim, reader])
-        let victimDevice = try await Self.deviceID(of: victim)
-        let head = try await Self.head(of: victim, in: vaultID)
-        let rogue = try await household.secondDevice(of: reader, deviceID: victimDevice)
         let own = try await household.secondDevice(of: reader)
         let ownDevice = try await Self.deviceID(of: own)
-        for device in [rogue, own] {
-            try await device.session.acceptInvitation(
-                Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
-                ownerEvidence: .safetyNumber(owner.safetyNumber))
-            try await device.session.sync()
-        }
+        try await own.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await own.session.sync()
         for sequence in 1...12 {
             try await Self.plantSegment(
                 by: own, as: ownDevice, sequence: UInt64(sequence), in: vaultID, on: household.transport)
         }
-        try await Self.plantSegment(
-            by: rogue, as: victimDevice, sequence: head + 1, in: vaultID, on: household.transport)
         try await owner.session.sync()
         for sequence in 1...12 {
             #expect(await !owner.session.recordedSegment(ownDevice, UInt64(sequence), in: vaultID))
         }
-        #expect(await owner.session.skippedSegment(ownDevice, in: vaultID) == 1)
-        #expect(await !owner.session.recordedSegment(victimDevice, head + 1, in: vaultID))
+        #expect(
+            try await owner.session.syncAll().vaults[vaultID]?.waiting[ownDevice] == nil, "the stream was not passed")
 
-        // The victim steps over the planted segment and publishes above it: the owner records it, once.
         var item = Self.bank(in: vaultID)
-        item.title = "Above the plant"
+        item.title = "Written beside the flood"
         item = try await victim.session.save(item)
         try await victim.session.sync()
         try await Self.syncAll([owner], rounds: 2)
-        #expect(await owner.session.recordedSegment(victimDevice, head + 1, in: vaultID), "a cut's chain has a gap")
-        #expect(await owner.session.recordedSegment(victimDevice, head + 2, in: vaultID))
         #expect(try await owner.session.item(id: item.id).title == item.title)
         #expect(await owner.session.judgementIsSettled(vaultID))
         try await owner.session.sync()

@@ -26,13 +26,13 @@ extension AdversarialSharedVaultTests {
         let (owner, member, bystander) = (home.owner, home.members[0], home.members[1])
         let vaultID = home.vaultID
         let phoneID = try #require(try await member.vault.store.loadAccount()).deviceID
-        let laptopID = UUID(uuidString: "D0000000-0000-4000-8000-0000000000E7")!
         let newPassword = "an entirely different passphrase"
 
         // The member's laptop, joined to the vault. Its holder controls what it is shown: it never learns of its
         // revocation, as a device that does not ask never does.
         let view = WithholdingTransport(base: household.transport)
-        let laptop = try await member.enrolledDevice(deviceID: laptopID, over: view, directory: household.directory)
+        let laptop = try await member.enrolledDevice(over: view, directory: household.directory)
+        let laptopID = try #require(try await laptop.vault.store.loadAccount()).deviceID
         try await laptop.session.acceptInvitation(
             Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
             ownerEvidence: .safetyNumber(owner.safetyNumber))

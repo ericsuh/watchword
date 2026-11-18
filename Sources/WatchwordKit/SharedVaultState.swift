@@ -19,9 +19,16 @@ struct VersionKey: Hashable, Sendable {
 /// Two questions are answered from it. **Whose work is a value?** The account that signed a segment of the stream of
 /// the device the value's stamp names that carried the value's exact bytes, stamp included (`valueCarriers`, review
 /// finding S36): the stamp is the writer's claim, so a value is that device's work only where that device's own stream
-/// carried it, and a device ID alone could be listed by more than one account's registry, while a signature is one
-/// account's. A version's own revision is attributed the same way, through the segment that first carried it. **Is a segment inside a write cut?** The cut commits to a device's stream up to a
-/// sequence number by a chain of these digests, which every device recomputes from what it holds.
+/// carried it. A version's own revision is attributed the same way, through the segment that first carried it. **Is a
+/// segment inside a write cut?** The cut commits to a device's stream up to a sequence number by a chain of these
+/// digests, which every device recomputes from what it holds.
+///
+/// A stream is one account's by identity, not by inference (review finding Z157): a device's ID commits to its account
+/// under its key (`DeviceIdentifier`), a shared vault counts a registry's device only if its ID commits to that
+/// registry's account, and so every segment that verifies in a device's stream is signed by that one account. Which
+/// account signed a stream's lowest segment, which could write when its key was current, and whose standing passes
+/// it over (Z46, Z146, Z152, Z155) are no longer questions; `record` refuses a segment of any other account, which
+/// cannot verify, so that no index can come to hold two.
 ///
 /// Local state like the saved ledger, so it is signed by the account's own key under `SignatureDomain.membership`
 /// with its own magic (`WWSI`) and refused whole on load if it does not verify (A8): a planted index could otherwise
@@ -35,19 +42,9 @@ struct SharedStreamIndex: Sendable, Hashable {
         /// each the digest of an `AttributedValue`, filed under the device its stamp names.
         var values: [ValueKey] = []
         /// Whether this device opened the segment. One sealed under a key it does not hold is recorded all the same,
-        /// by its digest and signer, which need no key: it names the stream's account like any other and a cut's
-        /// chain runs over it, but nothing is known of what it carried (review finding Z51).
+        /// by its digest and signer, which need no key: a cut's chain runs over it, but nothing is known of what it
+        /// carried (review finding Z51).
         var opened = true
-        /// The vault key the segment was sealed under, from its envelope header, which needs no key to read: with its
-        /// signer, whether it names the stream (`NamingKey`, review finding Z152). `nil` for one recorded without it.
-        var keyID: UUID?
-    }
-
-    /// An account and a vault key under which its segments name a stream: it held a role that may write when it
-    /// first appeared in the chain while that key was current (review finding Z152).
-    struct NamingKey: Sendable, Hashable {
-        var account: UUID
-        var keyID: UUID
     }
 
     /// A value as the index files it: the device its stamp names, and SHA-256 of its encoding with the whole stamp.
@@ -60,40 +57,19 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// 3 since note-line removals, discards and history entries became attributable values (review findings S32,
     /// S43): an index of an earlier format filed none of them, so it is refused on load and rebuilt from the log by a
     /// replay, which files them, before anything is judged against it. 4 since segments that do not open here are
-    /// recorded too, each segment saying whether it was opened (Z51): an earlier index lacks them, and names a
-    /// stream's account by the first segment that happened to open. 5 since `ownTakenOut` (Z54) moved to a row of its
-    /// own, which a rebuild of the index leaves alone (`OwnTakenOutRow`, Z121). 6 since `relied` (Z153): an earlier
-    /// index does not say which revocations what it admitted rested on, so it is rebuilt by a replay; with it
-    /// `collected` (Z151), each segment's `keyID` (Z152) and `skippedPassedOver` (Z155).
-    static let formatVersion: UInt8 = 6
+    /// recorded too, each segment saying whether it was opened (Z51). 5 since `ownTakenOut` (Z54) moved to a row of
+    /// its own (`OwnTakenOutRow`, Z121). 6 since `relied` (Z153) and `collected` (Z151). 7 since device IDs commit to
+    /// their account (Z157): an earlier index was built while a stream's account was inferred and may file another
+    /// account's segments in a stream, and every device that wrote one has an ID that commits to nothing, which no
+    /// shared vault reads now, so there is nothing to carry forward and it is refused and rebuilt (round 5's L-M1 is
+    /// moot: no installation of format 6 has a stream that still counts).
+    static let formatVersion: UInt8 = 7
     static let maximumLength = 64 << 20
 
     /// By device, then sequence number.
     private(set) var streams: [UUID: [UInt64: Segment]] = [:]
-    /// The lowest sequence recorded of each stream whose signer is not `passedOver`, kept beside `streams`, among the
-    /// segments that are `naming`'s and among the rest: the segment that names the stream's account
-    /// (`account(ofStream:)`), asked for with every value judged.
-    private var lowestNaming: [UUID: UInt64] = [:]
-    private var lowestOther: [UUID: UInt64] = [:]
-    /// The highest sequence recorded of each stream whose signer is not `passedOver`.
-    private var highestCounted: [UUID: UInt64] = [:]
-    /// The account and key pairs whose segments name a stream before any other's (review finding Z152): the accounts
-    /// that first appeared in the chain, while that key was current, in a role that may write. A member let write
-    /// only later (a read-only member promoted) did not, and a segment it signed under that key may have been written
-    /// while it could not: planted at segment 1 of another member's stream before that member published there, it
-    /// took the stream the moment the promotion took it out of `passedOver`, and every device held aside what that
-    /// member published. A function of the accepted chain, so a promotion moves nothing; the session rotates the key
-    /// after one (`promotedWithinKeyEra`), so that the promoted member's own later segments name their streams. A
-    /// stream with no such segment is named by its lowest other one.
-    private(set) var naming: Set<NamingKey> = []
-    /// The accounts whose work cannot count in the vault under its current head (`WriteStanding.nothingCounts`: a
-    /// member never let write, say), whose segments name no stream's account (review finding Z146). Such a member
-    /// could otherwise list another member's device ID in their own registry (S33), sign that device's segment 1
-    /// before it published there, and have every device take the stream for theirs and hold aside all that device
-    /// wrote; and since Z137 every device records that segment. Set from the ledger by the session before each
-    /// judgement (`setNaming`), never saved: it is a function of the head, and refiling on a change keeps every
-    /// device that holds the same segments and head in agreement.
-    private(set) var passedOver: Set<UUID> = []
+    /// The lowest sequence recorded of each stream, kept beside `streams`.
+    private var lowest: [UUID: UInt64] = [:]
     /// The basis the vault's items were last judged against (`VaultSession.judgedBasis`: the membership head, and the
     /// revocations the judgements rested on, Z153), so that a change of either is noticed after a restart too.
     var judgedHead: [UInt8]?
@@ -116,64 +92,24 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// segments no snapshot covers is merely missing them here (a lagging listing, a store withholding them) and is
     /// waited for.
     var collected: [UUID: UInt64] = [:]
-    /// For each stream, the lowest sequence of a `passedOver` account's segment that was not recorded because no
-    /// segment of another account's is recorded above it there (review finding Z155). Such a segment names nothing and
-    /// is filed nowhere; it matters only to a write cut's chain, which runs over a stream up to a segment of the
-    /// stream's own, so it is recorded once one is above it (a replay, asked for when that segment is recorded). A
-    /// member who may never write can sign any number of segments into streams of devices they list, and recording
-    /// each grew the signed index without bound; now it grows only by what another account's segments sit above.
-    var skippedPassedOver: [UUID: UInt64] = [:]
 
     init() {}
 
-    /// Whether a segment of an account that is not `passedOver` is recorded in `device`'s stream above `sequence`.
-    func hasCountedSegment(_ device: UUID, above sequence: UInt64) -> Bool {
-        (highestCounted[device] ?? 0) > sequence
-    }
-
-    /// The account a device's stream belongs to: the one whose keys signed its lowest-numbered segment recorded here,
-    /// passing over the segments of an account whose work cannot count (`passedOver`, Z146), and of those the lowest
-    /// that `naming` holds if there is one (Z152) (review finding Z46). A stream is named by a device ID alone, device
-    /// IDs are chosen by devices, and nothing
-    /// stops a member listing another member's device ID in their own registry and signing objects into "its"
-    /// stream. So the name does not say whose a stream is; its first segment does, and a shared vault keeps its whole
-    /// log, so devices that hold the same segments agree. `nil` for a stream nothing was recorded of.
+    /// The account a device's stream belongs to: the one whose keys signed its segments recorded here, which is the
+    /// account the device's ID commits to (Z157). `nil` for a stream nothing was recorded of.
     func account(ofStream device: UUID) -> UUID? {
         firstSequence(ofStream: device).flatMap { streams[device]?[$0]?.account }
     }
 
-    /// The sequence number of the segment that names a device's stream (`account(ofStream:)`).
+    /// The lowest sequence number recorded of a device's stream.
     func firstSequence(ofStream device: UUID) -> UInt64? {
-        lowestNaming[device] ?? lowestOther[device]
-    }
-
-    private func names(_ segment: Segment) -> Bool {
-        segment.keyID.map { naming.contains(NamingKey(account: segment.account, keyID: $0)) } ?? false
-    }
-
-    private mutating func noteLowest(_ segment: Segment, device: UUID, sequence: UInt64) {
-        guard !passedOver.contains(segment.account) else { return }
-        highestCounted[device] = max(highestCounted[device] ?? 0, sequence)
-        if names(segment) {
-            lowestNaming[device] = min(lowestNaming[device] ?? .max, sequence)
-        } else {
-            lowestOther[device] = min(lowestOther[device] ?? .max, sequence)
-        }
-    }
-
-    /// Whether the segment at `sequence` of `device`'s stream is there and signed by the account the stream belongs
-    /// to. Another account's object in that position is kept, since a write cut's chain runs over every object of
-    /// the stream, but nothing is attributed through it.
-    func isOwnersSegment(device: UUID, sequence: UInt64) -> Bool {
-        guard let segment = streams[device]?[sequence] else { return false }
-        return segment.account == account(ofStream: device)
+        lowest[device]
     }
 
     /// Remembers a segment. The first copy seen of a name is kept: objects are written once, so a second, different
     /// object under the same name is a store showing devices different streams (`forkedStream`), and the cut's chain
-    /// is what tells which one its signer held. What a segment carried is filed only if the account the stream
-    /// belongs to signed it (Z46); if a lower-numbered segment arrives later and is another account's, the stream is
-    /// that account's after all and what was filed through it is filed again.
+    /// is what tells which one its signer held. A segment signed by another account than the stream's is refused: it
+    /// cannot verify (Z157), and an index never holds two accounts' segments in one stream.
     ///
     /// A segment recorded unopened is completed by the same object once it opens (a key arrived, and the log is
     /// replayed): the same digest, now with what it carried.
@@ -183,47 +119,13 @@ struct SharedStreamIndex: Sendable, Hashable {
                 return
             }
             streams[device]?[sequence] = segment
-            if segment.account == account(ofStream: device) { file(segment, device: device, sequence: sequence) }
+            file(segment, device: device, sequence: sequence)
             return
         }
-        let before = account(ofStream: device)
+        if let owner = account(ofStream: device), owner != segment.account { return }
         streams[device, default: [:]][sequence] = segment
-        noteLowest(segment, device: device, sequence: sequence)
-        let owner = account(ofStream: device)
-        if let before, before != owner {
-            firstCarrier[device] = nil
-            for value in valueCarriers.keys {
-                valueCarriers[value]?[device] = nil
-                if valueCarriers[value]?.isEmpty == true { valueCarriers[value] = nil }
-            }
-            for (number, held) in (streams[device] ?? [:]).sorted(by: { $0.key < $1.key })
-            where held.account == owner {
-                file(held, device: device, sequence: number)
-            }
-        } else if segment.account == owner {
-            file(segment, device: device, sequence: sequence)
-        }
-    }
-
-    /// Names no stream after `accounts`' segments (`passedOver`), names streams after `naming`'s first, and files
-    /// again what every stream carried for the account it now belongs to. Nothing changes if both are the ones in
-    /// force.
-    mutating func setNaming(passedOver accounts: Set<UUID>, naming keys: Set<NamingKey>) {
-        guard accounts != passedOver || keys != naming else { return }
-        passedOver = accounts
-        naming = keys
-        lowestNaming = [:]
-        lowestOther = [:]
-        highestCounted = [:]
-        firstCarrier = [:]
-        valueCarriers = [:]
-        for (device, stream) in streams {
-            for (number, held) in stream { noteLowest(held, device: device, sequence: number) }
-            guard let owner = account(ofStream: device) else { continue }
-            for (number, held) in stream.sorted(by: { $0.key < $1.key }) where held.account == owner {
-                file(held, device: device, sequence: number)
-            }
-        }
+        lowest[device] = min(lowest[device] ?? .max, sequence)
+        file(segment, device: device, sequence: sequence)
     }
 
     private mutating func file(_ segment: Segment, device: UUID, sequence: UInt64) {
@@ -235,7 +137,7 @@ struct SharedStreamIndex: Sendable, Hashable {
         }
     }
 
-    /// The highest record version any segment of `device`'s stream recorded here carried for the stream's account.
+    /// The highest record version any segment of `device`'s stream recorded here carried.
     func highestVersionCarried(by device: UUID) -> UInt64 {
         firstCarrier[device]?.keys.map(\.version).max() ?? 0
     }
@@ -302,7 +204,6 @@ struct SharedStreamIndex: Sendable, Hashable {
                 let segment = stream[sequence]!
                 out += SharedBytes.littleEndian(sequence) + segment.digest + SharedBytes.bytes(segment.account)
                 out += [segment.opened ? 1 : 0]
-                out += segment.keyID.map { [1] + SharedBytes.bytes($0) } ?? [0]
                 out += SharedBytes.littleEndian32(UInt32(segment.entries.count))
                 for entry in segment.entries {
                     out += SharedBytes.bytes(entry.recordID) + [entry.kind] + SharedBytes.littleEndian(entry.version)
@@ -316,10 +217,10 @@ struct SharedStreamIndex: Sendable, Hashable {
             out += SharedBytes.littleEndian32(UInt32(devices.count))
             for device in devices { out += SharedBytes.bytes(device) }
         }
-        for map in [collected, skippedPassedOver] {
-            let devices = map.keys.sorted { $0.precedes($1) }
-            out += SharedBytes.littleEndian32(UInt32(devices.count))
-            for device in devices { out += SharedBytes.bytes(device) + SharedBytes.littleEndian(map[device]!) }
+        let collectedDevices = collected.keys.sorted { $0.precedes($1) }
+        out += SharedBytes.littleEndian32(UInt32(collectedDevices.count))
+        for device in collectedDevices {
+            out += SharedBytes.bytes(device) + SharedBytes.littleEndian(collected[device]!)
         }
         return out + (try keyset.sign(out, domain: .membership))
     }
@@ -356,14 +257,8 @@ struct SharedStreamIndex: Sendable, Hashable {
             var previousSequence: UInt64 = 0
             for _ in 0..<count {
                 guard let sequence = reader.uint64(), sequence > previousSequence, let digest = reader.read(32),
-                    let signer = reader.uuid(), let openedFlag = reader.read(1), openedFlag[0] <= 1,
-                    let keyFlag = reader.read(1), keyFlag[0] <= 1
+                    let signer = reader.uuid(), let openedFlag = reader.read(1), openedFlag[0] <= 1
                 else { return nil }
-                var keyID: UUID?
-                if keyFlag[0] == 1 {
-                    guard let key = reader.uuid() else { return nil }
-                    keyID = key
-                }
                 guard let entryCount = reader.uint32(), Int(entryCount) <= reader.remaining / 25 else { return nil }
                 previousSequence = sequence
                 var entries: [VersionKey] = []
@@ -385,7 +280,9 @@ struct SharedStreamIndex: Sendable, Hashable {
                     device: device, sequence: sequence,
                     segment: Segment(
                         digest: digest, account: signer, entries: entries, values: values,
-                        opened: openedFlag[0] == 1, keyID: keyID))
+                        opened: openedFlag[0] == 1))
+                // A stream holding two accounts' segments is no index this version wrote (Z157).
+                guard index.segment(device: device, sequence: sequence) != nil else { return nil }
             }
         }
         for keyPath in [\SharedStreamIndex.awaiting, \SharedStreamIndex.relied] {
@@ -397,16 +294,14 @@ struct SharedStreamIndex: Sendable, Hashable {
                 index[keyPath: keyPath].insert(device)
             }
         }
-        for keyPath in [\SharedStreamIndex.collected, \SharedStreamIndex.skippedPassedOver] {
-            guard let count = reader.uint32(), Int(count) <= reader.remaining / 24 else { return nil }
-            var previous: UUID?
-            for _ in 0..<count {
-                guard let device = reader.uuid(), previous.map({ $0.precedes(device) }) ?? true,
-                    let sequence = reader.uint64(), sequence > 0
-                else { return nil }
-                previous = device
-                index[keyPath: keyPath][device] = sequence
-            }
+        guard let collectedCount = reader.uint32(), Int(collectedCount) <= reader.remaining / 24 else { return nil }
+        var previousCollected: UUID?
+        for _ in 0..<collectedCount {
+            guard let device = reader.uuid(), previousCollected.map({ $0.precedes(device) }) ?? true,
+                let sequence = reader.uint64(), sequence > 0
+            else { return nil }
+            previousCollected = device
+            index.collected[device] = sequence
         }
         guard reader.remaining == 0 else { return nil }
         return index

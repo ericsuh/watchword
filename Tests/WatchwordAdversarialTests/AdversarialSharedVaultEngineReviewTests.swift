@@ -99,11 +99,12 @@ extension AdversarialSharedVaultTests {
 extension AdversarialSharedVaultTests {
     /// Threat: a member the vault never let write (read-only from the start, A4), with a device registered under a
     /// writer's device ID (S33), who signs segment 1 of that device's stream before the writer has published in the
-    /// vault. Since Z137 every device takes such a segment in and records it, and a stream belongs to the account that
+    /// vault. Since Z137 every device took such a segment in and recorded it, and a stream belonged to the account that
     /// signed its lowest segment: every other device took the writer's stream for the read-only member's and held aside
     /// everything the writer published there, while the writer's device stepped over the planted segment and published
-    /// from 2, told nothing. A segment of an account whose work cannot count names no stream, and the writer is told
-    /// that someone wrote in its place.
+    /// from 2, told nothing. The writer's device ID commits to the writer's account (Z157): the plant verifies nowhere,
+    /// names nothing and erases nothing. It sits at the number the writer would publish at, as anything anyone can
+    /// create there would (A1): the writer is told, and goes on once it is gone.
     @Test("a read-only member's segment at the start of a writer's stream does not take the stream")
     func readOnlyMemberPlantAtSegmentOne() async throws {
         let household = SharedVaultHousehold()
@@ -144,14 +145,20 @@ extension AdversarialSharedVaultTests {
         item.title = "The victim's own"
         let own = try await victim.session.save(item)
         let report = try #require(try await victim.session.syncAll().vaults[vaultID])
-        #expect(report.ownStreamSteppedOver == 1, "the victim is not told someone wrote in its place")
-        #expect(try await Self.head(of: victim, in: vaultID) > 1)
-        try await Self.syncAll([owner, reader, victim])
+        #expect(report.ownStreamConflict == 1, "the victim is not told someone wrote in its place")
+        try await Self.syncAll([owner, reader])
+        for account in [owner, reader] {
+            #expect(Self.refused(location.name, in: try await account.session.syncAll().vaults[vaultID]))
+            #expect(try await account.session.item(id: bank.id).title == bank.title, "the planted deletion counted")
+            #expect(await account.session.streamOwner(victimDevice, in: vaultID) == nil)
+        }
+        await Self.remove(location.name, from: household.transport)
+        try await Self.syncAll([victim, owner, reader])
         for account in [owner, reader] {
             #expect(
                 (try? await account.session.item(id: own.id))?.title == own.title,
-                "the victim's work is held aside as the read-only member's stream")
-            #expect(try await account.session.item(id: bank.id).title == bank.title, "the planted deletion counted")
+                "the victim's work did not arrive")
+            #expect(await account.session.streamOwner(victimDevice, in: vaultID) == victim.accountID)
         }
     }
 }

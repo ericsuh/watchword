@@ -191,10 +191,8 @@ extension VaultSession {
                 }
                 // Someone outside the vault holds its current key (an addition and its removal lost a fork
                 // together, Z43): a routine rotation, by any device whose account administers the vault.
-                // A member promoted since the current key was introduced (Z152): their segments under it name no stream
-                // ahead of another member's, so the key is rotated, as routinely, and from then on they do.
                 let current = try sharedVault(vaultID).ledger
-                if !current.exposedKeyHolders.isEmpty || !Self.promotedWithinKeyEra(current).isEmpty,
+                if !current.exposedKeyHolders.isEmpty,
                     try sharedVault(vaultID).plan == nil,
                     ledger.state.member(account.accountID)?.role.isAdministrator == true,
                     (try? await planRotation(.routine, in: vaultID)) != nil
@@ -336,16 +334,25 @@ extension VaultSession {
         return anchors
     }
 
-    /// The other accounts' registries as `vaultID`'s chain anchors them, by account in a fixed order.
+    /// The other accounts' registries as `vaultID`'s chain anchors them, by account in a fixed order, each with only
+    /// the devices whose IDs commit to that account (`DeviceRegistryState.committedDevicesOnly`, review finding Z157):
+    /// a device ID another account's registry lists is no device of this one, so no two registries here list the same
+    /// device, and a stream, a value's stamp and a revocation each name one account by identity.
     func memberRegistries(_ vaultID: UUID, account: UUID) -> [(accountID: UUID, state: DeviceRegistryState)] {
         guard let vault = sharing.vaults[vaultID] else { return [] }
         return Self.memberAnchors(of: vault.ledger, excluding: account)
             .sorted { $0.key.uuidString < $1.key.uuidString }
             .compactMap { accountID, signingKey in
                 sharing.registries[MemberRegistryAnchor(accountID: accountID, signingKey: signingKey)].map {
-                    (accountID, $0)
+                    (accountID, $0.committedDevicesOnly)
                 }
             }
+    }
+
+    /// This account's own registry as a shared vault counts it: only the devices whose IDs commit to the account
+    /// (Z157), as every other member's device counts it.
+    static func committedOwnState(_ ownView: RegistryView?) -> DeviceRegistryState? {
+        ownView?.state.committedDevicesOnly
     }
 
     /// Password changes replayed side by side when another account's registry forks at the one followed; more than
@@ -562,11 +569,12 @@ extension VaultSession {
         ObjectDigest(hashing: Array("WW-devices-settled-v1".utf8) + entries.sorted().flatMap(\.bytes))
     }
 
-    /// The accounts whose registries, as `vaultID`'s chain anchors them, list `device`, this account's own first;
-    /// revoked devices included, since what a device wrote before its revocation is still its account's work.
+    /// The account whose registry, as `vaultID`'s chain anchors it, lists `device`, revoked devices included, since
+    /// what a device wrote before its revocation is still its account's work. At most one: a registry counts only the
+    /// devices whose IDs commit to its account (Z157), so the list is empty or names the one account the device is.
     func accountsListing(_ device: UUID, in vaultID: UUID, ownView: RegistryView?, account: AccountRecord) -> [UUID] {
         var accounts: [UUID] = []
-        if let ownView, ownView.state.devices[device] != nil || ownView.state.revoked[device] != nil {
+        if let own = Self.committedOwnState(ownView), own.devices[device] != nil || own.revoked[device] != nil {
             accounts.append(account.accountID)
         }
         for (accountID, state) in memberRegistries(vaultID, account: account.accountID)
@@ -577,14 +585,15 @@ extension VaultSession {
     }
 
     /// The account whose keys signed a sync object: its account key and its device's key in that account's
-    /// registry, as the object's own vault's chain anchors it. A device ID listed by more than one registry is
-    /// answered by whichever signature verifies, which only one account's keys can make.
+    /// registry, as the object's own vault's chain anchors it. Only the account the device's ID commits to (Z157):
+    /// another account that lists the ID, with a key of its own, signs nothing that verifies here, so every object
+    /// that verifies in a device's stream is that device's account's.
     func signingAccount(
         _ signature: [UInt8], over envelope: [UInt8], at location: SyncObjectLocation,
         ownView: RegistryView?, account: AccountRecord
     ) -> UUID? {
         let message = Self.syncSignedMessage(envelope, at: location)
-        if let ownView,
+        if let ownView, Self.committedOwnState(ownView)?.devices[location.author] != nil,
             (try? Self.verifyDual(
                 signature, over: message, domain: .logSegment, author: location.author, view: ownView)) != nil
         {
@@ -626,12 +635,6 @@ extension VaultSession {
         guard
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account)
         else { throw SyncKeyringError.authenticationFailed }
-        // A snapshot named as this device's that this account's keys did not sign is nobody's this device knows: it
-        // knows what it wrote (Z46). A segment in that position is taken in and held aside by the judge instead
-        // (`judgeAdmitsSegment`), so that the stream is not left waiting at it.
-        if location.kind == .snapshot, location.author == account.deviceID, signer != account.accountID {
-            throw SyncKeyringError.untrustedAuthor(location.author)
-        }
         // Keys in the chain that differ from this device's pin: the person has been warned, and nothing they sign
         // counts here until that is settled (S39).
         if vault.keyCheck?.substituted.contains(signer) == true {
@@ -641,8 +644,9 @@ extension VaultSession {
             throw SyncKeyringError.untrustedAuthor(location.author)
         }
         // A segment of an account whose work cannot count here at all is taken in too, and the judge passes over it in
-        // sequence (review finding Z137): refused here, it was never staged anywhere, so every device waited at it,
-        // and in another device's stream it squatted at that number for good.
+        // sequence (review finding Z137): refused here, it was never staged anywhere, so every device waited at its
+        // own device's stream for good. It can be in no other device's stream: the signer is the account the device
+        // ID commits to (Z157).
         switch vault.ledger.writeStanding(of: signer) {
         case .mayWrite:
             return
@@ -651,27 +655,10 @@ extension VaultSession {
         }
     }
 
-    /// Whether a segment at `location` signed by `signer`'s keys is that stream's own (review finding Z46). A stream is
-    /// named by its device alone, and a member can list another member's device ID in their own registry and sign
-    /// objects into "its" stream; every device, the victim's included, used to merge those as that device's versions,
-    /// which no rule keyed by device ID survives (a claim to have seen the device's unpublished edits is not asked
-    /// of the device itself, S46). So: this device's own stream is this account's and no other's, since a device
-    /// knows what it wrote; and any other stream is the account's that signed its lowest-numbered segment
-    /// (`SharedStreamIndex.account(ofStream:)`). A segment that is not the stream's own is held aside, never merged,
-    /// and the stream carries on past it.
-    static func streamAdmits(
-        _ signer: UUID, at location: SyncObjectLocation, in vault: SharedVault, account: AccountRecord
-    ) -> Bool {
-        if location.author == account.deviceID { return signer == account.accountID }
-        if let owner = vault.index.account(ofStream: location.author) { return owner == signer }
-        return true
-    }
-
     /// The devices whose streams a shared vault no longer reads: revoked from their own account (`revokedDevices`, the
-    /// same set the judge believes, Z150). Never this device by another account's word.
+    /// same set the judge believes). Never this device by another account's word: no other account lists it (Z157).
     func sharedRetiredAuthors(_ vaultID: UUID, ownView: RegistryView?, account: AccountRecord) -> Set<UUID> {
         guard sharing.vaults[vaultID] != nil else { return [] }
-        refreshPassedOver(vaultID)
         return revokedDevices(in: vaultID, ownView: ownView, account: account)
     }
 
@@ -685,46 +672,22 @@ extension VaultSession {
             let account = try? await loadAccount()
         else { return }
         let ownView = try? await registry(account)
-        refreshPassedOver(location.vaultID)
-        // A segment of an account whose work cannot count is recorded by its digest and signer alone, as one that did
-        // not open (review finding Z146): enough for a cut's chain, filed nowhere, naming no stream, so that such a
-        // member can grow the signed index by no more than that, and asks for no replay. If the head later lets that
-        // account write, the replay records it again with what it carried, as for a key that arrived.
-        let counts =
-            sharing.vaults[location.vaultID].flatMap { vault in
-                signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account).map {
-                    Self.mayHaveWritten($0, in: vault.ledger)
-                }
-            } ?? true
-        // Such a segment is recorded only below a segment of another account's in the same stream, where a write
-        // cut's chain can run over it; any other is noted as skipped, and recorded by the replay that a segment above
-        // it asks for (review finding Z155).
-        if !counts, let index = sharing.vaults[location.vaultID]?.index,
-            !index.hasCountedSegment(location.author, above: location.number),
-            index.segment(device: location.author, sequence: location.number) == nil
-        {
-            if (index.skippedPassedOver[location.author] ?? .max) > location.number {
-                sharing.vaults[location.vaultID]?.index.skippedPassedOver[location.author] = location.number
-                sharing.vaults[location.vaultID]?.indexChanged = true
-            }
-            return
-        }
-        let opened = opened && counts
-        let entries = counts ? entries : []
         // Not recorded while locked: a segment is recorded once, so it must be recorded with its values. A lock that
         // landed during the suspensions above stops the merge too, and the next sync records it. One recorded
         // unopened (it was sealed under a key not held then) is recorded again when it opens.
+        //
+        // Every segment that verifies in a device's stream is signed by the account the device's ID commits to (Z157),
+        // so a stream holds one account's segments and nobody else's. A segment of an account whose work cannot count
+        // at all (a member never let write) is not recorded: nothing of it can count, no write cut can run over it
+        // (a cut is taken only of an account that could write), and a change of head that lets that account write
+        // replays the log, which records it then. Such a member can therefore grow no other device's index (Z146,
+        // Z155), and needs no rule about where in a stream it may be recorded.
         guard let keys,
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account),
             var vault = sharing.vaults[location.vaultID],
+            Self.mayHaveWritten(signer, in: vault.ledger),
             vault.index.segment(device: location.author, sequence: location.number).map({ !$0.opened && opened })
-                ?? true,
-            // Another account's object in this device's own stream is no part of what it wrote. It is recorded,
-            // unfiled, for the cut's chain that runs over it, as in anyone's stream, but only behind a segment of this
-            // device's own: the stream's lowest segment names its account, and here that is never anyone else's (Z46).
-            location.author != account.deviceID || signer == account.accountID
-                || (vault.index.account(ofStream: location.author) == account.accountID
-                    && (vault.index.firstSequence(ofStream: location.author) ?? .max) < location.number)
+                ?? true
         else { return }
         // The values this segment carried that its stream had not carried before, for the work of the device their
         // stamp names: what a value is checked against, rather than the stamp it chose (S36). Only this stream's own
@@ -739,31 +702,19 @@ extension VaultSession {
                 values.append(value)
             }
         }
-        let streamWas = vault.index.account(ofStream: location.author)
         let firstWas = vault.index.firstSequence(ofStream: location.author)
         vault.index.record(
             device: location.author, sequence: location.number,
             segment: SharedStreamIndex.Segment(
                 digest: SharedStreamIndex.digest(name: location.name, envelope: envelope), account: signer,
                 entries: entries.map { VersionKey(recordID: $0.recordID, kind: $0.kind.rawValue, version: $0.version) },
-                values: values, opened: opened,
-                keyID: try? EnvelopeHeader.parse(envelope, expecting: location.envelopeKind).header.keyID))
+                values: values, opened: opened))
         vault.indexChanged = true
         sharing.vaults[location.vaultID] = vault
-        guard counts else { return }
-        // A segment of a passed-over account below this one was skipped: the replay records it, for the cut's chain.
-        if let skipped = vault.index.skippedPassedOver[location.author], skipped < location.number {
-            sharing.vaults[location.vaultID]?.index.skippedPassedOver[location.author] = nil
-            requestReplay(location.vaultID)
-        }
-        // An earlier segment of the stream arrived after a later one, and another account signed it: the stream is
-        // that account's, and whatever was judged while it looked like someone else's is judged again (Z51).
-        if let streamWas, streamWas != vault.index.account(ofStream: location.author) {
-            requestReplay(location.vaultID)
-        } else if let firstWas, let first = vault.index.firstSequence(ofStream: location.author), first < firstWas {
-            // An earlier segment of the same account's stream arrived after later ones (a lagging listing, a store
-            // that withheld it): a stream whose first segments were missing may have been taken for one collected
-            // before sharing (Z144), and what was believed of it is judged again (review finding Z151).
+        if let firstWas, let first = vault.index.firstSequence(ofStream: location.author), first < firstWas {
+            // An earlier segment of the stream arrived after later ones (a lagging listing, a store that withheld
+            // it): a stream whose first segments were missing may have been taken for one collected before sharing
+            // (Z144), and what was believed of it is judged again (review finding Z151).
             requestReplay(location.vaultID)
         }
         // A segment inside a cut that this device was waiting for, or a new segment of a device a version was held
@@ -829,18 +780,16 @@ extension VaultSession {
             try? await saveSharedVault(location.vaultID)
         }
         let ownView = try? await registry(account)
-        refreshPassedOver(location.vaultID)
         guard let current = sharing.vaults[location.vaultID],
             let signer = signingAccount(signature, over: envelope, at: location, ownView: ownView, account: account)
         else { return .holdAside }
         // Nobody but the owner has ever been listed, on the owner's own device: every object that verifies is the
         // owner's account's, and the vault is judged as that account's other vaults are, which is not at all (Z56).
         if Self.isOwnersAloneHere(current.ledger, account: account.accountID) { return .apply }
-        // An account whose work cannot count here at all (a member never let write) has its segments passed over in
-        // sequence, in its own stream or anyone's, and nothing of them kept (review finding Z137): refused at download
-        // as before, such a segment squatted at its number in another device's stream for good.
-        if case .nothingCounts = current.ledger.writeStanding(of: signer) { return .passOver }
-        guard Self.streamAdmits(signer, at: location, in: current, account: account) else { return .holdAside }
+        // The signer is the account the stream's device ID commits to (`signingAccount`, Z157): the stream is its, and
+        // its standing decides. An account whose work cannot count here at all (a member never let write) has its
+        // segments passed over in sequence and nothing of them kept (review finding Z137): refused at download as
+        // before, such a segment stopped its own device's stream on every device for good.
         switch current.ledger.writeStanding(of: signer) {
         case .mayWrite:
             return .apply
@@ -881,7 +830,6 @@ extension VaultSession {
         let ownView = try? await registry(account)
         let local = try await store.record(record.key)
         guard let keys else { throw SyncKeyringError.locked }
-        refreshPassedOver(record.vaultID)
         guard let vault = sharing.vaults[record.vaultID] else { return true }
         // A chain that has never listed anyone but its owner has one account's devices for writers, and nothing
         // they wrote is held against anything (Z56): what follows weighs one account's work against another's
@@ -939,7 +887,7 @@ extension VaultSession {
         }
         if admitted, record.kind == .item, let item = try? openItem(record, keys: keys) {
             // A version's writer is not asked about its own edits only where the version is known to be that
-            // device's: its own stream carried it (a stream is one account's, Z46), or it is this device's own. One
+            // device's: its own stream carried it (a stream is one account's, Z157), or it is this device's own. One
             // that merely names a device, in a snapshot say, is held to that device's stream like anyone's claim.
             let writersOwn =
                 record.deviceID == account.deviceID || vault.index.firstCarrier[record.deviceID]?[originKey] != nil
@@ -1003,8 +951,7 @@ extension VaultSession {
                 // "Cannot read from its first segment": here and sealed under a key not held. A stream with no first
                 // segment here has not published it yet (a shared vault keeps its whole log, Z42), and a claim about
                 // it waits for it (Z136): taken for unreadable, a claim about a member who had never published was
-                // believed everywhere. The first segment is the stream's own (`firstSequence(ofStream:)`), never one
-                // passed over (Z146).
+                // believed everywhere. The first segment recorded of the stream (`firstSequence(ofStream:)`).
                 if vouched || firstSegmentUnopened(device, in: vault) { continue }
                 awaited.insert(device)
                 return false
@@ -1029,7 +976,6 @@ extension VaultSession {
         guard entry.kind == .item, sharing.vaults[location.vaultID] != nil else { return true }
         guard let account = try await loadAccount() else { return false }
         let ownView = try? await registry(account)
-        refreshPassedOver(location.vaultID)
         guard let vault = sharing.vaults[location.vaultID] else { return true }
         if Self.isOwnersAloneHere(vault.ledger, account: account.accountID) { return true }
         let listing = { (device: UUID) in
@@ -1076,56 +1022,6 @@ extension VaultSession {
         return true
     }
 
-    /// Brings the stream index's `passedOver` and `naming` in line with the vault's accepted chain: the accounts the
-    /// chain has listed whose work cannot count under the current head (review finding Z146), and the account and key
-    /// pairs whose segments name streams first (Z152). Called before anything reads whose a stream is.
-    func refreshPassedOver(_ vaultID: UUID) {
-        guard let ledger = sharing.vaults[vaultID]?.ledger else { return }
-        let listed = Set(ledger.chain.flatMap { $0.state.members.map(\.accountID) })
-        let passedOver = listed.filter { !Self.mayHaveWritten($0, in: ledger) }
-        let naming = Self.namingKeys(of: ledger)
-        if let index = sharing.vaults[vaultID]?.index, index.passedOver != passedOver || index.naming != naming {
-            sharing.vaults[vaultID]?.index.setNaming(passedOver: passedOver, naming: naming)
-        }
-    }
-
-    /// Each vault key of the accepted chain with the accounts that first appeared while it was current in a role that
-    /// may write (`SharedStreamIndex.naming`, review finding Z152): the genesis' owner, the members of a rotation's
-    /// state who could write, and each member added while that key was current as a writer. A function of the chain.
-    static func namingKeys(of ledger: MembershipLedger) -> Set<SharedStreamIndex.NamingKey> {
-        var first: [UUID: [UUID: Bool]] = [:]
-        for link in ledger.chain {
-            let key = link.state.vaultKeyID
-            for member in link.state.members where first[key]?[member.accountID] == nil {
-                first[key, default: [:]][member.accountID] = member.role.mayWrite
-            }
-        }
-        var keys: Set<SharedStreamIndex.NamingKey> = []
-        for (key, accounts) in first {
-            for (account, mayWrite) in accounts where mayWrite {
-                keys.insert(SharedStreamIndex.NamingKey(account: account, keyID: key))
-            }
-        }
-        return keys
-    }
-
-    /// The members who may write now and first appeared under the current key in a role that could not (review
-    /// finding Z152): promoted since it was introduced. Their segments under it name no stream ahead of another's, so
-    /// an administrator's device rotates the key, after which they do.
-    static func promotedWithinKeyEra(_ ledger: MembershipLedger) -> Set<UUID> {
-        let key = ledger.state.vaultKeyID
-        var first: [UUID: Bool] = [:]
-        for link in ledger.chain where link.state.vaultKeyID == key {
-            for member in link.state.members where first[member.accountID] == nil {
-                first[member.accountID] = member.role.mayWrite
-            }
-        }
-        return Set(
-            ledger.state.members.map(\.accountID).filter {
-                first[$0] == false && ledger.writeStanding(of: $0) == .mayWrite
-            })
-    }
-
     /// Notes what one judgement waited for and whose revocations it asked about (`awaiting`, `relied`). A judgement made
     /// while the settled basis is current used the revocations as they stand, so the basis moves with it; otherwise
     /// the replay that is due settles it (Z153).
@@ -1162,7 +1058,6 @@ extension VaultSession {
         guard let head = sharing.vaults[vaultID]?.ledger.state.hash.bytes else { return nil }
         guard let account = try? await loadAccount() else { return head }
         let ownView = try? await registry(account)
-        refreshPassedOver(vaultID)
         guard let vault = sharing.vaults[vaultID] else { return nil }
         return Self.judgedBasis(
             head: vault.ledger.state.hash.bytes, index: vault.index,
@@ -1178,30 +1073,19 @@ extension VaultSession {
     /// anchors it. Their streams are not read (`syncRetiredAuthors`), and a shared vault writes no snapshot to hand
     /// their work on, so nothing of theirs is ever waited for (review finding Z144).
     ///
-    /// A device ID is chosen by its device, and any member can list another member's in their own registry (S33) and
-    /// then revoke it there. So a registry's revocation counts only for a device that is that registry's account's
-    /// (review finding Z150): the stream is that account's (`SharedStreamIndex.account(ofStream:)`), or, for a stream
-    /// nothing was recorded of, every registry that lists the device has revoked it (an account that lists it as
-    /// registered says it is in use). The same rule for this account's registry as for a member's, so that every
-    /// device that holds the same segments and registries answers alike, except for this device itself, which its own
-    /// registry alone revokes and no other account's. Called after `refreshPassedOver`.
+    /// A registry counts only the devices whose IDs commit to its account (`memberRegistries`, Z157), so each
+    /// revocation here is one account's of its own device, and no member can revoke another member's device by
+    /// listing its ID and revoking it (S33, Z150, round 5's M2): the union is the answer, the same on every device that
+    /// holds the same registries. This device is revoked by its own registry, whatever its ID.
     func revokedDevices(in vaultID: UUID, ownView: RegistryView?, account: AccountRecord) -> Set<UUID> {
-        var registries = memberRegistries(vaultID, account: account.accountID)
-        if let ownView { registries.insert((account.accountID, ownView.state), at: 0) }
         var devices: Set<UUID> = []
         if ownView?.state.revoked[account.deviceID] != nil { devices.insert(account.deviceID) }
-        guard let index = sharing.vaults[vaultID]?.index else {
+        guard sharing.vaults[vaultID] != nil else {
             return devices.union(ownView.map { Set($0.state.revoked.keys) } ?? [])
         }
-        for (accountID, state) in registries {
-            for device in state.revoked.keys where device != account.deviceID && !devices.contains(device) {
-                if let stream = index.account(ofStream: device) {
-                    if stream == accountID { devices.insert(device) }
-                    continue
-                }
-                if registries.contains(where: { $0.state.devices[device] != nil }) { continue }
-                devices.insert(device)
-            }
+        if let own = Self.committedOwnState(ownView) { devices.formUnion(own.revoked.keys) }
+        for (_, state) in memberRegistries(vaultID, account: account.accountID) {
+            devices.formUnion(state.revoked.keys)
         }
         return devices
     }
@@ -1283,10 +1167,7 @@ extension VaultSession {
     /// Whether the segment of `device`'s stream at `sequence` counts: its signer may write, or it is inside the cut
     /// of the record that ended the signer's permission.
     static func segmentCounts(_ device: UUID, sequence: UInt64, in vault: SharedVault) -> Bool {
-        // Only a segment of the account the stream belongs to: another account's object there counts for nothing.
-        guard let segment = vault.index.segment(device: device, sequence: sequence),
-            vault.index.isOwnersSegment(device: device, sequence: sequence)
-        else { return false }
+        guard let segment = vault.index.segment(device: device, sequence: sequence) else { return false }
         switch vault.ledger.writeStanding(of: segment.account) {
         case .mayWrite:
             return true
@@ -1442,7 +1323,6 @@ extension VaultSession {
         // The state this session signed (Z20): the cut is signed, so a planted `merged` must not widen it.
         guard let syncState else { throw SharedVaultError.syncNotConfigured }
         let state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
-        refreshPassedOver(vaultID)
         let vault = try sharedVault(vaultID)
         var positions: [UUID: SyncWriteCut.Position] = [:]
         for device in vault.index.devices(signedBy: accountID) {

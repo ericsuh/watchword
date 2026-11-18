@@ -9,69 +9,59 @@ import WatchwordTestSupport
 
 @testable import WatchwordKit
 
-// Review finding Z120 (docs/06-adversarial-review.md): the replay asked for when a stream's account changes was lost
-// when the change was learnt during a reconciling pass.
+// Review finding Z120 (docs/06-adversarial-review.md): a replay asked for while a reconciling pass ran was lost at the
+// end of that pass.
 extension AdversarialSharedVaultTests {
-    /// Threat: a current member who administers the vault (A4), with the store (A1) choosing what one device is shown
-    /// and when. The insider's second device is registered under the victim's device ID (S33) and signs a segment
-    /// into the stream named after it, carrying an item whose values are stamped as that device's; the insider's own
-    /// device then publishes, in its own stream, a version of that item with those values verbatim. The store keeps
-    /// the victim's real segments from a newly joined member's device, which therefore files the stream under the
-    /// insider (the only segment it has of it) and admits the insider's version as built on the victim's device's
-    /// work. Later the store shows it the victim's segments together with a change of membership: the change of head
-    /// makes the first pass a replay, in which the stream turns out to be the victim's and a replay is asked for, and
-    /// the end of that same pass settled the head, so the take-out that removes the version never ran and the device
-    /// kept it, while every other device holds it aside.
+    /// Threat: the store (A1) choosing what one device is shown and when. A member who joins is kept from a writer's
+    /// stream, so it holds aside the owner's version that carries the writer's values, waiting for that stream
+    /// (`awaiting`). Later the store shows it the writer's segments together with a change of membership: the change
+    /// of head makes the first pass a replay, recording one of the awaited stream's segments asks for another, and the
+    /// end of that same pass settled the basis, so the replay owed was never made. (Before Z157 the insider's
+    /// segment in the writer's stream made the request, by changing whose the stream was.) A pass settles only if no
+    /// replay was asked for while it ran: the request is kept, the next replay runs, and the device ends where every
+    /// other device is.
     @Test("a replay asked for during a replaying pass is not lost at the end of that pass")
     func replayRequestedDuringAReplay() async throws {
-        let setting = try await SquattedStream.make(seed: 12000)
-        let (owner, victim, insider, rogue) = (setting.owner, setting.victim, setting.insider, setting.rogue)
-        let (household, vaultID) = (setting.household, setting.vaultID)
-
-        // A member who joins while the store keeps the victim's segments from them.
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 12000)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let writer = try await household.account(seed: 12001)
+        try await owner.invite(writer, to: vaultID, as: .readWrite, owner: owner)
         let (judge, view) = try await household.withheldAccount(seed: 12010)
-        await view.withhold(Set(await household.transport.list(prefix: setting.stream)))
         try await owner.invite(judge, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([owner, writer, judge])
+        let writerDevice = try await Self.deviceID(of: writer)
+        await view.withholdNew(under: "vault/\(vaultID.uuidString)/log/\(writerDevice.uuidString)/")
 
-        // The insider's second device signs a segment into the victim's stream, past the victim's head.
-        try await Self.number(rogue, at: try await Self.head(of: victim, in: vaultID) + 1, in: vaultID)
-        var planted = Self.bank(in: vaultID)
-        planted.title = "Planted as the victim's device's work"
-        planted = try await rogue.session.save(planted)
-        try await rogue.session.sync()
-        // The insider's own device publishes a version of it, values and stamps as the plant has them: a client of
-        // the insider's own making, which does not judge its own rows (an honest one would take this one out at its
-        // next change of head, so it is written after that change has been settled).
-        try await insider.session.sync()
-        let carried = try await rogue.session.item(id: planted.id)
-        let account = try #require(try await insider.vault.store.loadAccount())
-        let keys = try #require(await insider.session.keys)
-        let vaultKey = try #require(await insider.session.currentVaultKey(vaultID, keys: keys, account: account))
-        let revision = try await insider.session.nextRevision(in: vaultID, above: nil, account: account)
-        try await insider.session.commitItem(
-            ItemMerge.written(carried, as: revision), replacing: nil, vaultKey: vaultKey, account: account)
-        try await insider.session.sync()
-
+        var item = try await writer.session.save(Self.setting(.password, to: "the-writers", in: Self.bank(in: vaultID)))
+        try await Self.syncAll([writer, owner])
+        item = try await owner.session.item(id: item.id)
+        item.title = "Renamed by the owner"
+        item = try await owner.session.save(item)
+        try await owner.session.sync()
         try await judge.session.sync()
-        #expect(
-            await judge.session.streamOwner(setting.victimDevice, in: vaultID) == insider.accountID,
-            "the stream was not filed under the insider: the test proves nothing")
         try #require(
-            try await judge.session.items(in: vaultID).items.map(\.id).contains(planted.id),
-            "the insider's version was not admitted: the test proves nothing")
+            (try? await judge.session.item(id: item.id)) == nil, "the judge was not waiting: the test proves nothing")
 
-        // A change of membership, and the victim's segments, in one sync.
+        // The rule itself: a request made while a replaying pass runs keeps the replay owed when the pass ends.
+        let before = await judge.session.sharedReplayRequests(vaultID)
+        await judge.session.requestReplay(vaultID)
+        await judge.session.sharedEngineDidRun(
+            vaultID, reconciled: true, report: SyncReport(), requestsBefore: before)
+        #expect(await judge.session.replayIsRequested(vaultID), "the replay asked for during the pass was settled away")
+
+        // And through the session: a change of membership, and the writer's segments, in one sync.
         let newcomer = try await household.account(seed: 12011)
         try await owner.invite(newcomer, to: vaultID, as: .readOnly, owner: owner)
         await view.reveal()
         try await judge.session.sync()
         try await judge.session.sync()
-
-        #expect(await judge.session.streamOwner(setting.victimDevice, in: vaultID) == victim.accountID)
-        #expect(
-            !(try await judge.session.items(in: vaultID).items.map(\.id).contains(planted.id)),
-            "the insider's version, built on a write that does not count, stays on the device")
-        #expect(!(try await owner.session.items(in: vaultID).items.map(\.id).contains(planted.id)))
+        let shown = try await judge.session.item(id: item.id)
+        #expect(shown.title == item.title && shown.field(.password)?.value == "the-writers")
+        #expect(await judge.session.judgementIsSettled(vaultID))
+        try await judge.session.sync()
+        #expect(await judge.session.judgementIsSettled(vaultID), "the log is replayed at every sync")
     }
 }
 

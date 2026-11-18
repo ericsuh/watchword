@@ -263,6 +263,8 @@ public actor VaultSession: SharesExecutor {
         let epoch = lockEpoch
 
         let accountID = UUID.random(using: &random)
+        // This device's key first, so that its ID can commit to the account under it (review finding Z157).
+        let device = try await deviceKeys.createDevice(accountID: accountID)
         let secretKey = SecretKey.generate(using: &random)
         defer { secretKey.zeroise() }
         let kdf = try kdfParameters()
@@ -278,7 +280,7 @@ public actor VaultSession: SharesExecutor {
 
         let record = AccountRecord(
             accountID: accountID,
-            deviceID: UUID.random(using: &random),
+            deviceID: device.id,
             personalVaultID: personalVaultID,
             personalVaultKeyID: vaultKey.key.keyID,
             kdf: kdf,

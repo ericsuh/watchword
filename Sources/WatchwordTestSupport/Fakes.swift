@@ -167,6 +167,14 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
         generator = SeededGenerator(seed: seed)
     }
 
+    public func createDevice(accountID: UUID) throws -> DeviceIdentity {
+        let key = SoftwareDeviceKey.generate(using: &generator)
+        let publicKey = try key.publicKey()
+        let deviceID = DeviceIdentifier.derive(accountID: accountID, key: publicKey)
+        held[accountID] = (deviceID, key)
+        return DeviceIdentity(id: deviceID, key: publicKey)
+    }
+
     public func create(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey {
         let key = SoftwareDeviceKey.generate(using: &generator)
         held[accountID] = (deviceID, key)

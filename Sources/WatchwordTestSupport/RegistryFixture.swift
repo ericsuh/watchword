@@ -37,6 +37,25 @@ public struct RegistryFixture: Sendable {
         return key
     }
 
+    /// A device whose ID commits to this account under a key made for it here (`DeviceIdentifier`, Z157).
+    public mutating func committedDevice() -> UUID {
+        let key = SoftwareDeviceKey.generate(using: &generator)
+        // Cannot fail for a generated key.
+        let id = DeviceIdentifier.derive(accountID: accountID, key: try! key.publicKey())
+        deviceKeys[id] = key
+        return id
+    }
+
+    /// `device` registered under `key` (another device's, say) by a registered device.
+    public mutating func add(_ device: UUID, key: DevicePublicKey, by author: UUID, parents: [RegistryEntry])
+        -> RegistryEntry
+    {
+        signed(
+            RegistryEntry(
+                accountID: accountID, parents: parents.map(\.id), author: .device(author),
+                body: .add(RegistryDevice(id: device, key: key, label: []))))
+    }
+
     /// A new Account Unlock Key: the next credential generation's.
     public mutating func nextUnlockKey() -> EncryptionKey {
         let key = EncryptionKey.generate(using: &generator)

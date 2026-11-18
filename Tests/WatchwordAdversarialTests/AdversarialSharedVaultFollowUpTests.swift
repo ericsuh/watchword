@@ -111,9 +111,12 @@ extension AdversarialSharedVaultTests {
     /// the victim publishing until it reached that number; from there every sync met the planted name
     /// (`ownStreamConflict`), for good, the victim's later work reached nobody, its deletions were held back in every
     /// vault, the person read "Up to date.", and it outlasted the member's removal. A segment signed by any account
-    /// the chain lists is taken in and passed over in sequence, keeping nothing of it: whatever it carries counts
-    /// for nothing while its signer's work cannot count.
-    @Test("a read-only member's segment in another member's stream is stepped over, and nothing of it is kept")
+    /// the chain lists was then taken in and passed over in sequence. Since Z157 the victim's device ID commits to the
+    /// victim's account and the member's object verifies nowhere: nothing of it counts or is kept anywhere. At the
+    /// number it occupies the victim's stream stops, as at any object anyone can create there (A1), and says so at
+    /// every sync (never "Up to date."): its deletions elsewhere wait for its work there (F7.6), nothing is marked
+    /// sent, and it all goes out once the object is gone.
+    @Test("a read-only member's segment in another member's stream counts nowhere, and the stream waits visibly")
     func readOnlyMemberPlantIsSteppedOver() async throws {
         let household = SharedVaultHousehold()
         let owner = try await household.account(seed: 3240)
@@ -150,7 +153,7 @@ extension AdversarialSharedVaultTests {
         try await household.transport.create(
             location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
 
-        // The victim writes on, one segment a sync, past the planted number.
+        // The victim writes on, one segment a sync, up to the planted number, and is told there.
         var titles: [String] = []
         for index in 0..<5 {
             var item = Self.bank(in: vaultID)
@@ -164,22 +167,30 @@ extension AdversarialSharedVaultTests {
         try await victim.session.sync()
         try await victim.session.trash(id: own.id)
         try await victim.session.deletePermanently(id: own.id)
-        let last = try #require(try await victim.session.syncAll().vaults[vaultID])
-        #expect(last.ownStreamConflict == nil, "the victim's stream is stopped at the planted number")
-        #expect(try await Self.head(of: victim, in: vaultID) > plantedAt)
-        let syncState = try #require(victim.vault.sync?.state)
-        #expect(
-            try await syncState.pendingDeletions(vaultID: personal).isEmpty,
-            "the victim's deletion in another vault is held back by an object someone else wrote")
+        let blocked = try #require(try await victim.session.syncAll().vaults[vaultID])
+        #expect(blocked.ownStreamConflict == plantedAt, "the victim is not told its stream is stopped")
+        #expect(try await Self.head(of: victim, in: vaultID) == plantedAt - 1)
         try await Self.syncAll([owner, reader])
         for account in [owner, reader] {
-            let shown = try await account.session.items(in: vaultID).items.map(\.title)
-            #expect(Set(titles).isSubset(of: Set(shown)), "the victim's later work reached nobody")
+            #expect(Self.refused(location.name, in: try await account.session.syncAll().vaults[vaultID]))
             #expect(try await account.session.item(id: bank.id).title == bank.title, "the planted deletion counted")
         }
         for account in [owner, victim, reader] {
             let kept = try await #require(account.vault.sync?.state).quarantined(vaultID: vaultID)
             #expect(kept.isEmpty, "what a member whose writes never count signed was kept")
+        }
+
+        // The object gone, the stream goes on: every edit arrives, and the deletion elsewhere goes out after them.
+        await Self.remove(location.name, from: household.transport)
+        let last = try #require(try await victim.session.syncAll().vaults[vaultID])
+        #expect(last.ownStreamConflict == nil)
+        try await victim.session.syncAll()
+        let syncState = try #require(victim.vault.sync?.state)
+        #expect(try await syncState.pendingDeletions(vaultID: personal).isEmpty, "the deletion never went out")
+        try await Self.syncAll([owner, reader])
+        for account in [owner, reader] {
+            let shown = try await account.session.items(in: vaultID).items.map(\.title)
+            #expect(Set(titles).isSubset(of: Set(shown)), "the victim's later work reached nobody")
         }
     }
 }

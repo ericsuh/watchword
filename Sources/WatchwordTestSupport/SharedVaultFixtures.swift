@@ -65,7 +65,7 @@ public struct SharingAccount: Sendable {
     /// unlocked, with sharing configured over sharing state and contacts of its own: pins, ledgers and stream
     /// indexes are per device (review finding S35), so it starts with none.
     public func enrolledDevice(
-        deviceID: UUID = UUID(), over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory
+        deviceID: UUID? = nil, over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory
     ) async throws -> SharingAccount {
         let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport)
         let state = InMemorySharingStateStore()
@@ -175,7 +175,8 @@ public actor WithholdingTransport: SyncTransport {
 
 extension SharedVaultHousehold {
     /// Another device of `account`, enrolled over the household's transport (`SharingAccount.enrolledDevice`).
-    public func secondDevice(of account: SharingAccount, deviceID: UUID = UUID()) async throws -> SharingAccount {
+    /// Another device of `account`, its ID committing to the account (Z157) unless `deviceID` names it.
+    public func secondDevice(of account: SharingAccount, deviceID: UUID? = nil) async throws -> SharingAccount {
         try await account.enrolledDevice(deviceID: deviceID, over: transport, directory: directory)
     }
 

@@ -17,6 +17,8 @@ extension AdversarialSharedVaultTests {
     /// victim's device (S33, Z46), carrying a new item; the victim's device rightly holds it aside, and from then on
     /// it published no deletion in any vault, the Personal one included, for as long as the entry was kept or the
     /// insider cared to plant another. Only what this device's own take-out put aside is its own unpublished work.
+    /// Since Z157 such a plant verifies nowhere and nothing of it is held aside at all; the gate's rule stands, and
+    /// with it the deletion going out.
     @Test("an entry planted under this device's name does not stop its deletions going out")
     func plantedEntryDoesNotHoldDeletionsBack() async throws {
         let setting = try await SquattedStream.make(seed: 5410)
@@ -33,7 +35,7 @@ extension AdversarialSharedVaultTests {
         _ = try await rogue.session.save(planted)
         try await rogue.session.sync()
         try await victim.session.sync()
-        #expect(try await victim.session.sharedVaultStatus(setting.vaultID).heldAside > 0)
+        #expect(try await victim.session.sharedVaultStatus(setting.vaultID).heldAside == 0, "the plant verified")
 
         try await victim.session.trash(id: own.id)
         try await victim.session.deletePermanently(id: own.id)

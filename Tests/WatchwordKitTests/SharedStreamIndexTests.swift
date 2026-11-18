@@ -8,7 +8,7 @@ import WatchwordTestSupport
 
 /// What a device remembers of each stream of a shared vault (docs/02-architecture.md §8.10): whose a stream is, what
 /// is filed through it, and that both are a function of the segments recorded, whatever order they came in and
-/// whether or not each opened (review findings Z46, Z51).
+/// whether or not each opened (review findings Z51, Z157).
 @Suite("Shared vaults: the stream index")
 struct SharedStreamIndexTests {
     static let device = UUID()
@@ -31,23 +31,27 @@ struct SharedStreamIndexTests {
             entries: opened ? [version(UInt64(number))] : [], values: opened ? [value(number)] : [], opened: opened)
     }
 
-    @Test("a stream belongs to the account that signed its lowest segment, in whatever order the segments came")
-    func ownerIsTheLowestSegmentsSigner() {
+    /// Review finding Z157: a stream is one account's by identity. The session records only what verifies, and only
+    /// the account a device's ID commits to can sign in its stream; the index holds to that too, so no order of
+    /// arrival can make it file another account's segment in a stream.
+    @Test("a stream holds one account's segments, and another account's is never recorded in it")
+    func oneAccountPerStream() {
         let segments: [(UInt64, SharedStreamIndex.Segment)] = [
             (1, Self.segment(1, by: Self.victim)), (2, Self.segment(2, by: Self.victim)),
-            (3, Self.segment(3, by: Self.insider)), (4, Self.segment(4, by: Self.victim)),
+            (4, Self.segment(4, by: Self.victim)),
         ]
         var reference: SharedStreamIndex?
-        for order in [[0, 1, 2, 3], [2, 0, 1, 3], [3, 2, 1, 0], [2, 3, 0, 1]] {
+        for order in [[0, 1, 2], [2, 0, 1], [2, 1, 0], [1, 2, 0]] {
             var index = SharedStreamIndex()
             for position in order {
                 index.record(device: Self.device, sequence: segments[position].0, segment: segments[position].1)
             }
+            index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: Self.insider))
             #expect(index.account(ofStream: Self.device) == Self.victim)
-            #expect(index.isOwnersSegment(device: Self.device, sequence: 2))
-            #expect(!index.isOwnersSegment(device: Self.device, sequence: 3))
-            // The insider's segment is there for the chain, and nothing is filed through it.
-            #expect(index.chain(device: Self.device, through: 4) != nil)
+            #expect(index.firstSequence(ofStream: Self.device) == 1)
+            #expect(index.segment(device: Self.device, sequence: 3) == nil, "another account's segment was recorded")
+            #expect(index.chain(device: Self.device, through: 2) != nil)
+            #expect(index.chain(device: Self.device, through: 4) == nil, "the chain ran over a segment not recorded")
             #expect(index.firstCarrier[Self.device]?[Self.version(3)] == nil)
             #expect(index.valueCarriers[Self.value(3)] == nil)
             #expect(index.firstCarrier[Self.device]?[Self.version(4)] == 4)
@@ -58,30 +62,12 @@ struct SharedStreamIndexTests {
         }
     }
 
-    @Test("what was filed through a stream is filed again when an earlier segment shows it to be another account's")
-    func refilingWhenTheOwnerChanges() {
-        var index = SharedStreamIndex()
-        index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: Self.insider))
-        #expect(index.account(ofStream: Self.device) == Self.insider)
-        #expect(index.valueCarriers[Self.value(3)]?[Self.device] == 3)
-        #expect(index.firstCarrier[Self.device]?[Self.version(3)] == 3)
-
-        index.record(device: Self.device, sequence: 1, segment: Self.segment(1, by: Self.victim))
-        #expect(index.account(ofStream: Self.device) == Self.victim)
-        #expect(index.valueCarriers[Self.value(3)] == nil, "still filed through a segment that is not the stream's own")
-        #expect(index.firstCarrier[Self.device]?[Self.version(3)] == nil)
-        #expect(index.valueCarriers[Self.value(1)]?[Self.device] == 1)
-        #expect(index.devices(signedBy: Self.insider).isEmpty)
-    }
-
-    @Test("a segment that does not open names the stream's account and is in the chain; it is completed when it opens")
+    @Test("a segment that does not open is in the chain, and is completed when it opens")
     func unopenedSegments() {
         var index = SharedStreamIndex()
         index.record(device: Self.device, sequence: 1, segment: Self.segment(1, by: Self.victim, opened: false))
-        index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.insider))
+        index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.victim))
         #expect(index.account(ofStream: Self.device) == Self.victim)
-        #expect(!index.isOwnersSegment(device: Self.device, sequence: 2))
-        #expect(index.valueCarriers[Self.value(2)] == nil)
         #expect(index.contiguous(device: Self.device, upTo: 2) == 2)
         #expect(index.chain(device: Self.device, through: 2) != nil)
         #expect(index.segment(device: Self.device, sequence: 1)?.opened == false)
@@ -101,17 +87,15 @@ struct SharedStreamIndexTests {
         #expect(index.firstCarrier[Self.device]?[Self.version(9)] == nil)
     }
 
-    @Test("a saved index says the same after it is read back, the stream's account and unopened segments included")
+    @Test("a saved index says the same after it is read back, unopened segments included")
     func savedAndParsed() throws {
         let keyset = Keyset.generate(accountID: UUID())
         let bundle = try keyset.publicKeyBundle()
         let vaultID = UUID()
         var index = SharedStreamIndex()
-        index.record(device: Self.device, sequence: 5, segment: Self.segment(5, by: Self.insider))
+        index.record(device: Self.victim, sequence: 5, segment: Self.segment(5, by: Self.insider))
         index.record(device: Self.device, sequence: 2, segment: Self.segment(2, by: Self.victim, opened: false))
-        var keyed = Self.segment(3, by: Self.victim)
-        keyed.keyID = Self.insider
-        index.record(device: Self.device, sequence: 3, segment: keyed)
+        index.record(device: Self.device, sequence: 3, segment: Self.segment(3, by: Self.victim))
         index.awaiting = [Self.device]
         index.relied = [Self.victim, Self.insider]
         index.collected = [Self.device: 4, Self.victim: 1]
@@ -119,50 +103,14 @@ struct SharedStreamIndexTests {
         let parsed = try #require(SharedStreamIndex.parse(saved, account: bundle, vaultID: vaultID))
         #expect(parsed == index)
         #expect(parsed.account(ofStream: Self.device) == Self.victim)
+        #expect(parsed.account(ofStream: Self.victim) == Self.insider)
         #expect(parsed.segment(device: Self.device, sequence: 2)?.opened == false)
-        #expect(parsed.valueCarriers[Self.value(5)] == nil && parsed.valueCarriers[Self.value(3)]?[Self.device] == 3)
-        // An index of the earlier format, or one altered, is refused whole and rebuilt from the log.
+        #expect(parsed.valueCarriers[Self.value(3)]?[Self.device] == 3)
+        // An index of an earlier format (6, written while a stream's account was inferred, Z157), or one altered, is
+        // refused whole and rebuilt from the log.
         var earlier = saved
-        earlier[4] = 4
+        earlier[4] = 6
         #expect(SharedStreamIndex.parse(earlier, account: bundle, vaultID: vaultID) == nil)
-    }
-
-    /// Review finding Z152: a segment names a stream ahead of another's only if its signer first appeared under the
-    /// key it was sealed under in a role that could write, whatever the order the segments came in; a stream with no
-    /// such segment is named by its lowest other one.
-    @Test("a segment whose signer could write under its key names the stream ahead of one planted before it")
-    func namingSegmentsComeFirst() {
-        let key = UUID()
-        func keyed(_ number: UInt8, by account: UUID) -> SharedStreamIndex.Segment {
-            var segment = Self.segment(number, by: account)
-            segment.keyID = key
-            return segment
-        }
-        let naming: Set<SharedStreamIndex.NamingKey> = [SharedStreamIndex.NamingKey(account: Self.victim, keyID: key)]
-        let segments: [(UInt64, SharedStreamIndex.Segment)] = [
-            (1, keyed(1, by: Self.insider)), (2, keyed(2, by: Self.victim)), (3, keyed(3, by: Self.victim)),
-        ]
-        var reference: SharedStreamIndex?
-        for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2]] {
-            var index = SharedStreamIndex()
-            index.setNaming(passedOver: [], naming: naming)
-            for position in order {
-                index.record(device: Self.device, sequence: segments[position].0, segment: segments[position].1)
-            }
-            #expect(index.account(ofStream: Self.device) == Self.victim)
-            #expect(index.firstSequence(ofStream: Self.device) == 2)
-            #expect(index.firstCarrier[Self.device]?[Self.version(1)] == nil)
-            #expect(index.firstCarrier[Self.device]?[Self.version(2)] == 2)
-            if let reference { #expect(index == reference) } else { reference = index }
-        }
-        // With no naming segment, the lowest other names it, and a change of naming files everything again.
-        var index = SharedStreamIndex()
-        index.record(device: Self.device, sequence: 1, segment: keyed(1, by: Self.insider))
-        index.record(device: Self.device, sequence: 2, segment: keyed(2, by: Self.victim))
-        #expect(index.account(ofStream: Self.device) == Self.insider)
-        index.setNaming(passedOver: [], naming: naming)
-        #expect(index.account(ofStream: Self.device) == Self.victim)
-        #expect(index.valueCarriers[Self.value(2)]?[Self.device] == 2 && index.valueCarriers[Self.value(1)] == nil)
     }
 
     /// Review finding Z151: a device of the owner's account whose first segments are not here is taken for one whose

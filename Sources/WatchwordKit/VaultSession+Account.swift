@@ -832,7 +832,9 @@ extension VaultSession {
         await loadSharedMarkersIfNeeded()
         let view = try await registry(account)
         var updated = account
-        if asNewDevice { updated.deviceID = UUID.random(using: &random) }
+        // A new device's key first, so that its ID can commit to the account under it (review finding Z157).
+        let created = asNewDevice ? try await deviceKeys.createDevice(accountID: account.accountID) : nil
+        if let created { updated.deviceID = created.id }
         let unpublished = asNewDevice ? try await unpublishedRows(of: account) : (rows: [], deletions: [:])
         let now = await clock.now()
         let keys = try requireKeys(since: epoch)
@@ -842,8 +844,8 @@ extension VaultSession {
             name: configuration.deviceName, at: now, deviceID: updated.deviceID, keyset: keys.keyset)
         let keyset = keys.keyset
         let deviceKey: DevicePublicKey
-        if asNewDevice {
-            deviceKey = try await deviceKeys.create(accountID: account.accountID, deviceID: updated.deviceID)
+        if let created {
+            deviceKey = created.key
         } else {
             guard
                 let existing = try await deviceKeys.publicKey(
@@ -1143,8 +1145,7 @@ extension VaultSession {
     /// leaves this device, and nothing here gives it access: it still needs the password and the Secret Key.
     public func prepareDeviceIdentity(accountID: UUID) async throws -> DeviceIdentity {
         guard keys == nil, try await loadAccount() == nil else { throw VaultError.enrolmentUnavailable }
-        let id = UUID.random(using: &random)
-        return DeviceIdentity(id: id, key: try await deviceKeys.create(accountID: accountID, deviceID: id))
+        return try await deviceKeys.createDevice(accountID: accountID)
     }
 
     /// As `enrol`, with the new device's ID chosen by the caller: for tests that need to name the device.
@@ -1252,23 +1253,26 @@ extension VaultSession {
         guard view.state.pendingCredentials.isEmpty else { throw VaultError.passwordSuperseded }
 
         // This device: a new ID, a new key, registered with the enrolment key the derived AUK yields.
+        // Its ID commits to the account under its key (review finding Z157): made with the key, unless a registered
+        // device vouched for one made earlier (`prepareDeviceIdentity`) or a test names it.
         let deviceID: UUID
+        let deviceKey: DevicePublicKey
         if let assigningDeviceID {
             deviceID = assigningDeviceID
+            if let prepared = try await deviceKeys.publicKey(accountID: accountID, deviceID: deviceID) {
+                deviceKey = prepared
+            } else {
+                deviceKey = try await deviceKeys.create(accountID: accountID, deviceID: deviceID)
+            }
         } else {
-            deviceID = UUID.random(using: &random)
+            let created = try await deviceKeys.createDevice(accountID: accountID)
+            (deviceID, deviceKey) = (created.id, created.key)
         }
         var account = AccountRecord(
             accountID: accountID, deviceID: deviceID, personalVaultID: opened.personal,
             personalVaultKeyID: Self.zeroUUID, kdf: header.kdf, salt: header.salt, unlockKeyID: header.unlockKeyID,
             wrappedKeyset: header.wrappedKeyset, keysetVersion: header.keysetVersion,
             credentialGeneration: header.generation, createdAt: now, emergencyKitConfirmedAt: now)
-        let deviceKey: DevicePublicKey
-        if let prepared = try await deviceKeys.publicKey(accountID: accountID, deviceID: deviceID) {
-            deviceKey = prepared
-        } else {
-            deviceKey = try await deviceKeys.create(accountID: accountID, deviceID: deviceID)
-        }
         let enrolment = EnrolmentKey.derive(from: unlockKey, accountID: accountID)
         defer { enrolment.zeroise() }
         let registration = try await signedRegistryEntry(

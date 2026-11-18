@@ -122,8 +122,14 @@ public enum DeviceKeyError: Error, Equatable, Sendable {
 /// arrives with the platform work and signs `DeviceSignatureAlgorithm.p256ECDSA`. `KeychainDeviceKeyStore` is the
 /// software implementation; `WatchwordTestSupport.FakeDeviceKeyStore` is the fake.
 public protocol DeviceKeyStore: Sendable {
+    /// Creates this installation's key for a new device of `accountID`, replacing any it held for the account, and
+    /// returns the device's ID with the key's public half. The ID is derived from the account and that key
+    /// (`DeviceIdentifier`), so it names no other account's device (review finding Z157): the one way production makes
+    /// a device.
+    func createDevice(accountID: UUID) async throws -> DeviceIdentity
     /// Creates this installation's key for `deviceID`, replacing any it held for the account, and returns its public
-    /// half.
+    /// half. For a device whose ID is already chosen: an account made before IDs committed to their account, and tests
+    /// that must name a device. Such an ID counts for nothing in a shared vault unless it happens to commit.
     func create(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey
     /// The public half of the key held for `deviceID`, or `nil` if this installation has none for that device.
     func publicKey(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey?
@@ -149,13 +155,26 @@ public actor KeychainDeviceKeyStore: DeviceKeyStore {
         self.random = InjectedGenerator(base: random)
     }
 
+    public func createDevice(accountID: UUID) async throws -> DeviceIdentity {
+        let key = SoftwareDeviceKey.generate(using: &random)
+        defer { key.zeroise() }
+        let publicKey = try key.publicKey()
+        let deviceID = DeviceIdentifier.derive(accountID: accountID, key: publicKey)
+        try await store(key, deviceID: deviceID, accountID: accountID)
+        return DeviceIdentity(id: deviceID, key: publicKey)
+    }
+
     public func create(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey {
         let key = SoftwareDeviceKey.generate(using: &random)
         defer { key.zeroise() }
         let publicKey = try key.publicKey()
+        try await store(key, deviceID: deviceID, accountID: accountID)
+        return publicKey
+    }
+
+    private func store(_ key: SoftwareDeviceKey, deviceID: UUID, accountID: UUID) async throws {
         let stored = SecureBytes.concatenating([SecureBytes(copying: Self.bytes(deviceID)), key.seedCopy()])
         try await keychain.store(stored, for: .deviceSigningKey(accountID: accountID))
-        return publicKey
     }
 
     public func publicKey(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey? {

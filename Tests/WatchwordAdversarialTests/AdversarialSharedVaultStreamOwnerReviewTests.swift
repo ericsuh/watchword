@@ -81,12 +81,11 @@ extension AdversarialSharedVaultTests {
     /// Threat: a current member who administers the vault (A4), alone. The victim's device has segments in the vault
     /// sealed under the first key. The insider lists that device's ID in their own registry, rotates the key, and at
     /// once signs a segment into the stream named after it, sealed under the new key. Someone invited afterwards is
-    /// entitled to the new key only and passes over everything sealed under the old one. If a device files a
-    /// stream under the account that signed the first segment it could *open*, the newcomer takes the insider's
-    /// segment for the stream's first: the insider's versions are applied there as that device's, and every genuine
-    /// later segment of the victim's is held aside, while the older devices see the reverse. Who signed a segment and
-    /// which object it is need no vault key, so every device records every segment, and the stream is the same
-    /// account's everywhere.
+    /// entitled to the new key only and passes over everything sealed under the old one. When a stream was the
+    /// account's that signed the first segment a device could *open* (before Z51), the newcomer took the insider's
+    /// segment for the stream's first. Since Z157 the device ID commits to the victim's account, so the insider's
+    /// segment verifies on no device, whichever keys it holds: the stream is the victim's everywhere, and the
+    /// insider's versions are applied nowhere.
     @Test("a stream belongs to the same account on a device that joined after a rotation as on every other")
     func streamOwnerForSomeoneWhoJoinedAfterARotation() async throws {
         let setting = try await SquattedStream.make(seed: 5110)
@@ -100,31 +99,37 @@ extension AdversarialSharedVaultTests {
         planted = try await rogue.session.save(planted)
         let before = Set(await setting.household.transport.list(prefix: setting.stream))
         try await rogue.session.sync()
-        #expect(Set(await setting.household.transport.list(prefix: setting.stream)).count > before.count)
+        let plants = Set(await setting.household.transport.list(prefix: setting.stream)).subtracting(before)
+        #expect(!plants.isEmpty)
 
         let newcomer = try await setting.household.account(seed: 5119)
         try await owner.invite(newcomer, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([victim, owner, newcomer], rounds: 3)
+        for account in [owner, newcomer] {
+            #expect(await account.session.streamOwner(setting.victimDevice, in: vaultID) == victim.accountID)
+            let titles = try await account.session.items(in: vaultID).items.map(\.title)
+            #expect(!titles.contains(planted.title), "the insider's segment was applied as the victim's device's")
+        }
+        // Where the insider's object sits at the victim's next number, the victim's stream waits there, losing
+        // nothing; gone, the victim's later work arrives on every device.
+        for name in plants { await Self.remove(name, from: setting.household.transport) }
         var genuine = Self.bank(in: vaultID)
         genuine.title = "The victim's own, written afterwards"
         genuine = try await victim.session.save(genuine)
         try await Self.syncAll([victim, owner, newcomer], rounds: 3)
-
-        #expect(await newcomer.session.streamOwner(setting.victimDevice, in: vaultID) == victim.accountID)
-        #expect(await owner.session.streamOwner(setting.victimDevice, in: vaultID) == victim.accountID)
         for account in [owner, newcomer] {
             let titles = try await account.session.items(in: vaultID).items.map(\.title)
             #expect(titles.contains(genuine.title), "the victim's later work did not arrive")
-            #expect(!titles.contains(planted.title), "the insider's segment was applied as the victim's device's")
         }
     }
 
     /// Threat: the same insider with the store (A1), or a transport that delivers out of order, against a device
     /// that has recorded nothing of the stream yet: it is shown the insider's segment before the victim's earlier
-    /// ones. Until they arrive the stream looks like the insider's, and what was judged meanwhile was judged by
-    /// that. When a lower-numbered segment changes whose the stream is, everything is judged again: a replay is
-    /// asked for, and written down so that a restart still makes it.
-    @Test("a stream whose owner changes when an earlier segment arrives is judged again")
-    func ownerChangeAsksForAReplay() async throws {
+    /// ones. Before Z157 the stream looked like the insider's until they arrived. Now the insider's segment is
+    /// recorded in no order: it does not verify as the device's, so the stream is nobody's until the victim's own
+    /// first segment arrives, and the victim's from then on.
+    @Test("another account's segment in a device's stream is recorded in no order of arrival")
+    func anotherAccountsSegmentIsNeverRecorded() async throws {
         let setting = try await SquattedStream.make(seed: 5130)
         let (owner, rogue) = (setting.owner, setting.rogue)
         let vaultID = setting.vaultID
@@ -144,16 +149,17 @@ extension AdversarialSharedVaultTests {
         try await owner.session.sync()
         await owner.session.forgetStreamIndex(vaultID)
 
-        // Shown the insider's segment alone, the stream is the insider's as far as this device can tell.
         await owner.session.judgeRecord(
             segment: last.location, signature: last.object.signature, envelope: last.object.envelope, entries: [])
-        #expect(await owner.session.streamOwner(setting.victimDevice, in: vaultID) == setting.insider.accountID)
-        #expect(await !owner.session.replayIsRequested(vaultID))
-        // The victim's first segment arrives: the stream is the victim's, and what was judged is judged again.
+        #expect(await owner.session.streamOwner(setting.victimDevice, in: vaultID) == nil)
         await owner.session.judgeRecord(
             segment: first.location, signature: first.object.signature, envelope: first.object.envelope, entries: [])
         #expect(await owner.session.streamOwner(setting.victimDevice, in: vaultID) == setting.victim.accountID)
-        #expect(await owner.session.replayIsRequested(vaultID), "what was admitted under the wrong owner stays merged")
+        await owner.session.judgeRecord(
+            segment: last.location, signature: last.object.signature, envelope: last.object.envelope, entries: [])
+        #expect(
+            await !owner.session.recordedSegment(setting.victimDevice, last.location.number, in: vaultID),
+            "the insider's segment was recorded in the victim's stream")
     }
 
     /// Threat: a member (A4), or the store (A1) by timing. A segment is sealed under a key ID this device has no
