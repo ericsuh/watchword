@@ -424,14 +424,22 @@ discard by its resolution's revision, each history entry once per write that rec
 stamp included, against the segment that carried them (S36); and (3) every edit its clock says it contains, of any
 device but its own writer's, was published in a segment of that device's stream that counts: one carried a version of
 the record at or above the clock's count (S44 for a device whose account's work does not all count, S46 for a current
-member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head and the stream index,
-which every device holding the same segments computes alike; it does not depend on when or where the version was
-merged. Where (3) cannot be decided yet (the claimed device's stream is not here that far) the version waits, held
-aside until that stream grows; a claim about the judging device's own edits beyond what it published is false at once,
-asked before anything else (Z136). A current member's device whose first segment this device holds and cannot open
-(sealed under keys this account was never given, S42) is not checked, and its edits are believed as before; one whose
-first segment is not here has not published it yet (a shared vault keeps its whole log, Z42), and a claim about it
-waits (Z136).
+member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head, the stream index
+and the devices revoked in the registries the chain anchors, which every device holding the same segments and
+registries computes alike; it does not depend on when or where the version was merged. The index's attribution is
+itself a function of the head: a segment of an account whose work cannot count under it names no stream (Z146), and a
+change of head refiles the index before anything is judged, as every device does. Where (3) cannot be decided yet (the
+claimed device's stream is not here that far) the version waits, held aside until that stream grows; a claim about the
+judging device's own edits beyond what it published is false at once, asked before anything else (Z136). A current
+member's device whose first segment this device holds and cannot open (sealed under keys this account was never given,
+S42) is not checked, and its edits are believed as before; one with no segment here has not published yet (a shared
+vault keeps its whole log, Z42), and a claim about it waits (Z136). A stream that will never grow here is never waited
+for (Z144): a revoked device's, which no device reads after it learns of the revocation, and a device of the owner's
+account whose first segments were collected before the vault was shared. Claims about them and values naming them are
+believed for an account that may write, so a device that recorded none of such a stream (enrolled, joined or rebuilt
+since) judges as one that recorded it all does: waiting, it held aside for good what every other device kept, which is
+divergence, not only loss. Until a device learns of a revocation it reads the stream and waits for it like any other,
+so the two judgements meet once the registry has reached every device.
 
 **Completeness: every effect of a write leaves a trace that names it.** Take a write `w` and any version `v` made, by
 any sequence of merges and updates, from a state that contains `w`'s result.

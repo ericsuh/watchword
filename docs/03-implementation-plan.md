@@ -293,10 +293,15 @@ half delivered** on a Mac; the transports are open.
   snapshot's entries to the snapshot's author rather than to the device each names (Z38), which wants a column too;
   and, for a device that has never published in a vault, an unfetchable name in its stream still holds its publishing
   there (Z31). From the review of the second round (Z135 to Z143): a keyed or cryptographic digest for the
-  quarantine's index, a schema version 4 migration (Z141); the collected floor in the signed state, which would let
-  the anchor survive a store that withholds a device's head and re-lists an older object of its own (Z135); coverage
-  recorded per signer, so that a claim an honest device carried on can be traced to an insider (Z139); and a Mac run of
-  the comment changed in `SQLiteSyncStateStore`.
+  quarantine's index, a schema version 4 migration (Z141); a rule for a restored device whose collected floor is older
+  than its stream, which would let the anchor survive a store that withholds a device's head and re-lists an older
+  object of its own (Z135; the floor itself is in the signed state since Z149); coverage recorded per signer, so that
+  a claim an honest device carried on can be traced to an insider (Z139); and a Mac run of the comment changed in
+  `SQLiteSyncStateStore`. From the review of the third round (Z144 to Z149): handing on, in a shared vault, what only a
+  revoked device's own versions carried, which a device joining after the revocation never receives (there is no
+  snapshot to carry it, Z144); keeping the report of another account's segment in a device's own stream beyond the
+  sync that met it (Z146); and the owner's choice for a crowded digest, between withholding snapshots until the person
+  discards entries (built) and counting the drop without remembering it (Z147).
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
   screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
   `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,

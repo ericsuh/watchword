@@ -474,13 +474,22 @@ create a file under the vault's prefix can list one (Z24). What cannot be told (
 to check with) holds publishing back (`SyncReport.ownStreamUnverified`) only where the device's state could be older
 than its stream and the stream cannot show which numbers it used: when no object of the stream that is known to be
 this device's is listed (one that verified as its own, or the one at the number its signed state last published).
-Segments are collected lowest first, as a contiguous run of listed numbers that stops at the first one the listing
-lacks, and never the device's own genuine head (what it published or verified as its own), whatever names are listed
-above it (Z135), so while one of a stream's segments is listed none above it was collected; publishing then cannot reuse a number, and an unfetchable name far ahead mutes nothing (Z31). Without
-such an object, a trusted device's snapshot that claims more of the stream than the device can account for holds
-publishing back too, while some object of the stream at or past the next number is listed (a true claim implies one,
-since the head is never collected, Z139), read from the snapshots as they are, so it never moves the numbering and ends
-when the snapshot or its signer goes, or when nothing of the stream is listed there (Z32).
+Segments are collected lowest first, as a contiguous run of listed numbers that starts above what the device has
+collected already (`SyncState.collectedThrough`, signed with the state, so a name planted in the collected range stalls
+nothing, Z149), stops at the first number the listing lacks, and never takes the device's own genuine head (what it
+published or verified as its own), whatever names are listed above it (Z135); so while one of a stream's segments is
+listed none above it was collected, publishing then cannot reuse a number, and an unfetchable name far ahead mutes
+nothing (Z31). A name shown not to be the device's own (junk, another's signatures) is evidence of nothing: anyone who
+can create a file can list one. Without an own object listed, a device that has published in the vault (its signed
+state says so) also holds back while a device still trusted says, by a snapshot's coverage or a segment's
+acknowledgement, that it merged this stream further than the state's next number: a current state's head is listed
+unless the store withholds it and nobody can have merged beyond it, so this is what an older state whose head is
+missing from the listing sees (Z32, Z145). It is read from the state as it is now, so the head listed again, or the
+claimant revoked, ends it; it never moves the numbering. A device that never published is held by nothing but an
+undecided name: a claim about a device that never wrote, which an honest device that merged it carries on in snapshots
+of its own, held it for good (Z139), and so did one junk name where the claim pointed (Z145). The price: a state lost
+altogether (nothing signed survives) whose head the store makes unusable can reuse a collected number, as Z32 and Z135
+record.
 
 **Merge** (needs the vault key). Staged objects are verified again (the staging area is in the local file, which
 A8 can edit), then checked and opened in the order kind, context, AEAD, payload. Each stream is merged strictly in
@@ -569,10 +578,14 @@ validly signed segment), and acknowledgement and coverage values must be plausib
   devices' versions found no room is remembered in the signed state (`SyncState.quarantineDropped`): while one of a
   trusted device's is there the device writes no ordinary snapshot, and once the quarantine has room for every one of
   them again the log is replayed to offer them again (Z38). Like any replay, that offers again what the person
-  discarded. Sizes from the file are summed without overflow (Z39).
+  discarded. A version the store itself refuses (its lookup digest is not keyed, and entries crafted to share it crowd
+  it) is such a drop too (Z141), but the caps have room, so a replay at every sync would drop it again: the state notes
+  how many entries the quarantine held then (`SyncState.quarantineCrowded`), and the log is offered again only once it
+  holds fewer, which the person discarding entries brings about (Z147). Meanwhile the snapshots stay withheld, since one
+  would cover a version kept nowhere. Sizes from the file are summed without overflow (Z39).
 - A version found in the log under this device's own name counts as published only if it is the row the device
-  holds, and a deletion only if no row of the record is held or it is this device's own; otherwise the row is
-  published again (Z29, Z35).
+  holds, and a deletion only if it is this device's own, pending or published at that stamp, never because no row is
+  held (Z29, Z35, Z138); otherwise the row is published again.
 
 This is the monotonic check of §5: an older version, replayed by the store or found in an old snapshot, can never
 displace newer values, because a value is only ever replaced by one written knowing about it.
@@ -593,8 +606,9 @@ stops this vault's publishing while it is there, reported at every sync (`ownStr
 sent; passing it needs a skip the author signs and readers honour, which is open. In a shared vault, an object there
 that verifies as another member's is staged and held aside in sequence, so the device steps over it after one sync
 that reports the conflict (Z30), and so is one signed by a member whose writes never count, which the judge passes over
-keeping nothing (Z137); junk, or an object under keys that differ from the pin or by an account the chain does not
-list, still squats, reported and worded.
+keeping nothing (Z137); stepping over either is reported (`SyncReport.ownStreamSteppedOver`, Z146), since below the
+device's first segment there the other devices may take the stream for the planter's. Junk, or an object under keys
+that differ from the pin or by an account the chain does not list, still squats, reported and worded.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
 value (`EnvelopeKind.criticality(ofRawValue:)`: 10 to 127 ignorable, everything else critical; `scanStatus` is the first
@@ -1585,6 +1599,9 @@ Not solved here, and to be decided with integration:
   read-only there before the device synced) or whose copy was taken out and held aside as a write after the cut holds
   an item that exists nowhere else; while any vault does, no vault's deletions are published (Z44,
   `holdsUnpublishedWork`). What releases them is the copy going out, or the person discarding the held-aside copy.
+  A row the sync layer knows only by a deletion counts too while it holds an edit of this device's above what it
+  published: a move's copy has an ID anyone reading the source vault can derive, and a tombstone for it found in the
+  log before the copy existed made the copy look known (Z148).
   "Held aside" here means what this device's own take-out put aside, which it notes in a signed row of its own
   (`OwnTakenOutRow`, `WWTO`): an entry in the quarantine names the device its writer claims, and counting any entry
   that named this device let a member who can have it hold something aside (a segment signed into the stream named
@@ -1943,7 +1960,11 @@ it is need no vault key, so one sealed under a key the device does not hold (it 
 a losing branch's) is recorded by digest and signer, marked unopened, and completed if it opens later. A shared vault
 keeps its whole log, so the lowest-numbered segment, and with it the stream's account, is the same on every device;
 recorded only where they opened, a member who joined after a rotation took the first segment sealed under the new key
-for the stream's first, and an insider who wrote one there had the stream on that device and nowhere else. The same
+for the stream's first, and an insider who wrote one there had the stream on that device and nowhere else. A segment of
+an account whose work cannot count under the current head (`nothingCounts`: a member never let write) is recorded by
+digest and signer alone and names no stream's account (`SharedStreamIndex.passedOver`, set from the ledger before each
+judgement and refiled when it changes, Z146): otherwise such a member, with a device listed under a writer's device ID,
+took the writer's stream everywhere by signing its segment 1 first, and every device held aside all the writer wrote. The same
 recording keeps a cut's chain whole across segments the cutting device could not open (Z52). And when an
 earlier segment arrives after a later one and shows the stream to be another account's, the index files it again and
 the log is replayed, so nothing judged under the wrong account stays merged. A cut covers the streams that are the
@@ -1977,7 +1998,11 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   claim to have seen a current member's edits that their stream has not published is a claim about edits that do not
   exist yet, which would supersede them when they are made, so the version waits for that stream (S46; one about this
   device's own edits is refused). A current member's device whose stream this device cannot read from its first
-  segment is not checked. A tombstone, from a segment or from a snapshot (Z21), is judged the same way before it is
+  segment is not checked. Nor is a stream that will never carry the edits here (Z144): a revoked device's, which is
+  never read again (and a shared vault writes no snapshot to hand its work on), and a device of the owner's account
+  whose first segments were collected before the vault was shared; for an account that may write, a claim about either
+  is believed and never waited for, as such a device's own versions already were. Waiting, every version whose clock
+  named a lost phone was held aside for good on any device that built its index after the revocation. A tombstone, from a segment or from a snapshot (Z21), is judged the same way before it is
   applied or remembered, a snapshot's with nobody exempt, since its signer chose the device its entry names, and with
   the pass's segments recorded first (Z34),
   (`WriteJudge.admitsErasure`): its erasure summary is its author's clock, and one built on a late write would erase
@@ -1989,7 +2014,8 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   carried counts only if its own copy of the record holds it: a device knows what it wrote, so a value relabelled
   with its revision is refused there at once. A value carried by no segment held here waits: the version is held
   aside and the device its stamp names is remembered (`SharedStreamIndex.awaiting`), and a new segment of that
-  device's stream replays the log. The one exception is a member who joined after a rotation, who cannot open the
+  device's stream replays the log; except where that stream will never carry it here, a revoked device's or the
+  owner's collected one, where it is believed for an account that may write (Z144). The one exception is a member who joined after a rotation, who cannot open the
   segments that carried older values: for them a version sealed under a key introduced at or after the latest record
   that ended anyone's permission to write vouches for such values (its sealer held that record and every earlier
   segment, and judged them), provided the device is listed by an account whose work can count. Segments sealed under a

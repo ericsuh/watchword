@@ -433,7 +433,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   device, past which a version is not kept on this device and the report counts it (`quarantineFull`, Z27: the
   quarantine is found by lookup and never reread; sizes are summed without overflow, Z39), and the state remembers
   whose (`SyncState.quarantineDropped`, Z38): no ordinary snapshot while it names a trusted device, and a replay once
-  there is room. A permanent deletion carries an
+  there is room; for a version the store refused for a crowded digest, only once the quarantine holds fewer entries
+  than it did then (`SyncState.quarantineCrowded`, Z147), never at every sync. A permanent deletion carries an
   erasure summary and removes only what its author had seen; anything else is kept, trashed
   (`Item.keptAfterDeletion`). Every discard is the person's: a permanent deletion, `ItemMerge.resolve`, and the 30-day
   trash purge (F1.5). Sync can leave an item in the trash that nobody chose to discard, so the purge removes only
@@ -487,12 +488,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   and comes from nothing else: never from a listed name (anyone can create one, Z24), a staged row (Z39), or a
   snapshot's coverage beyond what the stream can have got (Z21). Publishing is held back (`ownStreamUnverified`) only
   where the state could be behind the stream: no own object listed (`Listing.ownAnchored`, Z31), and an own-stream
-  object that cannot be told from this device's own, or a trusted snapshot claiming more of the stream while some object
-  of it at or past the next number is listed (Z32, Z139).
+  object at or past the next number that cannot be told from this device's own, or, for a device whose signed state
+  says it published there, a trusted snapshot's coverage or segment's acknowledgement of its stream reaching the next
+  number (Z32, Z139, Z145). A name shown not to be this device's own is evidence of nothing, and a device that never
+  published is held by no claim: either brought back a hold nothing could end.
   `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
-  every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that stops
-  at the first number the listing lacks, and never this device's own genuine head (what it published or verified as
-  its own), whatever names are listed above it (Z135; the anchor rests on that order).
+  every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that starts
+  above what this device collected already (`SyncState.collectedThrough`, Z149) and stops at the first number the
+  listing lacks, and never this device's own genuine head (what it published or verified as its own), whatever names
+  are listed above it (Z135; the anchor rests on that order).
 - A failure of local storage is a `StorageFailure` (`RecordStoreError`, `SQLiteConnection.Failure`) and stops a sync;
   never let one reject the object being merged or downloaded (Z39, Z142).
 - A record ID that a record of another vault holds on this device costs that entry alone (`SyncReport.collided`,
@@ -707,8 +711,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (`holdsUnpublishedWork`): the copy half of a move that was not published, or was held aside (Z44, PRD F7.6). Held
   aside means what this device's own take-out noted in its own signed row (`OwnTakenOutRow`, never in the stream
   index, which a rebuild cannot refill, Z121), never an entry's `device` field, which is its writer's claim (Z54);
-  until that row loads, the rule before Z54 holds, and a quarantine that cannot be read holds deletions back. Every
-  engine pass in `syncAll`, replays included, defers deletions; they go out once, last (Z55).
+  until that row loads, the rule before Z54 holds, and a quarantine that cannot be read holds deletions back. A row the
+  sync state knows only by a deletion counts while it holds an edit of this device's above what it published (a
+  tombstone for a move's derivable copy ID can be in the log before the copy, Z148): never let a stamp in `known`
+  alone release the gate. Every engine pass in `syncAll`, replays included, defers deletions; they go out once, last
+  (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
 
@@ -746,7 +753,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   key from the chain (`sharedVerify`), whatever that account's standing, for segments; `writeStanding` decides, never
   the envelope's signer alone. A segment of an account whose work cannot count at all is passed over in sequence and
   nothing of it kept (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever
-  step over it.
+  step over it. It is recorded by digest and signer alone, asks for no replay, and names no stream (Z146); stepping
+  over another account's segment in this device's own stream is reported (`ownStreamSteppedOver`).
 - **Every remote version is judged value by value** (`judgeAdmits`): its own revision, then every value it holds
   (`ItemMerge.attributedValues`, note-line removals, discards and history entries included, S32 and S43; a vault's
   description by `VaultMetadata.writtenBy`) by its *bytes, stamp included*, through a segment of the stream of the
@@ -755,7 +763,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   must have been published in a segment of that device's stream that counts, so a version built on a late write is
   held aside with it (S44), and one claiming a current member's edits their stream has not published waits for it
   (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z136; a stream with
-  no first segment here is waited for, never taken for one that cannot be read). A tombstone's erasure summary is judged the same
+  no first segment here is waited for, never taken for one that cannot be read; a stream that will never grow here, a
+  revoked device's or an owner's device's whose first segments were collected before sharing, is never waited for, and
+  what names it is believed for an account that may write, Z144). A tombstone's erasure summary is judged the same
   way before it is applied or remembered (`WriteJudge.admitsErasure`, S45): a deletion built on a late write is held
   aside and the item stays. A value naming this device that it never published
   counts only if its own copy holds it; one carried nowhere here waits for its stream (`awaiting`). A version that
@@ -798,7 +808,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   off the actor (Z10).
 - **A stream is one account's** (Z46): this device's own stream takes only this account's signature (another's there is
   held aside in sequence and never numbers the stream, Z30), and any other
-  belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`). Another
+  belongs to the account that signed its lowest-numbered segment (`SharedStreamIndex.account(ofStream:)`), passing
+  over the segments of an account whose work cannot count under the current head (`passedOver`, set from the ledger
+  by `refreshPassedOver` before every judgement and never saved, Z146). Another
   account's segment in it is recorded for the cut's chain, filed nowhere, and held aside. Every device records
   every signed segment, opened or not (`WriteJudge.recordUnopened`, Z51), so the lowest segment and a cut's chain are
   the same everywhere; a change of a stream's account asks for a replay. Never attribute through a

@@ -513,6 +513,22 @@ marks nothing as sent (`plantedDeletionBeforeTheRecordExists`). The jump ceiling
 (`refusedByTheStoreIsADrop`), a revoked device's dropped version holds no snapshot back
 (`droppedVersionOfARevokedDevice`). Local state: a staged object past the listed bounds is dropped
 (`stagedPastTheBounds`), and a store that fails while staging stops the sync (`stagingFailureStopsTheSync`).
+The review of the third round (`06-adversarial-review.md` Z144 to Z149; `AdversarialSyncEngineReviewTests.swift` in "sync
+log", `AdversarialSharedVaultEngineReviewTests.swift` in "shared vaults through the session",
+`AdversarialVaultSyncEngineReviewTests.swift` in "sync with real keys"). Shared vaults: the items a revoked device
+edited stay visible and converge on a device of its account enrolled after the revocation, on a member who joins after
+it and on a device whose stream index was rebuilt (`revokedDeviceWorkStaysVisible`, Z144); a read-only member's segment
+at segment 1 of a writer's stream does not take the stream, and the writer is told (`readOnlyMemberPlantAtSegmentOne`,
+`WordingTests.ownStreamHeldBack`, Z146). The hold for this device's own stream: a junk name where a snapshot's claim
+points does not hold back a device that never published (`junkNameWhereAClaimPoints`), a restored state whose head is
+missing from the listing does not publish over a collected number (`restoredStateWithItsHeadMissing`), a store emptied
+of the vault publishes on (`emptiedStoreDoesNotHold`), and `claimEndsWithItsSigner` now holds a device whose head is
+missing (Z145). The quarantine: a version refused for a crowded digest is not offered again at every sync, only once
+something has left the quarantine (`crowdedDigestDoesNotReplayEverySync`, Z147), and the two state fields that carry
+this and the collected floor are signed only when set (`SyncStateAuthenticationTests`). The deletion gate: a move's copy
+known only by a planted tombstone still holds its original's deletion back (`plantedTombstoneForAMovesCopy`, Z148).
+Collection: a name planted below what a device collected does not stop it collecting
+(`plantedNameBelowTheCollectedRun`, Z149).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
