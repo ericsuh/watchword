@@ -9,9 +9,10 @@ import Observation
 /// this type decides, is to hide every revealed value again whenever the app stops being the active app (an app
 /// switch, the notification centre, a call), and whenever the screen starts being captured (a recording, AirPlay, a
 /// shared screen, as far as iOS reports it), and to refuse to reveal while it is captured. On macOS the app's windows
-/// are also excluded from screen capture (`NSWindow.sharingType`), so a shared screen shows them blank, and a value
-/// is hidden again when the app resigns active. It does not stop a camera, and on iOS it cannot stop a capture the
-/// system does not report.
+/// also ask to be left out of screen capture (`NSWindow.sharingType = .none`), and a value is hidden again when the
+/// app resigns active. Whether a shared screen or a recording then shows the windows blank is not promised: later
+/// macOS versions are reported to capture them anyway, and docs/04-test-plan.md's manual check for F5.7 is the gate
+/// (review finding Z134). It does not stop a camera, and on iOS it cannot stop a capture the system does not report.
 ///
 /// The platform code only reports events; views compare `concealments` with the value they read when a secret was
 /// revealed (`RevealedSecrets`), so whatever is open on screen is hidden by the same rule.

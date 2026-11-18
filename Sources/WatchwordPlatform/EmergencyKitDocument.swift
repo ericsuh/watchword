@@ -39,8 +39,13 @@
             try data.write(to: url, options: options)
         }
 
+        /// What the rendered PDF is given room for up front, so that it does not grow by reallocation, which would free
+        /// the earlier fragments, the Secret Key's text and QR among them, unwiped (review finding Z134). The kit is one
+        /// page of text and a QR code, far below this; past it the buffer grows as before.
+        static let renderCapacity = 1 << 20
+
         private static func render(_ kit: EmergencyKit) throws -> NSMutableData {
-            let data = NSMutableData()
+            let data = NSMutableData(capacity: renderCapacity) ?? NSMutableData()
             let mediaBox = CGRect(origin: .zero, size: pageSize)
             let info = [kCGPDFContextTitle as String: EmergencyKitText.title] as CFDictionary
             guard let consumer = CGDataConsumer(data: data as CFMutableData),
