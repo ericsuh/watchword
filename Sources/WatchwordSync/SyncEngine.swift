@@ -665,14 +665,23 @@ public actor SyncEngine {
     }
 
     /// The streams of which this device has merged something that nothing listed stands for: a segment past what
-    /// the listed snapshots cover, and up to what it has merged, is not listed. Revoked devices' streams are not
-    /// read and not counted (what was merged from them is owed separately, §7.5).
+    /// the listed snapshots cover, and up to what it has merged, is not listed. A revoked device's segments are not
+    /// listed or read at all, so what was merged from one is lacking unless a listed snapshot (of this device's, or
+    /// another trusted device's that it merged) covers it: that snapshot is the only carrier of that work (§7.8).
+    /// Without this, a device that had merged nothing but a revoked device's stream, and had handed it on, saw nothing
+    /// lacking once the store lost that snapshot, was not asked, and then wrote the whole vault again unasked, as the
+    /// snapshot it owed for the revoked device's work (review finding SR27). A vault that keeps its whole log (a
+    /// shared vault, `maintainsLog` off) hands nothing on in snapshots, so there a revoked stream is not counted.
     private func lackingStreams(_ state: SyncState, listing: Listing, retired: Set<UUID>) -> Set<UUID> {
         let covered = listedCoverage(state, listing: listing)
         var lacking: Set<UUID> = []
-        for (author, merged) in state.merged where !retired.contains(author) {
+        for (author, merged) in state.merged {
             let after = covered[author] ?? 0
             guard merged > after else { continue }
+            guard !retired.contains(author) else {
+                if configuration.maintainsLog { lacking.insert(author) }
+                continue
+            }
             let listed = Set((listing.segments[author] ?? []).filter { $0 > after && $0 <= merged })
             if UInt64(listed.count) < merged - after { lacking.insert(author) }
         }
@@ -1586,8 +1595,14 @@ public actor SyncEngine {
     private func maintain(
         state: inout SyncState, listing: Listing, retired: Set<UUID>, handingOn: Bool, report: inout SyncReport
     ) async throws {
+        let before = Set(state.snapshots.keys)
         try await writeSnapshotIfElected(state: &state, retired: retired, handingOn: handingOn, report: &report)
+        // A snapshot written in this sync is not in the listing taken before it, and is remembered all the same: it
+        // is on the transport, and forgetting it until the next sync re-read it left a window in which a store that
+        // lost it showed no object of this device's missing (review finding SR27).
+        let written = state.snapshots.filter { !before.contains($0.key) }
         try await collectGarbage(state: &state, listing: listing, retired: retired, report: &report)
+        state.snapshots.merge(written) { kept, _ in kept }
     }
 
     /// Whether this device holds something merged from a revoked device that no snapshot by a trusted device is known

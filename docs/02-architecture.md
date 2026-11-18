@@ -1054,7 +1054,8 @@ that has something to add, because the person on another device may have deleted
    have collected (`SyncState.collectedThrough`, which never reaches the newest segment it published, since it never
    collects that one, except after its own hand-on snapshot: SR19), or a snapshot it remembers writing; a device sees its own objects
    at once and nobody else deletes them, so an honest store lists them all — *and* it has merged something of some
-   stream that nothing listed stands for (a segment past what the listed snapshots it has merged cover is missing).
+   stream that nothing listed stands for (a segment past what the listed snapshots it has merged cover is missing;
+   what it merged from a revoked device, whose segments are never listed, unless a listed snapshot covers it: SR27).
    This is what a device that was offline during a reset finds when it returns to a store another device has
    started again. The first half alone is not enough to ask (a device restored from a backup remembers less than its
    later self collected) and the second alone is not either (a provider that lags can show a snapshot's replacement
@@ -1176,7 +1177,9 @@ or runs between the two steps. Then:
   can, can erase it: the device is then a "new" one to itself, and publishes the rows it wrote again, unasked, as
   segments from its first number. The store gains ciphertext it held before, under the same keys; the reused numbers
   are the fork of SR15. A store emptied of everything but one registry entry is not "emptied" either (SR18): the
-  account's small objects are put back as ever, and no vault's contents are.
+  account's small objects are put back as ever, and no vault's contents are: a device whose only work in a vault was
+  a revoked device's, handed on in a snapshot the store then lost, is asked rather than writing it again (SR27), and a
+  snapshot is remembered from the sync that writes it, not only from the next listing.
 - *The person deleted the data on purpose, on another device.* Hence the question, and its wording
   (`ReuploadQuestion`): it says the data is gone from the sync storage, that this may have been deliberate, what
   will be uploaded (how many items in how many vaults, and the encrypted keys and device list), that uploading

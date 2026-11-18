@@ -258,6 +258,46 @@ struct SyncStoreResetTests {
         #expect(try await Self.titles(d) == Set((0..<6).map { "A \($0)" }))
     }
 
+    /// Review finding SR27, the residue of SR18. D has published nothing of its own (SR14) and merged only R's
+    /// stream; R is revoked, so D hands R's work on in a snapshot it owes. Then the store loses everything (A1 empties
+    /// it, or a reset). D's own snapshot is missing, but R's stream was not counted as lacking, so D was not asked;
+    /// its garbage collection forgot the missing snapshot, and at the next sync D owed R's work again and wrote the
+    /// whole vault, unasked. What was merged from a revoked device is lacking unless a listed snapshot covers it.
+    @Test("a device holding only a revoked device's handed-on work is asked after a reset, and uploads nothing unasked")
+    func revokedWorkIsAskedAbout() async throws {
+        let transport = InMemorySyncTransport()
+        let keys = FakeAccountKeys(seed: 107)
+        await keys.addVaultKey(vaultID: Household.vault)
+        let (rID, dID) = (Household.deviceIDs[0], Household.deviceIDs[1])
+        for id in [rID, dID] { await keys.trust(device: id) }
+        let r = SyncTestClient(deviceID: rID, vaultID: Household.vault, keys: keys, transport: transport)
+        let d = SyncTestClient(deviceID: dID, vaultID: Household.vault, keys: keys, transport: transport)
+        for index in 0..<3 {
+            try await r.save(Household.login(title: "R \(index)"))
+            try await r.sync()
+        }
+        #expect(try await d.sync().applied == 3)
+        await keys.retire(device: rID)
+        let handedOn = try await d.sync()
+        #expect(handedOn.snapshotsWritten == 1 && handedOn.segmentsWritten == 0)
+        #expect(await d.state()?.snapshots.keys.contains { $0.author == dID } == true, "remembered at once")
+
+        await transport.removeEverything()
+        for _ in 0..<3 {
+            let report = try await d.sync()
+            #expect(report.storeLacksObjects, "D holds R's work, which nothing listed stands for")
+            #expect(report.snapshotsWritten == 0 && report.segmentsWritten == 0)
+        }
+        #expect(await transport.allObjects.isEmpty)
+        #expect(await d.state()?.storeResetSuspected == true)
+
+        // On the person's answer, R's work is handed on again, and the question goes away.
+        #expect(try await d.engine.sync(handingOn: true).snapshotsWritten == 1)
+        let after = try await d.sync()
+        #expect(!after.storeLacksObjects && after.snapshotsWritten == 0)
+        #expect(try await Self.titles(d) == ["R 0", "R 1", "R 2"])
+    }
+
     /// Review finding R15. A snapshot was named by the highest version it holds, and only the hand-on after a
     /// reset was named above every name this device had used. A snapshot it owes (for a fork of its own stream, as
     /// here, or for a revoked device's work), written with no new version since its last one, took that one's name:

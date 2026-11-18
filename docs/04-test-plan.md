@@ -1005,7 +1005,8 @@ other does, and reported as not required on Linux, where they cannot compile.
   over the fakes): no sync, replay included, uploads again what the store held; a store never set up is not a
   reset; one device hands on everything and a new device reads all of it, with sequence numbers and state kept;
   asked twice it hands on once; a device whose stream another device's snapshot covered still notices its own
-  newest segment gone (SR19, `coveredStreamStillNoticesAReset`); an offline device that holds more is asked, and its new edits wait behind a gap
+  newest segment gone (SR19, `coveredStreamStillNoticesAReset`); a device holding only a revoked device's work,
+  handed on in a snapshot the store lost, is asked and writes nothing unasked (SR27, `revokedWorkIsAskedAbout`); an offline device that holds more is asked, and its new edits wait behind a gap
   until it answers; two devices in either order, and at once without seeing each other's snapshot, converge; a
   device whose own stream another device's upload stands for is still asked about a third stream; a second reset is
   noticed by the missing snapshot, and no snapshot name is used twice; a pending deletion and a merged erasure
