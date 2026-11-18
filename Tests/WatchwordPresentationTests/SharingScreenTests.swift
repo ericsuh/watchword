@@ -152,6 +152,14 @@ struct SharingScreenTests {
             return
         }
         #expect(shown.accountID == owner.accountID)
+        // A timer that fires once more after the step moved on changes nothing: before, it asked the session again
+        // and took the screen back to waiting, so the Join button came and went (the first Mac run's UI tests).
+        #expect(!accept.isWaiting && !invitation.isWaiting)
+        await accept.refresh()
+        #expect(accept.step == .confirmJoin(shown) && accept.errorMessage == nil)
+        await invitee.session.endSharingCodeSession()
+        await accept.refresh()
+        #expect(accept.step == .confirmJoin(shown) && accept.errorMessage == nil, "\(accept.errorMessage ?? "")")
         await accept.confirmJoin()
         #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
         #expect(try await invitee.session.sharedVaultStatus(vaultID).role == .readOnly)

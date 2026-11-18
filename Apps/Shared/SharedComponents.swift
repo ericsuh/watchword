@@ -34,13 +34,15 @@ struct QRCodeView: View {
 
     var body: some View {
         if let image = Self.image(for: text) {
-            Image(decorative: image, scale: 1)
+            // A labelled image, not a decorative one: a decorative image is left out of the accessibility tree, with
+            // its label and the identifier a caller gives it, so VoiceOver never reached it and XCUITest found no
+            // `invite.qr` on the Mac (the first Mac run's UI tests).
+            Image(image, scale: 1, label: Text("QR code for the other person to scan"))
                 .interpolation(.none)
                 .resizable()
                 .scaledToFit()
                 .frame(maxWidth: 220, maxHeight: 220)
                 .frame(maxWidth: .infinity)
-                .accessibilityLabel("QR code for the other person to scan")
         }
     }
 

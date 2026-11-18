@@ -93,33 +93,35 @@ final class VaultSharingTests: XCTestCase {
         expectMember(in: app, vault: "Family", role: "Can edit")
     }
 
-    /// The scan in each direction (ADR 0010, Scanning): this device reads the other person's screen in place of
-    /// typing their code, through the scanner stand-in a `--uitest` launch has in place of the camera, and the other
-    /// person types this device's code.
-    @MainActor
-    func testInviteByScanningTheirScreen() throws {
-        step("launch")
-        let app = XCUIApplication.launchedWithAccount()
-        app.openSettings()
-        app.syncNow(expecting: ".")
-        sharedVault(app, named: "Household")
+    #if os(iOS)
+        /// The scan in each direction (ADR 0010, Scanning): this device reads the other person's screen in place of
+        /// typing their code, through the scanner stand-in a `--uitest` launch has in place of the camera, and the other
+        /// person types this device's code. iPhone and iPad only: a Mac shows codes and scans none, and has no stand-in.
+        @MainActor
+        func testInviteByScanningTheirScreen() throws {
+            step("launch")
+            let app = XCUIApplication.launchedWithAccount()
+            app.openSettings()
+            app.syncNow(expecting: ".")
+            sharedVault(app, named: "Household")
 
-        app.tap(AccessibilityID.Invite.startSession)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.qr).appears(within: 15), app.debugDescription)
-        app.tap(AccessibilityID.Debug.memberJoins)
-        step("scan their screen")
-        XCTAssertTrue(app.element(AccessibilityID.Debug.scanMember).appears(within: 15), app.debugDescription)
-        app.tap(AccessibilityID.Debug.scanMember)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.ownCode).appears(within: 15), app.debugDescription)
-        app.tap(AccessibilityID.Debug.memberTypes)
-        app.tap(AccessibilityID.Invite.send)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.sent).appears(within: 15), app.debugDescription)
-        app.tap(AccessibilityID.Debug.memberAcceptsSession)
-        app.waitForText("accepted the invitation", in: "debug.peerStatus", timeout: 20)
-        app.closeScreen()
+            app.tap(AccessibilityID.Invite.startSession)
+            XCTAssertTrue(app.element(AccessibilityID.Invite.qr).appears(within: 15), app.debugDescription)
+            app.tap(AccessibilityID.Debug.memberJoins)
+            step("scan their screen")
+            XCTAssertTrue(app.element(AccessibilityID.Debug.scanMember).appears(within: 15), app.debugDescription)
+            app.tap(AccessibilityID.Debug.scanMember)
+            XCTAssertTrue(app.element(AccessibilityID.Invite.ownCode).appears(within: 15), app.debugDescription)
+            app.tap(AccessibilityID.Debug.memberTypes)
+            app.tap(AccessibilityID.Invite.send)
+            XCTAssertTrue(app.element(AccessibilityID.Invite.sent).appears(within: 15), app.debugDescription)
+            app.tap(AccessibilityID.Debug.memberAcceptsSession)
+            app.waitForText("accepted the invitation", in: "debug.peerStatus", timeout: 20)
+            app.closeScreen()
 
-        expectMember(in: app, vault: "Household", role: "Can edit")
-    }
+            expectMember(in: app, vault: "Household", role: "Can edit")
+        }
+    #endif
 
     /// This account joins a vault the other person shares: their number typed here (or their screen scanned), each
     /// types the other's six digits, and their invitation arrives inside the session.

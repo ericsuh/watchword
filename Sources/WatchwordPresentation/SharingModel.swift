@@ -344,9 +344,10 @@ public final class InvitationModel {
         }
     }
 
-    /// Looks for their device's answer. Called on a timer while `isWaiting`, and by "Check Again".
+    /// Looks for their device's answer. Called on a timer while `isWaiting`, and by "Check Again"; does nothing once
+    /// the step has moved on, so a timer that fires late never takes a finished step back.
     public func refresh() async {
-        guard throughSession, !isWorking else { return }
+        guard throughSession, isWaiting, !isWorking else { return }
         await perform { try await apply(try await context.session.refreshSharingCodeSession()) }
     }
 
@@ -565,9 +566,11 @@ public final class AcceptInvitationModel {
         await perform { try await apply(try await context.session.joinSharingCodeSession(scanned: payload)) }
     }
 
-    /// Looks for the inviter's next message, and then for their invitation. Called on a timer while `isWaiting`.
+    /// Looks for the inviter's next message, and then for their invitation. Called on a timer while `isWaiting`;
+    /// does nothing once the step has moved on. A refresh at "join this vault?" took the screen back to waiting for
+    /// the invitation until the invitation was read again, and the Join button came and went (the first Mac run).
     public func refresh() async {
-        guard !isWorking else { return }
+        guard isWaiting, !isWorking else { return }
         await perform {
             var status = try await context.session.refreshSharingCodeSession()
             try await apply(status)
@@ -747,7 +750,7 @@ public final class MemberVerificationModel {
     }
 
     public func refresh() async {
-        guard !isWorking else { return }
+        guard isWaiting, !isWorking else { return }
         await perform { try await apply(try await context.session.refreshSharingCodeSession()) }
     }
 

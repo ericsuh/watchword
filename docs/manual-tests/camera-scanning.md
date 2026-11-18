@@ -67,8 +67,9 @@ Steps:
 
 Steps:
 1. On a Mac, open Invite Someone and Accept an Invitation.
-2. **Expected**: the vault sharing code and its QR code are shown; there is no "Scan Their Screen" button (a
-   `--uitest` launch has only the "(UI test)" stand-in).
+2. **Expected**: the vault sharing code and its QR code are shown; there is no "Scan Their Screen" button, and no
+   "Scan the household member's screen (UI test)" stand-in either, even with `--uitest`: the stand-in is for iPhone and
+   iPad, as the camera is.
 
 ### A release build has no stand-ins
 

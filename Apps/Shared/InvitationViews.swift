@@ -45,10 +45,12 @@ struct InviteView: View {
         .navigationTitle("Invite Someone")
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
-        // While waiting for their device: look again every two seconds.
+        // While waiting for their device: look again every two seconds. A cancelled sleep (the step moved on, so the
+        // task's id changed) must not refresh once more: that refresh took a finished step back to waiting, and the
+        // screen flickered between the two for as long as it was open (the first Mac run's UI tests).
         .task(id: model.isWaiting) {
-            while model.isWaiting, !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+            while model.isWaiting {
+                guard (try? await Task.sleep(for: .seconds(2))) != nil, model.isWaiting else { return }
                 await model.refresh()
             }
         }
@@ -407,9 +409,12 @@ struct AcceptInvitationView: View {
         .navigationTitle("Accept an Invitation")
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
+        // While waiting for their device: look again every two seconds. A cancelled sleep (the step moved on, so the
+        // task's id changed) must not refresh once more: that refresh took a finished step back to waiting, and the
+        // screen flickered between the two for as long as it was open (the first Mac run's UI tests).
         .task(id: model.isWaiting) {
-            while model.isWaiting, !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+            while model.isWaiting {
+                guard (try? await Task.sleep(for: .seconds(2))) != nil, model.isWaiting else { return }
                 await model.refresh()
             }
         }
@@ -661,9 +666,12 @@ struct MemberVerificationView: View {
         .navigationTitle("Check \(model.memberName)")
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
+        // While waiting for their device: look again every two seconds. A cancelled sleep (the step moved on, so the
+        // task's id changed) must not refresh once more: that refresh took a finished step back to waiting, and the
+        // screen flickered between the two for as long as it was open (the first Mac run's UI tests).
         .task(id: model.isWaiting) {
-            while model.isWaiting, !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+            while model.isWaiting {
+                guard (try? await Task.sleep(for: .seconds(2))) != nil, model.isWaiting else { return }
                 await model.refresh()
             }
         }

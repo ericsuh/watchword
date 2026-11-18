@@ -107,8 +107,8 @@ import WatchwordSharing
 #endif
 
 /// The control that scans the other person's screen: the camera on iPhone and iPad; nothing on a Mac, which shows
-/// codes and does not scan them (ADR 0010). Under `--uitest` (Debug only) a stand-in reads the UI-test household
-/// member's screen instead, as the file-picker stand-ins do, so XCUITests drive the same model entry point
+/// codes and does not scan them (ADR 0010). Under `--uitest` (Debug only, iPhone and iPad) a stand-in reads the UI-test
+/// household member's screen instead, as the file-picker stand-ins do, so XCUITests drive the same model entry point
 /// (`cameraScanned`) the camera does.
 struct ScanCodeButton: View {
     let title: String
@@ -142,7 +142,9 @@ struct ScanCodeButton: View {
                     CodeScannerView { payload in Task { await onScan(payload) } }
                 }
             #endif
-            #if DEBUG
+            // iPhone and iPad only, like the camera it stands in for: a Mac scans nothing, so a UI test of a scan on a
+            // Mac would test a path no Mac has.
+            #if DEBUG && os(iOS)
                 if app.uiTestPeer != nil {
                     Button("Scan the household member's screen (UI test)") {
                         Task { if let payload = await uiTestPayload() { await onScan(payload) } }
