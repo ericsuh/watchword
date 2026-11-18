@@ -4,6 +4,7 @@ import WatchwordEnvelope
 import WatchwordInterchange
 import WatchwordMatching
 import WatchwordModel
+import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
 
@@ -30,6 +31,9 @@ enum FuzzTarget: String, CaseIterable, Sendable {
     /// The encrypted Watchword archive's parser: everything it checks before a key is derived (no derivation here, so
     /// a run spends its time on the parser, not on PBKDF2).
     case archive
+    /// What a vault sharing code session reads from a camera, a keyboard or the board (ADR 0010): the scanned codes,
+    /// typed numbers and confirmation codes, and the three board messages.
+    case sharingCode = "sharing-code"
 
     /// Tight limits, so a run spends its time in the parsers and not in megabytes of input. The standard limits are
     /// the same code with larger numbers.
@@ -131,6 +135,26 @@ enum FuzzTarget: String, CaseIterable, Sendable {
             guard let payload = try? SyncPayload.parse(bytes, allowedKinds: Set(EnvelopeKind.allCases)) else { return }
             let reread = try? SyncPayload.parse(payload.encoded(), allowedKinds: Set(EnvelopeKind.allCases))
             require(reread == payload, "a sync payload does not round-trip")
+        case .sharingCode:
+            let text = String(decoding: bytes, as: UTF8.self)
+            if let code = try? ScannedSharingCode(scanned: text) {
+                require(code.payload == text, "a scanned sharing code was not its one spelling")
+            }
+            if let code = try? FingerprintCode(scanned: text) {
+                require(code.payload == text, "a scanned fingerprint code was not its one spelling")
+            }
+            if let number = SharingSessionNumber(typed: text) {
+                require(number.digits.utf8.count == 8, "a typed number was not eight digits")
+                require(SharingSessionNumber(typed: number.digits) == number, "a typed number does not round-trip")
+            }
+            if let digits = SharingTypedDigits.digits(in: text, count: 6) {
+                require(digits.allSatisfy { $0 >= 0x30 && $0 <= 0x39 }, "a typed code held more than digits")
+            }
+            for kind in SharingSessionMessage.Kind.allCases {
+                guard let message = try? SharingSessionMessage.parse(bytes, expecting: kind) else { continue }
+                require(message.encoded() == bytes, "a board message is not its one encoding")
+                require(bytes.count == SharingSessionMessage.length(of: kind), "a board message of another length")
+            }
         case .signedObject:
             guard let object = try? SignedObject.parse(bytes) else { return }
             require((try? SignedObject.parse(object.serialized())) == object, "a signed object does not round-trip")
