@@ -676,16 +676,24 @@ extension AdversarialSharedVaultTests {
         let next = UInt64(await household.transport.list(prefix: ownStream).count) + 1
         let forged = try await impostor.session.sealDescriptionAsAModifiedClient(
             vaultID, to: "Personal", version: ownersRow.version + 1, device: ownerDevice)
-        try await impostor.session.publishSegmentAsAModifiedClient(vaultID, rows: [forged], sequence: next)
+        // An ordinary write beside it, which the member may make (review finding S68): a device that applies it has
+        // verified the segment and judged it, so the description was refused by the rule and for no other reason.
+        let item = try await impostor.session.save(Self.bank(in: vaultID))
+        let itemRow = try #require(await impostor.session.storedRowForTest(RecordKey(recordID: item.id, kind: .item)))
+        try await impostor.session.publishSegmentAsAModifiedClient(vaultID, rows: [forged, itemRow], sequence: next)
         try await Self.syncAll([newcomer, owner, bystander, newcomer])
         for account in [newcomer, owner, bystander] {
             #expect(try await Self.name(of: vaultID, on: account) == "Household")
         }
-        // Devices holding every key judge it and hold it aside; the newcomer applies none of it.
+        // Devices holding every key judge it and hold it aside; the newcomer applies none of the description, and the
+        // member's item counts as their write there and on the other member's device.
         for account in [owner, bystander] {
             #expect(try await Self.holdsDescriptionAside(vaultID, on: account))
         }
         #expect(try await newcomer.session.storedRowForTest(key)?.envelope == ownersRow.envelope)
+        for account in [newcomer, bystander] {
+            #expect(try await account.session.item(id: item.id).title == item.title, "the segment was judged")
+        }
     }
 
     /// Threat: review finding S62. A current member who may write but is no administrator (A4), with a client that
