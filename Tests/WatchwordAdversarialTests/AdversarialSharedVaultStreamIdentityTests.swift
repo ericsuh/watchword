@@ -112,7 +112,14 @@ extension AdversarialSharedVaultTests {
         var later = Self.bank(in: vaultID)
         later.title = "Written by the victim afterwards"
         later = try await promoted.session.save(later)
-        #expect(try await promoted.session.syncAll().vaults[vaultID]?.ownStreamConflict == head + 1)
+        let squatted = try await promoted.session.syncAll()
+        #expect(squatted.vaults[vaultID]?.ownStreamConflict == head + 1)
+        #expect(squatted.sharing[vaultID]?.ownStreamSquattedBy == writer.accountID, "the signer was not named")
+        // Junk in its place names nobody.
+        await household.transport.tamper(planted, contents: [0x57, 0x57])
+        let junk = try await promoted.session.syncAll()
+        #expect(junk.vaults[vaultID]?.ownStreamConflict == head + 1)
+        #expect(junk.sharing[vaultID]?.ownStreamSquattedBy == nil, "junk was attributed")
         await Self.remove(planted, from: household.transport)
         #expect(try await owner.session.removeMember(writer.accountID, from: vaultID) == .complete)
         try await Self.syncAll([promoted, owner, bystander], rounds: 3)
@@ -172,7 +179,9 @@ extension AdversarialSharedVaultTests {
         var item = Self.bank(in: vaultID)
         item.title = "Written on the new device"
         item = try await fresh.session.save(item)
-        #expect(try await fresh.session.syncAll().vaults[vaultID]?.ownStreamConflict == 1, "the plant was taken in")
+        let squatted = try await fresh.session.syncAll()
+        #expect(squatted.vaults[vaultID]?.ownStreamConflict == 1, "the plant was taken in")
+        #expect(squatted.sharing[vaultID]?.ownStreamSquattedBy == former.accountID, "the signer was not named")
         await Self.remove(planted, from: household.transport)
         try await Self.syncAll([fresh, owner, member])
         for account in [owner, member] {

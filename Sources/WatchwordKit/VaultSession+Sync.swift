@@ -117,6 +117,10 @@ extension VaultSession {
                 // in this sync (ADR 0009), as its log is whole.
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
                 if vaultReport.deletionsDeferred > 0 { deferred.append(vaultID) }
+                if let conflict = vaultReport.ownStreamConflict, sharing.vaults[vaultID] != nil {
+                    sharingReports[vaultID, default: SharedVaultSyncReport()].ownStreamSquattedBy =
+                        await ownStreamSigner(at: conflict, in: vaultID, account: record)
+                }
                 if vaultReport.transportUnavailable || vaultReport.deferredUntilUnlock
                     || vaultReport.ownStreamConflict != nil || vaultReport.ownStreamExhausted
                     || vaultReport.ownStreamUnverified != nil

@@ -233,6 +233,12 @@ public struct SharedVaultSyncReport: Sendable, Equatable {
     /// the vault, where no other device would receive it, and nothing is written there until the device is enrolled
     /// again as a new device (`SharedVaultError.deviceIDDoesNotCommit`).
     public var deviceIDDoesNotCommit = false
+    /// The account whose keys signed the object that holds this device's next number in the vault's log, where the
+    /// engine reported `ownStreamConflict` (round 6's L2): a member who listed a device under this device's ID in
+    /// their own registry (S33) signed it. It verifies nowhere (Z157) and costs nothing but this stream, which waits
+    /// there until the object is removed; while it waits, this device publishes no vault's deletions (Z44). Named so
+    /// that the person knows whom to ask, or to remove. `nil` for junk, or an object no listed account signed.
+    public var ownStreamSquattedBy: UUID?
 
     public init() {}
 }

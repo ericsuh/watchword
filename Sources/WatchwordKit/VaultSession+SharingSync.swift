@@ -620,6 +620,38 @@ extension VaultSession {
         return nil
     }
 
+    /// The account that signed the object at `sequence` of this device's own stream in `vaultID`, when it is another
+    /// member's (round 6's L2, `SharedVaultSyncReport.ownStreamSquattedBy`): its account key's signature and the
+    /// signature of a device that account's registry, as the vault's chain anchors it, lists under this device's ID.
+    /// The registries as they are, uncommitted: this attributes an object that counts nowhere and decides nothing, so it
+    /// is the one place shared-vault code reads a member's listing of a device whose ID does not commit to it. `nil`
+    /// for junk, for an object nobody the chain lists signed, and for a vault with no ledger here.
+    func ownStreamSigner(at sequence: UInt64, in vaultID: UUID, account: AccountRecord) async -> UUID? {
+        guard sharing.vaults[vaultID] != nil, let syncSettings else { return nil }
+        let location = SyncObjectLocation.segment(vaultID: vaultID, author: account.deviceID, sequence: sequence)
+        guard
+            let bytes = try? await syncSettings.transport.fetch(
+                location.name, maximumLength: syncSettings.configuration.maximumObjectLength),
+            let object = try? SignedObject.parse(bytes), let parts = DualSignature.decode(object.signature),
+            let vault = sharing.vaults[vaultID]
+        else { return nil }
+        let message = Self.syncSignedMessage(object.envelope, at: location)
+        let anchors = Self.memberAnchors(of: vault.ledger, excluding: account.accountID)
+        for (accountID, signingKey) in anchors.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            guard
+                let state = sharing.registries[MemberRegistryAnchor(accountID: accountID, signingKey: signingKey)],
+                let device = state.devices[location.author] ?? state.revoked[location.author],
+                (try? Signatures.verify(
+                    parts.account, for: message, domain: .logSegment, signingKey: state.accountSigningKey)) != nil,
+                (try? DeviceSignatures.verify(
+                    parts.device, for: message, domain: .logSegment, deviceID: location.author, key: device.key))
+                    != nil
+            else { continue }
+            return accountID
+        }
+        return nil
+    }
+
     // MARK: - Verifying a shared vault's objects (`SyncKeyring.verify`)
 
     /// `syncVerify` for a shared vault: the object must carry the dual signature of a device registered to an
