@@ -31,7 +31,7 @@
         func saveZone(_ zone: CKRecordZone) async throws
 
         /// Returns if the zone exists; otherwise throws CloudKit's error (`zoneNotFound`, or `userDeletedZone`).
-        /// Asked only by `CloudKitTransport.startStoreAgain`, before its one-record query: a zone fetch reads the zone's
+        /// Asked only by `CloudKitTransport.probeZone`, before its one-record queries: a zone fetch reads the zone's
         /// metadata, which no encryption key protects, so it is no evidence that the zone's records can be read after
         /// a key reset (review finding SR26).
         func fetchZone(_ zoneID: CKRecordZone.ID) async throws
@@ -227,37 +227,27 @@
         /// The marker is set, never forgotten. Any other failure is the transport's typed error, and the zone stays
         /// as it was.
         ///
-        /// The probe is a fetch of the zone, then a query for one record in the listing's own shape (`probeQuery`).
-        /// The fetch alone cannot see a key reset: Apple documents `CKErrorUserDidResetEncryptedDataKey` as set on the
-        /// `zoneNotFound` error CloudKit returns when the zone's *records* are fetched (the documentation of
-        /// `CKRecord.encryptedValues` and of that key), and the zone's own metadata is not encrypted, so after a reset
-        /// the fetch succeeds and only reading records says what happened (review finding SR26). The query is
-        /// `name BEGINSWITH`, as every listing is, so it needs no index that a listing does not (SR20 (b): not a
-        /// `TRUEPREDICATE` query). A reset is believed whether CloudKit answers it for the whole query or for one
-        /// record in it. All of this is how the documentation reads, unverified against CloudKit: this file has not
-        /// been run there.
+        /// What the zone is comes from `probeZone`, and only its explicit word that the key was reset deletes
+        /// anything: a transient failure, an empty zone or a readable one never does. That word is asked for twice,
+        /// the second time immediately before the deletion, and a zone that reads by then is left alone: another
+        /// device answering the same question may have deleted, saved and uploaded in between, and a flag CloudKit
+        /// set while iCloud Keychain was still syncing may have cleared (review finding SR30). CloudKit has no
+        /// conditional zone deletion, so this narrows the window to the time between the second look and the
+        /// deletion; it does not close it.
         public func startStoreAgain() async throws {
-            var keyWasReset = false
-            do {
-                try await database.fetchZone(zoneID)
-                let page = try await database.records(
-                    matching: Self.probeQuery, inZoneWith: zoneID, desiredKeys: [Self.nameField], resultsLimit: 1,
-                    continuing: nil)
-                for case (_, .failure(let error)) in page.matchResults {
-                    if let zone = CloudKitErrors.zoneNotFound(in: error), CloudKitErrors.isReset(zone) { throw zone }
-                }
-                // The zone is there and its records can be read: nothing to recreate, and nothing in it is touched.
+            var probe = try await probeZone()
+            if probe == .keyReset { probe = try await probeZone() }
+            switch probe {
+            case .readable, .empty:
+                // The zone is there and nothing says its records cannot be read: nothing to recreate, and nothing in
+                // it is touched.
                 try? await marker.markSeen(markerName)
                 return
-            } catch let error where CloudKitErrors.zoneNotFound(in: error) != nil {
-                keyWasReset = CloudKitErrors.zoneNotFound(in: error).map(CloudKitErrors.isReset) ?? false
-            } catch let error as CKError where error.code == .userDeletedZone {
-                keyWasReset = false
-            } catch {
-                throw CloudKitErrors.transportError(for: error, name: zoneName)
+            case .keyReset, .missing:
+                break
             }
             do {
-                if keyWasReset {
+                if probe == .keyReset {
                     do {
                         try await database.deleteZone(zoneID)
                     } catch let error where Self.zoneAlreadyGone(error) {
@@ -271,6 +261,71 @@
             try? await marker.markSeen(markerName)
         }
 
+        /// What one look at the zone found.
+        enum ZoneProbe: Equatable {
+            /// A record was listed and then read whole, its encrypted payload included.
+            case readable
+            /// The zone exists and no probe prefix lists anything: no evidence that its records can be read, and none
+            /// that its key was reset (review finding SR29). Never a reason to delete.
+            case empty
+            /// CloudKit said the zone's encryption key was reset: for the zone, for one record of a query, or for the
+            /// one record read.
+            case keyReset
+            /// No zone (`zoneNotFound` without the reset flag, or `userDeletedZone`).
+            case missing
+        }
+
+        /// The prefixes `probeZone` reads one record of, in order: the layout's three top-level prefixes, each a
+        /// listing's `name BEGINSWITH` query, so the probe needs no index a listing does not (SR20 (b): never a
+        /// `TRUEPREDICATE` query).
+        static var probePrefixes: [String] { ["account/", "vault/", "sharing/"] }
+
+        /// Looks at the zone: a fetch of the zone, then for each of `probePrefixes` a query for one record that asks
+        /// for the encrypted payload as well as the name, and a fetch of the record it lists, as `fetch` reads it.
+        ///
+        /// The zone fetch alone cannot see a key reset: Apple documents `CKErrorUserDidResetEncryptedDataKey` as set on
+        /// the `zoneNotFound` error CloudKit returns when the zone's *records* are fetched (the documentation of
+        /// `CKRecord.encryptedValues` and of that key), and the zone's own metadata is not encrypted (SR26). Nor does
+        /// the documentation say whether a query that asks only for plain fields answers the reset, or whether CloudKit
+        /// reports it for the whole query or record by record (SR29). So the probe asks for the encrypted field, reads
+        /// the listed record whole, and believes the reset however it comes: thrown by the query, in one record's
+        /// result, or by the fetch. A record that went missing in between is skipped. A query or fetch that fails for
+        /// any other reason is the transport's typed error, and nothing is decided. All of this is how the
+        /// documentation reads, unverified against CloudKit: this file has not been run there.
+        func probeZone() async throws -> ZoneProbe {
+            do {
+                try await database.fetchZone(zoneID)
+                for prefix in Self.probePrefixes {
+                    let page = try await database.records(
+                        matching: Self.listingQuery(prefix: prefix), inZoneWith: zoneID,
+                        desiredKeys: [Self.nameField, Self.payloadField], resultsLimit: 1, continuing: nil)
+                    for (id, result) in page.matchResults {
+                        switch result {
+                        case .failure(let error):
+                            if CloudKitErrors.isKeyReset(error) { return .keyReset }
+                            continue  // One record's own failure: no evidence either way.
+                        case .success:
+                            do {
+                                _ = try await database.record(for: id)
+                                return .readable
+                            } catch let error where CloudKitErrors.isUnknownItem(error) {
+                                continue  // Deleted since it was listed.
+                            }
+                        }
+                    }
+                }
+                return .empty
+            } catch let error where CloudKitErrors.isKeyReset(error) {
+                return .keyReset
+            } catch let error where CloudKitErrors.zoneNotFound(in: error) != nil {
+                return .missing
+            } catch let error as CKError where error.code == .userDeletedZone {
+                return .missing
+            } catch {
+                throw CloudKitErrors.transportError(for: error, name: zoneName)
+            }
+        }
+
         /// The listing's query for `prefix`: `name BEGINSWITH prefix`, or every record for the empty prefix.
         static func listingQuery(prefix: String) -> CKQuery {
             let predicate =
@@ -278,10 +333,6 @@
                 ? NSPredicate(value: true) : NSPredicate(format: "%K BEGINSWITH %@", nameField, prefix)
             return CKQuery(recordType: recordType, predicate: predicate)
         }
-
-        /// The query `startStoreAgain` reads one record with: a listing's, of the account objects' prefix, so it needs
-        /// only the `name` index every listing needs.
-        static var probeQuery: CKQuery { listingQuery(prefix: "account/") }
 
         /// Whether a zone deletion failed only because there is no zone to delete.
         static func zoneAlreadyGone(_ error: any Error) -> Bool {
@@ -319,6 +370,10 @@
                 results += page.matchResults.count
                 guard results <= maximumListedObjects * 2 else { throw SyncTransportError.listingTooLarge(prefix) }
                 for (id, result) in page.matchResults {
+                    // A reset CloudKit reports record by record is a reset all the same (SR29).
+                    if case .failure(let error) = result, CloudKitErrors.isKeyReset(error) {
+                        throw SyncTransportError.storeReset
+                    }
                     guard case .success(let record) = result, let name = Self.objectName(forRecordName: id.recordName),
                         id.zoneID == zoneID, name.hasPrefix(prefix), record.recordType == Self.recordType,
                         record[Self.nameField] as? String == name
@@ -454,6 +509,12 @@
         /// `zoneNotFound` that CloudKit marks as a reset of its own encryption key: the data is gone, not absent.
         public static func isReset(_ error: CKError) -> Bool {
             error.userInfo[CKErrorUserDidResetEncryptedDataKey] as? Bool == true
+        }
+
+        /// Whether `error` is, or holds as the one record's error of a partial failure, a `zoneNotFound` that CloudKit
+        /// marks as a reset of its encryption key.
+        static func isKeyReset(_ error: any Error) -> Bool {
+            zoneNotFound(in: error).map(isReset) ?? false
         }
 
         /// The `zoneNotFound` error in `error`, directly or as the one record's error of a partial failure.
