@@ -18,8 +18,14 @@ actor HidingTransport: SyncTransport {
         self.base = base
     }
 
+    /// Every name deleted through this view, in order.
+    var deleted: [String] = []
+    /// A name whose deletion fails, as an unreachable store's would.
+    var failingDelete: String?
+
     func hide(_ names: Set<String>) { hidden = names }
     func makeUnreadable(_ names: Set<String>) { unreadable = names }
+    func failDeleting(_ name: String) { failingDelete = name }
 
     func list(prefix: String) async throws -> [String] {
         await base.list(prefix: prefix).filter { !hidden.contains($0) }
@@ -32,7 +38,11 @@ actor HidingTransport: SyncTransport {
 
     func create(_ name: String, contents: [UInt8]) async throws { try await base.create(name, contents: contents) }
 
-    func delete(_ name: String) async throws { await base.delete(name) }
+    func delete(_ name: String) async throws {
+        if name == failingDelete { throw SyncTransportError.unavailable }
+        deleted.append(name)
+        await base.delete(name)
+    }
 }
 
 /// The engine's second-round fixes (Z30 to Z39) as their independent review attacked them (docs/06-adversarial-review.md
@@ -290,5 +300,154 @@ extension AdversarialSyncTests {
         let (engine, _, _) = await Self.joiner(f, state: state, configuration: SyncTestClient.configuration)
         await #expect(throws: DiskFailure.self) { try await engine.sync() }
         await #expect(throws: DiskFailure.self) { try await engine.download() }
+    }
+
+    // MARK: - Claims of rows Z31 to Z39 that no test held (the review's list)
+
+    /// Z31's order: a device collects its own segments lowest first, and a delete that fails part-way stops there, so
+    /// no gap opens below a segment still listed. Threat: none but a store that fails between two deletions.
+    @Test("collection deletes lowest first and stops at a delete that fails")
+    func collectionOrderAndAFailedDelete() async throws {
+        let f = try await Self.fixture()
+        _ = try await Self.collectableStream(f, segments: 5)
+        let (store, syncState) = (await f.writer.store, await f.writer.syncState)
+        let transport = HidingTransport(base: f.transport)
+        await transport.failDeleting(f.segmentName(3))
+        let writer = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: transport, store: store,
+            syncState: syncState)
+        let report = try await writer.sync()
+        #expect(report.transportUnavailable)
+        #expect(await transport.deleted == [f.segmentName(1), f.segmentName(2)])
+        for sequence in UInt64(3)...5 { #expect(await f.transport.allObjects[f.segmentName(sequence)] != nil) }
+        // The store reachable again: the rest goes, lowest first, and the head stays.
+        await transport.failDeleting("")
+        try await writer.sync()
+        #expect(await transport.deleted == (1...4).map { f.segmentName(UInt64($0)) })
+        #expect(await f.transport.allObjects[f.segmentName(5)] != nil)
+    }
+
+    /// Z32's end: the hold for a trusted snapshot's claim ends with its signer. Threat: an insider device of the
+    /// account whose claim holds a device with an older state back, and which the person then revokes.
+    @Test("a hold for a snapshot's claim ends when its signer is revoked")
+    func claimEndsWithItsSigner() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("First", password: "1"))
+        try await f.writer.sync()
+        let insiderID = UUID(uuidString: "D0000000-0000-4000-8000-0000000000C0")!
+        await f.keys.trust(device: insiderID)
+        try await f.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: Self.vault, author: insiderID, number: 50, vector: [Self.a: 9],
+                entries: []),
+            signedBy: FakeSyncKeyring(deviceID: insiderID, keys: f.keys))
+        // Its own segment 1 is not usable in this sync and an unusable name sits where the claim points, so the
+        // device has no anchor and the claim holds it.
+        await f.transport.tamper(f.segmentName(1), contents: [1, 2, 3])
+        await f.transport.tamper(f.segmentName(9), contents: [1, 2, 3])
+        await f.writer.syncState.tamper(SyncState(vaultID: Self.vault))
+        try await f.writer.save(Self.login("Second", password: "2"))
+        let held = try await f.writer.sync()
+        #expect(held.ownStreamUnverified != nil, "nothing held the device: the test proves nothing")
+        await f.keys.retire(device: insiderID)
+        let released = try await f.writer.sync()
+        #expect(released.ownStreamUnverified == nil, "the claim of a revoked device still holds the device")
+    }
+
+    /// Z38: a device whose version found no room, revoked since, holds this device's snapshots back no longer: what a
+    /// revoked device wrote is not waited for. Threat: none; a revocation after the quarantine filled.
+    @Test("a dropped version of a device revoked since holds no snapshot back")
+    func droppedVersionOfARevokedDevice() async throws {
+        let f = try await Self.fixture()
+        var configuration = Self.jumpConfiguration()
+        configuration.snapshotThreshold = 4
+        configuration.maximumQuarantinedEntriesPerAuthor = 1
+        let store = await f.writer.store
+        let elected = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: store)
+        await f.keys.trust(device: Self.b)
+        let author = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        try await elected.save(Self.login("Mine", password: "m"))
+        try await elected.sync()
+        try await author.sync()
+        _ = try await Self.plantVersion(900, title: "Far ahead", on: author)
+        _ = try await Self.plantVersion(901, title: "Farther ahead", on: author)
+        try await author.sync()
+        #expect(try await elected.sync().quarantineFull == 1)
+        await elected.syncState.discardQuarantined(
+            await elected.syncState.quarantined(vaultID: Self.vault), vaultID: Self.vault)
+        await f.keys.retire(device: Self.b)
+        var written = 0
+        for index in 0..<8 {
+            try await elected.save(Self.login("More \(index)", password: "m"))
+            written += try await elected.sync().snapshotsWritten
+        }
+        #expect(written > 0, "a revoked device's dropped version still holds snapshots back")
+    }
+
+    /// Z39: a staged row past the bounds a reader lists (the staging area is a local file, A8) is dropped before
+    /// anything reads its number. Threat: A8, who plants a staged object at `UInt64.max` in this device's own stream
+    /// carrying this device's genuine signatures (an earlier object of its own, renamed).
+    @Test("a staged object past the listed bounds is dropped and moves nothing")
+    func stagedPastTheBounds() async throws {
+        let f = try await Self.fixture()
+        try await f.writer.save(Self.login("First", password: "1"))
+        try await f.writer.sync()
+        let location = SyncObjectLocation.segment(vaultID: Self.vault, author: Self.a, sequence: .max)
+        let payload = SyncPayload(
+            kind: .segment, vaultID: Self.vault, author: Self.a, number: .max, vector: [:], entries: [])
+        let keyring = await f.writer.keyring
+        let envelope = try await keyring.seal(payload.encoded(), at: location)
+        let signature = try await keyring.sign(envelope, at: location)
+        await f.writer.syncState.stage(
+            StagedObject(location: location, object: SignedObject(signature: signature, envelope: envelope)))
+        let later = try await f.writer.save(Self.login("Later", password: "2"))
+        let report = try await f.writer.sync()
+        #expect(report.segmentsWritten == 1 && !report.ownStreamExhausted)
+        #expect(await f.writer.state()?.nextSequence == 3)
+        #expect(await f.writer.syncState.staged(vaultID: Self.vault).isEmpty)
+        let reader = await f.reader()
+        try await reader.sync()
+        #expect(try await reader.items()[later.id] != nil)
+    }
+
+    /// Z33 through a snapshot: a version refused as a jump while a snapshot is merged is tried again once the rest of
+    /// the pass is in. Threat: none; the record-ID order a snapshot's entries come in, on a device with a history.
+    @Test("a version a snapshot carries ahead of the ones below it is merged once they are")
+    func jumpInsideASnapshot() async throws {
+        let f = try await Self.fixture()
+        let configuration = Self.jumpConfiguration()
+        let store = await f.writer.store
+        let a = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: store)
+        try await a.save(Self.login("First", password: "1"))
+        try await a.sync()
+        await f.keys.trust(device: Self.b)
+        let reader = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        try await reader.sync()
+        // Thirty more versions in A's store, published only in a snapshot; the lowest record ID carries the highest.
+        var ids: [UUID] = []
+        for index in 0..<29 {
+            let id = UUID(uuidString: String(format: "F%07X-0000-4000-8000-000000000000", index + 1))!
+            ids.append(try await a.save(Self.login("Later \(index)", password: "l", id: id)).id)
+        }
+        let first = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+        ids.append(try await a.save(Self.login("Highest", password: "h", id: first)).id)
+        let rows = await store.records(in: Self.vault, kind: .item)
+        try await f.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: Self.vault, author: Self.a, number: 31, vector: [Self.a: 1],
+                entries: rows.map(SyncEntry.init).sorted(by: SyncPayload.entryOrder)),
+            signedBy: a.keyring)
+        let report = try await reader.sync()
+        #expect(report.quarantined.isEmpty)
+        #expect(Set(ids).isSubset(of: Set(try await reader.items().keys)))
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).isEmpty)
     }
 }
