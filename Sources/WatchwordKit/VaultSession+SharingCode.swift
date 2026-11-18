@@ -418,7 +418,7 @@ extension VaultSession {
     /// is unavailable here may be owned by the account (V28): its chain is one this device cannot read, and a pin of
     /// its owner replaced on a session's word would be what an invitation for it is accepted on. Scoped to that
     /// owner (V33): one damaged or planted row does not stop every other pin being replaced. A vault whose owner this
-    /// device cannot name (a granted key, no marker, no saved owner) still refuses every replacement.
+    /// device cannot name (no marker: a saved owner row is not signed, V42) still refuses every replacement.
     func requirePinReplaceable(_ contact: PublicKeyBundle, listedIn vaultID: UUID?) throws {
         guard sharing.loaded, sharing.markersLoaded, let account else {
             throw SharedVaultError.sharingCodeKeysNotListed
@@ -440,7 +440,10 @@ extension VaultSession {
     }
 
     /// The owner of each shared vault that is unavailable here, as far as this device can name them: the account's
-    /// marker, else the saved `.owner` row; `nil` where neither does, or where the account's markers disagree.
+    /// marker; `nil` where there is none, or where the account's markers disagree. Never the saved `.owner` row, which
+    /// is not signed: A8 rewriting it to another contact would have scoped the guard to that contact and left the real
+    /// owner's pin replaceable on a session's word (review of V31 to V37, L2; docs/06-adversarial-review.md V42). The
+    /// row still words a vault that lacks only its owner's pin (`unavailableSharedVaults`), which decides nothing.
     func unavailableVaultOwners(account: AccountRecord) -> [UUID?] {
         let granted = keys?.vaultKeys.values.filter(\.arrivedByGrant).map(\.vaultID) ?? []
         let candidates = Set(sharing.markers.keys).union(sharing.unrestored.keys).union(granted)
@@ -449,7 +452,7 @@ extension VaultSession {
                 return nil
             }
             if sharing.markerConflicts.contains(vaultID) { return .some(nil) }
-            return .some(sharing.markers[vaultID] ?? sharing.unrestored[vaultID]?.savedOwner)
+            return .some(sharing.markers[vaultID])
         }
     }
 

@@ -68,3 +68,54 @@ extension AdversarialSharedVaultTests {
         #expect(row.keyID == newKey, "sealed under a key the removed member holds")
     }
 }
+
+// The same review, finding L2 (docs/06-adversarial-review.md V42).
+extension AdversarialSharedVaultTests {
+    /// Threat: A8 rewrites the unsigned `.owner` row of a shared vault unavailable on a member's device to name another
+    /// contact, while the store (A1) keeps the account's marker from it, so the device cannot name the owner. The
+    /// guard on replacing a pin from a session's word was scoped to the owner the row named: the contact's pin was
+    /// refused, and the real owner's could be replaced by keys A1 serves, which then anchor the vault when it is set up
+    /// again. With no marker the device names nobody, and no pin is replaced on a session's word.
+    @Test("with no marker naming the owner, no pin is replaced on a session's word, whatever the saved row names")
+    func noMarkerNoPinReplacement() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 1_570)
+        let member = members[0]
+        let contact = try await household.account(seed: 1_571)
+        let view = WithholdingTransport(base: household.transport)
+        let markers = AccountObjectLocation.vaultsPrefix(member.accountID) + "\(vaultID.uuidString)/shared/"
+        await view.withhold(Set(await household.transport.list(prefix: markers)))
+        await view.withholdNew(under: markers)
+        let device = try await member.vault.enrolledDevice(over: view)
+        let state = InMemorySharingStateStore()
+        let contacts = InMemoryVerifiedContactStore()
+        // A8, before the app starts: the saved rows name the contact as the vault's owner.
+        await state.tamper(.owner, vaultID: vaultID, value: contact.accountID.byteArray)
+        await state.tamper(.ledger, vaultID: vaultID, value: Array(repeating: 0x57, count: 64))
+        await device.session.configureSharing(
+            SharingSettings(state: state, contacts: contacts, directory: household.directory, board: household.board))
+        try await device.session.unlock(password: TestVault.password)
+        try await device.session.sync()
+        try await device.session.verifyContact(owner.accountID, evidence: .safetyNumber(owner.safetyNumber))
+        #expect(try await device.session.sharedVaultsAwaitingOwnerCheck() == [vaultID])
+
+        // A1 serves other keys for the owner's account, and runs a session with them.
+        let replacement = try SharingParty(accountID: owner.accountID, seed: 1_572)
+        await household.directory.publish(replacement.bundle)
+        var generator = SeededGenerator(seed: 1_573)
+        var starter = SharingCodeStarter.draw(as: replacement.bundle, using: &generator, at: Date())
+        try await starter.publish(on: household.board, at: Date())
+        _ = try await device.session.joinSharingCodeSession(number: starter.number.digits)
+        try await starter.poll(board: household.board, directory: household.directory, at: Date())
+        let shown = try await device.session.refreshSharingCodeSession()
+        _ = try starter.enterJoinerCode(try #require(shown.ownCode), at: Date())
+        let typed = try await device.session.enterSharingCode(try #require(starter.code))
+        #expect(typed.keysDifferFromPin && !typed.pinned)
+        await #expect(throws: SharedVaultError.sharingCodeKeysNotListed) {
+            try await device.session.replacePinFromSharingCode()
+        }
+        let pins = VerifiedContacts(store: contacts, account: member.bundle)
+        let pin = try #require(try await pins.pinned(owner.accountID))
+        #expect(pin.bundle.hasSameKeys(as: owner.bundle), "the owner's pin was replaced on a session's word")
+    }
+}
