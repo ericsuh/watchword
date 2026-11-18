@@ -86,6 +86,8 @@ extension AdversarialSharedVaultTests {
         await state.failSecondPendingDeletionRead()
         try await Self.restoreOntoOtherHardware(device, account: member.accountID)
         #expect(try await Self.deviceID(of: device) == secondID, "registered without the parked deletions")
+        // Nor was a device key made for an ID the failed attempt never registered (Z182).
+        #expect(await !device.vault.keychain.contains(.deviceSigningKey(accountID: member.accountID)))
         await device.session.lock()
         try await device.session.unlock(password: TestVault.password)
         #expect(try await Self.deviceID(of: device) != secondID, "the next unlock did not register")
