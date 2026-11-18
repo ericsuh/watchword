@@ -231,3 +231,61 @@ extension AdversarialSharedVaultTests {
         }
     }
 }
+
+// Review finding Z125: claims of Z48's that no test would have caught being false.
+extension AdversarialSharedVaultTests {
+    /// Threat: a device of the account led into another chain (Z59), or code that reaches `markShared` with another
+    /// owner. A device that holds a marker for a vault never signs a second one naming someone else: the account's
+    /// signature on two owners is the dispute, and this device must not be the one that makes it.
+    @Test("a device that holds a vault's marker signs no marker naming another owner")
+    func markSharedRefusesASecondOwner() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 12500)
+        let (owner, member, vaultID) = (home.owner, home.members[0], home.vaultID)
+        let markers = AccountObjectLocation.vaultsPrefix(member.accountID) + "\(vaultID.uuidString)/shared/"
+        let listed = Set(await household.transport.list(prefix: markers))
+        let account = try #require(try await member.vault.store.loadAccount())
+        let rows = try await member.vault.store.records(in: member.accountID, kind: .vaultDirectory).count
+        let epoch = await member.session.lockEpoch
+        await #expect(throws: SharingError.vaultOwnerConflict(vaultID: vaultID)) {
+            try await member.session.markShared(vaultID, owner: UUID(), account: account, epoch: epoch)
+        }
+        #expect(try await member.vault.store.records(in: member.accountID, kind: .vaultDirectory).count == rows)
+        #expect(Set(await household.transport.list(prefix: markers)) == listed)
+        #expect(try await member.session.sharedVaultInvitation(vaultID)?.ownerAccountID == owner.accountID)
+    }
+
+    /// Threat: a device of the account that has since been revoked (it keeps the account key) signing a marker that
+    /// names another owner. Markers are compared only from devices registered now: once the revocation is known, the
+    /// revoked device's marker starts no dispute, and the vault stays open on the account's other devices.
+    @Test("a marker signed by a device revoked since starts no dispute")
+    func revokedDevicesMarkerIsNotCompared() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 12510)
+        let (owner, member, vaultID) = (home.owner, home.members[0], home.vaultID)
+        let view = WithholdingTransport(base: household.transport)
+        let markers = AccountObjectLocation.vaultsPrefix(member.accountID) + "\(vaultID.uuidString)/shared/"
+        await view.withhold(Set(await household.transport.list(prefix: markers)))
+        let rogue = try await member.enrolledDevice(over: view, directory: household.directory)
+        let rogueAccount = try #require(try await rogue.vault.store.loadAccount())
+        let location = AccountObjectLocation.vaultShared(
+            accountID: member.accountID, vaultID: vaultID, author: rogueAccount.deviceID)
+        let body = VaultSession.sharedMarkerBody(vaultID: vaultID, owner: UUID())
+        let signature = try await rogue.session.dualSignature(
+            VaultSession.directoryMessage(name: location.name, body: body), domain: .vaultDirectory,
+            keys: try #require(await rogue.session.keys), account: rogueAccount)
+
+        try await member.session.sync()
+        try await member.session.revokeDevice(
+            rogueAccount.deviceID, password: .keepPassword(current: TestVault.password))
+        try await member.session.sync()
+        let second = try await household.secondDevice(of: member)
+        await household.transport.tamper(
+            location.name, contents: SignedObject(signature: signature, envelope: body).serialized())
+        try await Self.syncAll([second, member])
+
+        #expect(try await second.session.sharedVaultInvitation(vaultID)?.ownerAccountID == owner.accountID)
+        #expect(try await !member.session.sharedVaultStatus(vaultID).ownerDisputed)
+        _ = try await member.session.save(Self.bank(in: vaultID))
+    }
+}
