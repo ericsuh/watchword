@@ -478,8 +478,9 @@ Segments are collected lowest first, as a contiguous run of listed numbers that 
 lacks, and never the device's own genuine head (what it published or verified as its own), whatever names are listed
 above it (Z126), so while one of a stream's segments is listed none above it was collected; publishing then cannot reuse a number, and an unfetchable name far ahead mutes nothing (Z31). Without
 such an object, a trusted device's snapshot that claims more of the stream than the device can account for holds
-publishing back too, read from the snapshots as they are, so it never moves the numbering and ends when the snapshot
-or its signer goes (Z32).
+publishing back too, while some object of the stream at or past the next number is listed (a true claim implies one,
+since the head is never collected, Z130), read from the snapshots as they are, so it never moves the numbering and ends
+when the snapshot or its signer goes, or when nothing of the stream is listed there (Z32).
 
 **Merge** (needs the vault key). Staged objects are verified again (the staging area is in the local file, which
 A8 can edit), then checked and opened in the order kind, context, AEAD, payload. Each stream is merged strictly in

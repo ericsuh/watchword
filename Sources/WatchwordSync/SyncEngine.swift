@@ -497,13 +497,17 @@ public actor SyncEngine {
     /// device still trusted says its stream got that far: a segment is collected only once a listed snapshot covers
     /// it, so a claim beyond this device's own count is what an older state would see. The claim is read from the
     /// snapshots as they are now, so a snapshot collected or a signer revoked ends it; it never moves the numbering.
+    /// And it holds only while some object of this device's stream at or past its next number is listed (review
+    /// finding Z130): a device's genuine head is never collected (Z126), so a true claim implies one, and a claim about
+    /// a stream that lists nothing there (an insider's, about a device that never published in the vault, which an
+    /// honest device that merged it carries on in snapshots of its own) would otherwise hold the device for good.
     private func ownStreamHold(state: SyncState, listing: Listing, retired: Set<UUID>) -> UInt64? {
         guard !listing.ownAnchored else { return nil }
         let next = state.nextSequence
         let undecided = listing.ownUndecided.filter { $0 >= next }.min()
         let vouched =
             state.snapshots.filter { !retired.contains($0.key.author) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
-        if vouched >= next { return next }
+        if vouched >= next, (listing.segments[deviceID] ?? []).contains(where: { $0 >= next }) { return next }
         return undecided
     }
 

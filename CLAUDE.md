@@ -487,7 +487,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   and comes from nothing else: never from a listed name (anyone can create one, Z24), a staged row (Z39), or a
   snapshot's coverage beyond what the stream can have got (Z21). Publishing is held back (`ownStreamUnverified`) only
   where the state could be behind the stream: no own object listed (`Listing.ownAnchored`, Z31), and an own-stream
-  object that cannot be told from this device's own, or a trusted snapshot claiming more of the stream (Z32).
+  object that cannot be told from this device's own, or a trusted snapshot claiming more of the stream while some object
+  of it at or past the next number is listed (Z32, Z130).
   `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
   every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that stops
   at the first number the listing lacks, and never this device's own genuine head (what it published or verified as

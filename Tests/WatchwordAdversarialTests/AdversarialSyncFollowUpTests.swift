@@ -150,4 +150,42 @@ extension AdversarialSyncTests {
         try await reader.sync()
         #expect(try await reader.items()[id] != nil, "the record never reached another device")
     }
+
+    // MARK: - A snapshot's claim about this device's stream (Z130)
+
+    /// Threat: an insider device of the account (C), alone. C snapshots the vault claiming that device A's stream has
+    /// got to 5, though A has never published in the vault. Z32 holds a device without an anchor back while a trusted
+    /// snapshot claims more of its stream than its state accounts for, which is what an older state would see after its
+    /// segments were collected; here it held A back for good, since A had no anchor to get and an honest device that
+    /// merged C's snapshot carries the claim on in snapshots of its own, which revoking C does not end. Its deletions
+    /// in every vault were held back with it. A genuine claim implies a listed object of A's at or past the claimed
+    /// number, since a device's head is never collected (Z126): with none listed, the claim holds nothing back.
+    @Test("a snapshot's claim about a stream that lists nothing does not hold that device back")
+    func claimAboutAStreamWithNothingListed() async throws {
+        let f = try await Self.fixture()
+        let other = await f.reader()
+        try await other.save(Self.login("Theirs", password: "t"))
+        try await other.sync()
+        let insiderID = UUID(uuidString: "D0000000-0000-4000-8000-0000000000C0")!
+        await f.keys.trust(device: insiderID)
+        try await f.plant(
+            SyncPayload(
+                kind: .snapshot, vaultID: Self.vault, author: insiderID, number: 50, vector: [Self.a: 5, Self.b: 1],
+                entries: []),
+            signedBy: FakeSyncKeyring(deviceID: insiderID, keys: f.keys))
+        try await other.sync()
+
+        let mine = try await f.writer.save(Self.login("Mine", password: "m"))
+        for _ in 0..<2 {
+            let report = try await f.writer.sync()
+            #expect(report.ownStreamUnverified == nil, "a claim about a stream that lists nothing mutes the device")
+        }
+        #expect(await f.transport.allObjects[f.segmentName(1)] != nil, "the device published nothing")
+        // A device that has merged the claim passes over what it covers (Z21 accepts that of whoever signs a
+        // snapshot); once the insider is revoked, one that never merged it is shown the device's work.
+        await f.keys.retire(device: insiderID)
+        let later = await f.reader(UUID(uuidString: "D0000000-0000-4000-8000-0000000000D0")!)
+        try await later.sync()
+        #expect(try await later.items()[mine.id] != nil, "the device's work never arrived")
+    }
 }
