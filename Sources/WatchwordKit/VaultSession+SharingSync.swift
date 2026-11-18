@@ -228,25 +228,39 @@ extension VaultSession {
                 anchors[accountID, default: []].insert(signingKey)
             }
         }
+        let epoch = lockEpoch
         var registries: [MemberRegistryAnchor: DeviceRegistryState] = [:]
         var disagreements: Set<MemberRegistryAnchor> = []
+        func keep(_ anchor: MemberRegistryAnchor) {
+            registries[anchor] = sharing.registries[anchor]
+            if sharing.registryDisagreements.contains(anchor) { disagreements.insert(anchor) }
+        }
         for (accountID, signingKeys) in anchors.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
-            let anchorsOfAccount = signingKeys.map { MemberRegistryAnchor(accountID: accountID, signingKey: $0) }
+            let anchorsOfAccount = signingKeys.sorted { $0.lexicographicallyPrecedes($1) }.map {
+                MemberRegistryAnchor(accountID: accountID, signingKey: $0)
+            }
             guard let raw = await fetchMemberRegistry(accountID, transport: transport) else {
-                for anchor in anchorsOfAccount {
-                    registries[anchor] = sharing.registries[anchor]
-                    if sharing.registryDisagreements.contains(anchor) { disagreements.insert(anchor) }
-                }
+                anchorsOfAccount.forEach(keep)
                 continue
             }
-            for anchor in anchorsOfAccount {
-                let evaluated = Self.evaluateMemberRegistry(
-                    raw, accountID: accountID, signingKey: anchor.signingKey, pin: sharing.registryPins[anchor])
-                guard evaluated.complete else {
-                    // What was anchored is not all there now (withheld, or lost): nothing new is believed, and
-                    // nothing held is forgotten.
-                    registries[anchor] = sharing.registries[anchor]
-                    if sharing.registryDisagreements.contains(anchor) { disagreements.insert(anchor) }
+            // Replays of another account's registry are long work of that account's choosing (Z10): off the actor,
+            // on copied inputs, and dropped if a `lock()` came meanwhile, so `lock()` never waits for them.
+            let pins = anchorsOfAccount.map { sharing.registryPins[$0] }
+            guard
+                let evaluations = await awayFromSession(
+                    .memberRegistry, unlessLockedSince: epoch,
+                    {
+                        zip(anchorsOfAccount, pins).map { anchor, pin in
+                            Self.evaluateMemberRegistry(
+                                raw, accountID: accountID, signingKey: anchor.signingKey, pin: pin)
+                        }
+                    })
+            else { return }
+            for (anchor, (pin, evaluated)) in zip(anchorsOfAccount, zip(pins, evaluations)) {
+                // What was anchored is not all there now (withheld, or lost), or another refresh moved the pin while
+                // this one was away: nothing new is believed, and nothing held is forgotten.
+                guard evaluated.complete, sharing.registryPins[anchor] == pin else {
+                    keep(anchor)
                     continue
                 }
                 registries[anchor] = evaluated.state
@@ -256,6 +270,20 @@ extension VaultSession {
         }
         sharing.registries = registries
         sharing.registryDisagreements = disagreements
+    }
+
+    /// As `awayFromSession`, for work on public data that may run while the session is locked (another member's
+    /// registry is refreshed by a locked sync too): `work` runs off the actor, and its result is `nil` if a `lock()`
+    /// came meanwhile.
+    func awayFromSession<T: Sendable>(
+        _ step: AwayWork, unlessLockedSince epoch: UInt64, _ work: @escaping @Sendable () -> T
+    ) async -> T? {
+        let hook = awayWorkHook
+        let value = await Task.detached(priority: Task.currentPriority) {
+            hook?(step)
+            return work()
+        }.value
+        return epoch == lockEpoch ? value : nil
     }
 
     /// Every entry under an account's registry prefix on the transport, or `nil` if it cannot be listed.
@@ -307,9 +335,13 @@ extension VaultSession {
     /// Password changes replayed side by side when another account's registry forks at the one followed; more than
     /// this many competing changes are not replayed at all, and every device of the account is held in question.
     static let maximumMemberBranches = 8
+    /// Password changes one refresh follows forward along another account's registry (review finding Z10). Each
+    /// step costs up to `maximumMemberBranches` replays of the registry, and the account chooses how many changes
+    /// it publishes; the pin carries what was followed to the next refresh.
+    static let memberRegistryStepsPerRefresh = 8
 
     /// What `evaluateMemberRegistry` made of another account's registry.
-    struct MemberRegistryEvaluation {
+    struct MemberRegistryEvaluation: Sendable {
         /// Whose signatures count now: `nil` if nothing is anchored.
         var state: DeviceRegistryState?
         /// What this device anchors from now on; `nil` while it anchors nothing.
@@ -322,6 +354,9 @@ extension VaultSession {
         var unsettled = false
         /// `false` when the anchored entries were not all among those given: the caller keeps what it had.
         var complete = true
+        /// The walk stopped at `memberRegistryStepsPerRefresh` with changes still to follow: the next refresh goes on
+        /// from `pin`. Until then the account's devices are those registered as of the change reached.
+        var moreToFollow = false
     }
 
     /// Another account's registry, as this device follows it (review finding Z6; docs/02-architecture.md §8.10).
@@ -348,8 +383,11 @@ extension VaultSession {
     /// to a branch of the person's choosing. What this does not stop: the key holder can keep the member's
     /// contested devices in question for as long as they like, and a device that anchors while only the forged
     /// branch is visible follows it until the person verifies. The cure for both is the account re-key (F10.1).
+    ///
+    /// At most `maximumSteps` changes are followed in one call (Z10): the rest are followed by the next, from the pin.
     static func evaluateMemberRegistry(
-        _ raw: [[UInt8]], accountID: UUID, signingKey: [UInt8], pin: MemberRegistryPin?
+        _ raw: [[UInt8]], accountID: UUID, signingKey: [UInt8], pin: MemberRegistryPin?,
+        maximumSteps: Int = memberRegistryStepsPerRefresh
     ) -> MemberRegistryEvaluation {
         let entries = DeviceRegistry.admit(raw, accountID: accountID, accountSigningKey: signingKey)
         func evaluate(_ genesis: ObjectDigest, _ credential: ObjectDigest) -> DeviceRegistryState? {
@@ -384,9 +422,13 @@ extension VaultSession {
         // Forward, while exactly one change follows the one followed and replays as a chain.
         var branches: [DeviceRegistryState] = []
         var everyDeviceInQuestion = false
-        for _ in 0..<DeviceRegistry.maximumEntries {
+        for step in 0...maximumSteps {
             let next = state.pendingCredentials.filter { $0.previous == state.credential.id }
             guard !next.isEmpty else { break }
+            guard step < maximumSteps else {
+                result.moreToFollow = true
+                break
+            }
             guard next.count <= maximumMemberBranches else {
                 everyDeviceInQuestion = true
                 result.disagreement.formUnion(next.map(\.id))

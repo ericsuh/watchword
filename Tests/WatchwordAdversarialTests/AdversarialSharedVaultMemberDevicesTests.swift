@@ -106,4 +106,45 @@ extension AdversarialSharedVaultTests {
             VaultSession.devicesCode(accountID: member.accountID, credential: try #require(anchored).credential)
                 == code)
     }
+
+    /// Threat: a member of the vault (A4) publishes a registry that is long to replay (review finding Z10); A3 holding
+    /// the unlocked device, or auto-lock, locks meanwhile. The replay runs off the session's actor, so the lock takes
+    /// effect at once with the keys gone, and what the replay produced is dropped rather than believed after a lock.
+    /// The hook holds the replay until the test has locked: with the replay back on the actor, the lock waits out the
+    /// hook's 60-second bound and the test fails.
+    @Test("a lock while another member's registry is replayed takes effect at once, and the replay is dropped")
+    func lockWinsDuringMemberRegistryReplay() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 2200)
+        let (owner, member) = (home.owner, home.members[0])
+        try await Self.syncAll([owner, member])
+        try await member.session.changePassword(current: TestVault.password, new: "an entirely different passphrase")
+        try await member.session.sync()
+        let before = await owner.session.sharing.registryPins
+
+        let (reached, reaching) = AsyncStream.makeStream(of: Void.self)
+        let release = DispatchSemaphore(value: 0)
+        let released = Flag()
+        await owner.session.setAwayWorkHook { current in
+            guard current == .memberRegistry else { return }
+            reaching.yield()
+            if release.wait(timeout: .now() + 60) == .success { released.set() }
+        }
+        let work = Task { try await owner.session.sync() }
+        var iterator = reached.makeAsyncIterator()
+        _ = await iterator.next()
+        await owner.session.lock()
+        #expect(await owner.session.keys == nil)
+        release.signal()
+        _ = try? await work.value
+        #expect(released.isSet, "lock() returned only after the replay had given up waiting")
+        #expect(await owner.session.sharing.registryPins == before, "a replay finished after the lock was believed")
+        await owner.session.setAwayWorkHook(nil)
+
+        try await owner.session.unlock(password: TestVault.password)
+        try await owner.session.sync()
+        let anchor = try #require(
+            await owner.session.sharing.registryPins.first { $0.key.accountID == member.accountID })
+        #expect(anchor.value != before[anchor.key], "the member's change was never followed: nothing is tested")
+    }
 }

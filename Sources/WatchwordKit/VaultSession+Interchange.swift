@@ -251,6 +251,9 @@ enum AwayWork: Sendable, Hashable {
     /// An import's drafts compared with what is saved: which accounts each would hide, and which hosts are
     /// look-alikes. Linear in the file for a fixed vault, but the file and the vault are both large.
     case importReview
+    /// Another account's device registry replayed along the password changes it publishes (Z10): up to
+    /// `maximumMemberBranches` replays a step, of a registry its account fills.
+    case memberRegistry
 }
 
 /// What an archive entry holds: the first byte of its plaintext.

@@ -226,4 +226,50 @@ extension AdversarialAccountTests {
         #expect(RegistryAnchor(bytes: second) == none)
         #expect(RegistryAnchor(bytes: second + [0]) == nil, "a second-form anchor with anything after its pending")
     }
+
+    // MARK: - Another member's registry, walked a bounded number of steps at a time (Z10)
+
+    /// A member's registry with `changes` password changes in a row, all by `device`: what anyone the chain lists can
+    /// publish for nothing but the signatures they already make.
+    static func longChain(_ changes: Int, seed: UInt64 = 31) -> (f: RegistryFixture, entries: [RegistryEntry]) {
+        var f = RegistryFixture(seed: seed)
+        let phone = RegistryFixture.deviceID(0xA0)
+        let genesis = f.genesis(device: phone)
+        var entries = [genesis]
+        var previous = genesis
+        for generation in 1...changes {
+            _ = f.nextUnlockKey()
+            previous = f.credential(generation: generation, previous: previous, by: phone, parents: [previous])
+            entries.append(previous)
+        }
+        return (f, entries)
+    }
+
+    /// Threat: a member of a shared vault (A4), or anyone a chain lists or listed, publishes a legitimate chain of
+    /// thousands of password changes in their own registry. Each refresh of another member's device walked it to the
+    /// end, one to eight full replays a step, on the session's actor and before any vault's log, so first sight (or
+    /// a lost pin) held `lock()`, AutoFill and every vault's sync behind tens of minutes of work, and a process killed
+    /// meanwhile started again from the same place. Now one refresh takes a bounded number of steps and the pin
+    /// carries the progress to the next.
+    @Test("one refresh follows a member's password changes a bounded number of steps, and the pin carries on")
+    func memberRegistryWalkIsBounded() throws {
+        let (f, entries) = Self.longChain(20)
+        let raw = entries.map { $0.serialized() }
+        var pin: MemberRegistryPin?
+        var reached: UInt64 = 0
+        var refreshes = 0
+        while reached < 20, refreshes < 10 {
+            let evaluated = VaultSession.evaluateMemberRegistry(
+                raw, accountID: f.accountID, signingKey: f.accountSigningKey, pin: pin)
+            refreshes += 1
+            let generation = try #require(evaluated.state?.credential.generation)
+            #expect(
+                generation - reached <= VaultSession.memberRegistryStepsPerRefresh,
+                "refresh \(refreshes) walked \(generation - reached) steps")
+            #expect(!evaluated.unsettled)
+            reached = generation
+            pin = evaluated.pin
+        }
+        #expect(reached == 20 && refreshes == 3)
+    }
 }
