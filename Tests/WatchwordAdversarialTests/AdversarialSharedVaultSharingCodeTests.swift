@@ -555,3 +555,49 @@ extension AdversarialSharedVaultTests {
         #expect(try await invitee.session.sharedVaultStatus(vaultID).role == .readWrite)
     }
 }
+
+// The review of V31 to V37, finding L3 (docs/06-adversarial-review.md V43).
+extension AdversarialSharedVaultTests {
+    /// Threat: no outside adversary, the residual of V35. An invitation kept from a run that ended was delivered by the
+    /// next session with the invitee whatever that session asked for: in another role than the person chose now, and
+    /// after the invitee had been removed, when the kept invitation leads to a chain that no longer lists them. The
+    /// kept invitation is delivered only while the chain lists the invitee in the role asked for; another role is
+    /// refused, and an invitee removed since is invited afresh.
+    @Test("an invitation kept from an ended run is delivered only in its role and while the invitee is listed")
+    func keptInvitationFollowsTheChain() async throws {
+        let household = SharedVaultHousehold()
+        let racing = RacingTransport(base: household.transport)
+        let owner = try await SharingAccount.make(
+            over: racing, directory: household.directory, seed: 1_621, board: household.board)
+        let invitee = try await household.account(seed: 1_622)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let (checked, _) = try await owner.checkSharingCode(with: invitee)
+        await racing.pause(atListingOf: SharingObjectLocation.membershipPrefix(vaultID))
+        let sending = Task {
+            try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: checked)
+        }
+        await racing.untilPaused()
+        await owner.session.endSharingCodeSession()
+        await racing.resume()
+        _ = try? await sending.value
+        #expect(await owner.session.undeliveredInvitation(to: vaultID, for: invitee.accountID) != nil)
+
+        // Another role than the one the kept invitation added them in.
+        let (asReader, _) = try await owner.checkSharingCode(with: invitee)
+        await #expect(throws: MembershipError.memberAlreadyPresent(invitee.accountID)) {
+            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readOnly, checked: asReader)
+        }
+
+        // Removed since: the next session invites them again, on the chain as it is now.
+        #expect(try await owner.session.removeMember(invitee.accountID, from: vaultID) == .complete)
+        let (again, joined) = try await owner.checkSharingCode(with: invitee)
+        _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: again)
+        #expect(
+            try await owner.session.sharedVaultStatus(vaultID).membership.member(invitee.accountID)?.role == .readWrite)
+        let received = try #require(try await invitee.session.sharingCodeInvitation(run: joined.runID))
+        try await owner.session.sync()
+        try await invitee.session.acceptInvitation(received)
+        #expect(try await invitee.session.sharedVaultStatus(vaultID).role == .readWrite)
+    }
+}

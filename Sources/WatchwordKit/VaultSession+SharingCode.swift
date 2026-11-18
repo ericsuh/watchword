@@ -317,11 +317,18 @@ extension VaultSession {
         if let issued = run.issued {
             guard issued.vaultID == vaultID else { throw SharingError.invitationAlreadyCompleted }
             invitation = issued
-        } else if let issued = issuedSharingInvitations[kept] {
-            // Issued by an earlier run that ended before delivering it (V35): delivered now, never issued again.
+        } else if let issued = issuedSharingInvitations[kept],
+            let listed = try await currentMembership(of: partner, in: vaultID)
+        {
+            // Issued by an earlier run that ended before delivering it (V35): delivered now, never issued again; but
+            // only while the chain still lists the invitee, and in the role this run asks for (review of V31 to V37,
+            // L3; docs/06-adversarial-review.md V43). One removed since is invited afresh below; one listed in another
+            // role is refused, for the person to change the role from the member list.
+            guard listed == role else { throw MembershipError.memberAlreadyPresent(partner) }
             invitation = issued
             sharingCodeRun?.issued = issued
         } else {
+            issuedSharingInvitations[kept] = nil
             invitation = try await invite(partner, to: vaultID, as: role)
             // The chain has changed: remember what was issued before anything else can fail, outside the run too.
             issuedSharingInvitations[kept] = invitation
@@ -352,6 +359,13 @@ extension VaultSession {
         if sharingCodeRun?.generation == generation { sharingCodeRun?.invitationSent = true }
         issuedSharingInvitations[kept] = nil
         return invitation
+    }
+
+    /// The role the chain of `vaultID`, on the newest head this device can see, lists `account` in; `nil` if it does
+    /// not list the account (removed, or never added).
+    func currentMembership(of account: UUID, in vaultID: UUID) async throws -> MemberRole? {
+        try await ingestMembership(vaultID)
+        return try sharedVault(vaultID).ledger.state.member(account)?.role
     }
 
     /// An invitation `inviteThroughSharingCode` issued to `invitee` for `vaultID` and could not deliver (V35), for a
