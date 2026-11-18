@@ -5,7 +5,7 @@ import WatchwordKit
 import WatchwordPresentation
 import WatchwordTestSupport
 
-/// The Emergency Kit screen and the hiding of revealed secrets (Z80, Z86, Z95).
+/// The Emergency Kit screen and the hiding of revealed secrets (Z84, Z86, Z95).
 @Suite("Screen models: Emergency Kit and revealed secrets")
 @MainActor
 struct EmergencyKitScreenTests {
@@ -33,7 +33,7 @@ struct EmergencyKitScreenTests {
         #expect(model.kit == nil, "the kit outside onboarding goes with the screen")
     }
 
-    /// The PDF goes the export's way: written into the swept folder and removed after the mover (Z80).
+    /// The PDF goes the export's way: written into the swept folder and removed after the mover (Z84).
     @Test("the PDF is staged in the swept folder with the options given, and removed after the save and on lock")
     func stagedPDF() async throws {
         let root = temporaryRoot()

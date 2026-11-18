@@ -2365,9 +2365,17 @@ As built in milestone 2 (`WatchwordKit.VaultSession`):
 `SymmetricKey` bridging for CryptoKit, `ConstantTime` comparison, and the CommonCrypto PBKDF2 call
 (which needs raw pointers, and reads the password from and writes the key into protected storage).
 From milestone 2 it also holds the four system bindings whose signatures are pointer-typed
-(ADR 0001, milestone 2 amendment): the SQLite wrapper, `SecItemCopyMatching` (which returns
-Keychain data straight into `SecureBytes`), `LAContext.canEvaluatePolicy` and the PDF
+(ADR 0001, milestone 2 amendment): the SQLite wrapper, `SecItemCopyMatching` (which copies
+Keychain data into `SecureBytes`), `LAContext.canEvaluatePolicy` and the PDF
 `CGContext` initializer. Each is one small file with a safe API.
+
+Keychain secrets (the Secret Key, the Local Unlock Key, the device seed) are not in `SecureBytes` all the way: a read
+leaves the `CFData` the Security framework allocated, released unwiped when `KeychainBridge.copyData` returns, and a
+write hands `SecItemAdd` one `Data`, made straight from `SecureBytes` and zeroed in place once the call is done
+(`SystemKeychainStore.store`), beside whatever the framework copies internally. The quick-unlock state is decoded
+from one such copy, zeroed after decoding. Wiping the framework's `CFData` would need a write through a pointer to
+storage this code does not own; that copy is accepted and tracked (review §Z, Z98), and a post-lock memory image of
+the process may still hold one of these keys until the allocator reuses the block.
 `SecureBytes`:
 
 - heap storage that is page-aligned and a whole number of pages, so `mlock` (best effort; the result
@@ -2459,9 +2467,18 @@ Hygiene is the one feature that talks to a third party, so it adds two positions
   promised is therefore what F9.1 says and no more: no password, no full hash, no item title and no
   account identifier leaves the device. It is not that the service learns nothing about the vault.
 - **Whoever reads the device at rest** (A2, A3, A8). Finds nothing derived from a password in the clear:
-  no hash, no prefix, no reuse token, no breach result (ADR 0005).
+  no hash, no prefix, no reuse token, no breach result (ADR 0005). What the files themselves show is their
+  number (one range record per vault and distinct prefix checked, an index and a ledger) and their modification
+  times (when a password was last checked); their lengths say nothing, since every range record is padded to a
+  32 KiB bucket before it is sealed (review §Z, Z89).
 - **A malicious household member** (A4) chooses the items a victim's device analyses, so the cost of one
-  item, and the request rate whatever the items, are bounded.
+  item, and the request rate whatever the items, are bounded. A4 also reads the victim device's synced scan
+  times (§13.9), and a check answered from the prefix cache costs no request and so no pacing token: with one
+  cache for every vault, the gaps between those times said which of A4's probe items hit a range the device had
+  cached for some password in a vault A4 is not in, a confirmation oracle over that vault's passwords. The cache
+  is partitioned by vault (`PwnedRangeCache` files every range under the vault whose check fetched it), so a probe
+  in a shared vault is answered only by ranges fetched for that vault (review §Z, Z88). The same prefix in two
+  vaults costs two requests.
 
 ### 13.2 Pwned Passwords (F9.1)
 
@@ -2774,9 +2791,11 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   (`EnvelopeKind.accountHeader`, as for quick unlock's wrapped AUK), and named by
   `HMAC(local key, label ‖ message)`, so a name says nothing about the prefix it holds. The cache
   (`SealedPwnedRangeCache`) holds nothing in memory: each lookup and store goes through the session, which
-  refuses while locked, so its `lock()` has nothing to drop. One record per prefix (`CachedPwnedRange.encoded()`)
-  and a sealed index (prefix, fetch time, size) bound it to 512 prefixes and 32 MiB by default, expired ranges
-  first, then the oldest. The index lists at most 4,096 prefixes and one listing more does not decode, so
+  refuses while locked, so its `lock()` has nothing to drop. One record per vault and prefix, named from both
+  (`CachedPwnedRange.encodedPadded()`, padded to `paddingBucket`, 32 KiB, so a record's length does not say how many
+  suffixes its range holds) and a sealed index (vault, prefix, fetch time, size; format 2) bound it to 512 records and
+  32 MiB by default, expired ranges first, then the oldest. The index lists at most 4,096 records and one listing
+  more does not decode, so
   `HygieneSettings.cacheCapacity` is clamped to that (`maximumCacheCapacity`): above it, the index would be read as
   empty and every record it named left on disk, never evicted. A record planted from another account, or sealed by another device of this account (which has the
   keyset and this device's ID but not its secret), does not open and answers nothing. An older ledger of this
@@ -2909,7 +2928,22 @@ vault will store it** (`StoredItemSize`, at most 768 KiB against `ItemCodec`'s 1
 a control character as six bytes, every field carries a sync stamp, and every line of the notes is stored
 again with two identifiers, so 512 KiB as written can be megabytes as stored; an entry over the bound is
 skipped and listed, never reported as imported and then refused by the vault. The estimate is an upper
-bound by construction and the adversarial suite checks it against `ItemMerge.stamped` and `ItemCodec`.
+bound by construction and the adversarial suite checks it against `ItemMerge.stamped` and `ItemCodec`. The
+estimates are summed too, against **512 MiB stored for the whole import** (`maximumTotalStoredBytes`, counted
+in `add` and `addArchived` as each draft is kept; reaching it fails the file): a row of a title and 2,700 line
+feeds of notes is under 3 KB of CSV and about 730 KiB stored, so without it a 3 MB file (or a 1PUX of a
+hundredth of that, compressed) committed hundreds of megabytes of sealed rows, published to every device of the
+account (review §Z, Z81). The budget is above what a million small fields store, so it binds only on shapes that
+store far more than they count.
+
+The file's dates (created, modified, when each earlier version was replaced) are kept, bounded here to the
+years 1970 to 9999 only, since this module has no clock. The session bounds them by its own before a preview is
+shown (`ImportResult.boundingDates(notAfter:)`, reported as `futureDateBounded`): sync keeps `modifiedAt` from
+going backwards, so one date in the year 9000 would otherwise stick on every device and keep the "old password"
+check from firing. An archive's AutoFill field metadata (`autofill.*`: the extension's report rate limits and
+flags) is not restored, and is reported (`autoFillStateNotRestored`): it describes the vault the archive came
+from, and a far-future `autofill.lastReport` would silence that field's relying-party reports for good (review
+§Z, Z85).
 `InterchangeLimits.standard` holds these ceilings; an initialiser can tighten any of them and clamps each
 argument to `1...ceiling`, so no caller can loosen one. A file that cannot be read as
 what it claims to be ends in exactly one `InterchangeError`; a problem with one entry (too large, a repeated
@@ -3165,16 +3199,42 @@ that are not deleted; records that would not open are returned beside the report
 not left out silently. The standing warning is `InterchangeGuide.plaintextExportWarning`
 (`VaultSession.plaintextExportWarning`). File protection is the app's: the doc comment says
 `FileProtectionType.completeUnlessOpen` or stronger, a place the person chooses, never the App Group container.
-The app does it so (`ExportModel`, `ExportView`): the bytes stay in zeroising memory (`SecureBytes`) until the person
-saves, are then written by the app itself into a folder of its own in the temporary directory, with
-`.completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves the file where the
-person chooses; the staged copy is removed when the mover is done, on cancel, when the screen closes and at every lock,
-and the bytes are zeroised once saved. Not `fileExporter` with `FileWrapper.fileAttributes`, which says nothing about
-what the exporter stages. Where the mover copies rather than moves (another file provider), the copy's protection is
-the provider's. macOS has no protection classes: the file is as safe as the folder the person picks, which is why the
-warning says not to pick a synced one. The screen models also drop the export's bytes, the merge review and typed
-passwords on every lock, from `VaultSession.lockEvents()` rather than from views going away (review of the account
-screens, findings 5 and 6).
+The app does it so (`ExportModel`, `ExportView`). The session returns the file in zeroising memory
+(`PlaintextExport.bytes` is `SecureBytes`, the exporter's array moved out of its result and wiped while it was the only
+reference to its buffer; review §Z, Z83), and the model keeps that until the person saves. It is then written by the
+app itself, one copy made straight from protected storage and wiped once written, into the **staging folder**
+(`StagingFolder`: one fixed, backup-excluded folder, `<temporary directory>/Watchword Staging/`, with a sub-folder per
+file), with `.completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves the file
+where the person chooses. The staged copy is removed when the mover is done, on cancel, when the screen closes and at
+every lock; and the whole folder is swept independently of any model's state at launch (before the session is built),
+at every unlock, at every lock (`StagingSweeper`, on the lock signal) and at termination (macOS
+`applicationWillTerminate`, iOS `willTerminateNotification`, which also fire the lock signal so every screen model
+drops what it holds). A process that dies with the mover up (a crash, a force quit, a jetsam kill, power loss) leaves
+the file until the next launch, with its protection class on iOS and none on macOS; no later than that (review §Z,
+Z80, Z90). The sweep also removes the `Export-<UUID>` folders earlier builds staged in. What the exporters build on the
+way (the CSV or JSON text, the ZIP's parts) is ordinary memory and is not wiped, like every decoded item's `String`s
+(SEC4, D5). Not `fileExporter` with `FileWrapper.fileAttributes`, which says nothing about what the exporter stages.
+Where the mover copies rather than moves (another file provider), the copy's protection is the provider's. macOS has
+no protection classes: the file is as safe as the folder the person picks, which is why the warning says not to pick
+a synced one. The screen models also drop the export's bytes, the merge review and typed passwords on every lock,
+from `VaultSession.lockEvents()` rather than from views going away (review of the account screens, findings 5 and 6).
+
+The plaintext exporters leave out only the person's own trash (`Item.isTrashedByPerson`, `trashedItemOmitted`); an
+item sync left in the trash is nobody's discard and is written as a live item, with `syncTrashExported`, since the
+report is what a person moving away reads before deleting this copy (review §Z, Z87; X4 for restore).
+
+**The Emergency Kit goes the same way (PRD F5.1).** `VaultSession.emergencyKit(password:)` re-derives the account
+password in the call, as an export does: the Secret Key is the one secret that still matters once the device is
+back with its owner, and whoever holds the unlocked app, quick-unlocked or not, must not read it out (review §Z,
+Z86). `unconfirmedEmergencyKit()` shows the kit the person has not yet confirmed saving again without asking twice,
+only while the account records no confirmation and the session's keys were opened with the password (creation,
+enrolment, a password unlock); otherwise `accountPasswordRequired`. `EmergencyKitModel` asks for the password from
+Settings, and writes the PDF (`EmergencyKitDocument.write`, which zeroes its rendered buffer) into the staging folder
+with `.completeFileProtection` on iOS, for the file mover; the staged copy goes like an export's, and nothing holds
+the PDF in a view's state. The kit and the screen say to print it or keep it on a device of one's own, never in a
+synced folder (`EmergencyKitText.storageWarning`): saved beside the vault's ciphertext and archives, it would leave
+the password as the only barrier against A1 (ADR 0008). Core Graphics and Core Text keep copies of their own while
+drawing, which nothing here can wipe (review §Z, Z84).
 
 **The encrypted Watchword archive (PRD F8.4; ADR 0008).** A versioned, portable, whole-account backup that only
 Watchword reads, made of the vault's own envelope format (`AccountArchive` in `WatchwordCrypto`):
@@ -3215,7 +3275,15 @@ Each entry's plaintext is a type byte and its content: `1` a vault (its ID and n
 an item came from; the name's UTF-8 cut to 1,024 bytes at a scalar boundary, so it always decodes, and an entry
 that does not parse is listed as skipped), `2` an item exactly as `ItemCodec` stores it, history, trash, archived mark and unresolved
 values included. `exportArchive(vaults:passphrase:password:)` requires the account password like a plaintext export
-(someone holding an unlocked device must not be able to take the vault away under a passphrase of their own).
+(someone holding an unlocked device must not be able to take the vault away under a passphrase of their own). An
+archive this app wrote must restore, so a restore is not held to the limits of another app's file
+(`InterchangeLimits.standard`) but to `InterchangeLimits.archive`, sized to what the vault and the format accept: the
+format's 200,000 entries, the vault's 1 MiB item payload, 16,384 parts in one item, one field for every 64 bytes of
+the largest archive (no field `ItemCodec` writes is shorter), and 1 GiB stored over the whole archive. Whatever a
+restore would still not bring back is found when the archive is made: `exportArchive` runs the items through the
+restore's own assembler off the actor (`ArchivedItems.restoreCheck`, `AwayWork.archiveRestoreCheck`) and returns it
+(`ArchiveExport.restoreCheck`), and the export screen lists it before the person relies on the file (review §Z,
+Z82). The restore screen offers the archive's trash, which is otherwise left out and reported.
 
 **Reading one checks everything before decrypting anything.** `AccountArchive.parse` bounds the file (256 MiB),
 the entry count (200,000, and against the bytes that could hold it, before anything is allocated), every length,

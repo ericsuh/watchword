@@ -19,7 +19,7 @@
     /// the system's file mover; `EmergencyKitModel`) and then zeroes the rendered buffer. The Secret Key therefore
     /// *does* land in the app's temporary directory, for as long as the mover is up and no longer than the next
     /// launch: earlier wording here said it never did, which was not true of the file exporter either (review §G C2,
-    /// §Z Z80). Core Graphics and Core Text keep copies of their own while drawing, which nothing here can wipe. The
+    /// §Z Z84). Core Graphics and Core Text keep copies of their own while drawing, which nothing here can wipe. The
     /// document metadata carries only a title; the Secret Key appears in the page content and the QR code, nowhere
     /// else. The page also says not to keep the file in a synced folder (`EmergencyKitText.storageWarning`).
     public enum EmergencyKitDocument {

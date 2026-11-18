@@ -177,7 +177,11 @@ Requirement IDs are stable and referenced from the test plan.
   key material and decrypted items in memory.
 - F5.6 Clipboard copies expire (default 60 s) and use the "local only"/expiry pasteboard options.
 - F5.7 Screenshots/screen recording of secret fields are discouraged on iOS by marking secure text
-  fields; secrets are hidden from the app switcher snapshot.
+  fields; secrets are hidden from the app switcher snapshot. A revealed secret (a field shown, the Secret
+  Key on the Emergency Kit) is hidden again when the app stops being active or the screen starts being
+  recorded, mirrored or shared, and cannot be revealed while it is; on macOS the app's windows are left
+  out of screen capture and of window restoration. Nothing here stops a camera, or a capture the
+  system does not report (docs/04-test-plan.md, F5.7).
 
 ### 5.6 AutoFill and platform integration (F6)
 

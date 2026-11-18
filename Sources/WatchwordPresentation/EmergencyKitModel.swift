@@ -11,7 +11,7 @@ import WatchwordKit
 ///
 /// The PDF is written by the app itself into the swept `StagingFolder` (on iOS with complete protection: the kit is
 /// saved only while the app is in front) and handed to the file mover, as an export is, not to the system's file
-/// exporter, which says nothing about what it stages (Z80). The staged copy goes when the mover is done, when the
+/// exporter, which says nothing about what it stages (Z84). The staged copy goes when the mover is done, when the
 /// screen closes and on every lock, and with the folder at the next launch if the process dies first. The Secret Key
 /// is hidden again whenever `ScreenPrivacy` conceals (Z95). The formatted key is a `String`, not wipeable (SEC4);
 /// the model drops it on close and on lock.

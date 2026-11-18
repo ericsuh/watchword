@@ -8,7 +8,7 @@ import WatchwordPresentation
 /// created, or the unconfirmed one after a password unlock. The PDF is written by the app into its swept staging
 /// folder, with complete file protection on iOS, and handed to the system's file mover, as an export is; whatever is
 /// left of it goes when the mover is done, when the screen closes and at every lock, and with the folder at the next
-/// launch (`EmergencyKitModel`, Z80). The Secret Key is hidden again whenever the app resigns active or the screen is
+/// launch (`EmergencyKitModel`, Z84). The Secret Key is hidden again whenever the app resigns active or the screen is
 /// captured (`ScreenPrivacy`, Z95).
 struct EmergencyKitView: View {
     @Environment(AppModel.self) private var app

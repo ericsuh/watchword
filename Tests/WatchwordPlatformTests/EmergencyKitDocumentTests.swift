@@ -23,7 +23,7 @@
             #expect(text.contains("cannot recover your account"))
         }
 
-        /// Z80: the app writes the kit itself, into its swept staging folder, and the page says where not to keep it.
+        /// Z84: the app writes the kit itself, into its swept staging folder, and the page says where not to keep it.
         @Test("write puts the same page at the URL given, which says not to keep it in a synced folder")
         func written() throws {
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

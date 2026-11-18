@@ -247,8 +247,10 @@ Fifteen shipped modules, dependency-ordered, plus test support:
   `WatchwordMatching`; Foundation only, no keys, files or clocks. `WatchwordKit` depends on it, never the reverse.
 - **`WatchwordPresentation`** — the apps' screen models: one main-actor `@Observable` model per account screen
   (`VaultsModel`, `SharedVaultModel`, `InvitationModel`, `AcceptInvitationModel`, `DevicesModel`, `QuarantineModel`,
-  `HygieneModel`, `ImportModel`, `ExportModel`) over a `ScreenContext` (the session, and the app's activity and lock
-  hooks), and the wording (`ErrorWording`, `SyncSummary`, `InterchangeWording`, `SharingCodes`). Depends on
+  `HygieneModel`, `ImportModel`, `ExportModel`, `EmergencyKitModel`) over a `ScreenContext` (the session, and the
+  app's activity and lock hooks), `StagingFolder` and `StagingSweeper` (the one folder files are written into for the
+  file mover, Z80), `ScreenPrivacy` and `RevealedSecrets` (when revealed secrets are hidden again, F5.7, Z95), and the
+  wording (`ErrorWording`, `SyncSummary`, `InterchangeWording`, `SharingCodes`). Depends on
   `WatchwordKit` and the modules whose types it shows; `WatchwordPresentationTests` drives it over real sessions on
   Linux. It decides nothing about security: every refusal stays in `VaultSession`, and the model words it.
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
@@ -314,7 +316,10 @@ lists what is open (file protection and the screens, Credential Exchange, restor
 - "Clear" is about every password in the item: more than 16 password fields is `incomplete`, and two password
   fields sharing an ID share the worse result. An unknown result is never "not breached".
 - The prefix cache and the `ScanLedger` are password-derived (which prefixes; breach counts; bindings). They are
-  persisted only sealed, per device, unsynced. Nothing here writes to disk.
+  persisted only sealed, per device, unsynced. Nothing here writes to disk. The cache is **partitioned by vault**
+  (`PwnedRangeCache` takes the partition, `HygieneEngine` passes the item's vault): a cache hit costs no token and
+  scan times are synced, so a range fetched for one vault must never answer another's check (Z88). Sealed range
+  records are padded (`encodedPadded`, Z89).
 - **Synced results only postpone, never hide** (owner decision 10; ADR 0005, amendment of 2026-11-16; §13.9). Results
   and scan times are also synced, as `SyncedScanRecord` (kind `scanStatus`, beside the item, never an item version or
   history entry), a join of each device's latest observation. Every result is under a `ScanBinding` (a keyed digest of
@@ -355,7 +360,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `ImportReport`. Never drop, change or refuse something without a line in the report, on import or on export
   (`ExportReport`, `ExportSupport`).
 - Per-entry and per-file limits do not bound their product, so the import as a whole has budgets
-  (`maximumTotalFields`, `maximumScopeDerivations`), counted in `ImportAssembler.add` before an entry is built. A new
+  (`maximumTotalFields`, `maximumScopeDerivations`, counted in `ImportAssembler.add` before an entry is built, and
+  `maximumTotalStoredBytes`, the drafts' stored-size estimates summed as each is kept, Z81). A new
   per-entry cost needs a place in one of them. CSV rows are streamed (`CSVReader.forEachRecord`), never held beside
   the drafts. A draft is measured as the vault will store it (`StoredItemSize`, checked against `ItemMerge.stamped`
   and `ItemCodec` by the adversarial suite): if the stored form of an item changes, that estimate changes with it.
@@ -648,8 +654,13 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   commit checks every decision before writing, saves new items through `ItemMerge.stamped`, `ScopePolicy` and
   `commitItem` (keeping the file's history and times, never its IDs, vault or sync metadata), and merges over the
   item as the write reads it. Never add a path that writes an imported item another way.
-- A plaintext export or an archive needs the account password in the same call, re-derived under the stored
-  header (`verifyAccountPassword`), never a remembered "recently verified". File protection is the app's.
+- A plaintext export, an archive or the Emergency Kit needs the account password in the same call, re-derived under
+  the stored header (`verifyAccountPassword`), never a remembered "recently verified" (`emergencyKit(password:)`, Z86;
+  only `unconfirmedEmergencyKit` skips it, for keys opened with the password while the kit is unconfirmed). File
+  protection is the app's: every file the app writes for the file mover goes into `StagingFolder` (portable, in
+  `WatchwordPresentation`), swept at launch, unlock, lock and termination (Z80); never `fileExporter`.
+- An archive this app wrote must restore: `ArchivedItems` uses `InterchangeLimits.archive`, sized to the vault and
+  the format, and `exportArchive` reports what a restore would still not bring back (`restoreCheck`, Z82).
 - The archive is sealed under the archive passphrase *and* the Secret Key (ADR 0008); `AccountArchive.parse`
   checks everything, KDF bounds and every envelope's place included, before a key is derived, and every failure
   after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.

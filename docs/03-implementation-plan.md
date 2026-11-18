@@ -579,8 +579,13 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   shown) and URL with its own switch, all off (`MergeAdditions`, `MergeChoices`); export with the standing warning on
   screen for as long as it is open, the password asked for every time, and the `ExportReport` shown before the file
   is saved; the CSV exactly as stored; the restore screen showing `ImportPreview.archiveCreatedAt` first. The file
-  is handed to the system's exporter with `completeUnlessOpen` set on iOS (not yet checked on a device).
-  `ImportExportTests` covers both. Open: restoring an archive's vaults as vaults (today every archived item goes
+  is written by the app into its swept staging folder with `completeUnlessOpen` on iOS and handed to the file mover
+  (not yet checked on a device; review §Z, Z80), and the Emergency Kit PDF takes the same route behind the account
+  password (Z84, Z86). `ImportExportTests` covers both. Done after review §Z, on Linux: the import-wide stored-size
+  budget (Z81), the archive's own limits and the export's restore check (Z82), the export's bytes in `SecureBytes`
+  (Z83), dates bounded by the clock and no AutoFill state from an archive (Z85), sync's trash exported live (Z87).
+  Open from it: the Security framework's `CFData` copy of a Keychain secret read (Z98), and the device checks that
+  `docs/04-test-plan.md` lists under F5.1 and F5.7 and for Password AutoFill (Z95 to Z97). Open: restoring an archive's vaults as vaults (today every archived item goes
   into the one vault the person chooses, naming the vault it came from); the OS Credential Exchange calls and the
   extension's Info.plist keys; the instruction screens; a CXF file export (the format names the exporting app's
   relying-party ID, its associated domain, which the app does not have yet). Before shipping: a check of the CXF and
