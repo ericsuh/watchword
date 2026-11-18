@@ -264,6 +264,8 @@ enum AwayWork: Sendable, Hashable {
     /// A candidate account header's derivation under its own KDF parameters (up to the ceiling, its author's
     /// choice), at the lock screen or in `followPasswordChange` (Z14).
     case candidateDerivation
+    /// Every date an import keeps bounded by the clock (Z85), over up to 200,000 drafts (review finding Z132).
+    case importDates
 }
 
 /// What an archive entry holds: the first byte of its plaintext.
@@ -674,9 +676,11 @@ extension VaultSession {
     ) async throws -> ImportPreview {
         _ = try requireKeys(since: epoch)
         guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
-        // The file's dates are kept (created, modified, history), so none may be later than this clock's now: sync
-        // keeps `modifiedAt` monotonic, and one date in the future would stick on every device (Z85).
-        let result = result.boundingDates(notAfter: await clock.now())
+        // The file's dates are kept (created, modified, history, a passkey's creation), so none may be later than this
+        // clock's now: sync keeps `modifiedAt` monotonic, and one date in the future would stick on every device
+        // (Z85). A pass over every draft, so off the actor (Z132).
+        let now = await clock.now()
+        let result = try await awayFromSession(.importDates, since: epoch) { result.boundingDates(notAfter: now) }
         let existing = try await items(inVaults: [vaultID]).items
         _ = try requireKeys(since: epoch)
         guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }

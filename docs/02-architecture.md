@@ -3064,7 +3064,9 @@ store far more than they count.
 
 The file's dates (created, modified, when each earlier version was replaced) are kept, bounded here to the
 years 1970 to 9999 only, since this module has no clock. The session bounds them by its own before a preview is
-shown (`ImportResult.boundingDates(notAfter:)`, reported as `futureDateBounded`): sync keeps `modifiedAt` from
+shown, off its actor (`ImportResult.boundingDates(notAfter:)`, `AwayWork.importDates`, reported as
+`futureDateBounded`), a passkey's creation date inside its field included, in the item and its history (review
+finding Z132): sync keeps `modifiedAt` from
 going backwards, so one date in the year 9000 would otherwise stick on every device and keep the "old password"
 check from firing. An archive's AutoFill field metadata (`autofill.*`: the extension's report rate limits and
 flags) is not restored, and is reported (`autoFillStateNotRestored`): it describes the vault the archive came

@@ -232,7 +232,7 @@ public struct ImportResult: Equatable, Sendable {
     }
 
     /// The result with every date a draft keeps from the file (created, modified, each history entry's replacement
-    /// time) no later than `now`, each entry that had one later reported once (`futureDateBounded`). The obligation
+    /// time, and each passkey's creation date in its field, Z132) no later than `now`, each entry that had one later reported once (`futureDateBounded`). The obligation
     /// `ImportedEntry` states for a path that keeps the file's dates; the session calls it with its clock's now
     /// before a preview is shown (review §Z, Z85). This module has no clock, so `now` is the caller's.
     public func boundingDates(notAfter now: Date) -> ImportResult {
@@ -249,6 +249,20 @@ public struct ImportResult: Equatable, Sendable {
             bound(&item.createdAt)
             bound(&item.modifiedAt)
             for entry in item.history.indices { bound(&item.history[entry].replacedAt) }
+            // A passkey's creation date is inside its field's value (review finding Z132), in the item and in its
+            // history. One that does not decode is left as it is: nothing reads a date from it.
+            func boundPasskeys(_ fields: inout [Field]) {
+                for position in fields.indices where fields[position].kind == .passkey {
+                    guard var credential = try? fields[position].passkeyCredential(), credential.createdAt > now
+                    else { continue }
+                    credential.createdAt = now
+                    guard let value = try? credential.fieldValue() else { continue }
+                    fields[position].value = value
+                    changed = true
+                }
+            }
+            boundPasskeys(&item.fields)
+            for entry in item.history.indices { boundPasskeys(&item.history[entry].fields) }
             guard changed else { continue }
             if item.createdAt > item.modifiedAt { item.createdAt = item.modifiedAt }
             bounded.entries[index].item = item

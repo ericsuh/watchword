@@ -682,7 +682,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   after that is `CryptoError.authenticationFailed`. Its items are hostile input: they go through `ArchivedItems`.
   Entries are opened and decoded one at a time; only `Item.isTrashedByPerson` comes back as trash.
 - `lock()` never queues behind interchange work: a plaintext file's parse, an archive's parse, derivation and
-  decoding, and an export's password and archive derivations run off the actor (`awayFromSession`, named by
+  decoding, the bounding of an import's dates (Z132), and an export's password and archive derivations run off the actor (`awayFromSession`, named by
   `AwayWork`) on copied inputs, touching no session state, and the epoch is checked on return (`requireKeys(since:)`).
   IDs drawn there come from a `ForkedGenerator`, never a copy of `random`; key material, salts and nonces only from
   `random`, on the actor. A new long step goes there too, with a test that holds it (`awayWorkHook`) and locks. So do
