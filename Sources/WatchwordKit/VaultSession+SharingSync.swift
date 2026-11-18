@@ -827,6 +827,7 @@ extension VaultSession {
         guard let values = attributedValues(of: record, keys: keys) else { return false }
         var ownCopy: Set<SharedStreamIndex.ValueKey>?
         let vouched = Self.vouchesForUncarriedValues(record, in: vault, account: account.accountID)
+        let retired = revokedDevices(in: record.vaultID, ownView: ownView, account: account.accountID)
         var awaited: Set<UUID> = []
         var admitted = true
         // Every value is filed under the device its stamp names (`attributedValues`).
@@ -851,6 +852,14 @@ extension VaultSession {
             if vouched, !accounts.isEmpty, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) {
                 continue
             }
+            // A stream that will never carry it here: a revoked device's, which is not read again, or one whose first
+            // segments were collected before the vault was shared (review finding Z144). Believed of an account that
+            // may write, in a version that otherwise counts, and never waited for.
+            if !accounts.isEmpty, Self.neverCarriesHere(value.device, accounts: accounts, in: vault, retired: retired) {
+                if Self.allMayWrite(accounts, in: vault.ledger) { continue }
+                admitted = false
+                continue
+            }
             if !accounts.isEmpty { awaited.insert(value.device) }
             admitted = false
         }
@@ -864,7 +873,7 @@ extension VaultSession {
                 ItemMerge.effectiveClock(item, origin: Self.origin(record)),
                 of: VersionKey(recordID: record.recordID, kind: record.kind.rawValue, version: record.version),
                 author: writersOwn ? record.deviceID : nil, judgedBy: account.deviceID, in: vault, vouched: vouched,
-                listing: listing, awaited: &awaited)
+                retired: retired, listing: listing, awaited: &awaited)
         }
         if let known = sharing.vaults[record.vaultID]?.index.awaiting, !awaited.isSubset(of: known) {
             sharing.vaults[record.vaultID]?.index.awaiting.formUnion(awaited)
@@ -894,7 +903,7 @@ extension VaultSession {
     /// to be its work (`judgeAdmits`), or the device whose stream carried a tombstone. `nil` exempts nobody.
     static func knowledgeCounts(
         _ clock: VersionVector, of record: VersionKey, author: UUID?, judgedBy me: UUID, in vault: SharedVault,
-        vouched: Bool, listing: (UUID) -> [UUID], awaited: inout Set<UUID>
+        vouched: Bool, retired: Set<UUID>, listing: (UUID) -> [UUID], awaited: inout Set<UUID>
     ) -> Bool {
         for (device, count) in clock.entries where device != author {
             let accounts = listing(device)
@@ -907,12 +916,22 @@ extension VaultSession {
             // knows what it wrote, and no version vouches for that, nor does a stream it has not published in yet
             // (review finding Z136).
             if device == me { return false }
-            if accounts.allSatisfy({ vault.ledger.writeStanding(of: $0) == .mayWrite }) {
+            // A stream that will never show the edits here (review finding Z144): a revoked device's, never read again,
+            // so a device that recorded none of it (enrolled, joined or rebuilt its index since) waited for it for
+            // good; or the owner's, whose first segments were collected before the vault was shared. Believed of an
+            // account that may write, as such a device's own versions are (`counts`): a revoked device publishes
+            // nothing any device reads, so a claim about its edits supersedes none yet to come. Never waited for.
+            if neverCarriesHere(device, accounts: accounts, in: vault, retired: retired) {
+                if allMayWrite(accounts, in: vault.ledger) { continue }
+                if vouched, accounts.allSatisfy({ Self.mayHaveWritten($0, in: vault.ledger) }) { continue }
+                return false
+            }
+            if allMayWrite(accounts, in: vault.ledger) {
                 // "Cannot read from its first segment": here and sealed under a key not held. A stream with no first
                 // segment here has not published it yet (a shared vault keeps its whole log, Z42), and a claim about
                 // it waits for it (Z136): taken for unreadable, a claim about a member who had never published was
-                // believed everywhere.
-                if vouched || vault.index.segment(device: device, sequence: 1)?.opened == false { continue }
+                // believed everywhere. The first segment is the stream's own (`firstSequence(ofStream:)`).
+                if vouched || firstSegmentUnopened(device, in: vault) { continue }
                 awaited.insert(device)
                 return false
             }
@@ -942,6 +961,7 @@ extension VaultSession {
             self.accountsListing(device, in: location.vaultID, ownView: ownView, account: account)
         }
         let vouched = Self.vouchesForUncarriedValues(sealedUnder: keyID, in: vault, account: account.accountID)
+        let retired = revokedDevices(in: location.vaultID, ownView: ownView, account: account.accountID)
         var awaited: Set<UUID> = []
         var admitted = true
         let key = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
@@ -954,7 +974,7 @@ extension VaultSession {
             guard
                 Self.knowledgeCounts(
                     erasure.seen, of: key, author: author, judgedBy: account.deviceID, in: vault,
-                    vouched: vouched, listing: listing, awaited: &awaited)
+                    vouched: vouched, retired: retired, listing: listing, awaited: &awaited)
             else {
                 admitted = false
                 break
@@ -981,6 +1001,38 @@ extension VaultSession {
     static func mayHaveWritten(_ accountID: UUID, in ledger: MembershipLedger) -> Bool {
         if case .nothingCounts = ledger.writeStanding(of: accountID) { return false }
         return true
+    }
+
+    /// Whether every one of `accounts` may write now.
+    static func allMayWrite(_ accounts: [UUID], in ledger: MembershipLedger) -> Bool {
+        accounts.allSatisfy { ledger.writeStanding(of: $0) == .mayWrite }
+    }
+
+    /// The devices revoked from their own account, in this account's registry or in a member's as `vaultID`'s chain
+    /// anchors it. Their streams are not read (`syncRetiredAuthors`), and a shared vault writes no snapshot to hand
+    /// their work on, so nothing of theirs is ever waited for (review finding Z144).
+    func revokedDevices(in vaultID: UUID, ownView: RegistryView?, account: UUID) -> Set<UUID> {
+        var devices = Set(ownView.map { Array($0.state.revoked.keys) } ?? [])
+        for (_, state) in memberRegistries(vaultID, account: account) { devices.formUnion(state.revoked.keys) }
+        return devices
+    }
+
+    /// Whether `device`'s stream will never carry here what was not recorded of it already (review finding Z144): it
+    /// is revoked, so its stream is never read again; or it is a device of the owner's account whose first segments
+    /// are not here, which in a vault that keeps its whole log only collection before the vault was shared explains
+    /// (a stream of another account never lost its first segments, and one that shows none at all has not published
+    /// yet, Z136).
+    static func neverCarriesHere(_ device: UUID, accounts: [UUID], in vault: SharedVault, retired: Set<UUID>) -> Bool {
+        if retired.contains(device) { return true }
+        guard let first = vault.index.firstSequence(ofStream: device), first > 1 else { return false }
+        return accounts.allSatisfy { $0 == vault.ledger.owner.accountID }
+    }
+
+    /// Whether the stream's own first segment is segment 1, here, and sealed under a key this device does not hold:
+    /// what it carried cannot be checked (S42).
+    static func firstSegmentUnopened(_ device: UUID, in vault: SharedVault) -> Bool {
+        guard vault.index.firstSequence(ofStream: device) == 1 else { return false }
+        return vault.index.segment(device: device, sequence: 1)?.opened == false
     }
 
     /// The attributable values of a stored version, as the index files them: an item's (`ItemMerge.attributedValues`),
