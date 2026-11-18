@@ -256,6 +256,40 @@ public final class SharedVaultModel {
     }
 }
 
+/// Which vault sharing code session a screen drives (V25): one `VaultSession` serves every window, so a screen
+/// remembers the session it started or joined (`SharingCodeStatus.runID`), passes it with every step, and ends only
+/// that one. `flow` counts the person's moves away (Start Over, the fallback, Done): an answer that arrives after one
+/// belongs to a step the person left, and changes nothing on the screen.
+struct SharingCodeBinding {
+    enum Verdict {
+        /// This screen's session.
+        case current
+        /// The person moved on while the step ran.
+        case stale
+        /// Another screen's session replaced this one's.
+        case replaced
+    }
+
+    private(set) var run: UInt64?
+    private(set) var flow: UInt64 = 0
+
+    mutating func admit(_ status: SharingCodeStatus, since flow: UInt64) -> Verdict {
+        guard flow == self.flow else { return .stale }
+        guard let run else {
+            self.run = status.runID
+            return .current
+        }
+        return status.runID == run ? .current : .replaced
+    }
+
+    /// The person left this screen's session; returns it, for ending.
+    mutating func leave() -> UInt64? {
+        flow &+= 1
+        defer { run = nil }
+        return run
+    }
+}
+
 /// Inviting someone to a shared vault (PRD F4.1, F4.2; ADR 0010): show the vault sharing code, type the six digits
 /// on their screen (or scan it), let them type this device's six, choose a role, and send the invitation inside the
 /// session. The check cannot be skipped: the session pins the invitee only from a completed session, and refuses to
@@ -304,6 +338,8 @@ public final class InvitationModel {
     private let context: ScreenContext
     private var reference: AccountReference?
     private var throughSession = false
+    private var binding = SharingCodeBinding()
+    private var actionFlow: UInt64 = 0
 
     public init(vaultID: UUID, context: ScreenContext) {
         self.vaultID = vaultID
@@ -344,6 +380,7 @@ public final class InvitationModel {
     // MARK: The vault sharing code
 
     public func startSession() async {
+        await leaveSession()
         await perform {
             throughSession = true
             try await apply(try await context.session.startSharingCodeSession())
@@ -354,7 +391,7 @@ public final class InvitationModel {
     /// the step has moved on, so a timer that fires late never takes a finished step back.
     public func refresh() async {
         guard throughSession, isWaiting, !isWorking else { return }
-        await perform { try await apply(try await context.session.refreshSharingCodeSession()) }
+        await perform { try await apply(try await context.session.refreshSharingCodeSession(run: binding.run)) }
     }
 
     /// Checks the six digits the person typed from the other screen.
@@ -362,7 +399,7 @@ public final class InvitationModel {
         guard case .typeTheirCode = step else { return }
         let typed = typedCode
         await perform {
-            let status = try await context.session.enterSharingCode(typed)
+            let status = try await context.session.enterSharingCode(typed, run: binding.run)
             typedCode = ""
             if case .typeTheirCode = status.step {
                 stepMessage = SharingCodeWording.wrongCode(attemptsLeft: status.attemptsLeft)
@@ -376,7 +413,7 @@ public final class InvitationModel {
     public func cameraScanned(_ payload: String) async {
         guard case .typeTheirCode = step else { return }
         await perform {
-            let status = try await context.session.scanSharingPartnerCode(payload)
+            let status = try await context.session.scanSharingPartnerCode(payload, run: binding.run)
             if case .typeTheirCode = status.step {
                 stepMessage = SharingCodeWording.wrongCode(attemptsLeft: status.attemptsLeft)
             }
@@ -389,7 +426,7 @@ public final class InvitationModel {
     public func useNewKeys() async {
         guard case .keysChanged = step else { return }
         await perform {
-            try await context.session.replacePinFromSharingCode()
+            try await context.session.replacePinFromSharingCode(run: binding.run)
             if let status = await context.session.sharingCodeStatus() { try await apply(status) }
         }
     }
@@ -398,7 +435,7 @@ public final class InvitationModel {
 
     /// Leaves the session for the full vault sharing code.
     public func useFullCode() async {
-        await context.session.endSharingCodeSession()
+        await leaveSession()
         throughSession = false
         status = nil
         step = .nameAccount
@@ -442,10 +479,14 @@ public final class InvitationModel {
 
     public func invite() async {
         guard case .chooseRole(_, let contact) = step else { return }
+        let checked = status
         await perform {
             if throughSession {
+                // The session and the partner this screen showed, or nothing (V25).
+                guard let checked, checked.partner == contact.accountID else { throw SharingCodeError.notReady }
                 do {
-                    invitation = try await context.session.inviteThroughSharingCode(to: vaultID, as: role)
+                    invitation = try await context.session.inviteThroughSharingCode(
+                        to: vaultID, as: role, checked: checked)
                     step = .issued(code: nil)
                 } catch SharedVaultError.invitationNotDelivered(let issued) {
                     // Issued, not delivered: the invitation as text, for them to paste (V22).
@@ -464,7 +505,7 @@ public final class InvitationModel {
     }
 
     public func startOver() async {
-        await context.session.endSharingCodeSession()
+        await leaveSession()
         step = .start
         throughSession = false
         status = nil
@@ -476,6 +517,7 @@ public final class InvitationModel {
     }
 
     private func apply(_ status: SharingCodeStatus) async throws {
+        guard await admit(status) else { return }
         self.status = status
         switch status.step {
         case .showNumber:
@@ -506,8 +548,32 @@ public final class InvitationModel {
         isWorking = true
         defer { isWorking = false }
         stepMessage = nil
+        actionFlow = binding.flow
+        let flow = actionFlow
         let failure = await ScreenOperation(context: context).run(body)
+        // The person moved on while this ran: what it has to say is not for the step they are on now.
+        guard flow == binding.flow else { return }
         errorMessage = failure ?? stepMessage
+    }
+
+    /// Ends this screen's session, if it has one, and drops whatever its running steps bring back.
+    private func leaveSession() async {
+        if let run = binding.leave() { await context.session.endSharingCodeSession(run: run) }
+    }
+
+    /// Takes `status` in if it is this screen's session and the person has not moved on: `false` otherwise, having
+    /// ended a session the person left and worded one that another screen replaced.
+    private func admit(_ status: SharingCodeStatus) async -> Bool {
+        switch binding.admit(status, since: actionFlow) {
+        case .current:
+            return true
+        case .stale:
+            if status.runID != binding.run { await context.session.endSharingCodeSession(run: status.runID) }
+            return false
+        case .replaced:
+            step = .failed(message: SharingCodeWording.replaced)
+            return false
+        }
     }
 }
 
@@ -559,6 +625,8 @@ public final class AcceptInvitationModel {
 
     private let context: ScreenContext
     private var invitation: Invitation?
+    private var binding = SharingCodeBinding()
+    private var actionFlow: UInt64 = 0
 
     public init(context: ScreenContext) {
         self.context = context
@@ -573,6 +641,7 @@ public final class AcceptInvitationModel {
     }
 
     public func joinWithNumber() async {
+        await leaveSession()
         let typed = numberText
         await perform { try await apply(try await context.session.joinSharingCodeSession(number: typed)) }
     }
@@ -580,6 +649,7 @@ public final class AcceptInvitationModel {
     /// What the camera read from the inviter's screen (`ScannedSharingCode`). Only the scanner view calls this.
     public func cameraScanned(_ payload: String) async {
         guard case .enterNumber = step else { return }
+        await leaveSession()
         await perform { try await apply(try await context.session.joinSharingCodeSession(scanned: payload)) }
     }
 
@@ -589,14 +659,14 @@ public final class AcceptInvitationModel {
     public func refresh() async {
         guard isWaiting, !isWorking else { return }
         await perform {
-            var status = try await context.session.refreshSharingCodeSession()
+            var status = try await context.session.refreshSharingCodeSession(run: binding.run)
             try await apply(status)
             guard case .awaitingInvitation = step else { return }
             if status.ownCode == nil {
-                status = try await context.session.refreshSharingCodeSession()
+                status = try await context.session.refreshSharingCodeSession(run: binding.run)
                 try await apply(status)
             }
-            guard let invitation = try await context.session.sharingCodeInvitation() else { return }
+            guard let invitation = try await context.session.sharingCodeInvitation(run: binding.run) else { return }
             self.invitation = invitation
             let owner = ContactSummary(try await context.session.contactCandidate(invitation.ownerAccountID))
             step = owner.isVerified ? .confirmJoin(owner) : .ownerNotVerified(ownerID: invitation.ownerAccountID)
@@ -607,7 +677,7 @@ public final class AcceptInvitationModel {
         guard case .showCodeAndType = step else { return }
         let typed = typedCode
         await perform {
-            let status = try await context.session.enterSharingCode(typed)
+            let status = try await context.session.enterSharingCode(typed, run: binding.run)
             typedCode = ""
             if case .showCodeAndTypeTheirs = status.step {
                 stepMessage = SharingCodeWording.wrongCode(attemptsLeft: status.attemptsLeft)
@@ -619,7 +689,7 @@ public final class AcceptInvitationModel {
     public func useNewKeys() async {
         guard case .keysChanged = step else { return }
         await perform {
-            try await context.session.replacePinFromSharingCode()
+            try await context.session.replacePinFromSharingCode(run: binding.run)
             if let status = await context.session.sharingCodeStatus() { try await apply(status) }
         }
     }
@@ -628,7 +698,9 @@ public final class AcceptInvitationModel {
     /// ends the session and pins nothing.
     public func confirmScannedAccount() async {
         guard case .confirmScan(let accountID, _, _) = step else { return }
-        await perform { try await apply(try await context.session.confirmScannedSharingPartner(accountID)) }
+        await perform {
+            try await apply(try await context.session.confirmScannedSharingPartner(accountID, run: binding.run))
+        }
     }
 
     /// Joins the vault of the invitation that arrived, once the person has said yes.
@@ -639,7 +711,7 @@ public final class AcceptInvitationModel {
 
     /// Goes back to the start without joining.
     public func decline() async {
-        await context.session.endSharingCodeSession()
+        await leaveSession()
         step = .enterNumber
         invitation = nil
         numberText = ""
@@ -651,7 +723,7 @@ public final class AcceptInvitationModel {
     // MARK: The fallback
 
     public func useFullCode() async {
-        await context.session.endSharingCodeSession()
+        await leaveSession()
         status = nil
         step = .enterCode
         errorMessage = nil
@@ -685,7 +757,7 @@ public final class AcceptInvitationModel {
 
     private func join(_ invitation: Invitation, evidence: VerificationEvidence?) async throws {
         let vaultID = try await context.session.acceptInvitation(invitation, ownerEvidence: evidence)
-        await context.session.endSharingCodeSession()
+        await leaveSession()
         // The vault's items arrive with a sync; a failure here leaves the next sync to fetch them.
         _ = try? await context.session.sync()
         confirmation = FingerprintConfirmation()
@@ -693,6 +765,7 @@ public final class AcceptInvitationModel {
     }
 
     private func apply(_ status: SharingCodeStatus) async throws {
+        guard await admit(status) else { return }
         self.status = status
         switch status.step {
         case .waiting:
@@ -723,8 +796,32 @@ public final class AcceptInvitationModel {
         isWorking = true
         defer { isWorking = false }
         stepMessage = nil
+        actionFlow = binding.flow
+        let flow = actionFlow
         let failure = await ScreenOperation(context: context).run(body)
+        // The person moved on while this ran: what it has to say is not for the step they are on now.
+        guard flow == binding.flow else { return }
         errorMessage = failure ?? stepMessage
+    }
+
+    /// Ends this screen's session, if it has one, and drops whatever its running steps bring back.
+    private func leaveSession() async {
+        if let run = binding.leave() { await context.session.endSharingCodeSession(run: run) }
+    }
+
+    /// Takes `status` in if it is this screen's session and the person has not moved on: `false` otherwise, having
+    /// ended a session the person left and worded one that another screen replaced.
+    private func admit(_ status: SharingCodeStatus) async -> Bool {
+        switch binding.admit(status, since: actionFlow) {
+        case .current:
+            return true
+        case .stale:
+            if status.runID != binding.run { await context.session.endSharingCodeSession(run: status.runID) }
+            return false
+        case .replaced:
+            step = .failed(message: SharingCodeWording.replaced)
+            return false
+        }
     }
 }
 
@@ -766,6 +863,8 @@ public final class MemberVerificationModel {
     public private(set) var status: SharingCodeStatus?
 
     private let context: ScreenContext
+    private var binding = SharingCodeBinding()
+    private var actionFlow: UInt64 = 0
 
     public init(vaultID: UUID, memberID: UUID, context: ScreenContext) {
         self.vaultID = vaultID
@@ -781,19 +880,20 @@ public final class MemberVerificationModel {
     }
 
     public func startSession() async {
+        await leaveSession()
         await perform { try await apply(try await context.session.startSharingCodeSession()) }
     }
 
     public func refresh() async {
         guard isWaiting, !isWorking else { return }
-        await perform { try await apply(try await context.session.refreshSharingCodeSession()) }
+        await perform { try await apply(try await context.session.refreshSharingCodeSession(run: binding.run)) }
     }
 
     public func confirmTheirCode() async {
         guard case .typeTheirCode = step else { return }
         let typed = typedCode
         await perform {
-            let status = try await context.session.enterSharingCode(typed)
+            let status = try await context.session.enterSharingCode(typed, run: binding.run)
             typedCode = ""
             if case .typeTheirCode = status.step {
                 stepMessage = SharingCodeWording.wrongCode(attemptsLeft: status.attemptsLeft)
@@ -805,7 +905,7 @@ public final class MemberVerificationModel {
     public func cameraScanned(_ payload: String) async {
         guard case .typeTheirCode = step else { return }
         await perform {
-            let status = try await context.session.scanSharingPartnerCode(payload)
+            let status = try await context.session.scanSharingPartnerCode(payload, run: binding.run)
             if case .typeTheirCode = status.step {
                 stepMessage = SharingCodeWording.wrongCode(attemptsLeft: status.attemptsLeft)
             }
@@ -817,20 +917,21 @@ public final class MemberVerificationModel {
     public func useNewKeys() async {
         guard case .keysChanged = step else { return }
         await perform {
-            try await context.session.replacePinFromSharingCode(listedIn: vaultID)
+            try await context.session.replacePinFromSharingCode(listedIn: vaultID, run: binding.run)
             if let status = await context.session.sharingCodeStatus() { try await apply(status) }
         }
     }
 
     public func end() async {
-        await context.session.endSharingCodeSession()
+        await leaveSession()
     }
 
     private func apply(_ status: SharingCodeStatus) async throws {
+        guard await admit(status) else { return }
         self.status = status
         // Another account answered: end the session before anything about it is pinned.
         if let partner = status.partner, partner != memberID {
-            await context.session.endSharingCodeSession()
+            await leaveSession()
             step = .failed(
                 message: "Another account's device answered, so this was stopped and nothing was changed. Make sure "
                     + "\(memberName) types the code on their own device.")
@@ -869,7 +970,31 @@ public final class MemberVerificationModel {
         isWorking = true
         defer { isWorking = false }
         stepMessage = nil
+        actionFlow = binding.flow
+        let flow = actionFlow
         let failure = await ScreenOperation(context: context).run(body)
+        // The person moved on while this ran: what it has to say is not for the step they are on now.
+        guard flow == binding.flow else { return }
         errorMessage = failure ?? stepMessage
+    }
+
+    /// Ends this screen's session, if it has one, and drops whatever its running steps bring back.
+    private func leaveSession() async {
+        if let run = binding.leave() { await context.session.endSharingCodeSession(run: run) }
+    }
+
+    /// Takes `status` in if it is this screen's session and the person has not moved on: `false` otherwise, having
+    /// ended a session the person left and worded one that another screen replaced.
+    private func admit(_ status: SharingCodeStatus) async -> Bool {
+        switch binding.admit(status, since: actionFlow) {
+        case .current:
+            return true
+        case .stale:
+            if status.runID != binding.run { await context.session.endSharingCodeSession(run: status.runID) }
+            return false
+        case .replaced:
+            step = .failed(message: SharingCodeWording.replaced)
+            return false
+        }
     }
 }

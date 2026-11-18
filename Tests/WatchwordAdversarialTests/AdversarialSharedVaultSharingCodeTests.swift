@@ -165,8 +165,9 @@ extension AdversarialSharedVaultTests {
         let (vaultID, owner, members) = try await household.household(roles: [.administrator], seed: 1_220)
         let administrator = members[0]
         let invitee = try await household.account(seed: 1_229)
-        try await administrator.checkSharingCode(with: invitee)
-        let invitation = try await administrator.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
+        let (checked, _) = try await administrator.checkSharingCode(with: invitee)
+        let invitation = try await administrator.session.inviteThroughSharingCode(
+            to: vaultID, as: .readWrite, checked: checked)
         try await administrator.session.sync()
         let received = try #require(try await invitee.session.sharingCodeInvitation())
         #expect(received == invitation && received.ownerAccountID == owner.accountID)
@@ -193,11 +194,11 @@ extension AdversarialSharedVaultTests {
         let invitee = try await household.account(seed: 1_232)
         let vaultID = try await owner.session.createVault(name: "Household").id
         try await owner.session.shareVault(vaultID)
-        try await owner.checkSharingCode(with: invitee)
+        let (checked, _) = try await owner.checkSharingCode(with: invitee)
         let fake = try SharingParty(accountID: invitee.accountID, seed: 1_239)
         await household.directory.publish(fake.bundle)
         await #expect(throws: SharingError.keySubstituted(accountID: invitee.accountID)) {
-            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
+            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: checked)
         }
         #expect(await household.board.allObjects.keys.contains { $0.contains("/invitation/") } == false)
     }
@@ -445,7 +446,7 @@ extension AdversarialSharedVaultTests {
 
         var issued: Invitation?
         do {
-            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
+            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: checked)
             Issue.record("delivered into a taken slot")
         } catch SharedVaultError.invitationNotDelivered(let invitation) {
             issued = invitation
@@ -453,7 +454,7 @@ extension AdversarialSharedVaultTests {
         let invitation = try #require(issued)
         #expect(invitation == Invitation(vaultID: vaultID, ownerAccountID: owner.accountID))
         await #expect(throws: SharedVaultError.invitationNotDelivered(invitation), "a retry only delivers again") {
-            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
+            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: checked)
         }
         try await owner.session.sync()
         let status = try await owner.session.sharedVaultStatus(vaultID)

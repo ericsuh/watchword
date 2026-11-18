@@ -708,3 +708,63 @@ extension SharingScreenTests {
         #expect(rows.first?.trustText?.contains("remove them and invite them again") == true)
     }
 }
+
+extension SharingScreenTests {
+    /// Two sharing screens over one session, as two windows on a Mac (V25): one invites Bob to the first vault, the
+    /// other starts a session and checks Carol. Send in the first window invited the second window's partner, Carol,
+    /// into the first window's vault, while that window named Bob; and leaving one screen ended the other's session.
+    /// Each screen now drives only the session it started.
+    @Test("each sharing screen drives only its own session, so Send never invites another window's partner")
+    func screensDoNotShareASession() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 721)
+        let bob = try await household.account(seed: 722)
+        let carol = try await household.account(seed: 723)
+        let first = try await owner.session.createVault(name: "First").id
+        let second = try await owner.session.createVault(name: "Second").id
+        try await owner.session.shareVault(first)
+        try await owner.session.shareVault(second)
+
+        let window1 = InvitationModel(vaultID: first, context: ContextProbe().context(owner.session))
+        await window1.startSession()
+        guard case .showCode(let number1, _) = window1.step else {
+            Issue.record("expected the code, got \(window1.step)")
+            return
+        }
+        _ = try await bob.session.joinSharingCodeSession(number: number1)
+        await window1.refresh()
+        window1.typedCode = try #require(try await bob.session.refreshSharingCodeSession().ownCode)
+        await window1.confirmTheirCode()
+        guard case .chooseRole(_, let shownContact) = window1.step else {
+            Issue.record("expected the role step, got \(window1.step)")
+            return
+        }
+        #expect(shownContact.accountID == bob.accountID)
+
+        let window2 = InvitationModel(vaultID: second, context: ContextProbe().context(owner.session))
+        await window2.startSession()
+        guard case .showCode(let number2, _) = window2.step else {
+            Issue.record("expected the code, got \(window2.step)")
+            return
+        }
+        _ = try await carol.session.joinSharingCodeSession(number: number2)
+        await window2.refresh()
+        window2.typedCode = try #require(try await carol.session.refreshSharingCodeSession().ownCode)
+        await window2.confirmTheirCode()
+
+        await window1.invite()
+        #expect(window1.invitation == nil, "window 1 sent an invitation through window 2's session")
+        let firstStatus = try await owner.session.sharedVaultStatus(first)
+        let firstMembers: [UUID] = firstStatus.membership.members.map(\.accountID)
+        #expect(!firstMembers.contains(carol.accountID))
+
+        // Leaving the first window's screen leaves the second's session running, and it still invites Carol.
+        await window1.startOver()
+        #expect(await owner.session.sharingCodeStatus() != nil)
+        await window2.invite()
+        #expect(window2.step == .issued(code: nil), "\(window2.errorMessage ?? "")")
+        let secondStatus = try await owner.session.sharedVaultStatus(second)
+        let secondMembers: [UUID] = secondStatus.membership.members.map(\.accountID)
+        #expect(secondMembers.contains(carol.accountID))
+    }
+}

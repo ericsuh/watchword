@@ -41,9 +41,9 @@ struct SharingCodeSessionTests {
         #expect(try await ownerPins.pinned(invitee.accountID)?.method == .sharingCode)
         #expect(try await inviteePins.pinned(owner.accountID)?.method == .sharingCode)
 
-        let sent = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
+        let sent = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite, checked: accepted)
         await #expect(throws: SharingError.invitationAlreadyCompleted, "one invitation per session") {
-            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readOnly)
+            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readOnly, checked: accepted)
         }
         try await owner.session.sync()
         let received = try #require(try await invitee.session.sharingCodeInvitation())

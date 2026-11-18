@@ -184,6 +184,11 @@ public enum SharingCodeWording {
         return tries + " If their screen now shows other digits than before, stop and start a new code."
     }
 
+    /// This screen's session was replaced by one another screen or window started on this device (V25).
+    public static let replaced =
+        "Another window on this device started a vault sharing code, so this one was stopped and nothing was sent from "
+        + "here. Start again when that one is done."
+
     public static func failure(_ error: SharingCodeError) -> String {
         switch error {
         case .sessionNotFound:

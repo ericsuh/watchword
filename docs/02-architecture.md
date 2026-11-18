@@ -1513,7 +1513,9 @@ at a time (a second is `busy`), checks the lock before anything reaches the boar
 join ends the running session first and re-checks the lock and the session's generation after every wait, so an end, a
 lock or another start that lands meanwhile wins (V20). A joiner remembers each number it answered for twice a session's
 lifetime, across a lock, and never answers one again (`numberAlreadyAnswered`), so a board that serves a fresh commit
-buys the adversary in the middle no second try against one starter session (V23).
+buys the adversary in the middle no second try against one starter session (V23). Each status names its session
+(`runID`), and every step, the invitation (`inviteThroughSharingCode(to:as:checked:)`) and an end (`run:`) are bound to
+it, so one window's screen never drives another window's session (V25).
 
 **What the screens accept as a check** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). A vault sharing code
 session, or the fallback: the full vault sharing code typed (`.safetyNumber`), behind a secondary action, for two

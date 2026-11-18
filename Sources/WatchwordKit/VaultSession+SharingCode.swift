@@ -85,6 +85,10 @@ public struct SharingCodeStatus: Sendable, Hashable {
 
     public let role: Role
     public let step: Step
+    /// Which session this is (its generation): a screen passes it back with every step it takes (`run:`), and a step
+    /// for a session that has since been replaced, by another window or screen on this device, is refused
+    /// (`SharingCodeError.notReady`) rather than taken in whichever session is running (V25).
+    public let runID: UInt64
     /// This device's own account, for the screens to show ("You are …"), so each person can compare it with the
     /// account the other screen names.
     public let ownAccount: UUID
@@ -184,11 +188,11 @@ extension VaultSession {
     /// Looks at the board for the session's next message: the reply (starter, which then reveals) or the reveal
     /// (joiner, which checks it opens the commitment).
     @discardableResult
-    public func refreshSharingCodeSession() async throws -> SharingCodeStatus {
+    public func refreshSharingCodeSession(run: UInt64? = nil) async throws -> SharingCodeStatus {
         let (board, directory) = try sharingCodeSettings()
         let epoch = lockEpoch
         let generation = sharingCodeGeneration
-        try await sharingCodeStep { side, now in
+        try await sharingCodeStep(run: run) { side, now in
             switch side {
             case .starter(var starter):
                 defer { side = .starter(starter) }
@@ -205,9 +209,9 @@ extension VaultSession {
 
     /// The six digits the person typed from the other device's screen. A match authenticates the other account,
     /// which is pinned; a wrong code uses one of three attempts, and the last ends the session.
-    public func enterSharingCode(_ typed: String) async throws -> SharingCodeStatus {
+    public func enterSharingCode(_ typed: String, run: UInt64? = nil) async throws -> SharingCodeStatus {
         _ = try sharingCodeSettings()
-        try await sharingCodeStep { side, now in
+        try await sharingCodeStep(run: run) { side, now in
             switch side {
             case .starter(var starter):
                 defer { side = .starter(starter) }
@@ -222,9 +226,9 @@ extension VaultSession {
 
     /// The starter's camera read the joiner's fingerprint code from their screen, in place of typing their six
     /// digits. Only the scanner calls this.
-    public func scanSharingPartnerCode(_ payload: String) async throws -> SharingCodeStatus {
+    public func scanSharingPartnerCode(_ payload: String, run: UInt64? = nil) async throws -> SharingCodeStatus {
         _ = try sharingCodeSettings()
-        try await sharingCodeStep { side, now in
+        try await sharingCodeStep(run: run) { side, now in
             guard case .starter(var starter) = side else { throw SharingCodeError.notReady }
             defer { side = .starter(starter) }
             _ = try starter.scanJoinerCode(payload, at: now)
@@ -240,10 +244,13 @@ extension VaultSession {
 
     /// Joiner: the person said yes to pinning the account a scan named (`SharingCodeStatus.Step.confirmScannedAccount`,
     /// whose `partner` must be `account`). Pins it, or records that it conflicts with the pin already there.
-    public func confirmScannedSharingPartner(_ account: UUID) async throws -> SharingCodeStatus {
+    public func confirmScannedSharingPartner(_ account: UUID, run runID: UInt64? = nil) async throws
+        -> SharingCodeStatus
+    {
         let epoch = lockEpoch
         _ = try requireKeys()
-        guard let run = sharingCodeRun, !run.busy, case .joiner(let joiner) = run.side, joiner.scanned,
+        guard let run = sharingCodeRun, runID == nil || runID == run.generation, !run.busy,
+            case .joiner(let joiner) = run.side, joiner.scanned,
             case .verified = joiner.phase, joiner.evidence != nil, joiner.starter.accountID == account
         else { throw SharingCodeError.notReady }
         sharingCodeRun?.scanConfirmed = true
@@ -258,6 +265,12 @@ extension VaultSession {
         sharingCodeGeneration &+= 1
     }
 
+    /// Ends the session `run` names, if it is still the one running; another (a second window's) is left alone.
+    public func endSharingCodeSession(run: UInt64) {
+        guard sharingCodeRun?.generation == run else { return }
+        endSharingCodeSession()
+    }
+
     // MARK: - After the session
 
     /// Invites the account this session authenticated (the starter's side of ADR 0010, After the session): the usual
@@ -269,11 +282,17 @@ extension VaultSession {
     /// those bytes (a create whose answer was lost) counts as delivered; one holding anything else (someone who heard
     /// the number took it) throws `SharedVaultError.invitationNotDelivered` with the invitation, for the screen to hand
     /// over as text.
-    public func inviteThroughSharingCode(to vaultID: UUID, as role: MemberRole) async throws -> Invitation {
+    ///
+    /// `checked` is the status the screen showed when the person chose to send: the invitation goes to its partner,
+    /// in its session, or nowhere. Another session that replaced it (a second window's) is never the one invited
+    /// (V25).
+    public func inviteThroughSharingCode(to vaultID: UUID, as role: MemberRole, checked: SharingCodeStatus)
+        async throws -> Invitation
+    {
         let (board, _) = try sharingCodeSettings()
         let epoch = lockEpoch
-        guard let run = sharingCodeRun, case .starter(let starter) = run.side, case .verified = starter.phase,
-            let partner = starter.joiner?.accountID
+        guard let run = sharingCodeRun, run.generation == checked.runID, case .starter(let starter) = run.side,
+            case .verified = starter.phase, let partner = starter.joiner?.accountID, partner == checked.partner
         else { throw SharingCodeError.notReady }
         guard run.pinned else { throw SharingError.fingerprintNotVerified }
         guard !run.invitationSent else { throw SharingError.invitationAlreadyCompleted }
@@ -312,9 +331,10 @@ extension VaultSession {
     /// authenticated and bound to this session and account; `nil` while it has not arrived. Accept it with
     /// `acceptInvitation`, which needs the vault's owner pinned: by this session if the starter is the owner, by one
     /// of the person's own with the owner otherwise. Nobody vouches for an owner (ADR 0010, "No vouching").
-    public func sharingCodeInvitation() async throws -> Invitation? {
+    public func sharingCodeInvitation(run runID: UInt64? = nil) async throws -> Invitation? {
         let (board, _) = try sharingCodeSettings()
-        guard let run = sharingCodeRun, case .joiner(let joiner) = run.side else { throw SharingCodeError.notReady }
+        guard let run = sharingCodeRun, runID == nil || runID == run.generation, case .joiner(let joiner) = run.side
+        else { throw SharingCodeError.notReady }
         guard run.pinned else { throw SharingError.fingerprintNotVerified }
         guard
             let bytes = try await board.fetch(
@@ -328,10 +348,12 @@ extension VaultSession {
     /// directory's word. Allowed only where nothing this device holds says otherwise: with `vaultID`, the session's
     /// keys must be the ones that vault's chain lists for the account (the warning the person is resolving); without
     /// one, no shared vault here may list the account with other keys. Every vault's member check is made again.
-    public func replacePinFromSharingCode(listedIn vaultID: UUID? = nil) async throws {
+    public func replacePinFromSharingCode(listedIn vaultID: UUID? = nil, run runID: UInt64? = nil) async throws {
         let settings = try sharingSettings()
         let epoch = lockEpoch
-        guard let run = sharingCodeRun, let evidence = run.evidence, run.pinConflict else {
+        guard let run = sharingCodeRun, runID == nil || runID == run.generation, let evidence = run.evidence,
+            run.pinConflict
+        else {
             throw SharingCodeError.notReady
         }
         let contact = evidence.contact
@@ -381,11 +403,13 @@ extension VaultSession {
     /// it began on and the vault has not locked since; then pins what the step evidenced. A step that ends the session
     /// leaves the failed run in place, so the screen shows why.
     private func sharingCodeStep(
-        _ body: (inout SharingCodeRun.Side, Date) async throws -> Void
+        run runID: UInt64?, _ body: (inout SharingCodeRun.Side, Date) async throws -> Void
     ) async throws {
         let epoch = lockEpoch
         _ = try requireKeys()
-        guard var run = sharingCodeRun else { throw SharingCodeError.notReady }
+        guard var run = sharingCodeRun, runID == nil || runID == run.generation else {
+            throw SharingCodeError.notReady
+        }
         guard !run.busy else { throw SharingCodeError.busy }
         let generation = run.generation
         sharingCodeRun?.busy = true
@@ -470,7 +494,8 @@ extension VaultSession {
             case .failed(let error): step = .failed(error)
             }
             return SharingCodeStatus(
-                role: .starter, step: step, ownAccount: starter.account.accountID, number: starter.number.grouped,
+                role: .starter, step: step, runID: run.generation, ownAccount: starter.account.accountID,
+                number: starter.number.grouped,
                 scanPayload: starter.scanPayload,
                 ownCode: starter.code, attemptsLeft: starter.attemptsLeft, partner: starter.joiner?.accountID,
                 pinned: run.pinned, keysDifferFromPin: run.pinConflict, scanned: false)
@@ -485,7 +510,7 @@ extension VaultSession {
             case .failed(let error): step = .failed(error)
             }
             return SharingCodeStatus(
-                role: .joiner, step: step, ownAccount: joiner.account.accountID, number: nil,
+                role: .joiner, step: step, runID: run.generation, ownAccount: joiner.account.accountID, number: nil,
                 scanPayload: joiner.scanPayload, ownCode: joiner.code,
                 attemptsLeft: joiner.attemptsLeft, partner: joiner.starter.accountID, pinned: run.pinned,
                 keysDifferFromPin: run.pinConflict, scanned: joiner.scanned)

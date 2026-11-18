@@ -198,7 +198,8 @@
         func memberInvites() async throws {
             guard let memberVaultID else { return }
             let member = try await householdMember()
-            _ = try await member.inviteThroughSharingCode(to: memberVaultID, as: .readWrite)
+            guard let checked = await member.sharingCodeStatus() else { return }
+            _ = try await member.inviteThroughSharingCode(to: memberVaultID, as: .readWrite, checked: checked)
             try await member.sync()
         }
 
