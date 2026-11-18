@@ -1321,6 +1321,14 @@ public actor SyncEngine {
         if try await syncState.quarantine(entry, vaultID: vaultID) {
             usage.add(entry)
             quarantineUsage = usage
+        } else if !(try await syncState.holdsQuarantined(entry, vaultID: vaultID)) {
+            // Neither kept nor held: the store would not keep it (the SQLite store's lookup digest is not keyed, and
+            // entries crafted to share it crowd it, Z39). A drop like one past a cap, counted and, where this device
+            // writes snapshots, remembered (review finding Z141). In a shared vault, which writes none and replays
+            // its whole log at every change of head, remembering it would replay at every sync while the crowding
+            // stands, for nothing a replay can bring back.
+            report.quarantineFull += 1
+            if configuration.maintainsLog { state.quarantineDropped.insert(entry.device) }
         }
     }
 

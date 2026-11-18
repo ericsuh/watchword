@@ -100,10 +100,13 @@ actor InterceptingStateStore: SyncStateStore {
     var usage: QuarantineUsage?
     /// Thrown when the quarantine is counted, as a database that cannot be read would.
     var usageFailure: (any Error)?
+    /// Records whose entries the quarantine refuses to keep, as the SQLite store refuses one whose digest is crowded.
+    var refused: Set<RecordKey> = []
 
     func intercept(afterSave: (@Sendable (SyncState) async -> Void)?) { self.afterSave = afterSave }
     func report(usage: QuarantineUsage?) { self.usage = usage }
     func fail(usage failure: any Error) { usageFailure = failure }
+    func refuse(_ keys: Set<RecordKey>) { refused = keys }
 
     func loadState(vaultID: UUID) async -> SyncState? { await base.loadState(vaultID: vaultID) }
     func saveState(_ state: SyncState) async {
@@ -121,7 +124,8 @@ actor InterceptingStateStore: SyncStateStore {
         await base.removePendingDeletions(deletions, vaultID: vaultID)
     }
     func quarantine(_ entry: SyncEntry, vaultID: UUID) async -> Bool {
-        await base.quarantine(entry, vaultID: vaultID)
+        if refused.contains(entry.key) { return false }
+        return await base.quarantine(entry, vaultID: vaultID)
     }
     func quarantined(vaultID: UUID) async -> [SyncEntry] { await base.quarantined(vaultID: vaultID) }
     func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async {

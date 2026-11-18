@@ -366,7 +366,8 @@
         public func quarantine(_ entry: SyncEntry, vaultID: UUID) throws -> Bool {
             try connection.transaction {
                 guard try !holdsQuarantined(entry, vaultID: vaultID) else { return false }
-                // A crowded digest keeps nothing more: reported to the engine as already held, so not counted.
+                // A crowded digest keeps nothing more. Answered as not added; the engine, finding it not held either,
+                // counts it as not kept and remembers whose it was (review finding Z141).
                 guard try !digestCrowded(entry, vaultID: vaultID) else { return false }
                 try connection.query(
                     Self.quarantineInsert,

@@ -244,4 +244,33 @@ extension AdversarialSyncTests {
         #expect(report.quarantined.contains(RecordKey(recordID: far.id, kind: .item)))
         #expect(try await reader.items()[far.id] == nil, "a version three ceilings up was merged")
     }
+
+    // MARK: - A version the quarantine's store would not keep (Z141)
+
+    /// Threat: a member who sees a held-aside entry's ciphertext (the log is the vault's), or any writer whose versions
+    /// this device keeps aside. FNV-1a, the quarantine's lookup digest in SQLite, is not keyed, so sixteen entries
+    /// crafted to share one entry's digest, kept first, crowd that digest, and the store keeps nothing more under it
+    /// (Z39). It said so by answering "already held", so the engine neither counted the version as not kept nor
+    /// remembered whose it was: the version was unkept, uncounted and unrecorded, and nothing held back the snapshot
+    /// that covers its segment. A version the store does not keep, and does not hold, is a drop like one past a cap.
+    @Test("a version the quarantine's store refuses to keep is counted and remembered as not kept")
+    func refusedByTheStoreIsADrop() async throws {
+        let f = try await Self.fixture()
+        let configuration = Self.jumpConfiguration()
+        let author = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: await f.writer.store)
+        try await author.save(Self.login("Mine", password: "m"))
+        let far = try await Self.plantVersion(900, title: "Far ahead", on: author)
+        try await author.sync()
+        let state = InterceptingStateStore()
+        await state.refuse([RecordKey(recordID: far, kind: .item)])
+        let (engine, _, _) = await Self.joiner(f, state: state, configuration: configuration)
+        let report = try await engine.sync()
+        #expect(report.quarantined == [RecordKey(recordID: far, kind: .item)])
+        #expect(report.quarantineFull == 1, "a version kept nowhere was not counted")
+        #expect(
+            await state.loadState(vaultID: Self.vault)?.quarantineDropped == [Self.a],
+            "whose version was not kept was not remembered")
+    }
 }
