@@ -92,6 +92,47 @@ struct StagingTests {
         #expect(!FileManager.default.fileExists(atPath: presenting.path))
     }
 
+    /// The review of Z80 (Z129): `stage` created its folder with intermediate directories under a path it trusted. A8,
+    /// or anyone who can write to the per-user temporary directory of an unsandboxed build (`app:test macos`, CI),
+    /// makes `Watchword Staging` a symbolic link to a folder of their choosing, and the next export's plaintext was
+    /// written through it. And the sweep of earlier builds' `Export-*` folders removed any other program's folder of
+    /// that name in the temporary directory. Now a staging folder that is not a real directory is replaced before
+    /// anything is written, and only an `Export-<UUID>` folder holding one regular file is swept.
+    @Test("a staging folder replaced by a link is not written through, and the earlier sweep removes only its own")
+    func stagingFolderIsNotALink() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = FileManager.default
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        let elsewhere = root.appendingPathComponent("elsewhere", isDirectory: true)
+        try manager.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let staging = StagingFolder(temporaryDirectory: root)
+        try manager.createSymbolicLink(at: staging.url, withDestinationURL: elsewhere)
+
+        let staged = try staging.stage(named: "Export.csv") { try Data("Title,Password\n".utf8).write(to: $0) }
+        #expect(try manager.contentsOfDirectory(atPath: elsewhere.path).isEmpty, "written through the link")
+        let type = try manager.attributesOfItem(atPath: staging.url.path)[.type] as? FileAttributeType
+        #expect(type == .typeDirectory)
+        #expect(manager.fileExists(atPath: staged.path))
+
+        // The earlier builds' folders: only `Export-<UUID>` holding one regular file is theirs.
+        let ours = root.appendingPathComponent("Export-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: ours, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: ours.appendingPathComponent("old.csv"))
+        let named = root.appendingPathComponent("Export-reports", isDirectory: true)
+        try manager.createDirectory(at: named, withIntermediateDirectories: true)
+        try Data("kept".utf8).write(to: named.appendingPathComponent("q3.pdf"))
+        let fuller = root.appendingPathComponent("Export-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: fuller, withIntermediateDirectories: true)
+        try Data("a".utf8).write(to: fuller.appendingPathComponent("a.txt"))
+        try Data("b".utf8).write(to: fuller.appendingPathComponent("b.txt"))
+        staging.sweep()
+        #expect(!manager.fileExists(atPath: ours.path))
+        #expect(manager.fileExists(atPath: named.path), "another program's Export- folder was removed")
+        #expect(manager.fileExists(atPath: fuller.path), "a folder no earlier build wrote was removed")
+        #expect(manager.fileExists(atPath: elsewhere.path))
+    }
+
     @Test("each staged file has a folder of its own, a name cannot leave it, and removal touches nothing else")
     func layout() throws {
         let root = temporaryRoot()

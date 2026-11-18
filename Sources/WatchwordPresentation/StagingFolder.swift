@@ -32,9 +32,15 @@ public struct StagingFolder: Sendable, Hashable {
 
     /// Creates a sub-folder of its own for one file named `filename` and calls `write` with the file's URL, which
     /// must create the file there. Returns that URL. If `write` throws, nothing is left behind.
+    ///
+    /// The folder's own path is not trusted (review finding Z129): if `Watchword Staging` is anything but a real
+    /// directory (a symbolic link someone who can write the temporary directory made, a file), it is removed and made
+    /// again before anything is written, and nothing is created with intermediate directories. The temporary
+    /// directory itself is the system's. A swap between the check and the write is not excluded.
     public func stage(named filename: String, write: (URL) throws -> Void) throws -> URL {
+        try prepareFolder()
         let folder = url.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         excludeFromBackup()
         let file = folder.appendingPathComponent(Self.safeName(filename), isDirectory: false)
         do {
@@ -44,6 +50,26 @@ public struct StagingFolder: Sendable, Hashable {
             throw error
         }
         return file
+    }
+
+    /// Makes `url` a real directory of its own: whatever else is at the path (read without following a link) goes.
+    private func prepareFolder() throws {
+        let manager = FileManager.default
+        // The system's own directory (or a test's), trusted as it is; made if it is missing.
+        if Self.type(of: temporaryDirectory) == nil {
+            try manager.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        }
+        if let type = Self.type(of: url) {
+            guard type != .typeDirectory else { return }
+            try manager.removeItem(at: url)
+        }
+        try manager.createDirectory(at: url, withIntermediateDirectories: false)
+        guard Self.type(of: url) == .typeDirectory else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    /// The type of what is at `url` itself, a link not followed; `nil` if nothing is.
+    static func type(of url: URL) -> FileAttributeType? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
     }
 
     /// Removes one staged file with its sub-folder. A URL not staged here is left alone.
@@ -61,9 +87,22 @@ public struct StagingFolder: Sendable, Hashable {
         let manager = FileManager.default
         try? manager.removeItem(at: url)
         let leftovers = (try? manager.contentsOfDirectory(atPath: temporaryDirectory.path)) ?? []
-        for name in leftovers where name.hasPrefix(Self.earlierPrefix) {
+        for name in leftovers where Self.isEarlierExport(name, in: temporaryDirectory) {
             try? manager.removeItem(at: temporaryDirectory.appendingPathComponent(name, isDirectory: true))
         }
+    }
+
+    /// A folder an earlier build staged an export in, and nothing else of that name (review finding Z129): exactly
+    /// `Export-` and a UUID, a real directory holding one regular file. In an unsandboxed build the temporary
+    /// directory is the user's, and another program's `Export-…` folder there is not ours to remove.
+    static func isEarlierExport(_ name: String, in directory: URL) -> Bool {
+        guard name.hasPrefix(earlierPrefix), UUID(uuidString: String(name.dropFirst(earlierPrefix.count))) != nil
+        else { return false }
+        let folder = directory.appendingPathComponent(name, isDirectory: true)
+        guard type(of: folder) == .typeDirectory,
+            let contents = try? FileManager.default.contentsOfDirectory(atPath: folder.path), contents.count == 1
+        else { return false }
+        return type(of: folder.appendingPathComponent(contents[0], isDirectory: false)) == .typeRegular
     }
 
     /// The staged files, for tests and for the launch check: every regular file under the folder.

@@ -3349,7 +3349,10 @@ drops what it holds). A process that dies with the mover up (a crash, a force qu
 the file until the next launch, with its protection class on iOS and none on macOS; no later than that (review §Z,
 Z80, Z90). A lock that lands while the mover is up (the idle auto-lock included: no activity is recorded while the
 system's sheet is up) removes the file under it, and that save fails: the person exports again after unlocking.
-The sweep also removes the `Export-<UUID>` folders earlier builds staged in. What the exporters build on the
+The sweep also removes the `Export-<UUID>` folders earlier builds staged in, and only those: exactly that name, a
+real directory holding one regular file (an unsandboxed build's temporary directory is the user's; review finding
+Z129). The staging folder's own path is not trusted: anything at it but a real directory (a link, a file) is
+removed and the folder made again, without intermediate directories, before anything is written (Z129). What the exporters build on the
 way (the CSV or JSON text, the ZIP's parts) is ordinary memory and is not wiped, like every decoded item's `String`s
 (SEC4, D5). Not `fileExporter` with `FileWrapper.fileAttributes`, which says nothing about what the exporter stages.
 Where the mover copies rather than moves (another file provider), the copy's protection is the provider's. macOS has
