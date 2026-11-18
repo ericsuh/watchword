@@ -286,9 +286,6 @@ struct AdversarialSessionHygieneTests {
         return try DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceSecret: ownSecret, deviceID: deviceID)
     }
 
-    /// A8 plants another account's sealed ledger and ranges under this device's names, for an item it has given the
-    /// same ID and version: if believed, the ledger would say the breached password was checked. It is not believed:
-    /// the item is due, and the planted ranges answer nothing.
     /// A4, a writing member of a shared vault with a client that reads the raw scan records (Z88). A check answered
     /// from the prefix cache costs no pacing token, so the victim's next item is scanned at once, and each item's
     /// `scannedAt` is published to every member: the gaps between them said which of A4's probe items hit a range the
@@ -361,6 +358,9 @@ struct AdversarialSessionHygieneTests {
         #expect(throws: PwnedRangeCodecError.malformed) { try CachedPwnedRange(decodingPadded: tampered) }
     }
 
+    /// A8 plants another account's sealed ledger and ranges under this device's names, for an item it has given the
+    /// same ID and version: if believed, the ledger would say the breached password was checked. It is not believed:
+    /// the item is due, and the planted ranges answer nothing.
     @Test("a ledger and ranges planted from another account's device are not believed")
     func plantedRecordsAreIgnored() async throws {
         let (victim, victimVault) = try await Self.unlocked(seed: 31)
