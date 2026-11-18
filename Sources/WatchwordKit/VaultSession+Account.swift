@@ -47,6 +47,14 @@ public struct PendingPasswordChange: Sendable, Hashable, Identifiable {
     public var revokedDevices: [UUID]
     /// This device is among them: the change is refused here (`passwordChangeRevokesThisDevice`).
     public var revokesThisDevice: Bool
+    /// Whether the device that made it was registered before the password change this device follows, as that
+    /// change sealed it, rather than after it (review finding Z13). A device registered after it may have been
+    /// registered with the password it retired, by whoever else knew that password; the list puts these second.
+    public var registeredBeforeFollowed: Bool
+    /// Whether `canBeFollowed`, `revokedDevices` and `revokesThisDevice` were worked out: each costs a replay of the
+    /// registry, so the list does that for its first `maximumChangesDescribed` rows only, and
+    /// `describePasswordChange(by:)` does it for the one the person selects. Until then they say nothing.
+    public var isDescribed: Bool
 }
 
 /// What becomes of the account password when a device is revoked (docs/02-architecture.md §7.8). Both choices take
@@ -241,7 +249,8 @@ extension VaultSession {
     /// device beyond that is still listed and can still be followed by naming the device, which fetches its header
     /// then (`followPasswordChange`).
     static let maximumCandidateAuthors = 64
-    /// The password changes `pendingPasswordChanges` describes: each costs a replay of the registry.
+    /// The password changes `pendingPasswordChanges` describes in full: each costs a replay of the registry. Every
+    /// change is listed whatever this is (Z13); the rest are described one at a time (`describePasswordChange`).
     static let maximumChangesDescribed = 16
     /// Header names looked at during enrolment before giving up; the store may hold any number of planted ones.
     static let maximumHeadersConsidered = 64
@@ -569,7 +578,8 @@ extension VaultSession {
     /// credential entry must be one the registry lists as pending or forked, written by the same device, and the
     /// header must carry the account key's signature and that device's. `pending` are password changes made after
     /// the one this device follows; `forked` branch off earlier. **One per authoring device**, its newest, newest
-    /// generation first: whoever publishes many changes under one device's name is tried once (Z1).
+    /// generation first: whoever publishes many changes under one device's name is tried once (Z1). Devices whose
+    /// registration the checkpoint this device follows sealed come before the rest (Z13).
     ///
     /// Judged along the chain `passwordChangePending` reads (`trustedAnchor`), and none at all while a step of this
     /// device's own is under way: a change that was pending before it is a fork after it (review finding Z9).
@@ -585,6 +595,12 @@ extension VaultSession {
         let newestFirst: (AccountHeaderObject, AccountHeaderObject) -> Bool = {
             ($0.generation, $0.credentialID) > ($1.generation, $1.credentialID)
         }
+        // Authors the followed checkpoint sealed are tried first (Z13), then the rest, newest first.
+        let sealed = Self.sealedAuthors(view)
+        let order: (AccountHeaderObject, AccountHeaderObject) -> Bool = {
+            let (first, second) = (sealed.contains($0.author), sealed.contains($1.author))
+            return first != second ? first : newestFirst($0, $1)
+        }
         for row in rows where row.recordID != account.accountID {
             guard let header = try? AccountHeaderObject.parse(row.envelope),
                 Self.isCandidate(header, account: account, view: view)
@@ -595,7 +611,7 @@ extension VaultSession {
                 if forked[header.author].map({ newestFirst(header, $0) }) ?? true { forked[header.author] = header }
             }
         }
-        return (pending.values.sorted(by: newestFirst), forked.values.sorted(by: newestFirst))
+        return (pending.values.sorted(by: order), forked.values.sorted(by: order))
     }
 
     static func isCandidate(_ header: AccountHeaderObject, account: AccountRecord, view: RegistryView) -> Bool {
@@ -614,17 +630,38 @@ extension VaultSession {
     }
 
     /// The credential changes this device does not follow, by the device that made them, each device's newest
-    /// first; the devices in the order their newest change sorts (generation, then entry ID, descending). The order
-    /// is no defence, since whoever makes a change chooses its place in it: what bounds an author is that each gets
-    /// one attempt, and what reaches a change this order starves is naming its device.
-    static func changesByAuthor(_ changes: [DeviceRegistryState.Credential]) -> [(
+    /// first. The devices in `sealed` (`sealedAuthors`) come first, then the rest; within each, in the order their
+    /// newest change sorts (generation, then entry ID, descending). That last order is no defence, since whoever
+    /// makes a change chooses its place in it; `sealed` is (review finding Z13): a device registered after the change
+    /// this device follows may have been registered with the password that change retired, by anyone who knew it,
+    /// and as many of them as they like, while one the checkpoint sealed was registered before. What bounds an author
+    /// is that each gets one attempt, and what reaches a change this order starves is naming its device.
+    static func changesByAuthor(_ changes: [DeviceRegistryState.Credential], sealed: Set<UUID> = []) -> [(
         author: UUID, changes: [DeviceRegistryState.Credential]
     )] {
         var grouped: [UUID: [DeviceRegistryState.Credential]] = [:]
         for change in changes { grouped[change.author, default: []].append(change) }
         return grouped.map { author, changes in
             (author, changes.sorted { ($0.generation, $0.id) > ($1.generation, $1.id) })
-        }.sorted { ($0.changes[0].generation, $0.changes[0].id) > ($1.changes[0].generation, $1.changes[0].id) }
+        }.sorted {
+            let (first, second) = (sealed.contains($0.author), sealed.contains($1.author))
+            if first != second { return first }
+            return ($0.changes[0].generation, $0.changes[0].id) > ($1.changes[0].generation, $1.changes[0].id)
+        }
+    }
+
+    /// The devices whose registration the credential entry this device follows sealed: it descends from the entry
+    /// that registered them (review finding Z13). Bounded by the entries held.
+    static func sealedAuthors(_ view: RegistryView) -> Set<UUID> {
+        var sealed: Set<ObjectDigest> = []
+        var stack = [view.state.credential.id]
+        while let id = stack.popLast() {
+            guard sealed.insert(id).inserted, let entry = view.entries[id] else { continue }
+            stack += entry.parents
+        }
+        return Set(
+            (Array(view.state.devices.values) + Array(view.state.revoked.values))
+                .filter { sealed.contains($0.entry) }.map(\.id))
     }
 
     // MARK: - Account creation and upkeep
@@ -942,35 +979,64 @@ extension VaultSession {
     /// To a device that has not been given a new password, two changes made at once are symmetric: both carry the
     /// account key's signature, a registered device's and the previous password's. Which is the person's own is
     /// theirs to say, by the device it was made on; `revokedDevices` is what each would take away.
+    ///
+    /// **Every** author is listed (review finding Z13): listing needs no replay. Those whose registration the
+    /// followed checkpoint sealed come first, so that puppets registered with a retired password cannot push the
+    /// genuine change off a screen. What following each would do is worked out for the first
+    /// `maximumChangesDescribed`; `describePasswordChange(by:)` works it out for any other.
     public func pendingPasswordChanges() async throws -> [PendingPasswordChange] {
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         let view = try await registry(account)
         let rows = try await store.records(in: account.accountID, kind: .deviceRegistry)
-        let pending = Set(view.state.pendingCredentials.map(\.id))
-        var described: [PendingPasswordChange] = []
-        let authors = Self.changesByAuthor(view.state.pendingCredentials + view.state.forkedCredentials)
-        for (author, changes) in authors.prefix(Self.maximumChangesDescribed) {
-            let change = changes[0]
-            // As it would be followed: the registry replayed with the change as its last checkpoint.
-            let followed = try? Self.evaluateRegistry(
-                rows.map(\.envelope), accountID: account.accountID, accountKey: view.state.accountSigningKey,
-                genesis: view.state.genesis, credential: change.id)
-            var name = ""
-            if let keys, !keys.keyset.isZeroised,
-                let label = view.state.devices[author]?.label ?? view.state.revoked[author]?.label
-            {
-                name = Self.openLabel(label, deviceID: author, keyset: keys.keyset)?.name ?? ""
-            }
-            let known = Set(view.state.devices.keys).union(view.state.revoked.keys)
-            described.append(
-                PendingPasswordChange(
-                    device: author, deviceName: name, generation: change.generation,
-                    isFork: !pending.contains(change.id), canBeFollowed: followed != nil,
-                    revokedDevices: (followed?.state.revoked.keys.filter(known.contains) ?? [])
-                        .sorted { $0.uuidString < $1.uuidString },
-                    revokesThisDevice: followed?.state.standing(of: account.deviceID) == .revoked))
+        let sealed = Self.sealedAuthors(view)
+        let authors = Self.changesByAuthor(
+            view.state.pendingCredentials + view.state.forkedCredentials, sealed: sealed)
+        return authors.enumerated().map { index, author in
+            describe(
+                author.changes[0], view: view, rows: rows, account: account, sealed: sealed,
+                replaying: index < Self.maximumChangesDescribed)
         }
-        return described
+    }
+
+    /// One row of `pendingPasswordChanges`, worked out in full: the newest change `device` made that this device
+    /// does not follow.
+    public func describePasswordChange(by device: UUID) async throws -> PendingPasswordChange {
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        let view = try await registry(account)
+        let rows = try await store.records(in: account.accountID, kind: .deviceRegistry)
+        guard
+            let change = Self.changesByAuthor(view.state.pendingCredentials + view.state.forkedCredentials)
+                .first(where: { $0.author == device })?.changes.first
+        else { throw VaultError.noPasswordChangeToFollow(device) }
+        return describe(
+            change, view: view, rows: rows, account: account, sealed: Self.sealedAuthors(view), replaying: true)
+    }
+
+    private func describe(
+        _ change: DeviceRegistryState.Credential, view: RegistryView, rows: [StoredRecord], account: AccountRecord,
+        sealed: Set<UUID>, replaying: Bool
+    ) -> PendingPasswordChange {
+        let author = change.author
+        // As it would be followed: the registry replayed with the change as its last checkpoint.
+        let followed =
+            replaying
+            ? try? Self.evaluateRegistry(
+                rows.map(\.envelope), accountID: account.accountID, accountKey: view.state.accountSigningKey,
+                genesis: view.state.genesis, credential: change.id) : nil
+        var name = ""
+        if let keys, !keys.keyset.isZeroised,
+            let label = view.state.devices[author]?.label ?? view.state.revoked[author]?.label
+        {
+            name = Self.openLabel(label, deviceID: author, keyset: keys.keyset)?.name ?? ""
+        }
+        let known = Set(view.state.devices.keys).union(view.state.revoked.keys)
+        return PendingPasswordChange(
+            device: author, deviceName: name, generation: change.generation,
+            isFork: !view.state.pendingCredentials.contains { $0.id == change.id }, canBeFollowed: followed != nil,
+            revokedDevices: (followed?.state.revoked.keys.filter(known.contains) ?? [])
+                .sorted { $0.uuidString < $1.uuidString },
+            revokesThisDevice: followed?.state.standing(of: account.deviceID) == .revoked,
+            registeredBeforeFollowed: sealed.contains(author), isDescribed: replaying)
     }
 
     /// Every device of the account, revoked ones included, this device first. Names need the vault unlocked.
@@ -1604,7 +1670,8 @@ extension VaultSession {
             held[header.author] = (header, row.key)
         }
         if !stale.isEmpty { try await store.commit(StoreChange(deletions: stale)) }
-        let wanted = Self.changesByAuthor(view.state.pendingCredentials + view.state.forkedCredentials)
+        let wanted = Self.changesByAuthor(
+            view.state.pendingCredentials + view.state.forkedCredentials, sealed: Self.sealedAuthors(view))
         for (author, changes) in wanted.prefix(Self.maximumCandidateAuthors) {
             for credential in changes.prefix(Self.maximumHeaderAttempts) {
                 if let have = held[author], have.header.generation >= credential.generation { break }

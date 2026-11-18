@@ -126,7 +126,12 @@ public struct PasswordChangeRow: Hashable, Sendable, Identifiable {
             .map { names[$0] ?? "a device this one does not know" }
         var text = "The account password was changed on \(name)"
         text += change.isFork ? ", at the same time as the change this device follows." : "."
-        if change.revokesThisDevice {
+        if !change.registeredBeforeFollowed {
+            text += " That device was added after the password this device has was set."
+        }
+        if !change.isDescribed {
+            text += " Select it to see what following it would do."
+        } else if change.revokesThisDevice {
             text += " That change removes this device from your account, so it cannot be followed here."
         } else if !change.canBeFollowed {
             text += " It cannot be followed."
@@ -134,7 +139,8 @@ public struct PasswordChangeRow: Hashable, Sendable, Identifiable {
             text += " Following it removes \(revoked.joined(separator: ", ")) from your account."
         }
         summary = text
-        mayFollow = change.canBeFollowed && !change.revokesThisDevice
+        // Not yet worked out: the session refuses a change that removes this device or cannot be followed anyway.
+        mayFollow = !change.isDescribed || (change.canBeFollowed && !change.revokesThisDevice)
     }
 }
 
@@ -224,6 +230,15 @@ public final class DevicesModel: LockSensitive {
             done = true
         }
         return done
+    }
+
+    /// Works out what following `change` would do, for a row the list did not describe (Z13).
+    public func describe(_ change: PasswordChangeRow) async {
+        await perform {
+            let described = try await context.session.describePasswordChange(by: change.id)
+            let row = PasswordChangeRow(described, names: names)
+            passwordChanges = passwordChanges.map { $0.id == row.id ? row : $0 }
+        }
     }
 
     private func reload() async throws {

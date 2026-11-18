@@ -332,4 +332,104 @@ extension AdversarialAccountTests {
         edited[4] = 2
         #expect(MemberRegistryPins.parse(edited, account: bundle, vaultID: vaultID) == nil)
     }
+
+    // MARK: - The way out of too many pending changes is not spent in the adversary's order (Z13)
+
+    /// Devices the holder of a revoked device registers with the enrolment key of the generation it knew (the retired
+    /// password's), each publishing a two-step chain of password changes under keys nobody derives, with headers:
+    /// what it takes to sort every one of them ahead of a genuine change one generation up.
+    static func puppetChanges(from lost: TestVault, count: Int, seed: UInt64 = 4040) async throws -> RogueChange {
+        let session = lost.session
+        let account = try #require(await session.account)
+        let keys = try #require(await session.keys)
+        let view = try await session.registry(account)
+        var generator = SeededGenerator(seed: seed)
+        let enrolment = EnrolmentKey.derive(from: keys.accountUnlockKey, accountID: account.accountID)
+        var change = RogueChange()
+        for index in 0..<count {
+            let id = UUID(uuidString: String(format: "D1000000-0000-4000-8000-%012X", index + 1))!
+            let key = SoftwareDeviceKey.generate(using: &generator)
+            var registration = RegistryEntry(
+                accountID: account.accountID, parents: view.state.heads,
+                author: .enrolment(credential: view.state.credential.id),
+                body: .add(RegistryDevice(id: id, key: try key.publicKey(), label: [])))
+            registration.accountSignature = try keys.keyset.sign(registration.accountMessage, domain: .deviceRegistry)
+            registration.authorSignature = try enrolment.sign(registration.enrolmentMessage, domain: .deviceRegistry)
+            change.entries.append(registration)
+            var parents = [registration.id]
+            var previous = view.state.credential.id
+            var previousEnrolment = enrolment
+            var generation = account.credentialGeneration
+            for _ in 0..<2 {
+                generation += 1
+                let unlockKey = EncryptionKey.generate(using: &generator)
+                let next = EnrolmentKey.derive(from: unlockKey, accountID: account.accountID)
+                var credential = RegistryEntry(
+                    accountID: account.accountID, parents: parents, author: .device(id),
+                    body: .credential(generation: generation, enrolmentKey: try next.publicKey(), previous: previous))
+                credential.accountSignature = try keys.keyset.sign(credential.accountMessage, domain: .deviceRegistry)
+                credential.authorSignature = try key.sign(
+                    prepared: DeviceSignatures.signedBytes(
+                        domain: .deviceRegistry, deviceID: id, message: credential.deviceMessage))
+                credential.previousCredentialSignature = try previousEnrolment.sign(
+                    credential.previousCredentialMessage, domain: .deviceRegistry)
+                let salt = (0..<account.kdf.saltLength).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
+                var header = AccountHeaderObject(
+                    accountID: account.accountID, generation: generation, author: id, kdf: account.kdf, salt: salt,
+                    unlockKeyID: unlockKey.keyID, keysetVersion: generation, credentialID: credential.id,
+                    genesisID: view.state.genesis,
+                    wrappedKeyset: try keys.keyset.wrap(with: unlockKey, recordVersion: generation, using: &generator))
+                try header.bind(personalVaultID: account.personalVaultID, unlockKey: unlockKey, using: &generator)
+                header.accountSignature = try keys.keyset.sign(header.signedPart, domain: .accountHeader)
+                header.deviceSignature = try key.sign(
+                    prepared: DeviceSignatures.signedBytes(
+                        domain: .accountHeader, deviceID: id, message: header.signedPart))
+                change.entries.append(credential)
+                change.credentials.append(credential)
+                change.headers.append(header)
+                parents = [credential.id]
+                previous = credential.id
+                previousEnrolment = next
+            }
+        }
+        return change
+    }
+
+    /// Threat: the holder of the device the person revoked knows the retired password, so holds that generation's
+    /// enrolment key. It registers seventeen puppets with it, and each publishes a two-step chain of changes. On a
+    /// device still at the old generation, the three attempts of the lock screen went to puppets (their changes sort
+    /// first by generation and ID, both the adversary's choice), then `tooManyPasswordChangesPending`; and the list
+    /// the person was to choose from held sixteen puppets and not the genuine change, so it could not be followed.
+    /// Every author is listed, and those whose registration the checkpoint this device follows had sealed go first,
+    /// in the list and in the lock screen's attempts.
+    @Test("puppets registered with the retired password do not crowd the genuine change out of the way out")
+    func puppetsDoNotCrowdOutTheGenuineChange() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        let lost = try await f.enrolled(Self.deviceX)
+        let phone = try #require(await f.a.session.account?.deviceID)
+        let puppets = try await Self.puppetChanges(from: lost, count: 17)
+        try await f.a.session.revokeDevice(
+            Self.deviceX, password: .change(current: TestVault.password, new: Self.newPassword))
+        try await f.a.session.sync()
+        let genuine = try await f.registryView(f.a).state.credential.id
+        await Self.plant(puppets, in: f)
+
+        #expect(try await b.session.syncAll().awaitingNewPassword)
+        await b.session.lock()
+        let listed = try await b.session.pendingPasswordChanges()
+        #expect(listed.count == 18, "every author is listed")
+        #expect(listed.first?.device == phone, "the device the followed checkpoint sealed goes first")
+        #expect(listed.first?.registeredBeforeFollowed == true)
+        #expect(listed.dropFirst().allSatisfy { !$0.registeredBeforeFollowed })
+        #expect(listed.filter(\.isDescribed).count == VaultSession.maximumChangesDescribed)
+        // A row the list did not work out is worked out when the person selects it.
+        let last = try #require(listed.last)
+        #expect(!last.isDescribed)
+        let described = try await b.session.describePasswordChange(by: last.device)
+        #expect(described.isDescribed && described.canBeFollowed && !described.revokesThisDevice)
+
+        try await b.session.unlock(password: Self.newPassword)
+        #expect(try await f.registryView(b).state.credential.id == genuine)
+    }
 }

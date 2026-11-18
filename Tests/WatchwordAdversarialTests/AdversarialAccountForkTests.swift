@@ -233,14 +233,16 @@ extension AdversarialAccountTests {
 
     /// Threat: before the lost device was revoked, its holder enrolled devices of their own with the password they
     /// knew. Each publishes changes too, so more devices claim a change than one unlock tries, and all of theirs sort
-    /// ahead of the genuine one. The unlock says so rather than calling the new password wrong, and the person
-    /// reaches the genuine change by naming the device they made it on.
+    /// ahead of the genuine one: made, here, on a device the person added after the password this device has was
+    /// set, so that the checkpoint this device follows seals none of them (Z13 puts the ones it seals first). The
+    /// unlock says so rather than calling the new password wrong, and the person reaches the genuine change by
+    /// naming the device they made it on.
     @Test("more devices claiming a change than an unlock tries is reported, and the genuine one is reached by name")
     func moreAuthorsThanAttempts() async throws {
         let f = try await Self.fixture()
         let b = try await f.enrolled(Self.deviceB)
         let lost = try await f.enrolled(Self.deviceX)
-        let deviceA = try #require(await f.a.session.account?.deviceID)
+        let c = try await f.enrolled(Self.deviceC)
         var rogues: [RogueChange] = []
         for (index, id) in [Self.deviceP1, Self.deviceP2, Self.deviceP3].enumerated() {
             let puppet = try await f.enrolled(id)
@@ -248,17 +250,18 @@ extension AdversarialAccountTests {
                 try await Self.rogueChange(from: puppet, passwords: [nil, nil], seed: 3000 + UInt64(index)))
         }
         try await lost.session.sync()
-        try await f.a.session.sync()
+        try await c.session.sync()
         try await b.session.sync()
-        try await f.a.session.revokeDevice(
+        try await c.session.revokeDevice(
             Self.deviceX, password: .change(current: TestVault.password, new: Self.newPassword))
-        try await f.a.session.sync()
-        let genuine = try await f.registryView(f.a).state.credential.id
+        try await c.session.sync()
+        let genuine = try await f.registryView(c).state.credential.id
         for rogue in rogues { await Self.plant(rogue, in: f) }
 
         #expect(try await b.session.syncAll().awaitingNewPassword)
         await b.session.lock()
-        #expect(try await b.session.pendingPasswordChanges().count == 4)
+        let listed = try await b.session.pendingPasswordChanges()
+        #expect(listed.count == 4 && listed.allSatisfy { !$0.registeredBeforeFollowed })
         await #expect(throws: VaultError.tooManyPasswordChangesPending) {
             try await b.session.unlock(password: Self.newPassword)
         }
@@ -269,9 +272,9 @@ extension AdversarialAccountTests {
             try await b.session.followPasswordChange(by: Self.deviceB, password: Self.newPassword)
         }
         await #expect(throws: CryptoError.authenticationFailed) {
-            try await b.session.followPasswordChange(by: deviceA, password: TestVault.password)
+            try await b.session.followPasswordChange(by: Self.deviceC, password: TestVault.password)
         }
-        try await b.session.followPasswordChange(by: deviceA, password: Self.newPassword)
+        try await b.session.followPasswordChange(by: Self.deviceC, password: Self.newPassword)
         #expect(try await f.registryView(b).state.credential.id == genuine)
         #expect(try await b.session.state() == .unlocked)
         #expect(try await !b.session.isAwaitingNewPassword())
