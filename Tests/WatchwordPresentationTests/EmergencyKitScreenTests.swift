@@ -54,7 +54,7 @@ struct EmergencyKitScreenTests {
         }
         let url = try model.stagePDF(options: [.atomic], render: render)
         #expect(url.lastPathComponent == EmergencyKitModel.filename)
-        #expect(given.contains(.atomic) && given.contains(.withoutOverwriting))
+        #expect(!given.contains(.atomic) && given.contains(.withoutOverwriting))
         #expect(staging.stagedFiles() == [url])
         model.finishSaving()
         #expect(staging.stagedFiles().isEmpty && model.kit == created, "onboarding keeps its kit")

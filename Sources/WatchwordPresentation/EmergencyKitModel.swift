@@ -98,7 +98,8 @@ public final class EmergencyKitModel: LockSensitive {
         guard let kit else { throw CocoaError(.fileNoSuchFile) }
         removeStagedPDF()
         let url = try staging.stage(named: Self.filename) { url in
-            try render(kit, url, options.union(.withoutOverwriting))
+            // Never through something already there; `atomic` cannot be combined with that, and is not needed.
+            try render(kit, url, options.subtracting(.atomic).union(.withoutOverwriting))
         }
         stagedPDF = url
         return url
