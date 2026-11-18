@@ -638,6 +638,56 @@ extension AdversarialSharedVaultTests {
         #expect(try await newcomer.session.storedRowForTest(key)?.envelope == ownersRow.envelope)
     }
 
+    /// Threat: review finding S61's second route. A current member who may write but is no administrator (A4) enrols
+    /// a device of their own account under the device ID of the owner's device (device IDs are public, and each
+    /// account's registry is its own), and from it publishes the next segment of that device's stream: signed as
+    /// every object is, so it verifies under the member's registry, and carrying a description row just above the
+    /// version of the owner's rotation re-seal, labelled with the owner's device. The newcomer who joined after the rotation finds
+    /// a segment of the owner's device's stream carrying those bytes. It must count on no device: the segment's signer
+    /// is the member, whose segments count as writes and never as an administrator's. (At the re-seal's own version
+    /// the row would be passed over as a stamp already merged; one version above it is the version that matters.)
+    @Test("a description in a later segment of the owner's device's stream, signed by a member, counts on no device")
+    func forgedDescriptionInALaterSegmentOfTheOwnersStream() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(
+            roles: [.readWrite, .readWrite, .readWrite], seed: 3_800)
+        let (hostile, bystander, leaving) = (members[0], members[1], members[2])
+        try await Self.syncAll([owner, hostile, bystander, leaving])
+        #expect(try await owner.session.removeMember(leaving.accountID, from: vaultID) == .complete)
+        try await Self.syncAll([owner, hostile, bystander, owner])
+        let newcomer = try await household.account(seed: 3_880)
+        try await owner.invite(newcomer, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([newcomer, owner, newcomer])
+        let key = RecordKey(recordID: vaultID, kind: .vaultMetadata)
+        let ownersRow = try #require(await owner.session.storedRowForTest(key))
+        let ownerDevice = try #require(await owner.session.deviceIDForTest())
+        #expect(ownersRow.deviceID == ownerDevice, "the rotation's re-seal")
+
+        let impostor = try await hostile.vault.enrolledDevice(deviceID: ownerDevice, over: household.transport)
+        await impostor.session.configureSharing(
+            SharingSettings(
+                state: InMemorySharingStateStore(), contacts: InMemoryVerifiedContactStore(),
+                directory: household.directory, shareAccess: RecordingShareAccess()))
+        try await impostor.session.unlock(password: TestVault.password)
+        // For the vault's current key. Its engine reads the owner's stream as its own, and what it makes of that is not
+        // what this test is about.
+        _ = try? await impostor.session.syncAll()
+        let ownStream = SyncObjectLocation.vaultPrefix(vaultID) + "log/\(ownerDevice.uuidString)/"
+        let next = UInt64(await household.transport.list(prefix: ownStream).count) + 1
+        let forged = try await impostor.session.sealDescriptionAsAModifiedClient(
+            vaultID, to: "Personal", version: ownersRow.version + 1, device: ownerDevice)
+        try await impostor.session.publishSegmentAsAModifiedClient(vaultID, rows: [forged], sequence: next)
+        try await Self.syncAll([newcomer, owner, bystander, newcomer])
+        for account in [newcomer, owner, bystander] {
+            #expect(try await Self.name(of: vaultID, on: account) == "Household")
+        }
+        // Devices holding every key judge it and hold it aside; the newcomer applies none of it.
+        for account in [owner, bystander] {
+            #expect(try await Self.holdsDescriptionAside(vaultID, on: account))
+        }
+        #expect(try await newcomer.session.storedRowForTest(key)?.envelope == ownersRow.envelope)
+    }
+
     /// Threat: review finding S62. A current member who may write but is no administrator (A4), with a client that
     /// does not keep the rule, publishes a rename at the very top of what every device's engine accepts above what
     /// it holds (U5's ceiling). Every device holds it aside, as it must; but the judge opened it to judge it, and
@@ -702,6 +752,63 @@ extension AdversarialSharedVaultTests {
 
         try await member.session.sync()
         #expect(await member.session.judgedHeadForTest(vaultID) == moved)
+    }
+
+    /// Threat: review finding S65 again, as a real race through `syncAll` rather than through hooks, on the branch
+    /// the hooks never reached: the head moves after the take-out and before the vault's own run begins, so the run
+    /// judges against a head nothing was taken out for (`takenOutAgainst` differs from it). A member made read-only
+    /// (A4) whose client is not shown the record keeps writing; the store (A1) hides the record from another member's
+    /// device, which merges the late write. That device then replays, and while its sync is suspended in another
+    /// vault's listing, a call that ingests membership outside the guard (here `removeMember`, which ingests before it
+    /// finds it may not remove) brings the record in. The replay rebuilds nothing it does not count, but takes nothing
+    /// out either; marking the vault judged against the new head would keep the late write there for good. It must be
+    /// taken out at the next sync.
+    @Test("a head that moves between the take-out and the replay leaves the vault to be judged again, through syncAll")
+    func headMovedBeforeTheReplayThroughSyncAll() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3_700)
+        let (demoted, demotedView) = try await household.withheldAccount(seed: 3_717)
+        let racing = RacingTransport(base: household.transport)
+        let member = try await SharingAccount.make(over: racing, directory: household.directory, seed: 3_734)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.invite(demoted, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        // A vault of the member's own that its sync reaches before the shared one.
+        var earlier = try await member.session.createVault(name: "Earlier").id
+        for index in 0..<32 where earlier.uuidString >= vaultID.uuidString {
+            earlier = try await member.session.createVault(name: "Earlier \(index)").id
+        }
+        try #require(earlier.uuidString < vaultID.uuidString)
+        let bank = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, demoted, member])
+
+        let sharingPrefix = SharingObjectLocation.vaultPrefix(vaultID)
+        await demotedView.withholdNew(under: sharingPrefix)
+        await racing.withholdNew(under: sharingPrefix)
+        try await owner.session.changeRole(of: demoted.accountID, in: vaultID, to: .readOnly)
+        try await demoted.session.save(
+            Self.setting(.password, to: "late-password", in: try await demoted.session.item(id: bank.id)))
+        try await demoted.session.sync()
+        try await member.session.sync()
+        #expect(try await member.session.item(id: bank.id).field(.password)?.value == "late-password")
+
+        await racing.pause(atListingOf: SyncObjectLocation.vaultPrefix(earlier))
+        let replay = Task { try await member.session.syncAll(reconcile: true) }
+        await racing.untilPaused()
+        await racing.reveal()
+        await #expect(throws: SharingError.notPermitted) {
+            try await member.session.removeMember(demoted.accountID, from: vaultID)
+        }
+        let moved = try await member.session.sharedVaultStatus(vaultID).membership.hash.bytes
+        #expect(moved == (try await owner.session.sharedVaultStatus(vaultID).membership.hash.bytes))
+        await racing.resume()
+        _ = try await replay.value
+        #expect(await member.session.judgedHeadForTest(vaultID) != moved, "nothing was taken out for this head")
+
+        try await member.session.sync()
+        #expect(await member.session.judgedHeadForTest(vaultID) == moved)
+        #expect(try await member.session.item(id: bank.id).field(.password)?.value == "bank-password")
     }
 
     /// Threat: none beyond a store (A1) that delays one stream, as any slow provider does; the finding is a report
@@ -873,11 +980,112 @@ extension VaultSession {
             location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
     }
 
+    /// Publishes `rows` as segment `sequence` of this device's own stream, signed as every object is, the way a
+    /// client that does not keep the rules would: whatever the stream already holds, and with no acknowledgements.
+    func publishSegmentAsAModifiedClient(_ vaultID: UUID, rows: [StoredRecord], sequence: UInt64) async throws {
+        guard let account = try await loadAccount(), let transport = syncSettings?.transport else {
+            throw VaultError.noAccount
+        }
+        let location = SyncObjectLocation.segment(vaultID: vaultID, author: account.deviceID, sequence: sequence)
+        let payload = SyncPayload(
+            kind: .segment, vaultID: vaultID, author: account.deviceID, number: sequence, vector: [:],
+            entries: rows.map(SyncEntry.init)
+        ).encoded()
+        let envelope = try syncSeal(payload, at: location)
+        let signature = try await syncSign(envelope, at: location)
+        try await transport.create(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+    }
+
     /// Deletes the vault's description the way a client that does not keep the rule would: through the store that
     /// records a deletion to publish, as the permanent deletion of an item goes.
     func deleteDescriptionAsAModifiedClient(_ vaultID: UUID) async throws {
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         try await writer(for: account).commit(
             StoreChange(deletions: [RecordKey(recordID: vaultID, kind: .vaultMetadata)]))
+    }
+}
+
+/// The household's transport as one device sees it, with the store (A1) in control of two things: it can stop
+/// showing objects created under a prefix (as `WithholdingTransport` does), and it can hold one listing of a prefix
+/// until released, so a test can act while that device's sync is suspended there. Test code only.
+actor RacingTransport: SyncTransport {
+    let base: InMemorySyncTransport
+    private var frozen: [String: Set<String>] = [:]
+    private var pausePrefix: String?
+    private var paused = false
+    private var reached: CheckedContinuation<Void, Never>?
+    private var held: CheckedContinuation<Void, Never>?
+
+    init(base: InMemorySyncTransport) {
+        self.base = base
+    }
+
+    func withholdNew(under prefix: String) async {
+        frozen[prefix] = Set(await base.list(prefix: prefix))
+    }
+
+    func reveal() {
+        frozen = [:]
+    }
+
+    /// The next listing of exactly `prefix` waits for `resume()`.
+    func pause(atListingOf prefix: String) {
+        pausePrefix = prefix
+    }
+
+    /// Returns once a listing is waiting.
+    func untilPaused() async {
+        guard !paused else { return }
+        await withCheckedContinuation { reached = $0 }
+    }
+
+    func resume() {
+        held?.resume()
+        held = nil
+    }
+
+    private func holdIfAsked(_ prefix: String) async {
+        guard prefix == pausePrefix else { return }
+        pausePrefix = nil
+        paused = true
+        reached?.resume()
+        reached = nil
+        await withCheckedContinuation { held = $0 }
+    }
+
+    private func isWithheld(_ name: String) -> Bool {
+        frozen.contains { prefix, shown in name.hasPrefix(prefix) && !shown.contains(name) }
+    }
+
+    func list(prefix: String) async throws -> [String] {
+        await holdIfAsked(prefix)
+        return await base.list(prefix: prefix).filter { !isWithheld($0) }
+    }
+
+    func listWithCopies(prefix: String) async throws -> SyncListing {
+        await holdIfAsked(prefix)
+        var listing = try await base.listWithCopies(prefix: prefix)
+        listing.names.removeAll { isWithheld($0) }
+        listing.copied = listing.copied.filter { !isWithheld($0.key) }
+        return listing
+    }
+
+    func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
+        guard !isWithheld(name) else { return nil }
+        return try await base.fetch(name, maximumLength: maximumLength)
+    }
+
+    func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) async throws -> SyncObjectCopies {
+        guard !isWithheld(name) else { return SyncObjectCopies() }
+        return try await base.fetchCopies(name, maximumLength: maximumLength, maximumCopies: maximumCopies)
+    }
+
+    func create(_ name: String, contents: [UInt8]) async throws {
+        try await base.create(name, contents: contents)
+    }
+
+    func delete(_ name: String) async throws {
+        await base.delete(name)
     }
 }

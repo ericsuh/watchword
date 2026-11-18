@@ -530,10 +530,15 @@ a demotion before the stream it bounds (`demotionHeardBeforeTheNamesItBounds`); 
 administrator who joined after a rotation and learns of the demotion as it rotates, taken out before the re-seal
 (S59, `lateRenameSealedAgainWhileRotating`); a read-write member's re-seal after a rotation, which owes nothing it
 never seals (S60, `readWriteMemberResealsWithoutTheDescription`); a member's snapshot carrying a description row
-labelled as the owner's rotation re-seal, refused on a newcomer's device (S61, `forgedDescriptionInAMembersSnapshot`);
+labelled as the owner's rotation re-seal, refused on a newcomer's device (S61, `forgedDescriptionInAMembersSnapshot`),
+and S61's second route, the same row one version up in a later segment of the owner's device's stream, published by a
+device the member enrolled under that device's ID, which renames the vault everywhere if a segment's signer is not
+asked for the role (S67, `forgedDescriptionInALaterSegmentOfTheOwnersStream`);
 a forged rename at the version ceiling, after which an administrator's rename and a member's item still land
 everywhere (S62, `forgedRenameAtTheCeiling`); a replay that saw the head move settling the head it began with
-(S65, `replaySettlesTheHeadItBeganWith`); and a member's deletion of the description, which erases it nowhere
+(S65, `replaySettlesTheHeadItBeganWith`), and the same race through `syncAll` with the head moving between the take-out
+and the replay, where a demoted member's late write merged earlier would otherwise stay (S67,
+`headMovedBeforeTheReplayThroughSyncAll`); and a member's deletion of the description, which erases it nowhere
 (`descriptionDeletedByAMember`, a property that held before the rule). Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
 parts names its writer and that a merge's attributed parts are exactly its inputs', and
 `LongRunningLateWriteSimulationTests` checks, over random histories, that a device that held late versions aside as
