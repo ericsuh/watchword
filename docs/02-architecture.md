@@ -1928,7 +1928,10 @@ an item's, and the three properties above carry over:
   device seals the description again after a rotation (the device that planned the rotation is one). A device whose
   account may not name the vault leaves the description out of what it counts as its own to seal again
   (`sharedInventory(_:resealableBy:)`), so its `pendingRotation` does not report it as owed for as long as no
-  administrator's re-seal has reached it (S60). The same word
+  administrator's re-seal has reached it (S60). That word is judged by the row's bytes: each segment files the
+  digest of every description row it carried, and a row counts, and vouches, only through the segment of its
+  device's stream that carried those bytes (`descriptionCarriage`), never by its version alone, which a snapshot
+  can deliver under any device's name with other bytes (S61). The same word
   stands when the only carrier of the name that such a member can read is a late copy its former author published
   again (S56). Holding the record is not having judged by it: a device that learns of a demotion while it plans a
   rotation of its own holds, for a moment, a late name it merged before and a key newer than the demotion. So

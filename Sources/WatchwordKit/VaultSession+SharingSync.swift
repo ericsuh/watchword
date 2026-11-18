@@ -376,7 +376,10 @@ extension VaultSession {
             segment: SharedStreamIndex.Segment(
                 digest: SharedStreamIndex.digest(name: location.name, envelope: envelope), account: signer,
                 entries: entries.map { VersionKey(recordID: $0.recordID, kind: $0.kind.rawValue, version: $0.version) },
-                values: values))
+                values: values,
+                descriptions: entries.compactMap {
+                    $0.kind == .vaultMetadata ? $0.envelope.map(SharedStreamIndex.descriptionDigest) : nil
+                }))
         vault.indexChanged = true
         sharing.vaults[location.vaultID] = vault
         // A segment inside a cut that this device was waiting for, or a new segment of a device a version was held
@@ -491,11 +494,15 @@ extension VaultSession {
             self.accountsListing(device, in: record.vaultID, ownView: ownView, account: account)
         }
         let originKey = VersionKey(recordID: record.recordID, kind: record.kind.rawValue, version: record.version)
-        guard Self.counts(originKey, device: record.deviceID, in: vault, listing: listing) else { return false }
-        guard let values = attributedValues(of: record, keys: keys) else { return false }
-        var ownCopy: Set<SharedStreamIndex.ValueKey>?
         // A vault's description counts only as an administrator's work, on top of everything asked of a value.
         let isDescription = record.kind == .vaultMetadata
+        guard
+            isDescription
+                ? Self.descriptionRowCounts(originKey, of: record, in: vault, listing: listing)
+                : Self.counts(originKey, device: record.deviceID, in: vault, listing: listing)
+        else { return false }
+        guard let values = attributedValues(of: record, keys: keys) else { return false }
+        var ownCopy: Set<SharedStreamIndex.ValueKey>?
         let vouched =
             isDescription
             ? Self.vouchesForDescriptions(originKey, of: record, in: vault, account: account)
@@ -549,7 +556,9 @@ extension VaultSession {
             if !accounts.isEmpty { awaited.insert(value.device) }
             admitted = false
         }
-        if admitted, record.kind == .item, let item = try? openItem(record, keys: keys) {
+        if admitted, record.kind == .item,
+            let item = withoutRaisingWriteClock(record.vaultID, { try? openItem(record, keys: keys) })
+        {
             admitted = Self.knowledgeCounts(
                 ItemMerge.effectiveClock(item, origin: Self.origin(record)),
                 of: VersionKey(recordID: record.recordID, kind: record.kind.rawValue, version: record.version),
@@ -697,10 +706,53 @@ extension VaultSession {
         let ledger = vault.ledger
         guard ledger.keyEpoch(of: record.keyID) != nil, passesOverSomeKey(in: ledger, account: account.accountID)
         else { return false }
-        if let sequence = vault.index.firstCarrier[record.deviceID]?[key] {
+        switch descriptionCarriage(key, of: record, in: vault) {
+        case .carried(let sequence):
             return administratorSegmentCounts(record.deviceID, sequence: sequence, in: vault)
+        case .otherBytes:
+            return false
+        case .notCarried:
+            return record.deviceID == account.deviceID
+                && ledger.administratorStanding(of: account.accountID) == .holdsRole
         }
-        return record.deviceID == account.deviceID && ledger.administratorStanding(of: account.accountID) == .holdsRole
+    }
+
+    /// Where the stream of the device a row of the vault's description names carried that exact row.
+    enum DescriptionCarriage: Equatable {
+        /// Its first segment that carried these bytes.
+        case carried(UInt64)
+        /// A segment of that stream carried the version, with other bytes: the row is not that device's.
+        case otherBytes
+        /// No segment of that stream held here carried the version.
+        case notCarried
+    }
+
+    /// Where `record.deviceID`'s stream carried `record` byte for byte (review finding S61). A version key binds no
+    /// bytes, and a row's device is whatever the entry that delivered it says: segments make it their author, but a
+    /// snapshot can carry rows of any device. So a member could seal a name of their choosing at a version an
+    /// administrator's segment carried, label the row with that administrator's device and deliver it in a snapshot,
+    /// and every device that judged the row by its version would take it as the administrator's. A description is
+    /// the one record whose row vouches for a value to a newcomer as its writer's word (`vouchesForDescriptions`), so
+    /// it is judged by its bytes.
+    static func descriptionCarriage(_ key: VersionKey, of record: StoredRecord, in vault: SharedVault)
+        -> DescriptionCarriage
+    {
+        let digest = SharedStreamIndex.descriptionDigest(record.envelope)
+        if let sequence = vault.index.descriptionCarriers[record.deviceID]?[digest] { return .carried(sequence) }
+        return vault.index.firstCarrier[record.deviceID]?[key] == nil ? .notCarried : .otherBytes
+    }
+
+    /// `counts` for a row of the vault's description, by its bytes (`descriptionCarriage`, S61): the segment that
+    /// carried these bytes must count; a row whose version that stream carried with other bytes does not count; one
+    /// carried nowhere here is judged by who may write, as for any version.
+    static func descriptionRowCounts(
+        _ key: VersionKey, of record: StoredRecord, in vault: SharedVault, listing: (UUID) -> [UUID]
+    ) -> Bool {
+        switch descriptionCarriage(key, of: record, in: vault) {
+        case .carried(let sequence): return segmentCounts(record.deviceID, sequence: sequence, in: vault)
+        case .otherBytes: return false
+        case .notCarried: return counts(key, device: record.deviceID, in: vault, listing: listing)
+        }
     }
 
     /// The attributable values of a stored version, as the index files them: an item's (`ItemMerge.attributedValues`),
@@ -708,6 +760,25 @@ extension VaultSession {
     /// through every re-seal, so that a description is judged as its writer's and never as its sealer's). `nil` if the
     /// version does not open here.
     func attributedValues(of row: StoredRecord, keys: UnlockedKeys)
+        -> [(revision: Revision, value: SharedStreamIndex.ValueKey)]?
+    {
+        withoutRaisingWriteClock(row.vaultID) { attributedValuesOpening(row, keys: keys) }
+    }
+
+    /// Runs `body`, whose opens would raise this device's write clock for `vaultID` (`highestVersionSeen`), and puts
+    /// the clock back (review finding S62). The judge opens a version to judge it, and a version it holds aside is
+    /// never stored, so no other device's high water moves with it: a member who published a version at the very
+    /// top of what the engine accepts (U5) would otherwise lift every device's next write above every other
+    /// device's ceiling, and an administrator's next rename, or anyone's next edit, would be quarantined there as
+    /// implausible. What is stored raises the clock where it is stored or sealed. Synchronous, so no `lock()` or
+    /// merge can land in between.
+    func withoutRaisingWriteClock<T>(_ vaultID: UUID, _ body: () -> T) -> T {
+        let clock = highestVersionSeen[vaultID]
+        defer { highestVersionSeen[vaultID] = clock }
+        return body()
+    }
+
+    private func attributedValuesOpening(_ row: StoredRecord, keys: UnlockedKeys)
         -> [(revision: Revision, value: SharedStreamIndex.ValueKey)]?
     {
         switch row.kind {

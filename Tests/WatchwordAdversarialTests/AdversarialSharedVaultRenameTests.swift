@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import WatchwordCrypto
+import WatchwordEnvelope
 import WatchwordModel
 import WatchwordSharing
 import WatchwordStore
@@ -601,6 +602,82 @@ extension AdversarialSharedVaultTests {
         #expect(try await Self.name(of: vaultID, on: newcomer) == "Household")
     }
 
+    /// Threat: review finding S61. A current member who may write but is no administrator (A4), with a client that
+    /// does not keep the rule, against a member who joined after a rotation. The owner's device sealed the vault's
+    /// description again when it rotated, as its own row at some version, and the newcomer indexed that segment. The
+    /// member seals a description of their choosing as a row at exactly that version, labelled with the owner's
+    /// device and written by nobody else, and delivers it in a snapshot of their own: a snapshot may carry rows of
+    /// any device, and a version key binds no bytes, so a judge asking "did the owner's stream carry this version?"
+    /// says yes. It must count on no device: the newcomer keeps the owner's name and holds the forged row aside, and
+    /// so do the owner and a member holding every key.
+    @Test("a description delivered in a member's snapshot as an administrator's row counts on no device")
+    func forgedDescriptionInAMembersSnapshot() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(
+            roles: [.readWrite, .readWrite, .readWrite], seed: 3_400)
+        let (hostile, bystander, leaving) = (members[0], members[1], members[2])
+        try await Self.syncAll([owner, hostile, bystander, leaving])
+        #expect(try await owner.session.removeMember(leaving.accountID, from: vaultID) == .complete)
+        try await Self.syncAll([owner, hostile, bystander, owner])
+        let newcomer = try await household.account(seed: 3_480)
+        try await owner.invite(newcomer, to: vaultID, as: .readWrite, owner: owner)
+        try await Self.syncAll([newcomer, owner, newcomer])
+        #expect(try await Self.name(of: vaultID, on: newcomer) == "Household")
+        let key = RecordKey(recordID: vaultID, kind: .vaultMetadata)
+        let ownersRow = try #require(await owner.session.storedRowForTest(key))
+        #expect(ownersRow.deviceID == (try #require(await owner.session.deviceIDForTest())), "the rotation's re-seal")
+
+        let forged = try await hostile.session.sealDescriptionAsAModifiedClient(
+            vaultID, to: "Personal", version: ownersRow.version, device: ownersRow.deviceID)
+        try await hostile.session.publishSnapshotAsAModifiedClient(vaultID, rows: [forged], lamport: 9_000)
+        try await Self.syncAll([newcomer, owner, bystander, newcomer])
+        for account in [newcomer, owner, bystander] {
+            #expect(try await Self.name(of: vaultID, on: account) == "Household")
+        }
+        #expect(try await Self.holdsDescriptionAside(vaultID, on: newcomer))
+        #expect(try await newcomer.session.storedRowForTest(key)?.envelope == ownersRow.envelope)
+    }
+
+    /// Threat: review finding S62. A current member who may write but is no administrator (A4), with a client that
+    /// does not keep the rule, publishes a rename at the very top of what every device's engine accepts above what
+    /// it holds (U5's ceiling). Every device holds it aside, as it must; but the judge opened it to judge it, and
+    /// opening a version raised the device's write clock, so the next thing each device wrote went one above the
+    /// forged version: above the ceiling of every device whose store had not moved. An administrator's next rename,
+    /// and anyone's next edit, was then quarantined as implausible on every other device. A version held aside moves
+    /// no clock: the administrator's rename lands everywhere and nothing is quarantined as implausible.
+    @Test("a forged rename at the version ceiling makes no later write implausible on any device")
+    func forgedRenameAtTheCeiling() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(
+            roles: [.administrator, .readWrite, .readWrite], seed: 3_500)
+        let (administrator, hostile, bystander) = (members[0], members[1], members[2])
+        try await Self.syncAll([owner, administrator, hostile, bystander])
+        var highWaters: Set<UInt64> = []
+        for account in [owner, administrator, bystander] {
+            highWaters.insert(try await account.session.storedHighWaterForTest(vaultID))
+        }
+        let highWater = try #require(highWaters.count == 1 ? highWaters.first : nil)
+        let jump = try #require(await owner.session.maximumVersionJumpForTest())
+
+        try await hostile.session.renameAsAModifiedClient(vaultID, to: "Personal", version: highWater + jump)
+        try await hostile.session.sync()
+        try await Self.syncAll([owner, administrator, bystander])
+        for account in [owner, administrator, bystander] {
+            #expect(try await Self.name(of: vaultID, on: account) == "Household")
+            #expect(try await Self.holdsDescriptionAside(vaultID, on: account))
+        }
+
+        try await administrator.session.renameVault(id: vaultID, to: "Family")
+        let item = try await bystander.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([administrator, bystander, owner, administrator, bystander])
+        for account in [owner, administrator, bystander] {
+            #expect(try await Self.name(of: vaultID, on: account) == "Family")
+            #expect(try await account.session.item(id: item.id).title == item.title)
+            let implausible = try await account.session.quarantine().filter { $0.reason == .implausibleVersion }
+            #expect(implausible.isEmpty, "\(implausible)")
+        }
+    }
+
     /// Threat: none beyond a store (A1) that delays one stream, as any slow provider does; the finding is a report
     /// that never clears (PR review of `resealSharedVault`, S60). Only an administrator's device seals the vault's
     /// description again after a rotation, so a read-write member's device skips it. If it still counted the
@@ -680,7 +757,9 @@ extension AdversarialSharedVaultTests {
 extension VaultSession {
     /// Seals a description over the stored one the way a client that does not keep the rule would: `renameVault`
     /// without its checks, optionally labelled as another write's (`VaultMetadata.writtenBy`).
-    func renameAsAModifiedClient(_ vaultID: UUID, to name: String, writtenBy: Revision? = nil) async throws {
+    func renameAsAModifiedClient(
+        _ vaultID: UUID, to name: String, writtenBy: Revision? = nil, version: UInt64? = nil
+    ) async throws {
         guard let account = try await loadAccount(), let keys,
             let vaultKey = currentVaultKey(vaultID, keys: keys, account: account)
         else { throw VaultError.noAccount }
@@ -691,11 +770,59 @@ extension VaultSession {
         let now = await clock.now()
         var metadata = VaultMetadata(
             vaultID: vaultID, name: name, createdAt: previous?.createdAt ?? now, modifiedAt: now,
-            version: revision.version)
+            version: version ?? revision.version)
         metadata.writtenBy = writtenBy
         let row = try sealMetadata(metadata, vaultKey: vaultKey, account: account)
         try await store.commit(
             StoreChange(upserts: [row], expectations: [key: existing.map { .version($0.version) } ?? .absent]))
+    }
+
+    func maximumVersionJumpForTest() -> UInt64? {
+        syncSettings?.configuration.maximumVersionJump
+    }
+
+    /// The highest version this device's store holds in `vaultID`: what its engine's ceiling (U5) is measured from.
+    func storedHighWaterForTest(_ vaultID: UUID) async throws -> UInt64 {
+        var highest: UInt64 = 0
+        for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
+            highest = max(highest, try await store.records(in: vaultID, kind: kind).map(\.version).max() ?? 0)
+        }
+        return highest
+    }
+
+    /// Seals a row of the vault's description the way a client that does not keep the rule would: at any version,
+    /// labelled with any device, written by nobody else, and not stored.
+    func sealDescriptionAsAModifiedClient(_ vaultID: UUID, to name: String, version: UInt64, device: UUID)
+        async throws -> StoredRecord
+    {
+        guard let account = try await loadAccount(), let keys,
+            let vaultKey = currentVaultKey(vaultID, keys: keys, account: account)
+        else { throw VaultError.noAccount }
+        let existing = try await store.record(RecordKey(recordID: vaultID, kind: .vaultMetadata))
+        let createdAt =
+            existing.flatMap { try? openMetadata($0, keys: keys) }?.createdAt ?? Date(timeIntervalSince1970: 0)
+        let metadata = VaultMetadata(
+            vaultID: vaultID, name: name, createdAt: createdAt, modifiedAt: createdAt, version: version)
+        var row = try sealMetadata(metadata, vaultKey: vaultKey, account: account)
+        row.deviceID = device
+        return row
+    }
+
+    /// Publishes `rows` in a snapshot of this device's own, signed as every object is, the way a client that does not
+    /// keep the rules would: an honest device writes no snapshot of a shared vault (§8.10).
+    func publishSnapshotAsAModifiedClient(_ vaultID: UUID, rows: [StoredRecord], lamport: UInt64) async throws {
+        guard let account = try await loadAccount(), let transport = syncSettings?.transport else {
+            throw VaultError.noAccount
+        }
+        let location = SyncObjectLocation.snapshot(vaultID: vaultID, author: account.deviceID, lamport: lamport)
+        let payload = SyncPayload(
+            kind: .snapshot, vaultID: vaultID, author: account.deviceID, number: lamport, vector: [:],
+            entries: rows.map(SyncEntry.init)
+        ).encoded()
+        let envelope = try syncSeal(payload, at: location)
+        let signature = try await syncSign(envelope, at: location)
+        try await transport.create(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
     }
 
     /// Deletes the vault's description the way a client that does not keep the rule would: through the store that

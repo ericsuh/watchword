@@ -1214,7 +1214,6 @@ public actor SyncEngine {
             try await syncState.quarantine(entry, vaultID: vaultID)
             return
         }
-        highWater = max(highWater, entry.version)
         // Every erasure of the record this device knows of, taken together: the ones it merged, and its own if it
         // has one that is not published yet.
         var erasure = state.erasures[entry.key]
@@ -1256,6 +1255,9 @@ public actor SyncEngine {
                 return
             }
         }
+        // Only a version merged raises the high water: one held aside or quarantined is in no store, so it moves no
+        // other device's ceiling, and must not move this sync's for the entries after it (review finding S62).
+        highWater = max(highWater, entry.version)
         state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
         if entry.isDeletion {
             state.erasures[entry.key] = try await join(

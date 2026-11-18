@@ -34,6 +34,10 @@ struct SharedStreamIndex: Sendable, Hashable {
         /// The values this segment carried that an earlier segment of the same stream had not (review finding S36):
         /// each the digest of an `AttributedValue`, filed under the device its stamp names.
         var values: [ValueKey] = []
+        /// The digests of the record envelopes of the vault's description this segment carried
+        /// (`descriptionDigest`): which bytes it carried under each version, not only that it carried the version
+        /// (review finding S61).
+        var descriptions: [[UInt8]] = []
     }
 
     /// A value as the index files it: the device its stamp names, and SHA-256 of its encoding with the whole stamp.
@@ -44,9 +48,10 @@ struct SharedStreamIndex: Sendable, Hashable {
 
     static let magic: [UInt8] = Array("WWSI".utf8)
     /// 3 since note-line removals, discards and history entries became attributable values (review findings S32,
-    /// S43): an index of an earlier format filed none of them, so it is refused on load and rebuilt from the log by a
-    /// replay, which files them, before anything is judged against it.
-    static let formatVersion: UInt8 = 3
+    /// S43), 4 since segments file the digests of the descriptions they carried (S61): an index of an earlier format
+    /// filed none of them, so it is refused on load and rebuilt from the log by a replay, which files them, before
+    /// anything is judged against it.
+    static let formatVersion: UInt8 = 4
     static let maximumLength = 64 << 20
 
     /// By device, then sequence number.
@@ -60,6 +65,11 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// device its stamp names only through these: its bytes, stamp included, in a segment of a stream whose signer's
     /// work counts at that sequence (S36, S37).
     private(set) var valueCarriers: [ValueKey: [UUID: UInt64]] = [:]
+    /// For each device's stream, the lowest sequence that carried each exact row of the vault's description, by the
+    /// digest of its envelope (S61). `firstCarrier` binds a version and no bytes: a member can seal other bytes under
+    /// a version an administrator's segment carried, stamped with that administrator's device, and deliver them where
+    /// nothing ties a row to its stream (a snapshot), so a description is judged as its stream's only through these.
+    private(set) var descriptionCarriers: [UUID: [[UInt8]: UInt64]] = [:]
     /// Devices a version was held aside for because a value naming them was carried by none of their segments here:
     /// a new segment of theirs can make it count, so recording one asks for a replay (`judgedHead` cleared).
     var awaiting: Set<UUID> = []
@@ -78,6 +88,15 @@ struct SharedStreamIndex: Sendable, Hashable {
         for value in segment.values where (valueCarriers[value]?[device] ?? .max) > sequence {
             valueCarriers[value, default: [:]][device] = sequence
         }
+        for digest in segment.descriptions where (descriptionCarriers[device]?[digest] ?? .max) > sequence {
+            descriptionCarriers[device, default: [:]][digest] = sequence
+        }
+    }
+
+    /// What identifies one row of the vault's description for `descriptionCarriers`: SHA-256 of its record envelope,
+    /// which binds the record, the vault, the key and the version (its context) and the description itself.
+    static func descriptionDigest(_ envelope: [UInt8]) -> [UInt8] {
+        ObjectDigest(hashing: Array("WW-description-v1".utf8) + envelope).bytes
     }
 
     /// Whether this device's stream already carried `value` at or before `sequence`.
@@ -147,6 +166,8 @@ struct SharedStreamIndex: Sendable, Hashable {
                 }
                 out += SharedBytes.littleEndian32(UInt32(segment.values.count))
                 for value in segment.values { out += SharedBytes.bytes(value.device) + value.digest }
+                out += SharedBytes.littleEndian32(UInt32(segment.descriptions.count))
+                for digest in segment.descriptions { out += digest }
             }
         }
         let waiting = awaiting.sorted { $0.precedes($1) }
@@ -206,9 +227,18 @@ struct SharedStreamIndex: Sendable, Hashable {
                     guard let stampDevice = reader.uuid(), let valueDigest = reader.read(32) else { return nil }
                     values.append(ValueKey(device: stampDevice, digest: valueDigest))
                 }
+                guard let descriptionCount = reader.uint32(), Int(descriptionCount) <= reader.remaining / 32 else {
+                    return nil
+                }
+                var descriptions: [[UInt8]] = []
+                for _ in 0..<descriptionCount {
+                    guard let description = reader.read(32) else { return nil }
+                    descriptions.append(description)
+                }
                 index.record(
                     device: device, sequence: sequence,
-                    segment: Segment(digest: digest, account: signer, entries: entries, values: values))
+                    segment: Segment(
+                        digest: digest, account: signer, entries: entries, values: values, descriptions: descriptions))
             }
         }
         guard let waitingCount = reader.uint32(), Int(waitingCount) <= reader.remaining / 16 else { return nil }
