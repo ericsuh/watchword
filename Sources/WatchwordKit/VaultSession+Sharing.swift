@@ -726,9 +726,19 @@ extension VaultSession {
     }
 
     /// The vault's live records as rotation sees them: only what counts, since what does not was taken out.
-    func sharedInventory(_ vaultID: UUID) async throws -> [SealedRecordReference] {
+    ///
+    /// With `account`, only what that account's device seals again: the vault's description is left out unless the
+    /// account may name the vault (`mayRenameSharedVault`), because only an administrator's device seals it again
+    /// (§8.7, review finding S55). So a read-write member's `pendingRotation` does not report as owed, for ever, a
+    /// record it never seals (PR review of `resealSharedVault`; docs/06-adversarial-review.md §T, S60). Without it,
+    /// everything, as the planning device (an administrator's) counts its plan.
+    func sharedInventory(_ vaultID: UUID, resealableBy account: UUID? = nil) async throws -> [SealedRecordReference] {
+        var kinds = [EnvelopeKind.item, .vaultMetadata, .scanStatus]
+        if let account, !mayRenameSharedVault(try sharedVault(vaultID), account: account) {
+            kinds.removeAll { $0 == .vaultMetadata }
+        }
         var inventory: [SealedRecordReference] = []
-        for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
+        for kind in kinds {
             for row in try await store.records(in: vaultID, kind: kind) {
                 inventory.append(
                     SealedRecordReference(recordID: row.recordID, kind: kind, keyID: row.keyID, version: row.version))
@@ -757,7 +767,7 @@ extension VaultSession {
         _ = try requireKeys(since: epoch)
         let ledger = try sharedVault(vaultID).ledger
         guard ledger.writePermission(for: account.accountID).isAllowed else { return 0 }
-        let stale = ledger.recordsToReseal(in: try await sharedInventory(vaultID))
+        let stale = ledger.recordsToReseal(in: try await sharedInventory(vaultID, resealableBy: account.accountID))
         var count = 0
         for reference in stale {
             let keys = try requireKeys(since: epoch)
@@ -823,7 +833,8 @@ extension VaultSession {
         let held = Set(
             (keys.map { Array($0.vaultKeys.values) } ?? []).filter { $0.vaultID == vaultID }.map(\.key.keyID))
         let pending = vault.ledger.pendingRotation(
-            plan: plan, leaveRequests: leaveRequests, inventory: try await sharedInventory(vaultID), heldKeyIDs: held)
+            plan: plan, leaveRequests: leaveRequests,
+            inventory: try await sharedInventory(vaultID, resealableBy: account.accountID), heldKeyIDs: held)
         let heldAside = try await syncSettings?.state.quarantined(vaultID: vaultID).count ?? 0
         // Only a comparison made on the current head says anything; one is made now if the keys allow.
         if vault.keyCheck?.head != vault.ledger.state.hash, let settings = sharing.settings,

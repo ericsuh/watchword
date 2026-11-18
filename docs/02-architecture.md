@@ -1925,7 +1925,10 @@ an item's, and the three properties above carry over:
   one's), and for each account that could be the name's author, either it holds the role now or the version is
   sealed under a key introduced at or after the record that ended its role, so that its sealer held that record and
   judged the name by its cut. A member's version vouches for no name (S55), which is why only an administrator's
-  device seals the description again after a rotation (the device that planned the rotation is one). The same word
+  device seals the description again after a rotation (the device that planned the rotation is one). A device whose
+  account may not name the vault leaves the description out of what it counts as its own to seal again
+  (`sharedInventory(_:resealableBy:)`), so its `pendingRotation` does not report it as owed for as long as no
+  administrator's re-seal has reached it (S60). The same word
   stands when the only carrier of the name that such a member can read is a late copy its former author published
   again (S56). Holding the record is not having judged by it: a device that learns of a demotion while it plans a
   rotation of its own holds, for a moment, a late name it merged before and a key newer than the demotion. So

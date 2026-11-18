@@ -601,6 +601,52 @@ extension AdversarialSharedVaultTests {
         #expect(try await Self.name(of: vaultID, on: newcomer) == "Household")
     }
 
+    /// Threat: none beyond a store (A1) that delays one stream, as any slow provider does; the finding is a report
+    /// that never clears (PR review of `resealSharedVault`, S60). Only an administrator's device seals the vault's
+    /// description again after a rotation, so a read-write member's device skips it. If it still counted the
+    /// description as a record it owes, its status would say `.resealing(remaining: 1)` for as long as no
+    /// administrator's re-seal reached it, and for good if none ever did. The member's re-seal must finish with
+    /// nothing owed by that device while the description is still under the earlier key there, and the vault must
+    /// converge once the owner's re-seal arrives.
+    @Test("a read-write member's re-seal after a rotation leaves nothing owed, and the vault converges")
+    func readWriteMemberResealsWithoutTheDescription() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3_300)
+        let (member, memberView) = try await household.withheldAccount(seed: 3_317)
+        let leaving = try await household.account(seed: 3_334)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(leaving, to: vaultID, as: .readWrite, owner: owner)
+        let item = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, member, leaving])
+        let ownerDevice = try #require(await owner.session.deviceIDForTest())
+        await memberView.withholdNew(under: SyncObjectLocation.vaultPrefix(vaultID) + "log/\(ownerDevice.uuidString)/")
+
+        #expect(try await owner.session.removeMember(leaving.accountID, from: vaultID) == .complete)
+        try await Self.syncAll([member])
+        let status = try await member.session.sharedVaultStatus(vaultID)
+        #expect(!status.mayRename)
+        let key = RecordKey(recordID: vaultID, kind: .vaultMetadata)
+        let description = try #require(await member.session.storedRowForTest(key))
+        #expect(description.keyID != status.membership.vaultKeyID, "the owner's re-seal has not reached the member")
+        let resealedItem = try #require(
+            await member.session.storedRowForTest(RecordKey(recordID: item.id, kind: .item)))
+        #expect(resealedItem.keyID == status.membership.vaultKeyID, "the member sealed the item again")
+        #expect(status.pendingRotation.isEmpty)
+
+        await memberView.reveal()
+        try await Self.syncAll([member, owner, member])
+        let converged = try await member.session.sharedVaultStatus(vaultID)
+        #expect(converged.pendingRotation.isEmpty)
+        #expect(try await member.session.storedRowForTest(key)?.keyID == converged.membership.vaultKeyID)
+        #expect(try await owner.session.sharedVaultStatus(vaultID).pendingRotation.isEmpty)
+        for account in [owner, member] {
+            #expect(try await Self.name(of: vaultID, on: account) == "Household")
+            #expect(try await account.session.item(id: item.id).field(.password)?.value == "bank-password")
+        }
+    }
+
     /// Threat: a current member who may write but is no administrator (A4), with a client that does not keep the
     /// rule, trying the other way to change what a vault is called: not a description of its own, which every judge
     /// refuses, but a deletion of the description record, published in its own stream like the deletion of an item.
