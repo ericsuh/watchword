@@ -57,5 +57,10 @@ extension AdversarialVaultSyncTests {
         #expect(
             await f.a.session.holdsUnpublishedWork(in: destination, account: account),
             "a copy that exists on this device alone does not hold its original's deletion back")
+        // And the hold ends: once the copy's vault publishes, the original's deletion goes out after it.
+        try await f.a.session.sync()
+        #expect(await !f.a.session.holdsUnpublishedWork(in: destination, account: account), "the gate never opens")
+        try await f.b.session.sync()
+        #expect((try? await f.b.session.item(id: original.id)) == nil, "the original's deletion never went out")
     }
 }
