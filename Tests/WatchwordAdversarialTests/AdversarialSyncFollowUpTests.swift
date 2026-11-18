@@ -341,11 +341,10 @@ extension AdversarialSyncTests {
                 kind: .snapshot, vaultID: Self.vault, author: insiderID, number: 50, vector: [Self.a: 9],
                 entries: []),
             signedBy: FakeSyncKeyring(deviceID: insiderID, keys: f.keys))
-        // Its own segment 1 is not usable in this sync and an unusable name sits where the claim points, so the
-        // device has no anchor and the claim holds it.
-        await f.transport.tamper(f.segmentName(1), contents: [1, 2, 3])
+        // Its own head is missing from this listing, so the device, which has published here, has no anchor and the
+        // claim holds it (Z145: a name at the claimed number, or a lost state, no longer does).
+        await f.transport.tamper(f.segmentName(1), contents: nil)
         await f.transport.tamper(f.segmentName(9), contents: [1, 2, 3])
-        await f.writer.syncState.tamper(SyncState(vaultID: Self.vault))
         try await f.writer.save(Self.login("Second", password: "2"))
         let held = try await f.writer.sync()
         #expect(held.ownStreamUnverified != nil, "nothing held the device: the test proves nothing")

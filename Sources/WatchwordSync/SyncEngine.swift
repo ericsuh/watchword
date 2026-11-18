@@ -490,25 +490,33 @@ public actor SyncEngine {
     }
 
     /// Whether this device's own stream holds back its publishing in this vault, and from which number (review
-    /// findings Z24, Z31, Z32). A device whose state may be older than the transport (a restored backup, an earlier row
-    /// put back) must not publish at a number it used and collected, where no reader looks. With an object of its own
-    /// stream known to be its own listed (`Listing.ownAnchored`) that cannot happen. Without one, it holds back while
-    /// an object of its stream at or past its next number cannot be told from its own, or while a snapshot by a
-    /// device still trusted says its stream got that far: a segment is collected only once a listed snapshot covers
-    /// it, so a claim beyond this device's own count is what an older state would see. The claim is read from the
-    /// snapshots as they are now, so a snapshot collected or a signer revoked ends it; it never moves the numbering.
-    /// And it holds only while some object of this device's stream at or past its next number is listed (review
-    /// finding Z139): a device's genuine head is never collected (Z135), so a true claim implies one, and a claim about
-    /// a stream that lists nothing there (an insider's, about a device that never published in the vault, which an
-    /// honest device that merged it carries on in snapshots of its own) would otherwise hold the device for good.
+    /// findings Z24, Z31, Z32, Z145). A device whose state may be older than the transport (a restored backup, an
+    /// earlier row put back) must not publish at a number it used and collected, where no reader looks. With an object
+    /// of its own stream known to be its own listed (`Listing.ownAnchored`) that cannot happen: its genuine head is
+    /// never collected (Z135), so nothing above a listed own object has gone. Without one it holds back:
+    ///
+    /// - while an object of its stream at or past its next number cannot be told from its own (`ownUndecided`): a
+    ///   name shown to be someone else's (junk, another's signatures) is not one, since anyone who can create a file
+    ///   can list it, and with a snapshot's claim it held for good a device that never published there (Z145, Z139);
+    /// - and, for a device that has published in the vault, while a device still trusted says, by a snapshot's
+    ///   coverage or a segment's acknowledgement, that it merged this stream further than this state's next number.
+    ///   A current state's head is listed unless the store withholds it, and nobody can have merged beyond it; an older
+    ///   state whose head is missing from this listing (withheld, a stale listing, A8) would otherwise publish over a
+    ///   collected number, unread by every device that merged past it (Z145). Read from the state as it is now, so a
+    ///   signer revoked, or the head listed again, ends it; it never moves the numbering. A device that never
+    ///   published (its signed state says so) is not held by a claim: a lost state is Z32's residual, and a claim about
+    ///   a device that never wrote, which an honest device carries on, would hold it for good (Z139).
     private func ownStreamHold(state: SyncState, listing: Listing, retired: Set<UUID>) -> UInt64? {
         guard !listing.ownAnchored else { return nil }
         let next = state.nextSequence
-        let undecided = listing.ownUndecided.filter { $0 >= next }.min()
-        let vouched =
+        if let undecided = listing.ownUndecided.filter({ $0 >= next }).min() { return undecided }
+        guard state.lastPublishedSequence > 0 else { return nil }
+        let covered =
             state.snapshots.filter { !retired.contains($0.key.author) }.values.map { $0[deviceID] ?? 0 }.max() ?? 0
-        if vouched >= next, (listing.segments[deviceID] ?? []).contains(where: { $0 >= next }) { return next }
-        return undecided
+        let acknowledged =
+            state.acknowledgements.filter { $0.key != deviceID && !retired.contains($0.key) }.values
+            .map { $0[deviceID] ?? 0 }.max() ?? 0
+        return max(covered, acknowledged) >= next ? next : nil
     }
 
     private func pull(state: SyncState, retired: Set<UUID>, report: inout SyncReport) async throws -> Listing {
