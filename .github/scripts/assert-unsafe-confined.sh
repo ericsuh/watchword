@@ -23,7 +23,9 @@
 # 6. Test hooks stay in tests (review of round 7, Z168; round 8, Z172): `package` members that exist so a test can play
 #    an adversary or leave a check out are visible to every target of the package, WatchwordPlatform and
 #    WatchwordPresentation included, so the compiler would let a shipped target call one. Each may be named in code
-#    only on the lines below that define or apply it, matched whole (leading white space aside), and anywhere under
+#    only on the lines below that define or apply it, matched whole (leading white space aside) and counted (a line
+#    listed once may appear once in its file, so a copy of an allowed line elsewhere in that file is refused; one
+#    that must appear twice is listed twice, review of round 9, Z178), and anywhere under
 #    Sources/WatchwordTestSupport (Tests/ is not scanned): `playModifiedClient` and the state it sets,
 #    `playsModifiedClient` (a session that writes and publishes in a shared vault whatever its device ID, Z162),
 #    `assigningDeviceID` (enrolment under a named device ID that commits to nothing, Z157), `MemberKeyCheck.unchecked`
@@ -80,7 +82,8 @@ test_hooks=(
   'MemberKeyCheck.unchecked|(^|[^@A-Za-z0-9_.`])`?unchecked`?[[:space:]]*\('
   'MemberKeyCheck.init|(^|[^A-Za-z0-9_])MemberKeyCheck[[:space:]]*(\(|\.[[:space:]]*`?init([^A-Za-z0-9_]|$))'
 )
-# A file, then a line of it (leading white space removed) that may name a hook: where each is defined or applied.
+# A file, then a line of it (leading white space removed) that may name a hook: where each is defined or applied, as
+# many times as it may appear there.
 hook_lines=(
   'Sources/WatchwordKit/VaultSession.swift|var playsModifiedClient = false'
   'Sources/WatchwordKit/VaultSession+Sharing.swift|if playsModifiedClient { return true }'
@@ -100,12 +103,13 @@ for entry in "${test_hooks[@]}"; do
   name=${entry%%|*}
   pattern=${entry#*|}
   hooks=$(code_lines "$pattern" | ALLOWED="$allowed_hook_lines" awk '
-    BEGIN { count = split(ENVIRON["ALLOWED"], list, "\n"); for (i = 1; i <= count; i++) allowed[list[i]] = 1 }
+    BEGIN { count = split(ENVIRON["ALLOWED"], list, "\n"); for (i = 1; i <= count; i++) allowed[list[i]]++ }
     index($0, "Sources/WatchwordTestSupport/") == 1 { next }
     {
       path = $0; sub(/:.*/, "", path)
       text = $0; sub(/^[^:]*:[0-9]+:/, "", text); sub(/^[ \t]+/, "", text)
-      if (!((path "|" text) in allowed)) print
+      key = path "|" text
+      if (++seen[key] > allowed[key] + 0) print
     }' || true)
   [ -z "$hooks" ] || report "A test hook ($name) named outside the lines that define or apply it and Sources/WatchwordTestSupport (tests only):" "$hooks"
 done

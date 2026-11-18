@@ -782,8 +782,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   device (owner decision). `playModifiedClient` (package only) is for tests playing an adversary's device under another
   device's ID; nothing in production sets it, and `assert-unsafe-confined.sh` refuses it, `playsModifiedClient`,
   `enrol(…, assigningDeviceID:)`, `MemberKeyCheck.unchecked(in:)` and `MemberKeyCheck`'s initialiser anywhere in
-  `Sources/` or `Apps/` but the lines it lists for them (`hook_lines`, file and whole line) and `WatchwordTestSupport`
-  (Z168, Z172): a new line naming one gets an entry there, and a new `package` hook of that kind one in `test_hooks`. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
+  `Sources/` or `Apps/` but the lines it lists for them (`hook_lines`, file and whole line, each as many times as it is listed) and
+  `WatchwordTestSupport` (Z168, Z172, Z178): a new line naming one gets an entry there, and a new `package` hook of that kind one in `test_hooks`. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
   (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever step over it. It is not
   recorded at all (no cut runs over it; the change of head that lets its account write replays the log, which records
   it then), so a never-writing member grows no index (Z146 and Z155, superseded by Z157).

@@ -2,9 +2,9 @@
 let a test play an adversary or leave a check out (`playModifiedClient` and the state it sets, `enrol(…,
 assigningDeviceID:)`, `MemberKeyCheck.unchecked(in:)` and `MemberKeyCheck`'s initialiser) are visible to every target
 of the package, so the compiler would let a shipped one call them. The script allows each on the lines that define or
-apply it, matched whole, and under Sources/WatchwordTestSupport only (review of round 7, docs/06-adversarial-review.md
-Z168; the evasions of round 8, Z172). Run as it is, in a scratch tree of Swift files, and once on the repository as it
-stands."""
+apply it, matched whole and counted, and under Sources/WatchwordTestSupport only (review of round 7,
+docs/06-adversarial-review.md Z168; the evasions of round 8, Z172; a copy of an allowed line, round 9, Z178). Run
+as it is, in a scratch tree of Swift files, and once on the repository as it stands."""
 
 import os
 import subprocess
@@ -158,6 +158,25 @@ class TestHookTripwireTests(support.ScriptTestCase):
              "MemberKeyCheck.unchecked"),
             ("Sources/WatchwordSharing/MemberKeyCheck.swift",
              "MemberKeyCheck(vaultID: other, head: head, substituted: [], unverified: [])", "MemberKeyCheck.init"),
+        ):
+            with self.subTest(file=relative, hook=hook):
+                original = DEFINITIONS[relative]
+                self.write(relative, original + "func added() {\n    " + line + "\n}\n")
+                try:
+                    self.assert_refused("(" + hook + ")")
+                    self.assert_refused(relative + ":" + str(original.count("\n") + 2) + ":")
+                finally:
+                    self.write(relative, original)
+
+    def test_a_copy_of_an_allowed_line_in_its_file_is_refused(self):
+        # Each allowed line is counted (review of round 9, Z178): a copy of it elsewhere in the defining file is a new
+        # use of the hook, whatever its text.
+        for relative, line, hook in (
+            ("Sources/WatchwordKit/VaultSession+Sharing.swift", "playsModifiedClient = playing", "playsModifiedClient"),
+            ("Sources/WatchwordKit/VaultSession+Sync.swift",
+             "if sharing.vaults[location.vaultID] != nil, !playsModifiedClient,", "playsModifiedClient"),
+            ("Sources/WatchwordKit/VaultSession+Account.swift", "deviceID = assigningDeviceID", "assigningDeviceID"),
+            ("Sources/WatchwordSharing/MemberKeyCheck.swift", "return MemberKeyCheck(", "MemberKeyCheck.init"),
         ):
             with self.subTest(file=relative, hook=hook):
                 original = DEFINITIONS[relative]
