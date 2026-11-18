@@ -69,6 +69,8 @@ public enum ErrorWording {
             return "Your account password was changed on another device. Enter the new password."
         case .passwordSuperseded:
             return "That password has been changed since. Enter the current one."
+        case .accountPasswordRequired:
+            return "Enter your account password."
         case .passwordChangeRevokesThisDevice:
             return "That password belongs to a change that removed this device from your account, so it is not "
                 + "used here. If you did not remove this device, unlock with the password it still has and remove "

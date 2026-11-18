@@ -55,6 +55,8 @@ struct ImportView: View {
         .closesSheet()
         .overlay { if model.isWorking { ProgressView() } }
         .task { await model.load() }
+        // Revealed merge values are hidden again when the app resigns active or the screen is captured (Z95).
+        .onChange(of: app.privacy.concealments) { model.revealed.removeAll() }
         .onChange(of: model.stage) { focus = nil }
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: contentTypes) { read($0) }
         .confirmationDialog(
@@ -337,6 +339,7 @@ struct DuplicateBlock: View {
 /// What a merge would add to the existing item, each website, sign-in field and URL with its own switch, all off.
 /// Secret values are hidden until shown.
 struct MergeReviewView: View {
+    @Environment(AppModel.self) private var app
     let model: ImportModel
     let importedID: UUID
     let review: MergeReview
@@ -414,7 +417,7 @@ struct MergeReviewView: View {
         HStack {
             VStack(alignment: .leading) {
                 Text(field.label).font(.caption).foregroundStyle(.secondary)
-                if field.isSecret && !model.revealed.contains(field.id) {
+                if field.isSecret && !(model.revealed.contains(field.id) && app.privacy.mayReveal) {
                     Text("••••••••").accessibilityLabel("Hidden")
                 } else {
                     Text(field.value).font(.footnote).textSelection(.disabled)
@@ -425,7 +428,7 @@ struct MergeReviewView: View {
                 Button(model.revealed.contains(field.id) ? "Hide" : "Show") {
                     if model.revealed.contains(field.id) {
                         model.revealed.remove(field.id)
-                    } else {
+                    } else if app.privacy.mayReveal {
                         model.revealed.insert(field.id)
                     }
                 }
@@ -440,7 +443,7 @@ struct MergeReviewView: View {
             Toggle(isOn: fieldBinding(field.id)) {
                 VStack(alignment: .leading) {
                     Text(field.label).font(.caption).foregroundStyle(.secondary)
-                    if field.isSecret && !model.revealed.contains(field.id) {
+                    if field.isSecret && !(model.revealed.contains(field.id) && app.privacy.mayReveal) {
                         Text("••••••••").accessibilityLabel("Hidden")
                     } else {
                         Text(field.value)
@@ -454,7 +457,7 @@ struct MergeReviewView: View {
                 Button(model.revealed.contains(field.id) ? "Hide" : "Show") {
                     if model.revealed.contains(field.id) {
                         model.revealed.remove(field.id)
-                    } else {
+                    } else if app.privacy.mayReveal {
                         model.revealed.insert(field.id)
                     }
                 }

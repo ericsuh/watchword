@@ -54,4 +54,9 @@ public enum EmergencyKitText {
         "Watchword cannot recover your account. If you lose this kit and every device that is signed in, and you "
         + "forget your account password, your data is gone. Nobody, including the makers of Watchword, can reset it."
     public static let passwordLine = "Account password: write it here by hand, or keep it only in your memory."
+    /// Where not to keep it (review §Z, Z80): a kit saved into the synced folder holds the Secret Key beside the
+    /// ciphertext and archives that folder already has, leaving the password as the only barrier (ADR 0008).
+    public static let storageWarning =
+        "Print this kit, or keep the file only on a device of your own. Do not save it to iCloud Drive or any other "
+        + "folder that syncs: whoever can read that folder would have your Secret Key beside your encrypted vault."
 }

@@ -208,7 +208,7 @@ struct EnrolmentTests {
     func restoredStoreCarriesUnsyncedWork() async throws {
         let fleet = try await Fleet.make(2)
         let (a, c) = (fleet.devices[0], fleet.devices[1])
-        let kit = try await a.session.emergencyKit()
+        let kit = try await a.session.emergencyKit(password: TestVault.password)
         let doomed = try await a.session.save(login(fleet.personal, title: "Deleted on A, never synced"))
         let kept = try await a.session.save(login(fleet.personal, title: "Edited on A, never synced"))
         try await fleet.settle()
@@ -323,7 +323,7 @@ struct DeviceRegistrySessionTests {
         let a = fleet.devices[0]
         try await a.session.changePassword(current: TestVault.password, new: Self.newPassword)
         try await a.session.sync()
-        let kit = try await a.session.emergencyKit()
+        let kit = try await a.session.emergencyKit(password: Self.newPassword)
         let stale = EnrolmentTests.newDevice(over: fleet.transport, seed: 71)
         await #expect(throws: CryptoError.authenticationFailed) {
             try await stale.session.enrol(password: TestVault.password, secretKey: kit.setupCode)
@@ -401,7 +401,7 @@ struct DeviceRegistrySessionTests {
         // device it sets up with what it knows cannot enrol.
         _ = try? await lost.session.sync()
         #expect(try await lost.session.deviceStanding() == .revoked)
-        let kit = try await a.session.emergencyKit()
+        let kit = try await a.session.emergencyKit(password: Self.newPassword)
         let sockPuppet = EnrolmentTests.newDevice(over: fleet.transport, seed: 81)
         await #expect(throws: CryptoError.authenticationFailed) {
             try await sockPuppet.session.enrol(password: TestVault.password, secretKey: kit.setupCode)

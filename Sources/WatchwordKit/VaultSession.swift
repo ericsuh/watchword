@@ -139,6 +139,9 @@ public actor VaultSession: SharesExecutor {
     var keys: UnlockedKeys?
     var account: AccountRecord?
     var lockEpoch: UInt64 = 0
+    /// The lock epoch in which the installed keys were opened with the account password (creation, enrolment, a
+    /// password unlock); `nil` after a quick unlock. Only `unconfirmedEmergencyKit` reads it (Z86).
+    var passwordEnteredEpoch: UInt64?
     private var lastActivity: Date?
     private var backgroundedAt: Date?
     /// Lamport high-water mark per vault, so one record with an absurd version cannot freeze writes elsewhere.
@@ -319,7 +322,7 @@ public actor VaultSession: SharesExecutor {
             newKeys.zeroise()
             throw VaultError.lockedDuringUnlock
         }
-        install(newKeys, at: now)
+        install(newKeys, at: now, withPassword: true)
         try? await refreshSigningKey(account: record, keys: newKeys)
         // Which vaults are shared, read before anything picks a key for one (VaultSession+SharedMarker.swift). Last:
         // nothing after it reads `newKeys`, which a lock during the read would have zeroised.
@@ -338,11 +341,34 @@ public actor VaultSession: SharesExecutor {
         account = record
     }
 
-    /// The Emergency Kit again, for printing a replacement. Requires the vault to be unlocked.
-    public func emergencyKit() async throws -> EmergencyKit {
+    /// The Emergency Kit again, for printing a replacement (PRD F5.1). The account password is asked for in the same
+    /// call and re-derived under the stored header (`verifyAccountPassword`), as for an export: the Secret Key is the
+    /// one secret that still matters once the device is back in its owner's hands, and an unlocked session (quick
+    /// unlock included) must not hand it to whoever holds the device (Z86). Throws `CryptoError.authenticationFailed`
+    /// for a wrong password.
+    public func emergencyKit(password: String) async throws -> EmergencyKit {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        let record = try await verifyAccountPassword(password, since: epoch)
+        return try await currentEmergencyKit(record, since: epoch)
+    }
+
+    /// The kit the person has not yet confirmed saving, shown again after an unlock without asking for the password
+    /// twice (F5.1: the kit until it is confirmed). Only while the account records no confirmation *and* this
+    /// session's keys were opened with the account password (account creation, enrolment or a password unlock);
+    /// otherwise, quick unlock included, `accountPasswordRequired`, and `emergencyKit(password:)` is the way (Z86).
+    /// The confirmation flag is a plain column, so a file edited to clear it gains a quick-unlocked holder nothing.
+    public func unconfirmedEmergencyKit() async throws -> EmergencyKit {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        guard record.emergencyKitConfirmedAt == nil, passwordEnteredEpoch == epoch else {
+            throw VaultError.accountPasswordRequired
+        }
+        return try await currentEmergencyKit(record, since: epoch)
+    }
+
+    private func currentEmergencyKit(_ record: AccountRecord, since epoch: UInt64) async throws -> EmergencyKit {
         guard let bytes = try await keychain.read(.secretKey(accountID: record.accountID), prompt: "") else {
             throw VaultError.secretKeyMissing
         }
@@ -432,7 +458,7 @@ public actor VaultSession: SharesExecutor {
             newKeys.zeroise()
             throw VaultError.lockedDuringUnlock
         }
-        install(newKeys, at: now)
+        install(newKeys, at: now, withPassword: true)
         // Best effort: a Keychain hiccup here must not turn a correct password into a failed unlock.
         try? await refreshQuickUnlock(after: now, account: record)
         try? await refreshSigningKey(account: record, keys: newKeys)
@@ -752,7 +778,7 @@ public actor VaultSession: SharesExecutor {
             newKeys.zeroise()
             throw VaultError.lockedDuringUnlock
         }
-        install(newKeys, at: now)
+        install(newKeys, at: now, withPassword: false)
         try? await refreshSigningKey(account: record, keys: newKeys)
         do {
             try await reconcileAccountObjects(account: record, keys: newKeys)
@@ -857,8 +883,9 @@ public actor VaultSession: SharesExecutor {
         }
     }
 
-    func install(_ newKeys: UnlockedKeys, at now: Date) {
+    func install(_ newKeys: UnlockedKeys, at now: Date, withPassword: Bool) {
         keys = newKeys
+        passwordEnteredEpoch = withPassword ? lockEpoch : nil
         lastActivity = now
         backgroundedAt = nil
         startHygiene()

@@ -34,7 +34,7 @@ public enum ExportKind: String, Hashable, Sendable, CaseIterable, Identifiable {
 }
 
 /// A finished export, as the screen shows it. The bytes stay in the model, in zeroising memory, until
-/// `ExportModel.stage` writes them where the system's file mover takes them, and go at `discardFile`.
+/// `ExportModel.stage` writes them into the `StagingFolder` for the system's file mover, and go at `discardFile`.
 public struct ExportFile: Hashable, Sendable {
     /// One export: a new one is a new file even with the same report.
     public let id: UUID
@@ -70,20 +70,27 @@ public final class ExportModel: LockSensitive {
 
     private let context: ScreenContext
     private let now: @Sendable () -> Date
+    /// Where a file is written for the file mover; swept whole at launch, lock, unlock and termination (Z80).
+    public let staging: StagingFolder
     /// The file's bytes: plaintext for every format but the archive. Zeroised by `discardFile`.
     private var contents: SecureBytes?
     /// Where `stage` wrote them, until the file mover has taken them or the export is dropped.
-    private var stagingDirectory: URL?
+    private var stagedFile: URL?
 
-    public init(context: ScreenContext, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(
+        context: ScreenContext, staging: StagingFolder = .standard, now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.context = context
+        self.staging = staging
         self.now = now
         context.locks?.register(self)
     }
 
-    /// On every lock: the bytes, any staged copy and the typed password and passphrase go (finding 6).
+    /// On every lock: the bytes, any staged copy and the typed password and passphrase go (finding 6), and the
+    /// staging folder is swept whatever this model remembers of it (Z80).
     public func dropOnLock() {
         discardFile()
+        staging.sweep()
         password = ""
         passphrase = ""
         passphraseConfirmation = ""
@@ -153,18 +160,18 @@ public final class ExportModel: LockSensitive {
         }
     }
 
-    /// Writes the file into a new directory of its own under `directory`, with `options` (on iOS the app passes
+    /// Writes the file into a folder of its own in `staging`, with `options` (on iOS the app passes
     /// `.completeFileProtectionUnlessOpen`, so the file is never readable at rest while the device is locked), for the
     /// system's file mover to take where the person chooses. Returns the file's URL. The staged copy is removed by
-    /// `finishSaving` or `discardFile`, whichever comes first (PRD F8.4; review of the account screens, finding 5).
-    public func stage(in directory: URL, options: Data.WritingOptions) throws -> URL {
+    /// `finishSaving` or `discardFile`, whichever comes first (PRD F8.4; review of the account screens, finding 5),
+    /// and with the whole folder at the next launch, lock, unlock or termination if the process lives that long (Z80).
+    public func stage(options: Data.WritingOptions) throws -> URL {
         guard let contents, let file else { throw CocoaError(.fileNoSuchFile) }
         removeStagedCopy()
-        let folder = directory.appendingPathComponent("Export-" + UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        stagingDirectory = folder
-        let url = folder.appendingPathComponent(file.filename, isDirectory: false)
-        try Data(contents.unprotectedCopy()).write(to: url, options: options.union(.withoutOverwriting))
+        let url = try staging.stage(named: file.filename) { url in
+            try Data(contents.unprotectedCopy()).write(to: url, options: options.union(.withoutOverwriting))
+        }
+        stagedFile = url
         return url
     }
 
@@ -191,8 +198,8 @@ public final class ExportModel: LockSensitive {
     }
 
     private func removeStagedCopy() {
-        if let stagingDirectory { try? FileManager.default.removeItem(at: stagingDirectory) }
-        stagingDirectory = nil
+        if let stagedFile { staging.remove(stagedFile) }
+        stagedFile = nil
     }
 
     static func titles(_ session: VaultSession) async throws -> [UUID: String] {

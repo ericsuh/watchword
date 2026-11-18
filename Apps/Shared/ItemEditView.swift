@@ -63,7 +63,13 @@ struct ItemEditView: View {
                     }
                     .accessibilityIdentifier("edit.generate")
                 }
+                // Notes are where people put recovery phrases: no autocorrection or capitalisation, so the
+                // keyboard neither learns nor rewrites them (review §Z, Z97).
                 TextField("Notes", text: $draft.notes, axis: .vertical)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                    #endif
                 Toggle("Hide from AutoFill suggestions", isOn: $draft.excludedFromSuggestions)
                 ErrorText(message: model.errorMessage)
             }

@@ -103,6 +103,9 @@ public enum VaultError: Error, Equatable, Sendable {
     /// Unlock Key, or that binding cannot be checked: the row was edited (A8), or its key is one that reached this
     /// account by another member's grant. Refused at every unlock, before a key is installed (review finding Z5).
     case personalVaultMismatch
+    /// What was asked for needs the account password in the same call (the Emergency Kit once it has been confirmed,
+    /// or after a quick unlock; review finding Z86).
+    case accountPasswordRequired
 }
 
 /// A host a save would add to an item's scopes that the person has to confirm by name first (PRD F11.7).

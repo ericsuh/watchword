@@ -283,7 +283,7 @@ struct InterchangeSessionTests {
         await #expect(throws: InterchangeSessionError.archiveFromAnotherAccount(kit.accountID)) {
             try await vault.session.previewArchiveImport(archive.bytes, passphrase: Self.passphrase, into: personal)
         }
-        let ownKit = try await vault.session.emergencyKit()
+        let ownKit = try await vault.session.emergencyKit(password: TestVault.password)
         await #expect(throws: CryptoError.authenticationFailed) {
             try await vault.session.previewArchiveImport(
                 archive.bytes, passphrase: Self.passphrase, secretKey: ownKit.secretKey, into: personal)

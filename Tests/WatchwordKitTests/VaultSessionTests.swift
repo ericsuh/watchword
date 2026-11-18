@@ -98,9 +98,9 @@ struct VaultSessionAccountTests {
     func reshowKit() async throws {
         let vault = TestVault()
         let kit = try await vault.createAccount()
-        #expect(try await vault.session.emergencyKit() == kit)
+        #expect(try await vault.session.emergencyKit(password: TestVault.password) == kit)
         await vault.session.lock()
-        await #expect(throws: VaultError.locked) { try await vault.session.emergencyKit() }
+        await #expect(throws: VaultError.locked) { try await vault.session.emergencyKit(password: TestVault.password) }
     }
 
     @Test("changing the password re-wraps the keyset; only the new password unlocks")

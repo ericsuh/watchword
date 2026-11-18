@@ -6,7 +6,8 @@ struct ItemDetailView: View {
     @Environment(AppModel.self) private var model
     let item: Item
     let onEdit: () -> Void
-    @State private var revealed: Set<UUID> = []
+    /// Hidden again whenever the app resigns active or the screen is captured (`ScreenPrivacy`, F5.7, Z95).
+    @State private var revealed = RevealedSecrets<UUID>()
     @State private var confirmingTrash = false
 
     var body: some View {
@@ -81,7 +82,7 @@ struct ItemDetailView: View {
         HStack {
             VStack(alignment: .leading) {
                 Text(field.label).font(.caption).foregroundStyle(.secondary)
-                if field.kind.isSecret && !revealed.contains(field.id) {
+                if field.kind.isSecret && !revealed.isRevealed(field.id, under: model.privacy) {
                     Text("••••••••").accessibilityLabel("Hidden")
                 } else {
                     // Secrets are not selectable: a system Copy would bypass the expiring, local-only clipboard (F5.6).
@@ -94,11 +95,12 @@ struct ItemDetailView: View {
             }
             Spacer()
             if field.kind.isSecret {
-                Button(revealed.contains(field.id) ? "Hide" : "Show") {
+                Button(revealed.isRevealed(field.id, under: model.privacy) ? "Hide" : "Show") {
                     model.recordActivity()
-                    if revealed.contains(field.id) { revealed.remove(field.id) } else { revealed.insert(field.id) }
+                    revealed.toggle(field.id, under: model.privacy)
                 }
                 .buttonStyle(.borderless)
+                .disabled(!model.privacy.mayReveal)
             }
             Button("Copy") {
                 model.recordActivity()

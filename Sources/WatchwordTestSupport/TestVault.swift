@@ -80,7 +80,7 @@ public struct TestVault: Sendable {
         password: String = TestVault.password, name: String = "", hygiene: HygieneSettings? = nil
     ) async throws -> TestVault {
         try await session.sync()
-        let kit = try await session.emergencyKit()
+        let kit = try await session.emergencyKit(password: password)
         // Each device its own randomness, and so its own signing key: the registry refuses one key for two devices.
         let ownSeed =
             seed ?? deviceID.uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }

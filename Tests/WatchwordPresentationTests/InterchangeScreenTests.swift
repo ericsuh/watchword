@@ -109,25 +109,27 @@ struct InterchangeScreenTests {
     @Test("an export is staged in a folder of its own, removed after the save, and its bytes then dropped")
     func staging() async throws {
         let (vault, _) = try await vaultWithLibrary()
-        let model = ExportModel(context: ContextProbe().context(vault.session))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let staging = StagingFolder(temporaryDirectory: root)
+        let model = ExportModel(context: ContextProbe().context(vault.session), staging: staging)
         await model.load()
         model.kind = .applePasswordsCSV
         model.password = TestVault.password
         await model.export()
         let file = try #require(model.file)
         #expect(model.archiveBytes == nil, "a plaintext export's bytes leave only through stage")
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let staged = try model.stage(in: root, options: [])
+        let staged = try model.stage(options: [])
         #expect(staged.lastPathComponent == file.filename)
+        #expect(staged.deletingLastPathComponent().deletingLastPathComponent().path == staging.url.path)
         #expect(try String(contentsOf: staged, encoding: .utf8).contains("citylibrary.org"))
         model.finishSaving(saved: false)
         #expect(!FileManager.default.fileExists(atPath: staged.path), "a cancelled save left the staged copy")
         #expect(model.holdsContents, "a cancelled save keeps the file to save again")
-        _ = try model.stage(in: root, options: [])
+        _ = try model.stage(options: [])
         model.finishSaving(saved: true)
         #expect(!model.holdsContents && model.file == nil)
-        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        #expect(staging.stagedFiles().isEmpty)
     }
 
     /// A lock while the merge review or the export report is on screen (A2, someone who picks up the unlocked device
@@ -177,7 +179,10 @@ struct InterchangeScreenTests {
         _ = try await vault.session.save(
             login(personal, "=HYPERLINK(\"https://evil.example\")", host: "example.com", username: "+1", password: "@x")
         )
-        let model = ExportModel(context: ContextProbe().context(vault.session))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = ExportModel(
+            context: ContextProbe().context(vault.session), staging: StagingFolder(temporaryDirectory: root))
         await model.load()
         model.kind = .applePasswordsCSV
         #expect(model.problem == "Enter your account password.")
@@ -191,9 +196,7 @@ struct InterchangeScreenTests {
         let file = try #require(model.file)
         #expect(file.itemCount == 2 && file.kind.isPlaintext)
         #expect(file.filename.hasSuffix(".csv"))
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let text = try String(contentsOf: try model.stage(in: root, options: []), encoding: .utf8)
+        let text = try String(contentsOf: try model.stage(options: []), encoding: .utf8)
         #expect(text.contains("\"=HYPERLINK(\"\"https://evil.example\"\")\""), "kept exactly, quoted per RFC 4180")
         #expect(text.contains(",+1,") && text.contains("@x"))
         #expect(ExportModel.plaintextWarning.contains("not encrypted"))

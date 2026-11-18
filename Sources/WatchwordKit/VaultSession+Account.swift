@@ -1188,7 +1188,7 @@ extension VaultSession {
             throw VaultError.lockedDuringUnlock
         }
         registryView = nil
-        install(newKeys, at: now)
+        install(newKeys, at: now, withPassword: true)
         try? await refreshSigningKey(account: account, keys: newKeys)
         await loadSharedMarkersIfNeeded(force: true)
     }

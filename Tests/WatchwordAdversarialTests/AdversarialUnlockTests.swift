@@ -155,6 +155,36 @@ struct AdversarialUnlockTests {
         }
     }
 
+    /// Threat: U1's adversary, who can present the enrolled face or reaches the unlocked app but does not know the
+    /// account password, reads out the Secret Key (Z86). The kit is the one thing such a holder can take that still
+    /// matters once the device is back with its owner: with the sync store's ciphertext (A1) the password is then the
+    /// only barrier, for good. Before the fix `emergencyKit()` needed only unlocked keys. Now it takes the password
+    /// in the call, and the unconfirmed kit shown again without one needs keys opened with the password: a quick
+    /// unlock, even with the confirmation column cleared (A8), gets neither.
+    @Test("a quick-unlocked session cannot read the Emergency Kit without the account password")
+    func kitNeedsPassword() async throws {
+        let (vault, kit) = try await Self.enrolled()
+        try await vault.session.quickUnlock()
+        // The account was created and never confirmed: the state a cleared column also produces.
+        #expect(try await !vault.session.status().emergencyKitConfirmed)
+        await #expect(throws: VaultError.accountPasswordRequired) { try await vault.session.unconfirmedEmergencyKit() }
+        await #expect(throws: CryptoError.authenticationFailed) {
+            try await vault.session.emergencyKit(password: "a guess at the password")
+        }
+        #expect(try await vault.session.emergencyKit(password: TestVault.password) == kit)
+
+        // A password unlock may show the unconfirmed kit again without asking twice; once confirmed, it may not.
+        await vault.session.lock()
+        try await vault.session.unlock(password: TestVault.password)
+        #expect(try await vault.session.unconfirmedEmergencyKit() == kit)
+        try await vault.session.confirmEmergencyKitSaved()
+        await #expect(throws: VaultError.accountPasswordRequired) { try await vault.session.unconfirmedEmergencyKit() }
+        // And a lock ends what the password unlock allowed.
+        await vault.session.lock()
+        try await vault.session.quickUnlock()
+        await #expect(throws: VaultError.accountPasswordRequired) { try await vault.session.unconfirmedEmergencyKit() }
+    }
+
     // MARK: Expiry (F5.4)
 
     /// Threat: an enrolment outliving the conditions it was granted under. Each F5.4 trigger — interval expiry, an

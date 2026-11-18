@@ -14,15 +14,32 @@
     /// Renders the Emergency Kit as a one-page PDF (PRD F5.1, F10.2), with Core Graphics and Core Text so the same code
     /// runs on iOS and macOS.
     ///
-    /// The PDF is returned as `Data` and never written by this type: the caller hands it straight to the share sheet or
-    /// save panel, so the Secret Key does not land in the app's container, its caches or a temporary directory. The
-    /// document metadata carries only a title; the Secret Key appears in the page content and the QR code, nowhere else.
+    /// `write(_:to:options:)` is what the app uses: it renders the page into memory, writes it to the file it is given
+    /// (the app passes one in its swept staging folder, with complete file protection on iOS, and hands that file to
+    /// the system's file mover; `EmergencyKitModel`) and then zeroes the rendered buffer. The Secret Key therefore
+    /// *does* land in the app's temporary directory, for as long as the mover is up and no longer than the next
+    /// launch: earlier wording here said it never did, which was not true of the file exporter either (review §G C2,
+    /// §Z Z80). Core Graphics and Core Text keep copies of their own while drawing, which nothing here can wipe. The
+    /// document metadata carries only a title; the Secret Key appears in the page content and the QR code, nowhere
+    /// else. The page also says not to keep the file in a synced folder (`EmergencyKitText.storageWarning`).
     public enum EmergencyKitDocument {
         /// US Letter in points; also prints within A4's printable area.
         static let pageSize = CGSize(width: 612, height: 792)
         static let margin: CGFloat = 54
 
+        /// The kit as PDF bytes (for tests and previews; the app writes with `write(_:to:options:)`).
         public static func pdf(for kit: EmergencyKit) throws -> Data {
+            try render(kit) as Data
+        }
+
+        /// Renders the kit and writes it to `url` with `options`, then zeroes the rendered buffer.
+        public static func write(_ kit: EmergencyKit, to url: URL, options: Data.WritingOptions) throws {
+            let data = try render(kit)
+            defer { data.resetBytes(in: NSRange(location: 0, length: data.length)) }
+            try data.write(to: url, options: options)
+        }
+
+        private static func render(_ kit: EmergencyKit) throws -> NSMutableData {
             let data = NSMutableData()
             let mediaBox = CGRect(origin: .zero, size: pageSize)
             let info = [kCGPDFContextTitle as String: EmergencyKitText.title] as CFDictionary
@@ -59,12 +76,14 @@
                 left: margin + qrSide + 18)
             top -= qrSide + 24
 
-            _ = draw(
+            top = draw(
                 EmergencyKitText.unrecoverableWarning, font: font("Helvetica-Bold", 11), in: context, top: top,
                 width: width)
+            _ = draw(
+                EmergencyKitText.storageWarning, font: font("Helvetica", 10), in: context, top: top - 12, width: width)
             context.endPDFPage()
             context.closePDF()
-            return data as Data
+            return data
         }
 
         private static func font(_ name: String, _ size: CGFloat) -> CTFont {
