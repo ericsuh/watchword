@@ -559,7 +559,10 @@ public final class AcceptInvitationModel {
             var status = try await context.session.refreshSharingCodeSession()
             try await apply(status)
             guard case .awaitingInvitation = step else { return }
-            if status.ownCode == nil { status = try await context.session.refreshSharingCodeSession() }
+            if status.ownCode == nil {
+                status = try await context.session.refreshSharingCodeSession()
+                try await apply(status)
+            }
             guard let invitation = try await context.session.sharingCodeInvitation() else { return }
             self.invitation = invitation
             let owner = ContactSummary(try await context.session.contactCandidate(invitation.ownerAccountID))

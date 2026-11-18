@@ -119,6 +119,16 @@ struct ScanCodeButton: View {
     @Environment(AppModel.self) private var app
     @State private var scanning = false
 
+    init(
+        title: String, accessibilityID: String, uiTestPayload: @escaping @MainActor () async -> String?,
+        onScan: @escaping @MainActor (String) async -> Void
+    ) {
+        self.title = title
+        self.accessibilityID = accessibilityID
+        self.uiTestPayload = uiTestPayload
+        self.onScan = onScan
+    }
+
     var body: some View {
         Group {
             #if os(iOS)

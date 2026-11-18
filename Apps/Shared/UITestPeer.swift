@@ -180,8 +180,19 @@
                 memberVaultID = vaultID
             }
             let status = try await member.startSharingCodeSession()
+            // Their screen looks for the app's answer on a timer, as the app's own does, and reveals once it is there.
+            memberPolling?.cancel()
+            memberPolling = Task {
+                for _ in 0..<240 where !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    guard let step = try? await member.refreshSharingCodeSession().step else { return }
+                    if step != .showNumber { return }
+                }
+            }
             return (status.number ?? "", status.scanPayload ?? "")
         }
+
+        private var memberPolling: Task<Void, Never>?
 
         /// They invite the app's account to their vault inside the session, and sync.
         func memberInvites() async throws {
