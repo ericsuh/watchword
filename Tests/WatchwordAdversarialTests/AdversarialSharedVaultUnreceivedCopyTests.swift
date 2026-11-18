@@ -67,4 +67,42 @@ extension AdversarialSharedVaultTests {
         try await Self.syncAll([owner])
         #expect((try? await owner.session.item(id: second.id)) == nil, "the second deletion never went out")
     }
+
+    /// Threat: none needed but a sync state file that fails one read (a busy or damaged database); the review of round 9
+    /// (I6, F7.6). The installation of `twiceRestoredNonCommittingMove` is restored a second time, and reading the
+    /// deletions its second ID had parked fails while the third registers. Registration read them with `try?`, so it
+    /// went on with none: the third ID never parked them again, they stayed parked for an ID nobody releases, and
+    /// moving the copy out never let the original's deletion go. Registration now fails closed: it is not made, and the
+    /// next unlock makes it with the deletions parked again, which go out once the copy is moved out.
+    @Test("parked deletions that cannot be read when a restore registers are not stranded")
+    func parkedDeletionsUnreadableAtRegistration() async throws {
+        let state = InterceptingStateStore()
+        let restored = try await Self.restoredMove(seed: 17_700, syncState: state)
+        let (vaultID, owner, member, device) = (restored.vaultID, restored.owner, restored.member, restored.device)
+        let second = try await device.session.syncAll()
+        #expect(second.deletionsHeldBack.contains(vaultID))
+        let secondID = try await Self.deviceID(of: device)
+
+        await state.failSecondPendingDeletionRead()
+        try await Self.restoreOntoOtherHardware(device, account: member.accountID)
+        #expect(try await Self.deviceID(of: device) == secondID, "registered without the parked deletions")
+        await device.session.lock()
+        try await device.session.unlock(password: TestVault.password)
+        #expect(try await Self.deviceID(of: device) != secondID, "the next unlock did not register")
+        let third = try await device.session.syncAll()
+        #expect(third.deletionsHeldBack.contains(vaultID))
+
+        let again: Item
+        do {
+            again = try await device.session.move(itemID: restored.copy.id, to: restored.personal)
+        } catch VaultError.transferNeedsConfirmation(let concern) {
+            again = try await device.session.move(itemID: restored.copy.id, to: restored.personal, confirming: concern)
+        }
+        let fourth = try await device.session.syncAll()
+        #expect(fourth.deletionsHeldBack.isEmpty)
+        try await device.session.sync()
+        try await Self.syncAll([member, owner])
+        #expect((try? await member.session.item(id: again.id)) != nil, "the new copy did not arrive")
+        #expect((try? await member.session.item(id: restored.original.id)) == nil, "the parked deletion was stranded")
+    }
 }

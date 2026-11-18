@@ -93,6 +93,8 @@ extension AdversarialSyncTests {
 /// A state store over the in-memory one that lets a test lock the device's keyring the moment a state is saved, or
 /// make the quarantine's sizes read as a tampered file would make them.
 actor InterceptingStateStore: SyncStateStore {
+    struct PendingDeletionsUnreadable: Error {}
+
     let base = InMemorySyncStateStore()
     /// Called after each state is saved.
     var afterSave: (@Sendable (SyncState) async -> Void)?
@@ -104,12 +106,16 @@ actor InterceptingStateStore: SyncStateStore {
     var stageFailure: (any Error)?
     /// Records whose entries the quarantine refuses to keep, as the SQLite store refuses one whose digest is crowded.
     var refused: Set<RecordKey> = []
+    /// While set, the pending deletions of a vault read for the second time since then are not read: thrown, once.
+    private var pendingReads: [UUID: Int]?
 
     func intercept(afterSave: (@Sendable (SyncState) async -> Void)?) { self.afterSave = afterSave }
     func report(usage: QuarantineUsage?) { self.usage = usage }
     func fail(usage failure: any Error) { usageFailure = failure }
     func refuse(_ keys: Set<RecordKey>) { refused = keys }
     func fail(staging failure: any Error) { stageFailure = failure }
+    /// The next pass over every vault's pending deletions reads them; the one after fails at its first vault.
+    func failSecondPendingDeletionRead() { pendingReads = [:] }
 
     func loadState(vaultID: UUID) async -> SyncState? { await base.loadState(vaultID: vaultID) }
     func saveState(_ state: SyncState) async {
@@ -123,8 +129,16 @@ actor InterceptingStateStore: SyncStateStore {
     func staged(vaultID: UUID) async -> [StagedObject] { await base.staged(vaultID: vaultID) }
     func unstage(_ locations: [SyncObjectLocation]) async { await base.unstage(locations) }
     func addPendingDeletion(_ deletion: PendingDeletion) async { await base.addPendingDeletion(deletion) }
-    func pendingDeletions(vaultID: UUID) async -> [RecordKey: PendingDeletion] {
-        await base.pendingDeletions(vaultID: vaultID)
+    func pendingDeletions(vaultID: UUID) async throws -> [RecordKey: PendingDeletion] {
+        if var reads = pendingReads {
+            reads[vaultID, default: 0] += 1
+            pendingReads = reads
+            if reads[vaultID] == 2 {
+                pendingReads = nil
+                throw PendingDeletionsUnreadable()
+            }
+        }
+        return await base.pendingDeletions(vaultID: vaultID)
     }
     func removePendingDeletions(_ deletions: [RecordKey: RecordStamp], vaultID: UUID) async {
         await base.removePendingDeletions(deletions, vaultID: vaultID)

@@ -65,12 +65,12 @@ public struct SharingAccount: Sendable {
     /// unlocked, with sharing configured over sharing state and contacts of its own: pins, ledgers and stream
     /// indexes are per device (review finding S35), so it starts with none. `modifiedClient` makes it an adversary's
     /// modified client (`VaultSession.playModifiedClient`, Z162): it writes, accepts and publishes in a shared vault
-    /// whatever its ID, where an honest client whose ID does not commit refuses to.
+    /// whatever its ID, where an honest client whose ID does not commit refuses to. `syncState` is its sync state store.
     public func enrolledDevice(
         deviceID: UUID? = nil, over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory,
-        modifiedClient: Bool = false
+        modifiedClient: Bool = false, syncState: (any SyncStateStore)? = nil
     ) async throws -> SharingAccount {
-        let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport)
+        let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport, syncState: syncState)
         if modifiedClient { await device.session.playModifiedClient() }
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()

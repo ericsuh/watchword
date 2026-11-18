@@ -840,6 +840,9 @@ extension VaultSession {
         let created = asNewDevice ? try await deviceKeys.createDevice(accountID: account.accountID) : nil
         if let created { updated.deviceID = created.id }
         let unpublished = asNewDevice ? try await unpublishedRows(of: account) : (rows: [], deletions: [:])
+        // What the old ID had parked, read before anything commits: one that cannot be read fails the registration,
+        // which runs again at the next unlock, rather than leaving them parked for an ID nobody releases (Z177).
+        let parked = asNewDevice ? try await parkedDeletions(of: account) : []
         // The old ID's deletions wait while a shared vault holds an edit that nobody received, of it or of any device
         // ID of the registry that does not commit (Z167, Z170): the release's own predicate, so that an ID which commits
         // (a second restore) does not let go of what an earlier one left.
@@ -885,8 +888,7 @@ extension VaultSession {
                 highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, row.version)
             }
             try? await startNewDeviceSyncState(
-                carrying: unpublished.deletions, parked: (try? await parkedDeletions(of: account)) ?? [],
-                as: updated, parking: parksDeletions)
+                carrying: unpublished.deletions, parked: parked, as: updated, parking: parksDeletions)
         }
         registryView = nil
         if let refreshed = try? await registry(updated) {
@@ -1003,9 +1005,11 @@ extension VaultSession {
         return signed
     }
 
-    /// The deletions parked for `account`'s device (`parkedDeletionDevice`) that the account key signed.
+    /// The deletions parked for `account`'s device (`parkedDeletionDevice`) that the account key signed. Throws what
+    /// the state store threw, and `VaultError.locked` while locked: never an empty list for one it could not read.
     func parkedDeletions(of account: AccountRecord) async throws -> [PendingDeletion] {
-        guard let base = syncSettings?.state, let keys = try? requireKeys() else { return [] }
+        guard let base = syncSettings?.state else { return [] }
+        let keys = try requireKeys()
         let signingKey = try keys.keyset.publicKeyBundle().signingKey
         let device = Self.parkedDeletionDevice(of: account.deviceID)
         var parked: [PendingDeletion] = []

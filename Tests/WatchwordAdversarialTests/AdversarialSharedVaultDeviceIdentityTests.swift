@@ -14,12 +14,13 @@ import WatchwordTestSupport
 // have what it wrote there counted as published.
 extension AdversarialSharedVaultTests {
     /// A member's second device whose ID commits to nothing, as an older build enrolled it; honest unless `modified`.
-    static func legacyDevice(of member: SharingAccount, in household: SharedVaultHousehold, modified: Bool)
-        async throws -> SharingAccount
-    {
+    static func legacyDevice(
+        of member: SharingAccount, in household: SharedVaultHousehold, modified: Bool,
+        syncState: (any SyncStateStore)? = nil
+    ) async throws -> SharingAccount {
         try await member.enrolledDevice(
             deviceID: UUID(uuidString: "D1620000-0000-4000-8000-000000000162")!, over: household.transport,
-            directory: household.directory, modifiedClient: modified)
+            directory: household.directory, modifiedClient: modified, syncState: syncState)
     }
 
     /// Threat: none needed but a device of the person's own whose ID does not commit to their account (an account
@@ -125,11 +126,11 @@ extension AdversarialSharedVaultTests {
         let oldID: UUID
     }
 
-    static func restoredMove(seed: UInt64) async throws -> RestoredMove {
+    static func restoredMove(seed: UInt64, syncState: (any SyncStateStore)? = nil) async throws -> RestoredMove {
         let household = SharedVaultHousehold()
         let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: seed)
         let member = members[0]
-        let device = try await Self.legacyDevice(of: member, in: household, modified: true)
+        let device = try await Self.legacyDevice(of: member, in: household, modified: true, syncState: syncState)
         try await device.session.acceptInvitation(
             Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
             ownerEvidence: .safetyNumber(owner.safetyNumber))
