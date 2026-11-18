@@ -143,7 +143,11 @@ final class VaultSharingTests: XCTestCase {
             app.tap(AccessibilityID.Debug.scanMember)
             step("the scan names their account check; they type this device's code; say it is theirs")
             XCTAssertTrue(app.element(AccessibilityID.Accept.scannedAccount).appears(within: 20), app.debugDescription)
-            XCTAssertTrue(app.element(AccessibilityID.Accept.ownAccount).isPresent, app.debugDescription)
+            // This device's own account check is the form's last row, under the scan's question and the stand-in's
+            // buttons: on an iPhone it is below the fold, and a grouped form on iOS builds rows only as they scroll
+            // into view, so it is scrolled to before it is asked about (CI run 44387442462 asked with `exists`).
+            let ownAccount = app.reveal(AccessibilityID.Accept.ownAccount, at: .below, mayBeDisabled: true)
+            XCTAssertTrue(ownAccount.appears(within: 5), app.debugDescription)
             app.tap(AccessibilityID.Debug.memberTypes)
             app.tapWhenEnabled(AccessibilityID.Accept.confirmScan)
             XCTAssertTrue(
