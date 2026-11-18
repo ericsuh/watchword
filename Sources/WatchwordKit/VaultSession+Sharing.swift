@@ -1047,6 +1047,17 @@ extension VaultSession {
             {
                 throw SharedVaultError.keyIDInUse(joined.vaultKey.key.keyID)
             }
+            // A key of this vault that reached this account by grant names the chain that introduced it: a chain that
+            // never names it, on its accepted path or a branch it holds, is behind what the account has seen (the
+            // store serving an older prefix, A1, to a device whose saved ledger is gone, A8), or is another chain.
+            // Joined, it would seal under an older current key that a member removed since holds (review of V31 to
+            // V37, L1; docs/06-adversarial-review.md V41).
+            let ledger = joined.ledger
+            let unnamed = try requireKeys(since: epoch).vaultKeys.values.contains { key in
+                key.vaultID == vaultID && key.arrivedByGrant && ledger.keyEpoch(of: key.key.keyID) == nil
+                    && !ledger.branches.contains { $0.state.vaultKeyID == key.key.keyID }
+            }
+            if unnamed { throw SharedVaultError.chainBehindHeldKeys(vaultID) }
         } catch {
             if !adopted { joined.vaultKey.zeroise() }
             throw error

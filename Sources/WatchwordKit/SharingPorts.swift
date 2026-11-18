@@ -163,6 +163,11 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// on this device alone (PRD F7.6). Nothing is written, shared, accepted or published there from this device until
     /// it is enrolled again as a new device, whose ID commits.
     case deviceIDDoesNotCommit
+    /// The chain an invitation leads to never names a key of the vault that reached this account by grant: it is
+    /// behind what the account has seen (a store serving an older prefix of the chain), or it is another chain. Not
+    /// joined; a later sync, with the store serving the whole chain, can try again (docs/06-adversarial-review.md
+    /// V41).
+    case chainBehindHeldKeys(UUID)
     /// The invitation was issued (the joiner is added and holds a grant) but could not be delivered inside the vault
     /// sharing code session: something else is in its slot (anyone who heard the number may take it). Hand it over as
     /// text (`SharingCodes.text(for:)`); the joiner, who checked this device, pastes it (docs/06-adversarial-review.md,

@@ -157,6 +157,9 @@ public enum ErrorWording {
                 + "Sync, then try again."
         case .ownerDisputed:
             return VaultRow.ownerDisputedReason
+        case .chainBehindHeldKeys:
+            return "This device holds newer keys for that shared vault than the vault's history it was shown, so the "
+                + "sync storage may be showing an old copy of it. Nothing was changed. Sync, then try again."
         case .stillAMember:
             return "You are still a member of this vault. Leave it first; its items can be removed from this device "
                 + "once you are no longer a member."
