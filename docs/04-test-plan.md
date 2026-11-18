@@ -497,6 +497,22 @@ limit read as full (`quarantineSizesNearTheLimit`), and a failing store stops th
 (`storageFailureStopsTheSync`). The withheld snapshot is combined and worded (`SyncReportCombinationTests`,
 `WordingTests.snapshotWithheldForReview`), and the two fields added to the state are signed, and only when set
 (`SyncStateAuthenticationTests`).
+The review of the second round (`06-adversarial-review.md` Z135 to Z143; `AdversarialSyncFollowUpTests.swift` in "sync
+log", `AdversarialSharedVaultFollowUpTests.swift` in "shared vaults through the session"). Collection: a name planted far
+ahead in a device's own stream is not kept in place of its head (`plantedNameIsNotTheNewestToKeep`), collection stops at
+a segment missing from the listing (`collectionStopsAtAGap`), deletes lowest first and stops at a delete that fails
+(`collectionOrderAndAFailedDelete`). The hold: a snapshot's claim about a stream that lists nothing holds nothing back
+(`claimAboutAStreamWithNothingListed`), and a claim ends with its signer (`claimEndsWithItsSigner`). Shared vaults: a
+deletion claiming the edits of a member who has never published erases nothing, from the owner's snapshot or a writer's
+segment (`claimAboutAMemberWhoNeverPublished`); a read-only member's segment in another member's stream is stepped over
+and nothing of it kept (`readOnlyMemberPlantIsSteppedOver`), and a taken place is worded
+(`WordingTests.ownStreamHeldBack`). What this device published: a planted deletion for a record it does not hold yet
+marks nothing as sent (`plantedDeletionBeforeTheRecordExists`). The jump ceiling: failed retries do not lift it
+(`failedRetriesDoNotLiftTheCeiling`), and a version a snapshot carries ahead of the ones below it is merged by the retry
+(`jumpInsideASnapshot`). The quarantine: a version its store refuses to keep is counted and remembered
+(`refusedByTheStoreIsADrop`), a revoked device's dropped version holds no snapshot back
+(`droppedVersionOfARevokedDevice`). Local state: a staged object past the listed bounds is dropped
+(`stagedPastTheBounds`), and a store that fails while staging stops the sync (`stagingFailureStopsTheSync`).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

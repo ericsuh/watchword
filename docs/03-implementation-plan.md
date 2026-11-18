@@ -292,7 +292,11 @@ half delivered** on a Mac; the transports are open.
   once a version that supersedes it is merged (Z37), which want a column and an index in that schema; charging a
   snapshot's entries to the snapshot's author rather than to the device each names (Z38), which wants a column too;
   and, for a device that has never published in a vault, an unfetchable name in its stream still holds its publishing
-  there (Z31).
+  there (Z31). From the review of the second round (Z135 to Z143): a keyed or cryptographic digest for the
+  quarantine's index, a schema version 4 migration (Z141); the collected floor in the signed state, which would let
+  the anchor survive a store that withholds a device's head and re-lists an older object of its own (Z135); coverage
+  recorded per signer, so that a claim an honest device carried on can be traced to an insider (Z139); and a Mac run of
+  the comment changed in `SQLiteSyncStateStore`.
 - **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
   screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
   `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,

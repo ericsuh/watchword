@@ -815,7 +815,13 @@ quarantine's rows.** They are not signed and a kept entry is never taken out whe
 (Z37), and a snapshot's entries are charged to the device each names (Z38): each wants a column of the SQLite schema. A
 snapshot by an insider can also hold a device with no anchor back from publishing, reported, while it stands (Z32).
 **Not written.** The session-level tests the audit asked for Z22 (a real judge, two vaults) and Z27 (cost measured on
-SQLite).
+SQLite). **After the review of the second round (Z135 to Z143).** A read-only member's object in another member's
+stream is now stepped over (Z137); junk, or an object under substituted keys or by an account the chain does not list,
+still squats where Z24 tracks, and is worded. The anchor survives a planted name (Z135) but not a store that withholds a
+device's head while re-listing an older object of its own, which wants the collected floor in the signed state; a
+snapshot's claim holds a device back only while its stream lists something there (Z139), and a claim an honest device
+carried on is not traced to its signer. The quarantine's digest is still FNV-1a: a crowded digest is now a counted drop
+(Z141), and a keyed digest is a schema migration.
 
 ### Shared vaults: verification, membership and the session's sharing paths (Z40 to Z59)
 
