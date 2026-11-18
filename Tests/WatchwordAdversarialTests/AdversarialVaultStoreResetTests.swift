@@ -92,6 +92,65 @@ extension AdversarialVaultSyncTests {
         for device in f.devices { #expect(try await f.titles(device) == ["Bank", "Post"]) }
     }
 
+    /// Threat: no adversary beyond the timing (review finding SR21). The person taps Upload Again; while the store
+    /// is being started the app locks (auto-lock, the person switching away). What then runs must not be taken for
+    /// their answer: a locked sync that published the account's objects into the started store would leave no
+    /// transport or account sign that it was ever reset. Nothing is created, the call fails as locked, and the next
+    /// sync still asks.
+    @Test("a lock while the store is started again publishes nothing as the person's answer")
+    func lockWhileStartingAgain() async throws {
+        let f = try await Self.resetFixture()
+        await f.store.reset()
+        await f.store.forgetCreates()
+        let plan = try await f.a.session.reuploadPlan()
+        let session = f.a.session
+        await f.store.whenStartingAgain { await session.lock() }
+        await #expect(throws: VaultError.locked) { try await session.reuploadAfterStoreReset(confirming: plan) }
+        let created = await f.store.created
+        #expect(created.isEmpty, "\(created)")
+        try await session.unlock(password: TestVault.password)
+        #expect(try await session.syncAll().storeNeedsReupload)
+        #expect(await f.store.created.isEmpty)
+    }
+
+    /// Threat: no adversary (SR21). The upload stops part-way: the store was started again and the account's objects
+    /// went in, then the connection went before the vault's snapshot. The store now lists the account's registry,
+    /// so neither the transport's sign nor the account's says anything, and this device never published in the
+    /// vault (it only merged the other device's work), so the engine's sign has no object of its own to miss
+    /// (SR14). Only this device holds the vault; the question must stay open until it has handed on.
+    @Test("an upload stopped part-way leaves the question open until the device has handed on")
+    func uploadStoppedPartWay() async throws {
+        let store = ResettableSyncTransport()
+        let a = TestVault.syncing(over: store)
+        try await a.createAccount()
+        let b = try await a.enrolledDevice(deviceID: Self.deviceB, over: store)
+        try await b.session.unlock(password: TestVault.password)
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(
+            Item(vaultID: vaultID, title: "Bank", scopes: [], fields: [Field(kind: .password, label: "P", value: "s")]))
+        for _ in 0..<3 {
+            for device in [a, b] { try await device.session.sync() }
+        }
+        let state = try #require(try await b.sync?.state.loadState(vaultID: vaultID))
+        try #require(state.lastPublishedSequence == 0, "B never published in the vault")
+
+        await store.reset()
+        await store.refuseCreates(under: SyncObjectLocation.vaultPrefix(vaultID))
+        let stopped = try await b.session.reuploadAfterStoreReset(confirming: try await b.session.reuploadPlan())
+        #expect(stopped.vaults[vaultID]?.snapshotsWritten == 0)
+        await store.refuseCreates(under: nil)
+        #expect(try await b.session.syncAll().storeNeedsReupload, "the vault is still in no store")
+        #expect(try await b.session.syncAll().storeNeedsReupload)
+
+        let finished = try await b.session.reuploadAfterStoreReset(confirming: try await b.session.reuploadPlan())
+        #expect(finished.vaults[vaultID]?.snapshotsWritten == 1 && !finished.storeNeedsReupload)
+        #expect(try await b.session.syncAll().storeNeedsReupload == false)
+        let c = try await b.enrolledDevice(deviceID: Self.deviceC, over: store)
+        try await c.session.unlock(password: TestVault.password)
+        try await c.session.sync()
+        #expect(try await c.session.items().items.map(\.title) == ["Bank"])
+    }
+
     /// Threat: A1 says the store was reset while it still holds everything, to get the person to say yes and see
     /// what the device then gives it. The yes gives it nothing: no vault object is created, because nothing the
     /// device holds is missing from the store, and the device's sync state is exactly what it was.

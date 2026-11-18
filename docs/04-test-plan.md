@@ -1024,7 +1024,9 @@ other does, and reported as not required on Linux, where they cannot compile.
   older copy; a whole-log vault with a judge asked to hand on), "sync with real keys"
   (`AdversarialVaultStoreResetTests`: nothing put back unasked under either kind of reset; a reset only claimed;
   repeated resets reusing no name; an old copy of the store put back; the quarantine and an unpublished deletion; a
-  shared vault never uploaded from one member's device) and "account enrolment and device registry"
+  shared vault never uploaded from one member's device; a lock while the store is started again, and an upload
+  stopped part-way, which asks again until the device has handed on: SR21, `lockWhileStartingAgain`,
+  `uploadStoppedPartWay`) and "account enrolment and device registry"
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
   revoked device cannot answer and stays revoked; a password change survives). `LongRunningSyncSimulationTests`
   resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone

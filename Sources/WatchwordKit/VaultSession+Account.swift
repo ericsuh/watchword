@@ -1205,9 +1205,10 @@ extension VaultSession {
     /// deleted where no `SyncStoreMarker` remembers it; docs/02-architecture.md §7.10). The two are told apart by
     /// what this device remembers doing: if it has ever published or merged a vault's log (`hasSyncedBefore`), the
     /// store was emptied, and the sync stops as at a transport that says `storeReset` — nothing is published, here
-    /// or in any vault, until the person has answered. `reuploading` is that answer and skips the check.
+    /// or in any vault, until the person has answered. `reuploadingSince` is that answer, given at that lock epoch, and
+    /// skips the check only while the vault is still unlocked at it (`reuploadAnswered`, SR21).
     func syncAccountObjects(
-        account: AccountRecord, transport: any SyncTransport, reuploading: Bool = false
+        account: AccountRecord, transport: any SyncTransport, reuploadingSince epoch: UInt64? = nil
     ) async throws -> AccountObjectsReport {
         var report = AccountObjectsReport()
         let accountID = account.accountID
@@ -1256,7 +1257,9 @@ extension VaultSession {
         registryView = nil
         guard let view = try? await registry(account) else { return report }
         try? await pinRegistry(view, accountID: accountID)
-        if !reuploading, gathered.listed.isDisjoint(with: view.state.retainedEntries),
+        // The person's answer only while unlocked at the epoch they gave it in (SR21): asked after the suspensions
+        // above, so a lock that landed during them makes this an ordinary sync that stops at the reset store.
+        if !reuploadAnswered(epoch), gathered.listed.isDisjoint(with: view.state.retainedEntries),
             try await hasSyncedBefore(account)
         {
             throw SyncTransportError.storeReset

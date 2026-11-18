@@ -197,7 +197,10 @@ public final class DevicesModel: LockSensitive {
                 let report = try await context.session.reuploadAfterStoreReset(confirming: question.plan)
                 try await reload()
                 sync = SyncSummary(report, deviceNames: names)
-                if !report.storeNeedsReupload, report.transportFailure == nil {
+                // Only an upload that ran: a vault left locked or waiting for a new password uploaded nothing, and the
+                // question is not pending for it only because no engine could look (review finding SR21).
+                let ran = !report.vaults.values.contains { $0.deferredUntilUnlock || $0.awaitingNewPassword }
+                if !report.storeNeedsReupload, report.transportFailure == nil, ran {
                     notice = "This device uploaded what it holds. Your other devices will pick it up when they sync."
                     done = true
                 }

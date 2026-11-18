@@ -44,13 +44,14 @@ extension VaultSession {
         guard !syncInFlight else { throw SyncError.syncInProgress }
         syncInFlight = true
         defer { syncInFlight = false }
-        return try await runSync(reconcile: reconcile, reuploading: false)
+        return try await runSync(reconcile: reconcile, reuploadingSince: nil)
     }
 
-    /// One sync, for a caller that holds `syncInFlight`. `reuploading` is the person's confirmed answer to a reset
-    /// and comes from `reuploadAfterStoreReset(confirming:)` alone: the account's objects are published into a store
+    /// One sync, for a caller that holds `syncInFlight`. `reuploadingSince` is the lock epoch of the person's
+    /// confirmed answer to a reset and comes from `reuploadAfterStoreReset(confirming:)` alone; it counts only while
+    /// the vault is unlocked at that epoch (`reuploadAnswered`, SR21): the account's objects are published into a store
     /// that holds none of them, and every vault's engine hands on what it holds that the store lacks.
-    func runSync(reconcile: Bool, reuploading: Bool) async throws -> AccountSyncReport {
+    func runSync(reconcile: Bool, reuploadingSince epoch: UInt64?) async throws -> AccountSyncReport {
         guard let syncSettings, let syncState else { throw VaultError.syncNotConfigured }
         guard var record = try await loadAccount() else { throw VaultError.noAccount }
         var report = AccountSyncReport()
@@ -59,7 +60,7 @@ extension VaultSession {
         do {
             try await startRegistryIfAccountPredatesIt(account: record, transport: syncSettings.transport)
             report.account = try await syncAccountObjects(
-                account: record, transport: syncSettings.transport, reuploading: reuploading)
+                account: record, transport: syncSettings.transport, reuploadingSince: epoch)
         } catch let error as SyncTransportError where error.stopsSync {
             report.transportUnavailable = true
             report.transportFailure = report.transportFailure ?? error
@@ -122,7 +123,7 @@ extension VaultSession {
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 vaultReport = try await engine(vaultID).sync(
                     reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
-                    transportStopped: stopped, handingOn: reuploading)
+                    transportStopped: stopped, handingOn: reuploadAnswered(epoch))
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 sharedEngineDidRun(
                     vaultID, reconciled: (reconcile || shared.reconcile) && !vaultReport.replayPostponed,

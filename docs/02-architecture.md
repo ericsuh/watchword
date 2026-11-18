@@ -1081,9 +1081,14 @@ sync lock from before the plan is checked, so no ordinary sync merges anything b
 or runs between the two steps. Then:
 
 1. `SyncTransport.startStoreAgain()`: the one call that may recreate a store this device has seen and found missing.
-   CloudKit saves the zone again (deleting it first where CloudKit says its key was reset), keeps the marker, and
-   leaves a zone that exists exactly as it is; a transport with no notion of a reset does nothing.
-2. One sync with `reuploading`. *The account's objects* need no new code beyond skipping the second signal: every
+   CloudKit saves the zone again (deleting it first where CloudKit says its key was reset, and taking a deletion
+   answered "no such zone" as done), keeps the marker, and leaves a zone that exists exactly as it is, which it
+   learns by fetching the zone, not by a query (SR20); a transport with no notion of a reset does nothing. Before it,
+   each of the account's own vaults that has synced is marked `storeResetSuspected`, which only its hand-on or a
+   store standing for everything it holds clears, so an upload stopped part-way (a lock, the network, the app
+   killed) asks again; after it, the lock epoch is checked again (SR21).
+2. One sync with `reuploadingSince` the epoch of the answer, which counts only while the vault is unlocked at that
+   epoch (`reuploadAnswered`): a lock that overtakes it makes it an ordinary sync (SR21). *The account's objects* need no new code beyond skipping the second signal: every
    sync publishes what the listing lacks of the registry entries the device retains, its account header, a wrap
    under its own name of every vault key it has opened, and every vault deletion it has verified (§7.7). They are
    everything enrolment reads: a brand-new device can enrol from one device's upload.

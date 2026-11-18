@@ -109,8 +109,40 @@ extension VaultSession {
         defer { syncInFlight = false }
         guard try await reuploadPlan() == plan else { throw VaultError.reuploadNotConfirmed }
         _ = try requireKeys(since: epoch)
+        // Until each vault has handed on, or the store stands for everything it holds, the question stays open on
+        // this device, whatever stops the upload part-way: a lock, the network, the app killed (review finding SR21).
+        // Once the store is started again and the account's objects are in it, the transport's sign and the
+        // account's are gone, and only the engine's own would still ask.
+        try await markUploadUnfinished(account)
         try await syncSettings.transport.startStoreAgain()
-        return try await runSync(reconcile: false, reuploading: true)
+        // Locked while the store was started: nothing is published as the person's answer (SR21).
+        _ = try requireKeys(since: epoch)
+        return try await runSync(reconcile: false, reuploadingSince: epoch)
+    }
+
+    /// The person's answer stands only while the vault is unlocked at the epoch it was given in: a sync that a lock
+    /// overtook is an ordinary sync, a download, and publishes nothing as though asked (review finding SR21).
+    func reuploadAnswered(_ epoch: UInt64?) -> Bool {
+        guard let epoch else { return false }
+        return keys != nil && lockEpoch == epoch
+    }
+
+    /// Marks every vault of this account's own that has published or merged a log as suspected of a reset
+    /// (`SyncState.storeResetSuspected`), before the store is started again: the engine clears it when the vault
+    /// hands on or when the store stands for everything it holds, so an upload stopped part-way asks again
+    /// (`AccountSyncReport.storeNeedsReupload`), and nothing is snapshotted, collected or replayed meanwhile unasked.
+    /// A shared vault is not uploaded from one member's device and is left alone.
+    func markUploadUnfinished(_ account: AccountRecord) async throws {
+        guard let state = syncSettings?.state else { return }
+        await loadSharedVaultsIfNeeded()
+        for vaultID in try await vaultDirectory(account).keys.sorted(by: { $0.uuidString < $1.uuidString })
+        where sharing.vaults[vaultID] == nil {
+            guard var vault = try await state.loadState(vaultID: vaultID), !vault.storeResetSuspected,
+                vault.lastPublishedSequence > 0 || !vault.merged.isEmpty || !vault.snapshots.isEmpty
+            else { continue }
+            vault.storeResetSuspected = true
+            try await state.saveState(vault)
+        }
     }
 
     /// Whether this device has ever published or merged a vault's log: what tells a store that was emptied from one

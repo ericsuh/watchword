@@ -13,6 +13,8 @@ public actor ResettableSyncTransport: SyncTransport {
     public private(set) var startsAgain = 0
     /// Names created since the last `forgetCreates()`, in order.
     public private(set) var created: [String] = []
+    private var startingAgain: (@Sendable () async -> Void)?
+    private var refusedPrefix: String?
 
     public init(base: InMemorySyncTransport = InMemorySyncTransport()) {
         self.base = base
@@ -31,6 +33,18 @@ public actor ResettableSyncTransport: SyncTransport {
 
     public func forgetCreates() {
         created = []
+    }
+
+    /// Runs `hook` inside the next `startStoreAgain`, before it returns: a lock, say, that lands while the store
+    /// is being started.
+    public func whenStartingAgain(_ hook: @escaping @Sendable () async -> Void) {
+        startingAgain = hook
+    }
+
+    /// From now on every create under `prefix` fails as `unavailable`, as a connection lost part-way through an
+    /// upload; `nil` lets them through again.
+    public func refuseCreates(under prefix: String?) {
+        refusedPrefix = prefix
     }
 
     /// Every object the store holds.
@@ -54,6 +68,7 @@ public actor ResettableSyncTransport: SyncTransport {
 
     public func create(_ name: String, contents: [UInt8]) async throws {
         try check()
+        if let refusedPrefix, name.hasPrefix(refusedPrefix) { throw SyncTransportError.unavailable }
         try await base.create(name, contents: contents)
         created.append(name)
     }
@@ -76,5 +91,9 @@ public actor ResettableSyncTransport: SyncTransport {
     public func startStoreAgain() async throws {
         startsAgain += 1
         isReset = false
+        if let hook = startingAgain {
+            startingAgain = nil
+            await hook()
+        }
     }
 }
