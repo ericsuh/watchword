@@ -67,6 +67,9 @@ extension VaultSession {
         report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
         let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
+        // Deletions an earlier ID of this installation made, parked while a shared vault holds an edit of that ID that
+        // nobody received, go out once none remains; until then they are reported held back (Z167).
+        if mayWrite { report.deletionsHeldBack.formUnion(await releaseParkedDeletions(account: record, view: view)) }
         let ownDevices: Set<UUID> = view.map { Set($0.state.devices.keys) } ?? []
         // A device whose ID does not commit to its account publishes nothing in a shared vault, and says so (Z162).
         let ownIDCommits = await thisDeviceCommits(record)
@@ -204,9 +207,14 @@ extension VaultSession {
     /// clock's entry for this device (`ItemMerge.effectiveClock`), never merely that it sealed the row. One that does
     /// not open here counts.
     func holdsUnpublishedEdit(_ row: StoredRecord, published: RecordStamp?, account: AccountRecord) -> Bool {
+        holdsEdit(of: account.deviceID, in: row, above: published?.version ?? 0)
+    }
+
+    /// Whether `row` holds an edit of `deviceID` above `version`: its clock's entry for that device
+    /// (`ItemMerge.effectiveClock`). One that does not open here counts.
+    func holdsEdit(of deviceID: UUID, in row: StoredRecord, above version: UInt64 = 0) -> Bool {
         guard let keys, let item = try? openItem(row, keys: keys) else { return true }
-        let own = ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[account.deviceID] ?? 0
-        return own > (published?.version ?? 0)
+        return (ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[deviceID] ?? 0) > version
     }
 
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
@@ -596,14 +604,23 @@ extension VaultSession {
         let (keys, record) = try syncKeys()
         let signingKey = try keys.keyset.publicKeyBundle().signingKey
         return deletions.filter { key, deletion in
-            guard key == deletion.record.key, deletion.stamp.device == record.deviceID, deletion.stamp.deleted,
-                deletion.record.vaultID == vaultID
-            else { return false }
-            return
-                (try? Signatures.verify(
-                    deletion.authenticator, for: Self.pendingDeletionMessage(deletion), domain: .pendingDeletion,
-                    signingKey: signingKey)) != nil
+            deletion.stamp.device == record.deviceID
+                && Self.isSigned(deletion, as: key, in: vaultID, signingKey: signingKey)
         }
+    }
+
+    /// Whether `deletion`, stored under `key` for `vaultID`, is a deletion the account key signed, whichever device
+    /// ID stamped it.
+    static func isSigned(_ deletion: PendingDeletion, as key: RecordKey, in vaultID: UUID, signingKey: [UInt8])
+        -> Bool
+    {
+        guard key == deletion.record.key, deletion.stamp.deleted, deletion.record.vaultID == vaultID else {
+            return false
+        }
+        return
+            (try? Signatures.verify(
+                deletion.authenticator, for: pendingDeletionMessage(deletion), domain: .pendingDeletion,
+                signingKey: signingKey)) != nil
     }
 
     // MARK: - The stash (ADR 0009)
@@ -899,7 +916,9 @@ public struct AccountSyncReport: Sendable, Equatable {
     public var sharing: [UUID: SharedVaultSyncReport] = [:]
     /// A vault that holds an item of this device's that exists nowhere else (a move's copy that could not be
     /// published, or was held aside): while there is one, no vault's deletions are published, so that an original is
-    /// never erased ahead of its copy (PRD F7.6; review findings Z44, Z54). The first such vault found.
+    /// never erased ahead of its copy (PRD F7.6; review findings Z44, Z54). The first such vault found. Also every
+    /// shared vault holding an edit, nobody received, of an earlier ID of this installation whose deletions are parked
+    /// (`releaseParkedDeletions`, Z167).
     public var deletionsHeldBack: Set<UUID> = []
 
     public init() {}

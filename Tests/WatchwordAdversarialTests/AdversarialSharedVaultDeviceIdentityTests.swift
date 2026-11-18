@@ -111,6 +111,69 @@ extension AdversarialSharedVaultTests {
         #expect((try? await member.session.item(id: copy.id)) == nil, "the copy reached a device after all")
     }
 
+    /// Threat: none needed; round 7's Low (F7.6), the move of `moveByANonCommittingDevice` restored onto other hardware.
+    /// The copy holds edits of the old ID only, which no member counts (Z157), so it reached nobody; the original's
+    /// deletion is pending. The restore registers a new, committing ID (no device key), carries the old ID's pending
+    /// deletions over to it, and before Z167 the new ID, whose rows hold nothing unpublished, sent the deletion out: the
+    /// original was gone everywhere and the copy was here only, under an ID nobody counts. The deletion now stays
+    /// parked, reported, while any shared vault holds an edit of the old ID; moving the copy out again from this device
+    /// (written as its own) lets it go, after the new copy.
+    @Test("restoring a non-committing device onto other hardware does not send a move's deletion ahead of its copy")
+    func restoredNonCommittingMove() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 16_230)
+        let member = members[0]
+        let device = try await Self.legacyDevice(of: member, in: household, modified: true)
+        try await device.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        let personal = try #require(try await device.vault.store.loadAccount()?.personalVaultID)
+        let original = try await device.session.save(Self.bank(in: personal))
+        let other = try await device.session.createVault(name: "Other").id
+        _ = try await device.session.save(Self.bank(in: other))
+        try await device.session.sync()
+        try await Self.syncAll([member, owner])
+        let oldID = try await Self.deviceID(of: device)
+        let squat = SyncObjectLocation.segment(
+            vaultID: other, author: oldID, sequence: try await Self.head(of: device, in: other) + 1
+        ).name
+        try await household.transport.create(squat, contents: [0x57, 0x57])
+        _ = try await device.session.save(Self.bank(in: other))
+        let copy = try await device.session.move(itemID: original.id, to: vaultID)
+        let first = try await device.session.syncAll()
+        #expect(first.vaults[vaultID]?.segmentsWritten == 1, "the older build published the copy")
+        #expect(first.vaults[other]?.ownStreamConflict != nil)
+
+        // This build, restored onto other hardware: the store and its state, and no device key.
+        await device.session.playModifiedClient(false)
+        await Self.remove(squat, from: household.transport)
+        await device.session.lock()
+        await device.vault.forgetDeviceKey(accountID: member.accountID)
+        try await device.session.unlock(password: TestVault.password)
+        let newID = try await Self.deviceID(of: device)
+        #expect(newID != oldID, "the restore did not register a new device")
+        let second = try await device.session.syncAll()
+        #expect(second.sharing[vaultID]?.deviceIDDoesNotCommit == false)
+        #expect(second.deletionsHeldBack.contains(vaultID), "the parked deletion was not reported")
+        try await Self.syncAll([member, owner])
+        #expect((try? await member.session.item(id: original.id)) != nil, "the original was deleted everywhere")
+
+        // The person moves the copy out again from this device (confirming that the original is beside it there: it
+        // came back while its deletion was parked), and the new copy is its own, and goes out first.
+        let again: Item
+        do {
+            again = try await device.session.move(itemID: copy.id, to: personal)
+        } catch VaultError.transferNeedsConfirmation(let concern) {
+            again = try await device.session.move(itemID: copy.id, to: personal, confirming: concern)
+        }
+        let third = try await device.session.syncAll()
+        #expect(third.deletionsHeldBack.isEmpty)
+        try await device.session.sync()
+        try await Self.syncAll([member, owner])
+        #expect((try? await member.session.item(id: again.id)) != nil, "the new copy did not arrive")
+        #expect((try? await member.session.item(id: original.id)) == nil, "the parked deletion never went out")
+    }
+
     /// Threat: none needed; an account made before the device registry existed, whose first device started the
     /// registry under its old random ID (`registryGenesis`), which commits to nothing. Shared from that device, the
     /// vault's items would carry values every member holds aside, and nothing it wrote there would reach them. It does
