@@ -866,9 +866,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   never pass a page URL there, and build test inputs with `handedBack`. A passkey needs only the gate.
 - `CredentialIdentityPlanner` is a whole-vault function: a password or code identity exists only for a scope that
   covers its whole site (host equal to `PublicSuffix.broadestSite`, subdomains on, nothing excluded), with no other
-  item (of any vault) scoped below that host and none at that host sharing the suggested name; a passkey identity
-  only when the gate would release it. So a member of a shared vault can take a suggestion out of the keyboard and
-  never direct one. One item's change is published as the difference between the whole sets before and after.
+  item (of any vault) scoped below that host, none at that host sharing the suggested name, and none of the other
+  trust class at that host at all (`VaultSnapshot.crossesTrust`, Z70: a name can differ by bytes and not to the eye);
+  a passkey identity only when the gate would release it and, for a shared vault's item, nothing of another vault is
+  offered beside it (`meetsAnotherTrustClass`, also asked of a passkey identity handed back). So a member of a shared
+  vault can take a suggestion out of the keyboard and never direct one. One item's change is published as the difference between the whole sets before and after.
 - No host, no secret. With no service identifier every gated request is refused (`noServiceIdentifier`), text
   included. The system's host-less text insertion is `textInsertionListWithoutHost()` /
   `textToInsertWithoutHost(for:)`, through `ManualChoice`, which gives only fields whose kind is not a secret. Do not

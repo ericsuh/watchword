@@ -55,6 +55,8 @@ extension CredentialProviderModel {
                     try await self.makeAssertion(
                         itemID: record.itemID, fieldID: fieldID, request: request, presence: presence,
                         expecting: identity.credentialID))
+            } catch let needed as NeedsThePerson {
+                return .requiresInteraction(needed.reason)
             } catch {
                 switch Self.blocked(error) {
                 case .refused(.passkey(.userVerificationRequired)): return .requiresInteraction(.userVerification)
@@ -68,6 +70,11 @@ extension CredentialProviderModel {
         } catch {
             return Self.silentFailure(error)
         }
+    }
+
+    /// An identity handed back without the person that only the person can choose: answered `requiresInteraction`.
+    private struct NeedsThePerson: Error {
+        let reason: InteractionReason
     }
 
     private func makeAssertion(
@@ -86,6 +93,11 @@ extension CredentialProviderModel {
         let snapshot = try await load()
         let authorization = try Self.unwrap(
             ReleaseGate.authorize(itemID: itemID, for: [relyingParty.serviceIdentifier], in: snapshot))
+        // The system's sheet names no vault: a member's passkey beside an item of another vault for this relying
+        // party is not published, and a stale identity of it is the person's to choose in the list (Z70).
+        if credentialID != nil, snapshot.meetsAnotherTrustClass(authorization.item, on: authorization.host) {
+            throw NeedsThePerson(reason: .ambiguousMatch)
+        }
         var credential = try Self.unwrap(authorization.passkey(fieldID: fieldID))
         // Before anything else is done with it: the stored relying party, exactly (the authenticator checks again).
         guard credential.relyingPartyID == relyingParty.value else {

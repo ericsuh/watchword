@@ -2173,14 +2173,19 @@ identities, and it gives an item a password or code identity for a scope host on
    identity, and the AWS login never had one); and
 3. no other item scoped to that same host shares the name the suggestion shows, so accounts that
    tie are told apart by what the person tapped (F11.5), and two accounts under one email are not
-   suggested at all.
+   suggested at all; and no item of the other trust class (§9.2: one of the two in a shared vault,
+   the other in another vault) is scoped to that host at all, whatever its name, since a name can
+   differ by bytes and not to the eye (`аlice@x`, `alice@x `) and the system's rows name no vault
+   (review finding Z70).
 
 Everything else is reached through the keyboard's key icon, which opens the extension's list:
 that request names the page and goes through the gate. The cost is real and deliberate: a login
 saved from the extension is scoped to one exact host and has no QuickType identity until the
 person widens its scope in the app. A passkey identity is published exactly when the gate would
-release the passkey for its relying party, which every passkey request names. Because of rules 2
-and 3 one item's identities depend on the others, so a change to one item is published as the
+release the passkey for its relying party, which every passkey request names, and, for an item of
+a shared vault, only where nothing of another vault is offered for that relying party beside it;
+a stale identity of such a passkey handed back without the person gets `requiresInteraction`
+(Z70). Because of rules 2 and 3 one item's identities depend on the others, so a change to one item is published as the
 difference between the whole sets before and after.
 
 Nothing is published for an item that is excluded from AutoFill (F6.8), archived or in the trash,
@@ -2296,9 +2301,10 @@ What holds across all of them:
   two rows a member made alike in title, user name and host differ there, and
   `everyMemberSeesWhatIsSaved` is what a sheet states before a password or passkey is written to a
   shared vault's item. The vault's name is a member's to choose, so the adapter shows `isShared`
-  wherever it shows the name. Published identities are unchanged in rule (§9.1: "no other item"
-  means of any vault), so a member can take a keyboard suggestion away by saving something below
-  it and can never direct one. Not covered: a relying party's reports and a `largeBlob` write still
+  wherever it shows the name. In published identities "no other item" means of any vault (§9.1),
+  and an item of the other class at the same host withdraws the site's suggestions for both, so a
+  member can take a keyboard suggestion away by saving something below it or beside it and can
+  never direct one, not even with a user name that only looks like the person's (Z70). Not covered: a relying party's reports and a `largeBlob` write still
   reach a shared vault's item without extension UI; neither carries a secret of the person's into
   the vault.
 - **Shadowed accounts are neither listed nor released.** An item that matches the host less

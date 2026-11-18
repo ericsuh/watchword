@@ -78,6 +78,18 @@ struct VaultSnapshot: Sendable {
         sharedVaults.contains(item.vaultID)
     }
 
+    /// Whether `item` and `other` are in different trust domains: different vaults, one of them shared. What one
+    /// says is not the other's word, so where they meet the person chooses, knowing the vaults (review finding Z70).
+    func crossesTrust(_ item: Item, _ other: Item) -> Bool {
+        item.vaultID != other.vaultID && (isShared(item) || isShared(other))
+    }
+
+    /// Whether an item of a shared vault is offered on `host` beside an item of another vault: then a request that
+    /// names no vault (a suggestion, the system's passkey sheet) must not lead to it without the person (Z70).
+    func meetsAnotherTrustClass(_ item: Item, on host: NormalizedHost) -> Bool {
+        isShared(item) && offered(on: host).contains { crossesTrust(item, $0.item) }
+    }
+
     /// The vault of `item`, for a list or a sheet to name.
     func vault(of item: Item) -> EntryVault {
         vault(item.vaultID)

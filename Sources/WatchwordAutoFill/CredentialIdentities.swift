@@ -144,11 +144,14 @@ public struct IdentityDifference: Hashable, Sendable {
 /// - no other item outside the trash holds a scope below that host, so there is no page of the site where another
 ///   account is more specific and this one would be an "other account" (PRD F6.6, scenario S1); and
 /// - no other item scoped to that same host shares the name the suggestion would show, so two accounts that tie
-///   are told apart by what the person tapped (F11.5).
+///   are told apart by what the person tapped (F11.5); and no item of another trust class (one of the two in a
+///   shared vault, the other in another vault) is scoped to that host at all, since a name can differ by bytes and
+///   not to the eye, and the system's rows do not name a vault (review finding Z70).
 ///
 /// Everything else (the Amazon retail login once an AWS item exists, a login saved for one exact host) is reached
 /// through the extension's list, which is told the page and asks the gate. A passkey identity is published only
-/// if the gate would release the passkey for its relying party, which every passkey request names.
+/// if the gate would release the passkey for its relying party, which every passkey request names, and, for an item
+/// of a shared vault, only if no item of another vault is among what the gate offers there (Z70).
 ///
 /// Nothing is published for an item that is in the trash, archived or marked `excludedFromSuggestions` (F6.8), for
 /// an item whose ID another item shares, for a scope the scope policy would refuse, or for a passkey its relying
@@ -207,7 +210,8 @@ public enum CredentialIdentityPlanner {
                 let relyingParty = try? RelyingPartyID(credential.relyingPartyID),
                 let host = try? HostNormalizer.normalize(relyingParty.serviceIdentifier),
                 case .success = ReleaseGate.authorize(
-                    itemID: item.id, for: [relyingParty.serviceIdentifier], in: snapshot)
+                    itemID: item.id, for: [relyingParty.serviceIdentifier], in: snapshot),
+                !snapshot.meetsAnotherTrustClass(item, on: host)
             else { continue }
             add(
                 .passkey(
@@ -259,8 +263,10 @@ public enum CredentialIdentityPlanner {
     /// "No other item" means no item of any vault. An item of a shared vault never shadows the person's own on a
     /// page (`ItemRanker`), but it does stand beside it there, and that is a choice for the person, which a tap that
     /// names no page cannot be: so a member of a shared vault can take a site's suggestion out of the keyboard by
-    /// saving something below it, and can never direct one. An item of a shared vault must also pass the gate for
-    /// its own host, which refuses one that resembles a site saved in another vault.
+    /// saving something below it, and can never direct one. For the same reason an item of another trust class
+    /// scoped to the very host withdraws the site for both, whatever names they show (Z70): the system's rows carry
+    /// no vault, and a name can differ by bytes and not to the eye. An item of a shared vault must also pass the
+    /// gate for its own host, which refuses one that resembles a site saved in another vault.
     private static func wholeSites(of item: Item, in snapshot: VaultSnapshot) -> [WholeSite] {
         var sites: [WholeSite] = []
         let others = snapshot.rankable.filter { $0.id != item.id }
@@ -275,17 +281,25 @@ public enum CredentialIdentityPlanner {
             }
             let below = "." + host.value
             var takenNames = Set<String>()
-            var isOutranked = false
+            var isWithdrawn = false
             for other in others {
                 // Stored scope hosts are compared in their canonical spelling, whatever a record carries.
                 let hosts = other.scopes.map { ServiceScope.canonicalHost($0.host) }
                 if hosts.contains(where: { $0.hasSuffix(below) }) {
-                    isOutranked = true
+                    isWithdrawn = true
                     break
                 }
-                if hosts.contains(host.value) { takenNames.formUnion(suggestedNames(of: other)) }
+                guard hosts.contains(host.value) else { continue }
+                // Where the two classes meet at the host, a name the person cannot tell apart by eye (a Cyrillic
+                // letter, a trailing space) would make two rows alike that the system shows without their vaults:
+                // neither has a suggestion (review finding Z70).
+                if snapshot.crossesTrust(item, other) {
+                    isWithdrawn = true
+                    break
+                }
+                takenNames.formUnion(suggestedNames(of: other))
             }
-            if !isOutranked { sites.append(WholeSite(host: host, takenNames: takenNames)) }
+            if !isWithdrawn { sites.append(WholeSite(host: host, takenNames: takenNames)) }
         }
         return sites
     }
