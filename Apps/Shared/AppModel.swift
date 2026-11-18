@@ -365,7 +365,7 @@ final class AppModel {
             let devices = (try? await session.devices()) ?? []
             let names = Dictionary(
                 devices.map { ($0.id, DeviceRow.reference($0)) }, uniquingKeysWith: { first, _ in first })
-            self.lastSync = SyncSummary(report, deviceNames: names)
+            self.lastSync = await SyncSummary.loading(report, deviceNames: names, from: session)
             if self.phase == .unlocked { try await self.reload() }
         }
     }

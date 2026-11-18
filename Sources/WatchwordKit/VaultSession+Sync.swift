@@ -196,6 +196,18 @@ extension VaultSession {
         if mayWrite, stopped == nil {
             await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
         }
+        // The copies that hold every deletion back, by item, for the screen to name (Z171).
+        if mayWrite, let view {
+            let nobodyReceived = Self.idsNobodyReceives(account: record, view: view)
+            let vaults = nobodyReceived.isEmpty ? [] : Array(try await vaultDirectory(record).keys)
+            for vaultID in vaults {
+                guard let items = await itemsHoldingEdits(of: nobodyReceived, in: vaultID, account: record),
+                    !items.isEmpty
+                else { continue }
+                report.copiesNobodyReceived[vaultID] = items
+                report.deletionsHeldBack.insert(vaultID)
+            }
+        }
         report.sharing = sharingReports
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
         try? await reconcileHygiene()
@@ -954,6 +966,12 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// shared vault holding an edit, nobody received, of an earlier ID of this installation whose deletions are parked
     /// (`releaseParkedDeletions`, Z167).
     public var deletionsHeldBack: Set<UUID> = []
+    /// Why, where it is a copy nobody received (review finding Z171): per shared vault, the items whose rows hold an
+    /// edit of a device ID of this account's registry that does not commit (`idsNobodyReceives`), such as an earlier ID
+    /// of this installation restored onto other hardware. Each such vault is in `deletionsHeldBack` too. The person
+    /// releases the deletions by moving each item out of the shared vault from this device, which writes it as this
+    /// device's, or by deleting it.
+    public var copiesNobodyReceived: [UUID: Set<UUID>] = [:]
 
     public init() {}
 

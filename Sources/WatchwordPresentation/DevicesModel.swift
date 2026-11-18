@@ -192,7 +192,7 @@ public final class DevicesModel: LockSensitive {
         await perform {
             let report = try await context.session.syncAll()
             try await reload()
-            sync = SyncSummary(report, deviceNames: names)
+            sync = await SyncSummary.loading(report, deviceNames: names, from: context.session)
         }
     }
 

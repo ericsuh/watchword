@@ -127,6 +127,32 @@ struct WordingTests {
         #expect(SyncSummary(report).notices.contains(.keptAside(2)))
     }
 
+    @Test("deletions held for a copy nobody received name the copy, its vault and what to do (Z171)")
+    func copiesReachedNobody() throws {
+        let vaultID = UUID()
+        let copy = UUID()
+        var report = AccountSyncReport()
+        report.deletionsHeldBack = [vaultID]
+        report.copiesNobodyReceived = [vaultID: [copy]]
+        let summary = SyncSummary(report, vaultNames: [vaultID: "Household"], itemTitles: [copy: "Bank"])
+        #expect(!summary.notices.contains(.deletionsHeldBack), "the generic notice hides the reason")
+        let notice = try #require(summary.notices.first { $0.id == "copiesReachedNobody" })
+        #expect(notice == .copiesReachedNobody([UnreceivedCopy(vault: "Household", title: "Bank")]))
+        let text = notice.text
+        #expect(text.contains("“Bank” in “Household”"))
+        #expect(text.contains("Move it out of the shared vault from this device, or delete it"))
+        #expect(text.contains("in every vault"))
+
+        // Names the screen could not read fall back to words, and a vault held back for another reason still says so.
+        report.deletionsHeldBack.insert(UUID())
+        report.copiesNobodyReceived[vaultID] = [copy, UUID()]
+        let unnamed = SyncSummary(report)
+        #expect(unnamed.notices.contains(.deletionsHeldBack))
+        let fallback = try #require(unnamed.notices.first { $0.id == "copiesReachedNobody" })
+        #expect(fallback.text.contains("an item in a shared vault, an item in a shared vault have reached nobody"))
+        #expect(fallback.text.contains("Move each out"))
+    }
+
     @Test("a wrong password and tampering read the same", arguments: [CryptoError.authenticationFailed])
     func authenticationFailed(error: CryptoError) {
         #expect(ErrorWording.message(for: error) == "Incorrect password.")

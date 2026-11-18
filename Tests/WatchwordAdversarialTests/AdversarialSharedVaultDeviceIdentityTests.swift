@@ -249,6 +249,7 @@ extension AdversarialSharedVaultTests {
         try await device.session.deletePermanently(id: restored.original.id)
         let third = try await device.session.syncAll()
         #expect(third.deletionsHeldBack.contains(vaultID), "the deletion was not held back")
+        #expect(third.copiesNobodyReceived[vaultID] == [restored.copy.id], "the report does not name the copy")
         try await Self.syncAll([member, owner])
         #expect((try? await member.session.item(id: restored.original.id)) != nil, "the original was erased")
     }
