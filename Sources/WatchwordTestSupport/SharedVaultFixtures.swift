@@ -36,16 +36,16 @@ public struct SharingAccount: Sendable {
         bundle.fingerprint.safetyNumber
     }
 
+    /// `store` is the device's record store (a test's hook over one); a fresh in-memory store by default.
     public static func make(
         over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory, seed: UInt64,
-        hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil
+        hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil, store: (any RecordStore)? = nil
     ) async throws -> SharingAccount {
-        let vault =
-            configuration.map {
-                TestVault(
-                    sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport, configuration: $0),
-                    seed: seed, hygiene: hygiene)
-            } ?? TestVault.syncing(over: transport, seed: seed, hygiene: hygiene)
+        let syncState = InMemorySyncStateStore()
+        let sync =
+            configuration.map { SyncSettings(state: syncState, transport: transport, configuration: $0) }
+            ?? SyncSettings(state: syncState, transport: transport)
+        let vault = TestVault(store: store ?? InMemoryRecordStore(), sync: sync, seed: seed, hygiene: hygiene)
         try await vault.createAccount()
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
@@ -102,11 +102,13 @@ public struct SharedVaultHousehold: Sendable {
 
     public init() {}
 
-    public func account(seed: UInt64, hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil)
-        async throws -> SharingAccount
-    {
+    public func account(
+        seed: UInt64, hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil,
+        store: (any RecordStore)? = nil
+    ) async throws -> SharingAccount {
         try await SharingAccount.make(
-            over: transport, directory: directory, seed: seed, hygiene: hygiene, configuration: configuration)
+            over: transport, directory: directory, seed: seed, hygiene: hygiene, configuration: configuration,
+            store: store)
     }
 
     /// An owner with a new shared vault called `name`, and one member per role, each invited and joined.

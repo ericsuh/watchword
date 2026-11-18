@@ -67,6 +67,7 @@ extension VaultSession {
         report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
         let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
+        let epoch = lockEpoch
         // Deletions an earlier ID of this installation made, parked while a shared vault holds an edit of that ID that
         // nobody received, go out once none remains; until then they are reported held back (Z167).
         if mayWrite { report.deletionsHeldBack.formUnion(await releaseParkedDeletions(account: record, view: view)) }
@@ -196,22 +197,38 @@ extension VaultSession {
         if mayWrite, stopped == nil {
             await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
         }
-        // The copies that hold every deletion back, by item, for the screen to name (Z171).
-        if mayWrite, let view {
-            let nobodyReceived = Self.idsNobodyReceives(account: record, view: view)
-            let vaults = nobodyReceived.isEmpty ? [] : Array(try await vaultDirectory(record).keys)
-            for vaultID in vaults {
-                guard let items = await itemsHoldingEdits(of: nobodyReceived, in: vaultID, account: record),
-                    !items.isEmpty
-                else { continue }
-                report.copiesNobodyReceived[vaultID] = items
-                report.deletionsHeldBack.insert(vaultID)
-            }
+        // The copies that hold every deletion back, by item, for the screen to name (Z171), while the keys this sync
+        // started with are still here (Z174).
+        if mayWrite, let view, (try? requireKeys(since: epoch)) != nil {
+            report.copiesNobodyReceived = await copiesNobodyReceived(
+                account: record, view: view, since: epoch, otherwise: Array(report.vaults.keys))
+            report.deletionsHeldBack.formUnion(report.copiesNobodyReceived.keys)
         }
         report.sharing = sharingReports
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
         try? await reconcileHygiene()
         return report
+    }
+
+    /// The items of each shared vault that hold an edit nobody received (`itemsHoldingEdits`), for the report
+    /// (`AccountSyncReport.copiesNobodyReceived`, Z171). Read while the keys of `epoch` are here: a row that does not
+    /// open counts, so after a lock every item would be named; a lock during the scan reports none (review of round 9,
+    /// Z174). The vaults are the directory's, or `otherwise` (the vaults the sync ran) where it cannot be read now: a
+    /// report that names too few is better than none, and the gate decided by itself (Z175).
+    func copiesNobodyReceived(account: AccountRecord, view: RegistryView, since epoch: UInt64, otherwise: [UUID])
+        async -> [UUID: Set<UUID>]
+    {
+        let nobodyReceived = Self.idsNobodyReceives(account: account, view: view)
+        guard !nobodyReceived.isEmpty else { return [:] }
+        let vaults = (try? await vaultDirectory(account)).map { Array($0.keys) } ?? otherwise
+        var copies: [UUID: Set<UUID>] = [:]
+        for vaultID in vaults {
+            let items = await itemsHoldingEdits(of: nobodyReceived, in: vaultID, account: account)
+            guard (try? requireKeys(since: epoch)) != nil else { return [:] }
+            guard let items, !items.isEmpty else { continue }
+            copies[vaultID] = items
+        }
+        return copies
     }
 
     /// Whether `vaultID` holds an item that exists nowhere but on this device: one it created, of which the sync layer
