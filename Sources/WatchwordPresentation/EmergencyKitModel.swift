@@ -54,6 +54,11 @@ public final class EmergencyKitModel: LockSensitive {
     /// The password is still to be asked for.
     public var needsPassword: Bool { kit == nil }
 
+    /// Outside onboarding, the kit opened from Settings while the account records no confirmation that it was saved
+    /// (review finding Z131: after a quick unlock the unconfirmed kit no longer opens the vault, so Settings is where
+    /// a person who only quick-unlocks confirms it). The screen then offers the confirmation.
+    public private(set) var awaitsConfirmation = false
+
     /// Whether the Secret Key is on screen now: shown since the last concealment, and the screen not captured.
     public var showsSecretKey: Bool {
         kit != nil && privacy.mayReveal && shownAt == privacy.concealments
@@ -82,9 +87,22 @@ public final class EmergencyKitModel: LockSensitive {
         let drops = self.drops
         errorMessage = await ScreenOperation(context: context).run {
             let opened = try await context.session.emergencyKit(password: password)
+            let confirmed = try await context.session.status().emergencyKitConfirmed
             guard self.drops == drops else { return }
             kit = opened
             shownAt = privacy.mayReveal ? privacy.concealments : nil
+            awaitsConfirmation = !isOnboarding && !confirmed
+        }
+    }
+
+    /// The person says the kit opened from Settings is saved or printed (PRD F5.1, Z131).
+    public func confirmSaved() async {
+        guard awaitsConfirmation, kit != nil else { return }
+        isWorking = true
+        defer { isWorking = false }
+        errorMessage = await ScreenOperation(context: context).run {
+            try await context.session.confirmEmergencyKitSaved()
+            awaitsConfirmation = false
         }
     }
 
@@ -120,6 +138,7 @@ public final class EmergencyKitModel: LockSensitive {
         password = ""
         if !isOnboarding { kit = nil }
         shownAt = nil
+        awaitsConfirmation = false
     }
 
     public func dropOnLock() {
@@ -128,6 +147,7 @@ public final class EmergencyKitModel: LockSensitive {
         password = ""
         kit = nil
         shownAt = nil
+        awaitsConfirmation = false
     }
 
     /// How many locks this model has heard: an open whose call a lock overtook keeps nothing (Z127).

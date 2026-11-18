@@ -33,6 +33,28 @@ struct EmergencyKitScreenTests {
         #expect(model.kit == nil, "the kit outside onboarding goes with the screen")
     }
 
+    /// The review of Z86 (Z131): after a quick unlock the unconfirmed kit no longer opens the vault, and Settings' kit
+    /// offered only "Done", so a person who only quick-unlocks stayed unconfirmed until their next password unlock
+    /// (F5.1). Settings' kit now offers the confirmation while the account records none.
+    @Test("the kit opened from Settings can be confirmed while the account records no confirmation")
+    func confirmFromSettings() async throws {
+        let vault = TestVault()
+        _ = try await vault.createAccount()
+        #expect(try await !vault.session.status().emergencyKitConfirmed)
+        let model = EmergencyKitModel(context: ContextProbe().context(vault.session), privacy: ScreenPrivacy())
+        model.password = TestVault.password
+        await model.open()
+        #expect(model.awaitsConfirmation)
+        await model.confirmSaved()
+        #expect(model.errorMessage == nil && !model.awaitsConfirmation)
+        #expect(try await vault.session.status().emergencyKitConfirmed)
+        // Once confirmed, the next opening offers nothing more.
+        model.close()
+        model.password = TestVault.password
+        await model.open()
+        #expect(model.kit != nil && !model.awaitsConfirmation)
+    }
+
     /// The PDF goes the export's way: written into the swept folder and removed after the mover (Z84).
     @Test("the PDF is staged in the swept folder with the options given, and removed after the save and on lock")
     func stagedPDF() async throws {

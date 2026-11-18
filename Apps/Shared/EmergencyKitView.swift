@@ -65,6 +65,13 @@ struct EmergencyKitView: View {
                         Button("Continue") { Task { await app.confirmEmergencyKitSaved() } }
                             .disabled(!confirmed)
                             .accessibilityIdentifier("kit.continue")
+                    } else if model.awaitsConfirmation {
+                        // Not yet confirmed: after a quick unlock this is the only place to do it (Z131).
+                        Toggle("I have saved or printed my Emergency Kit", isOn: $confirmed)
+                            .accessibilityIdentifier("kit.settingsConfirmSaved")
+                        Button("Confirm") { Task { await model.confirmSaved() } }
+                            .disabled(!confirmed || model.isWorking)
+                            .accessibilityIdentifier("kit.settingsConfirm")
                     }
                 }
             }

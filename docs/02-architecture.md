@@ -3369,8 +3369,9 @@ password in the call, as an export does: the Secret Key is the one secret that s
 back with its owner, and whoever holds the unlocked app, quick-unlocked or not, must not read it out (review §Z,
 Z86). `unconfirmedEmergencyKit()` shows the kit the person has not yet confirmed saving again without asking twice,
 only while the account records no confirmation and the session's keys were opened with the password (creation,
-enrolment, a password unlock); otherwise `accountPasswordRequired`. `EmergencyKitModel` asks for the password from
-Settings, and writes the PDF (`EmergencyKitDocument.write`, which zeroes its rendered buffer) into the staging folder
+enrolment, a password unlock); otherwise `accountPasswordRequired`, and the vault opens. `EmergencyKitModel` asks for
+the password from Settings, and offers the confirmation there while the account records none, so a person who only
+quick-unlocks can still confirm the kit (review finding Z131); and writes the PDF (`EmergencyKitDocument.write`, which zeroes its rendered buffer) into the staging folder
 with `.completeFileProtection` on iOS, for the file mover; the staged copy goes like an export's, and nothing holds
 the PDF in a view's state. The kit and the screen say to print it or keep it on a device of one's own, never in a
 synced folder (`EmergencyKitText.storageWarning`): saved beside the vault's ciphertext and archives, it would leave
