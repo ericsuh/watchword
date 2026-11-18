@@ -184,29 +184,37 @@
             let name = SyncTransportContract.name
             try await transport.create(name, contents: [1])
             let zoneSaves = database.savedZones
-            let queries = database.queriedKeys.count
+            let queries = database.queries.count
             try await transport.startStoreAgain()
             #expect(database.savedZones == zoneSaves && database.deletedZones.isEmpty)
-            #expect(database.queriedKeys.count == queries, "the zone is fetched, not queried (SR20)")
+            // One record, in a listing's shape: never a TRUEPREDICATE query, which needs an index nothing else needs
+            // (SR20), and the records are read, since only they show a key reset (SR26).
+            let probes = database.queries.dropFirst(queries)
+            #expect(probes.count == 1 && probes.allSatisfy { $0.limit == 1 && $0.predicate.contains("BEGINSWITH") })
             #expect(try await transport.fetch(name, maximumLength: 10) == [1])
         }
 
-        /// CloudKit reset the key that protected the zone: the zone is still there, unreadable, and Apple prescribes
-        /// deleting it before saving it again. Only then, and only on this call.
+        /// CloudKit reset the key that protected the zone: the zone is still there, its metadata fetches, its records
+        /// answer `zoneNotFound` with the reset key, and Apple prescribes deleting it before saving it again. Only
+        /// then, and only on this call. Review finding SR26: a probe that only fetched the zone found it present and
+        /// left it, so the listings kept answering the reset and the person was asked again at every sync.
         @Test("a zone whose encryption key was reset is deleted and saved again by startStoreAgain alone")
         func startingAgainAfterAKeyReset() async throws {
             let database = FakeCloudKitDatabase()
             let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
             try await transport.create(SyncTransportContract.name, contents: [1])
-            let reset = CKError(.zoneNotFound, userInfo: [CKErrorUserDidResetEncryptedDataKey: true])
-            database.injectFailure(reset)
+            database.resetEncryptionKey(of: "Watchword")
             await #expect(throws: SyncTransportError.storeReset) { try await transport.list(prefix: "vault/") }
-            #expect(database.deletedZones.isEmpty)
+            await #expect(throws: SyncTransportError.storeReset) {
+                try await transport.fetch(SyncTransportContract.name, maximumLength: 10)
+            }
+            #expect(database.deletedZones.isEmpty && database.zoneNames == ["Watchword"])
 
-            database.injectFailure(reset)
             try await transport.startStoreAgain()
             #expect(database.deletedZones == ["Watchword"] && database.zoneNames == ["Watchword"])
             #expect(try await transport.list(prefix: "").isEmpty)
+            try await transport.create(SyncTransportContract.name, contents: [2])
+            #expect(try await transport.fetch(SyncTransportContract.name, maximumLength: 10) == [2])
         }
 
         /// Review finding SR20: after a key reset the zone may already be gone by the time it is deleted, and CloudKit

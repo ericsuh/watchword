@@ -1082,8 +1082,10 @@ or runs between the two steps. Then:
 
 1. `SyncTransport.startStoreAgain()`: the one call that may recreate a store this device has seen and found missing.
    CloudKit saves the zone again (deleting it first where CloudKit says its key was reset, and taking a deletion
-   answered "no such zone" as done), keeps the marker, and leaves a zone that exists exactly as it is, which it
-   learns by fetching the zone, not by a query (SR20); a transport with no notion of a reset does nothing. Before it,
+   answered "no such zone" as done), keeps the marker, and leaves a zone that exists exactly as it is. It learns
+   which by fetching the zone and then reading one record with a listing's own `name BEGINSWITH` query, never a
+   `TRUEPREDICATE` one (SR20): a zone's metadata is not encrypted and fetches after a key reset, and only its records
+   answer the reset (SR26); a transport with no notion of a reset does nothing. Before it,
    each of the account's own vaults that has synced is marked `storeResetSuspected`, which only its hand-on or a
    store standing for everything it holds clears, so an upload stopped part-way (a lock, the network, the app
    killed) asks again; after it, the lock epoch is checked again (SR21).
@@ -1191,7 +1193,8 @@ known to another (SR16).
 
 **Adapters.** `CloudKitTransport.startStoreAgain` is drafted with the rest of that transport (not compiled, not run
 against CloudKit; that a zone whose key was reset must be deleted before it is saved again follows Apple's
-documentation and is unverified, as is saving a zone again after `userDeletedZone`). `CoordinatedFileSyncTransport`
+documentation and is unverified, as are saving a zone again after `userDeletedZone` and a zone fetch succeeding
+after a key reset while its records answer the reset, SR26). `CoordinatedFileSyncTransport`
 needs nothing: its folder is created by the first write, and an emptied folder is the second signal. The Devices
 screen shows the notice, an "Upload Again…" button and the question as an alert (`DevicesModel.askToUploadAgain`,
 `confirmUpload`, `declineUpload`; the SwiftUI in `Apps/Shared/DevicesView.swift` is drafted, unbuilt).

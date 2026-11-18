@@ -30,10 +30,10 @@
         /// Creates the zone, or does nothing if it exists.
         func saveZone(_ zone: CKRecordZone) async throws
 
-        /// Returns if the zone exists; otherwise throws CloudKit's error (`zoneNotFound`, with
-        /// `CKErrorUserDidResetEncryptedDataKey` when its key was reset, or `userDeletedZone`). Asked only by
-        /// `CloudKitTransport.startStoreAgain`: a zone fetch needs no queryable index, where a query for every record
-        /// needs one on `recordName` that no other call needs (review finding SR20).
+        /// Returns if the zone exists; otherwise throws CloudKit's error (`zoneNotFound`, or `userDeletedZone`).
+        /// Asked only by `CloudKitTransport.startStoreAgain`, before its one-record query: a zone fetch reads the zone's
+        /// metadata, which no encryption key protects, so it is no evidence that the zone's records can be read after
+        /// a key reset (review finding SR26).
         func fetchZone(_ zoneID: CKRecordZone.ID) async throws
 
         /// Deletes the zone and every record in it. Called only by `CloudKitTransport.startStoreAgain`, for a zone
@@ -227,13 +227,26 @@
         /// The marker is set, never forgotten. Any other failure is the transport's typed error, and the zone stays
         /// as it was.
         ///
-        /// The probe is a fetch of the zone, not a query: a query for every record needs a queryable `recordName`
-        /// index in production, which no other call needs, and would otherwise be refused (SR20).
+        /// The probe is a fetch of the zone, then a query for one record in the listing's own shape (`probeQuery`).
+        /// The fetch alone cannot see a key reset: Apple documents `CKErrorUserDidResetEncryptedDataKey` as set on the
+        /// `zoneNotFound` error CloudKit returns when the zone's *records* are fetched (the documentation of
+        /// `CKRecord.encryptedValues` and of that key), and the zone's own metadata is not encrypted, so after a reset
+        /// the fetch succeeds and only reading records says what happened (review finding SR26). The query is
+        /// `name BEGINSWITH`, as every listing is, so it needs no index that a listing does not (SR20 (b): not a
+        /// `TRUEPREDICATE` query). A reset is believed whether CloudKit answers it for the whole query or for one
+        /// record in it. All of this is how the documentation reads, unverified against CloudKit: this file has not
+        /// been run there.
         public func startStoreAgain() async throws {
             var keyWasReset = false
             do {
                 try await database.fetchZone(zoneID)
-                // The zone is there: nothing to recreate, and nothing in it is touched.
+                let page = try await database.records(
+                    matching: Self.probeQuery, inZoneWith: zoneID, desiredKeys: [Self.nameField], resultsLimit: 1,
+                    continuing: nil)
+                for case (_, .failure(let error)) in page.matchResults {
+                    if let zone = CloudKitErrors.zoneNotFound(in: error), CloudKitErrors.isReset(zone) { throw zone }
+                }
+                // The zone is there and its records can be read: nothing to recreate, and nothing in it is touched.
                 try? await marker.markSeen(markerName)
                 return
             } catch let error where CloudKitErrors.zoneNotFound(in: error) != nil {
@@ -258,6 +271,18 @@
             try? await marker.markSeen(markerName)
         }
 
+        /// The listing's query for `prefix`: `name BEGINSWITH prefix`, or every record for the empty prefix.
+        static func listingQuery(prefix: String) -> CKQuery {
+            let predicate =
+                prefix.isEmpty
+                ? NSPredicate(value: true) : NSPredicate(format: "%K BEGINSWITH %@", nameField, prefix)
+            return CKQuery(recordType: recordType, predicate: predicate)
+        }
+
+        /// The query `startStoreAgain` reads one record with: a listing's, of the account objects' prefix, so it needs
+        /// only the `name` index every listing needs.
+        static var probeQuery: CKQuery { listingQuery(prefix: "account/") }
+
         /// Whether a zone deletion failed only because there is no zone to delete.
         static func zoneAlreadyGone(_ error: any Error) -> Bool {
             if CloudKitErrors.zoneNotFound(in: error) != nil || CloudKitErrors.isUnknownItem(error) { return true }
@@ -272,10 +297,7 @@
                     $0.isEmpty || FileSyncTransport.isValidComponent(String($0))
                 })
             else { throw SyncTransportError.invalidName(prefix) }
-            let predicate =
-                prefix.isEmpty
-                ? NSPredicate(value: true) : NSPredicate(format: "%K BEGINSWITH %@", Self.nameField, prefix)
-            let query = CKQuery(recordType: Self.recordType, predicate: predicate)
+            let query = Self.listingQuery(prefix: prefix)
             var names: Set<String> = []
             var cursor: Database.Cursor?
             var pages = 0

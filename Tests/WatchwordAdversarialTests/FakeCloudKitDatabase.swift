@@ -11,8 +11,10 @@
     /// predicate cannot be evaluated on Apple platforms: only `TRUEPREDICATE` and `name BEGINSWITH <string>` are
     /// understood, and any other shape records an issue and throws, so a transport that changes its query cannot pass
     /// unnoticed) and page by an integer cursor, `desiredKeys` limits the fields returned, and assets are copied at save. Every
-    /// save's policy is recorded, and an error can be injected for the next call. (A copy lives in each test target
-    /// that needs one; test code only.)
+    /// save's policy is recorded, and an error can be injected for the next call. A zone whose encryption key was reset
+    /// (`resetEncryptionKey`) behaves as Apple documents for `CKErrorUserDidResetEncryptedDataKey`, as read here: its
+    /// metadata still fetches, and every read or write of its records answers `zoneNotFound` with that key set, until
+    /// the zone is deleted (review finding SR26). (A copy lives in each test target that needs one; test code only.)
     final class FakeCloudKitDatabase: CloudKitDatabase, @unchecked Sendable {
         typealias Cursor = Int
 
@@ -23,6 +25,10 @@
         private(set) var savePolicies: [CKModifyRecordsOperation.RecordSavePolicy] = []
         private(set) var savedChangeTags: [String?] = []
         private(set) var queriedKeys: [[CKRecord.FieldKey]] = []
+        /// The predicate format and results limit of every query, in order.
+        private(set) var queries: [(predicate: String, limit: Int)] = []
+        /// Zones whose encryption key CloudKit reset: present, with records nobody can read.
+        private var keyReset: Set<String> = []
         /// Every zone save and zone deletion asked for, in order.
         private(set) var savedZones: [String] = []
         private(set) var deletedZones: [String] = []
@@ -40,8 +46,19 @@
         func purgeZone(_ zoneName: String) {
             lock.withLock {
                 zones.remove(zoneName)
+                keyReset.remove(zoneName)
                 stored = stored.filter { $0.key.zoneID.zoneName != zoneName }
             }
+        }
+
+        /// CloudKit resets the key that protects `zoneName`'s encrypted fields (the person reset their iCloud
+        /// Keychain, or recovered the account): the zone and its records stay on the server, unreadable.
+        func resetEncryptionKey(of zoneName: String) {
+            lock.withLock { _ = keyReset.insert(zoneName) }
+        }
+
+        static var resetError: CKError {
+            CKError(.zoneNotFound, userInfo: [CKErrorUserDidResetEncryptedDataKey: true])
         }
 
         /// The prefix a query asks for: `""` for `TRUEPREDICATE`, the constant of `name BEGINSWITH <string>`, or `nil`
@@ -91,7 +108,9 @@
             }
             return try lock.withLock {
                 queriedKeys.append(desiredKeys)
+                queries.append((query.predicate.predicateFormat, resultsLimit))
                 guard zones.contains(zoneID.zoneName) else { throw CKError(.zoneNotFound) }
+                guard !keyReset.contains(zoneID.zoneName) else { throw Self.resetError }
                 let matching = stored.values.filter {
                     $0.recordID.zoneID == zoneID && $0.recordType == query.recordType
                         && ($0["name"] as? String ?? "").hasPrefix(prefix)
@@ -116,6 +135,7 @@
             try takeInjected()
             return try lock.withLock {
                 guard zones.contains(recordID.zoneID.zoneName) else { throw CKError(.zoneNotFound) }
+                guard !keyReset.contains(recordID.zoneID.zoneName) else { throw Self.resetError }
                 guard let record = stored[recordID] else { throw CKError(.unknownItem) }
                 return Self.copy(record, keys: nil)
             }
@@ -140,6 +160,10 @@
                         partial[record.recordID] = CKError(.zoneNotFound)
                         continue
                     }
+                    guard !keyReset.contains(record.recordID.zoneID.zoneName) else {
+                        partial[record.recordID] = Self.resetError
+                        continue
+                    }
                     if stored[record.recordID] != nil, savePolicy == .ifServerRecordUnchanged {
                         saves[record.recordID] = .failure(CKError(.serverRecordChanged))
                         continue
@@ -151,6 +175,10 @@
                 for id in recordIDsToDelete {
                     guard zones.contains(id.zoneID.zoneName) else {
                         partial[id] = CKError(.zoneNotFound)
+                        continue
+                    }
+                    guard !keyReset.contains(id.zoneID.zoneName) else {
+                        partial[id] = Self.resetError
                         continue
                     }
                     deletes[id] = stored.removeValue(forKey: id) == nil ? .failure(CKError(.unknownItem)) : .success(())
@@ -181,6 +209,7 @@
             try takeInjected()
             lock.withLock {
                 zones.remove(zoneID.zoneName)
+                keyReset.remove(zoneID.zoneName)
                 stored = stored.filter { $0.key.zoneID.zoneName != zoneID.zoneName }
                 deletedZones.append(zoneID.zoneName)
             }
