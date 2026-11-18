@@ -242,11 +242,19 @@ extension VaultSession {
         return (ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[deviceID] ?? 0) > version
     }
 
-    /// Whether `row` holds an edit of any of `deviceIDs`, opening it once. One that does not open here counts.
-    func holdsEdit(ofAny deviceIDs: Set<UUID>, in row: StoredRecord) -> Bool {
+    /// Whether `row` holds a value written by any of `deviceIDs`, opening it once: a value of `ItemMerge.attributedValues`
+    /// (history entries included) whose stamp names one of them. One that does not open here counts.
+    ///
+    /// By values, never by the clock (review of round 9, Z173): a clock entry, or a stamp's `seen`, is its writer's
+    /// claim, and a writing member (A4) can publish a version that claims to have seen edits of any ID, which no judge
+    /// asks about when no account lists that ID as counted. A value stamped by such an ID, from another account's
+    /// stream, is held aside by the judge (it is attributed to the stream of the device its stamp names, which counts
+    /// nowhere), so only this account's own writes, made here or carried over, hold one in a row.
+    func holdsValue(ofAny deviceIDs: Set<UUID>, in row: StoredRecord) -> Bool {
         guard let keys, let item = try? openItem(row, keys: keys) else { return true }
-        let clock = ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries
-        return deviceIDs.contains { (clock[$0] ?? 0) > 0 }
+        return ItemMerge.attributedValues(item, origin: Self.origin(row)).contains {
+            deviceIDs.contains($0.revision.device)
+        }
     }
 
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {

@@ -897,7 +897,10 @@ the new ID's (`releaseParkedDeletions`). Carrying the copy over would not do: it
 which every member holds aside. Any future way of moving an installation to a new ID (the in-app re-enrolment of
 Z162) parks the same way. One predicate decides registration, release and the deletion gate (review finding Z170):
 any row of a shared vault, whichever device's, holding an edit of a device ID of the account's registry that does not
-commit, or of the ID being left (`vaultsHoldingEditsNobodyReceived`). Registration parks again, whatever it finds,
+commit, or of the ID being left (`vaultsHoldingEditsNobodyReceived`). An edit there is a value that ID stamped
+(`ItemMerge.attributedValues`, history entries included), never a clock entry or a stamp's `seen`, which are claims a
+writing member of another account can make about any ID (Z173); a value another account stamped with such an ID is
+held aside by the judge, so only this account's own writes, made here or carried over, count. Registration parks again, whatever it finds,
 what the old ID had itself parked, so a second restore (from a backup taken under the restored ID, which commits)
 releases nothing; and while such a row exists no vault's deletions go out at all, the new ID's own included, or a
 deletion made again of an original that came back would go out ahead of its only copy. The sync names the copies

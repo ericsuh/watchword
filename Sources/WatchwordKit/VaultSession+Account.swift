@@ -1046,15 +1046,17 @@ extension VaultSession {
 
     /// The items of `vaultID`, if it is shared, whose rows hold an edit of one of `deviceIDs` (`idsNobodyReceives`),
     /// whichever device's row it is (Z170: one this installation carried over under an intermediate ID holds the first
-    /// ID's values too); `nil` where the vault's rows cannot be read. Fails closed: a row that does not open counts, and
-    /// "shared" is `isMarkedShared`, so a vault counts until the markers say it is private.
+    /// ID's values too); `nil` where the vault's rows cannot be read. An edit is a value that ID stamped
+    /// (`holdsValue(ofAny:in:)`), never a clock's claim to have seen one, which another account can write (Z173).
+    /// Fails closed: a row that does not open counts, and "shared" is `isMarkedShared`, so a vault counts until the
+    /// markers say it is private.
     func itemsHoldingEdits(of deviceIDs: Set<UUID>, in vaultID: UUID, account: AccountRecord) async -> Set<UUID>? {
         guard !deviceIDs.isEmpty, isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) else {
             return []
         }
         guard let rows = try? await store.records(in: vaultID, kind: .item) else { return nil }
         var items: Set<UUID> = []
-        for row in rows where holdsEdit(ofAny: deviceIDs, in: row) { items.insert(row.recordID) }
+        for row in rows where holdsValue(ofAny: deviceIDs, in: row) { items.insert(row.recordID) }
         return items
     }
 

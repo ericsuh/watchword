@@ -730,7 +730,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   ID's, once none remains (Z167): never carry them over unconditionally, never release one at registration (what the
   old ID had parked is parked again, Z170), and never release a deletion stamped by another device's ID. Registration,
   the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
-  whichever device's, holding an edit of an ID `idsNobodyReceives` names), and while it finds a row no vault's
+  whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173), and while it finds a row no vault's
   deletions go out, the new ID's own included (Z170); `copiesNobodyReceived` names those items for the summary (Z171). Every engine pass in
   `syncAll`, replays included, defers deletions; they go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
