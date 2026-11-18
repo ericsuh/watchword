@@ -1140,7 +1140,6 @@ public actor SyncEngine {
             }
             return
         }
-        highWater = max(highWater, entry.version)
         // Every erasure of the record this device knows of, taken together: the ones it merged, and its own if it
         // has one that is not published yet.
         var erasure = state.erasures[entry.key]
@@ -1189,6 +1188,9 @@ public actor SyncEngine {
                 return
             }
         }
+        // The ceiling moves only for what merged (review finding Z131): raised before the merge was tried, each entry
+        // that then failed lifted it a step, so a chain of them one ceiling apart carried a version past U5.
+        highWater = max(highWater, entry.version)
         state.known[entry.key] = max(state.known[entry.key] ?? entry.stamp, entry.stamp)
         if entry.isDeletion {
             state.erasures[entry.key] = try await join(

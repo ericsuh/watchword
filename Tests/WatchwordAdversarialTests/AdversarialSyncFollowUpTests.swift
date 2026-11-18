@@ -188,4 +188,60 @@ extension AdversarialSyncTests {
         try await later.sync()
         #expect(try await later.items()[mine.id] != nil, "the device's work never arrived")
     }
+
+    // MARK: - The version-jump ceiling in the retry (Z131)
+
+    /// Threat: an insider device of the account (any trusted device in a vault with no judge). Its segment carries
+    /// versions one ceiling apart, each over a row the reader holds and each with an envelope that does not open, and
+    /// a real version one ceiling above the last: all refused as out of reach when first met, and tried again once
+    /// the pass has merged the rest. The ceiling was raised before each merge was tried, so every failing entry
+    /// lifted it by one more step, and the real version merged past U5. The ceiling moves only for what merges.
+    @Test("versions that fail to merge in the retry do not lift the version-jump ceiling")
+    func failedRetriesDoNotLiftTheCeiling() async throws {
+        let f = try await Self.fixture()
+        let configuration = Self.jumpConfiguration()
+        let store = await f.writer.store
+        let a = SyncTestClient(
+            deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration, store: store)
+        await f.keys.trust(device: Self.b)
+        let b = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        try await a.save(Self.login("First", password: "1"))
+        try await a.sync()
+        let readerID = UUID(uuidString: "D0000000-0000-4000-8000-0000000000C0")!
+        await f.keys.trust(device: readerID)
+        let reader = SyncTestClient(
+            deviceID: readerID, vaultID: Self.vault, keys: f.keys, transport: f.transport,
+            configuration: configuration)
+        try await reader.sync()
+        try await b.sync()
+        var theirs: [Item] = []
+        for index in 0..<29 { theirs.append(try await b.save(Self.login("B \(index)", password: "b"))) }
+        try await b.sync()
+        try await a.sync()
+        // 30 is the highest version once B's segment is merged; the ceiling is 16 above whatever has merged.
+        var rows: [StoredRecord] = []
+        for (index, version) in [UInt64(46), 62].enumerated() {
+            var edited = try await a.item(theirs[index].id)
+            edited.notes = "does not open"
+            var row = try await a.keyring.sealItem(
+                ItemMerge.written(edited, as: Revision(version: version, device: Self.a)))
+            row.envelope[row.envelope.count - 1] ^= 0x01
+            rows.append(row)
+        }
+        var far = Self.login("Three steps up", password: "f")
+        far.version = 78
+        far = ItemMerge.stamped(far, previous: nil, revision: Revision(version: 78, device: Self.a))
+        rows.append(try await a.keyring.sealItem(far))
+        let sequence = try #require(await a.state()?.nextSequence)
+        try await f.plant(Self.payload(rows, sequence: sequence), signedBy: a.keyring)
+        try await b.save(Self.login("After", password: "c"))
+        try await b.sync()
+
+        let report = try await reader.sync()
+        #expect(report.quarantined.contains(RecordKey(recordID: far.id, kind: .item)))
+        #expect(try await reader.items()[far.id] == nil, "a version three ceilings up was merged")
+    }
 }
