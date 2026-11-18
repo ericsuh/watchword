@@ -119,7 +119,10 @@ Status: delivered, with these scoping notes.
 - Also deferred: the encrypted per-item index record (§5) to milestone 5, the `changelog` and
   `sync_state` tables and tombstones to milestone 3, device-to-device enrolment to milestone 3
   (Emergency Kit entry works now: `unlock(password:secretKey:)`), and the F11.7 add-a-mismatched-host
-  confirmation UI to milestone 5, where the mismatch is first observable.
+  confirmation UI to milestone 5, where the mismatch is first observable. That confirmation is now built below
+  the view (review finding Z61): `VaultSession.save(_:confirmingHosts:)` refuses a look-alike host the caller
+  has not named, and `ItemEditorModel` asks; the editor's dialog is written but not yet compiled on a Mac. The
+  assessment banner on revealing a secret (`05-anti-phishing.md` L6) is not built and stays open.
 - Real Keychain round trips need an entitled, signed process; `swift test` and CI skip them
   (`errSecMissingEntitlement`) and check the query attributes instead. On a Mac,
   `mise run app:test-keychain --team <ID>` runs the round trip signed, in the app-hosted
@@ -431,7 +434,8 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   - an owner decision the review left open: with no host named, text insertion gives only fields that are not
     secrets, which narrows F6.4 (recovery codes, security answers and PINs insert only where the system names
     the host). `ManualChoice.isInsertable` is the one place to change it;
-  - the UI tests in `04-test-plan.md` §6.7 ("no override affordance", the F11.7 confirmation in the app).
+  - the UI tests in `04-test-plan.md` §6.7 ("no override affordance", the F11.7 confirmation in the app; the
+    confirmation's logic is tested on Linux, `AdversarialItemEditorTests`, review finding Z61).
 
 ## Milestone 6 — Hygiene (portable core done)
 

@@ -2017,7 +2017,11 @@ Full design in `05-anti-phishing.md`. Three additions beyond matching:
 
 1. **Scope policy.** `ScopePolicy`/`PublicSuffix` refuse single-label and public-suffix scopes at
    creation, edit, and import. Without this, a `com` scope becomes the top-ranked match on an
-   attacker's domain.
+   attacker's domain. A shared-hosting suffix that is also its operator's own sign-in site
+   (`PublicSuffix.signInAtSuffix`: `wordpress.com`, `substack.com`, `tumblr.com` and a few others) is
+   accepted as an exact-host scope and refused with subdomains, which would reach its tenants (review
+   finding Z63); `ScopePolicy.newScope(forHost:)` gives such a host that reach wherever nobody chose one
+   (the editor, an imported URL, a passkey's relying party).
 2. **Look-alike warning.** `PhishingDetector` turns "no match" into a named warning for hosts that
    resemble a saved scope — visual skeleton, edit-distance near-miss, saved name out of position,
    per-label mixed script, punycode. Silence is what pushes a person to copy a password by hand.
@@ -2079,7 +2083,11 @@ else in the model changes.
 
 Passkeys: the extension signs `authenticatorData || clientDataHash` with the item's P-256 key,
 increments no counter (Apple's guidance for synced passkeys), supports `prf` (HMAC-secret derived
-from a per-passkey 32-byte secret stored in the field) and `largeBlob` storage in the item.
+from a per-passkey 32-byte secret stored in the field) and `largeBlob` storage in the item. A
+relying party's largeBlob write replaces the field, whose earlier value stays in the item's history,
+so writes are bounded: one per field per `largeBlobInterval` (a day), and none that would take the item
+past `largeBlobItemBudget` (half the payload limit); a write refused is reported as not written and the
+assertion stands (review finding Z66).
 `PasskeyAuthenticator` (§9.2) is that authenticator, in software: ES256 only, attestation format
 `none`, credential IDs of 32 random bytes, the signature DER-encoded. The flags say what happened
 rather than what a relying party would like to hear: UP and UV come from what the extension
@@ -3015,6 +3023,26 @@ and new `url` fields are *reported* (`DuplicateMatch.newHosts`, `hasNewSignInFie
 `additions(of:to:)`) and added only when `MergeChoices` names the host or the field the person accepted;
 there is no "accept all". Field values are compared as bytes.
 
+**A new entry can reach an existing secret too** (review finding Z62). An item is ranked against every other by
+its scopes, in every vault, whatever its user name: an entry scoped one label below a saved login (`login.bank.example`
+beside `bank.example`) outranks it there, the extension then neither lists nor releases the saved login on that host,
+and the next password the person saves there is offered to the imported item, whose other scopes the file chose. An
+entry the file marks archived (or, from an archive, excluded from suggestions) hides the saved login the same way
+while offering nothing. So the preview judges every entry, duplicate or not, against what the gate ranks among
+(`SavedSites`, every vault, trashed items and policy-refused scopes left out) and reports an `ImportConcern` for one
+that would hide a saved account on a host it is offered on (`hidden`), stand beside one (`beside`: a tie, or an item
+of a shared vault next to the person's own), or name a host that resembles a saved site or cannot be verified by eye
+(`lookAlikeHosts`, by `SavedSites.Prepared.standing`; an entry's own other hosts vouch for nothing, being the file's
+too). Hosts past the preview's comparison budget (`VaultSession.maximumImportHostComparisons`) are `uncheckedHosts`
+and need the decision as well. `commitImport` refuses without a decision for every such entry (`decisionRequired`):
+`keepBoth` imports it, knowing what it does, `skip` leaves it out. The import screen lists them with the accounts
+they would hide, named with their vaults, and shows every entry's hosts through `MergeHost` (ASCII, registrable
+domain, reach). Duplicates are still looked for in the chosen vault only; the concern covers the other vaults.
+
+The duplicate screen also shows, in full, the values a merge adds with no per-field choice (other fields, tags and
+the notes text; secrets behind Show), not only their labels (review finding Z67): a link or a phone number in a text
+field is read as the item's own once it is there.
+
 URLs are in that list because of what an export does with them. An entry's URL that says more than its
 host is kept as a website field, and a second review found the consequence: merged by default, the
 attacker's `https://evil.example/login` became a field of the bank's item, widened nothing in this app, and
@@ -3063,8 +3091,8 @@ read off the header) and `previewArchiveImport(_:passphrase:secretKey:into:optio
 the drafts with the items of the chosen vault (`DuplicateDetector.matches`) and return an `ImportPreview`: the
 `ImportReport`, a summary per entry (title, kind, state, hosts, login names, and the apex hosts added beside a `www`
 host, `apexScopesAdded`, from the report's `apexScopeAdded` lines: `ImportOptions.matchApexOfWWWHosts`, on unless the
-person turns it off, applies to the other managers' formats; an archive's scopes come back as they were) and the
-matches; for an archive also
+person turns it off on the import screen before the file is read, applies to the other managers' formats; an
+archive's scopes come back as they were), the matches and the concerns (`ImportConcern`, above); for an archive also
 its identifier and creation time (`archiveID`, `archiveCreatedAt`), set only once it has opened, so they are the
 values the manifest authenticated, and the restore screen shows the date: A1 can put an older archive in place of
 the newest, and every archive under the same passphrase and Secret Key opens. **Nothing is written, and the
@@ -3074,7 +3102,7 @@ preview holds no secret**: the drafts stay inside the actor (`pendingImport`), a
 drafts and throws `noPendingImport` instead of keeping them. The values a merge would add, with every
 value in full for the duplicate screen, come from `importAdditions(preview:importedID:existingID:)` while it is
 shown. `commitImport(_:decisions:)` checks every decision before writing anything: an entry that matches an
-existing item must have one (`decisionRequired`), and a merge may only go into an item it was matched with
+existing item, or that the preview raised a concern about, must have one (`decisionRequired`), and a merge may only go into an item it was matched with
 (`unknownMatch`); an entry with no match and no decision is added. Then each entry goes through the vault's own
 write path. A new item is stamped by `ItemMerge.stamped` as this device's write, its scopes checked against
 `ScopePolicy`, and committed on the condition that no row has its ID (`commitItem`), keeping the history and the

@@ -936,11 +936,20 @@ parser cannot read is refused, and the `host` fuzz target checks the same agreem
 view: there is no call that releases after a refusal, which `AdversarialAutoFillRequestTests` checks request by
 request (§6.3).
 
+*At the session and screen model (review findings Z61, Z62, Z65):* F11.7 is enforced in
+`VaultSession.save`, which refuses a host a save adds that resembles a saved site, or cannot be read
+by eye, unless the caller names it as confirmed; `AdversarialItemEditorTests` ("Adversarial: account
+screens") holds the refusal, the question naming the site and the item, and that an ordinary host asks
+nothing. An import entry that would hide or stand beside a saved account, in any vault, or name a
+look-alike, is refused at commit without a decision (`AdversarialImportTakeoverTests`, "Adversarial:
+interchange through the session"), and `InterchangeScreenTests` drives the screen model. Look-alikes are
+judged against `SavedSites`, the gate's own view (`MergeHostTests`: a trashed item, a policy-refused scope
+or a member's item scoped to the look-alike recognises nothing).
+
 *Still to come:* a UI test that the AutoFill extension presents no override affordance on a
-suspicious host, and that adding a mismatched host as a scope requires the confirmation in F11.7
-(both milestone 5; the second was planned for milestone 2, but the mismatch it confirms is first
-observable from the extension). Milestone 2 enforces F11.2 at the vault boundary instead:
-`VaultSession.save` refuses over-broad scopes whatever the UI sends.
+suspicious host, and one that drives the editor's F11.7 dialog and the import's concern section on a
+Mac (milestone 5). Milestone 2 enforces F11.2 at the vault boundary: `VaultSession.save` refuses
+over-broad scopes whatever the UI sends.
 
 ### 6.8 Fuzzing (nightly)
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,

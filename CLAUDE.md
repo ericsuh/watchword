@@ -608,7 +608,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
 - The actor is re-entrant across `await`: after every suspension, re-check the lock epoch (`requireKeys(since:)`)
   before touching key material, so `lock()` always wins.
 - Read contexts come from the store row, and a decrypted item's `id`/`vaultID`/`version` must equal the row's.
-- Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends (and in `resolveConflict`).
+- Scopes are checked with `ScopePolicy` in `save`, whatever the UI sends (and in `resolveConflict`). A host a save
+  adds is judged against `SavedSites` (what the gate ranks among, every vault): one that resembles a saved site or
+  cannot be read by eye is refused (`hostsNeedConfirmation`) unless the call names it in `confirmingHosts` (F11.7,
+  Z61). `ItemEditorModel` asks; a view that skips it is refused all the same.
 - The vault owns sync metadata: every write goes through `ItemMerge.stamped` and commits conditionally on the row it
   read (`commitItem`); a caller's `revisions`, `clock` or `conflicts` are never trusted. The session's deletions go
   through `writer(for:)` (`DeletionRecordingStore` when sync is configured); the engine writes to `store` directly.
@@ -628,7 +631,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   or a transport, and every hygiene query reconciles the engine with the store first. No timer: the UI or a
   background task calls `runHygieneStep()`.
 - Imports are preview then commit (§14.1). The drafts stay in the actor (`pendingImport`) and `lock()` drops them;
-  what leaves the actor before a commit holds no secret but what `importAdditions` hands the duplicate screen. A
+  what leaves the actor before a commit holds no secret but what `importAdditions` hands the duplicate screen. The
+  preview judges every entry against `SavedSites`, in every vault (`ImportConcern`, Z62): one that would hide or
+  stand beside a saved account, or name a look-alike host, needs a decision like a duplicate. A
   commit checks every decision before writing, saves new items through `ItemMerge.stamped`, `ScopePolicy` and
   `commitItem` (keeping the file's history and times, never its IDs, vault or sync metadata), and merges over the
   item as the write reads it. Never add a path that writes an imported item another way.
