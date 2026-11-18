@@ -489,8 +489,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   where the state could be behind the stream: no own object listed (`Listing.ownAnchored`, Z31), and an own-stream
   object that cannot be told from this device's own, or a trusted snapshot claiming more of the stream (Z32).
   `push` never writes beyond `maximumSequence`. Every listed snapshot is merged; a segment is collected only once
-  every other stream acknowledges it and a listed snapshot covers it, lowest first and never the newest (the anchor
-  rests on that order).
+  every other stream acknowledges it and a listed snapshot covers it, lowest first, a contiguous listed run that stops
+  at the first number the listing lacks, and never this device's own genuine head (what it published or verified as
+  its own), whatever names are listed above it (Z126; the anchor rests on that order).
 - A failure of local storage is a `StorageFailure` (`RecordStoreError`, `SQLiteConnection.Failure`) and stops a sync;
   never let one reject the object being merged (Z39).
 - A record ID that a record of another vault holds on this device costs that entry alone (`SyncReport.collided`,
