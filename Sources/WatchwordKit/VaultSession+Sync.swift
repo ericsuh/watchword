@@ -182,12 +182,30 @@ extension VaultSession {
     /// nothing of the set, and while the set's own row has not loaded (deleted, refused, never written by this build)
     /// every held-aside entry naming this device that the sync state does not know counts, as before Z54, until the
     /// quarantine holds none and the set is known to be all there is.
+    /// Whether `row`, this device's, holds an edit of its own above every version of the record it published: its
+    /// clock's entry for this device (`ItemMerge.effectiveClock`), never merely that it sealed the row. One that does
+    /// not open here counts.
+    func holdsUnpublishedEdit(_ row: StoredRecord, published: RecordStamp?, account: AccountRecord) -> Bool {
+        guard let keys, let item = try? openItem(row, keys: keys) else { return true }
+        let own = ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[account.deviceID] ?? 0
+        return own > (published?.version ?? 0)
+    }
+
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
         guard let syncState, let base = syncSettings?.state else { return false }
-        let known = (try? await syncState.loadState(vaultID: vaultID))?.known ?? [:]
-        for row in (try? await store.records(in: vaultID, kind: .item)) ?? []
-        where row.deviceID == account.deviceID && known[row.key] == nil {
-            return true
+        let state = try? await syncState.loadState(vaultID: vaultID)
+        let known = state?.known ?? [:]
+        for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
+            guard let stamp = known[row.key] else { return true }
+            // Known only as a deletion: the log says nothing of a version of it. A move's copy has an ID anyone who
+            // reads the source vault can derive, and a tombstone for it, found in the log before the copy was written,
+            // made the copy look known; if the copy's vault then could not publish, the original's deletion went out
+            // ahead of it (review finding Z148). Such a row holds the deletions back while it holds an edit of this
+            // device's above what it published, as `unsharedWorkCount` measures it: a version a merge kept after a
+            // deletion holds none, and holds nothing back.
+            if stamp.deleted, holdsUnpublishedEdit(row, published: state?.published[row.key], account: account) {
+                return true
+            }
         }
         guard let vault = sharing.vaults[vaultID], !vault.ownTakenOut.isEmpty || !vault.ownTakenOutComplete else {
             return false
