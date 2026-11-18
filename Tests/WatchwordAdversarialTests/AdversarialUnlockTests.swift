@@ -489,3 +489,33 @@ actor GatedRecordStore: RecordStore {
     }
     func eraseAll() async throws { try await inner.eraseAll() }
 }
+
+// Claims of Z7 that no test held (review finding Z17).
+extension AdversarialUnlockTests {
+    /// Z7: an attempt is counted before the prompt and taken back only once the released key has opened the keyset.
+    /// After two cancels, three quick unlocks in a row must each take their attempt back (counted, the third would
+    /// be refused); and a released key that opens nothing destroys the enrolment and takes nothing back.
+    @Test("each quick unlock that opens the keyset takes its attempt back; a key that opens nothing does not")
+    func attemptsTakenBackOnlyByTheKeyset() async throws {
+        let (vault, kit) = try await Self.enrolled()
+        await vault.session.lock()
+        await vault.keychain.script(.cancel, .cancel)
+        for _ in 0..<2 {
+            await #expect(throws: KeychainError.userCancelled) { try await vault.session.quickUnlock() }
+        }
+        for _ in 0..<3 {
+            try await vault.session.quickUnlock()
+            await vault.session.lock()
+        }
+        await vault.keychain.script(.cancel, .cancel)
+        for _ in 0..<2 {
+            await #expect(throws: KeychainError.userCancelled) { try await vault.session.quickUnlock() }
+        }
+        #expect(try await vault.session.status().quickUnlock == .allowed, "a success did not take its attempt back")
+
+        await vault.keychain.script(.releaseBytes(Array(repeating: 0x5A, count: 32)))
+        await #expect(throws: (any Error).self) { try await vault.session.quickUnlock() }
+        #expect(try await vault.session.state() == .locked)
+        #expect(!(await vault.keychain.contains(.quickUnlockKey(accountID: kit.accountID))))
+    }
+}

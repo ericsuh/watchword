@@ -882,7 +882,9 @@ public actor VaultSession: SharesExecutor {
     /// With no header row at all the check has nothing to stand on: that is refused wherever the Keychain holds a
     /// registry anchor, which every account that has a header has, and let through only for an account that has
     /// neither (made before the registry existed, or a store restored onto other hardware with its header row
-    /// removed). Such an account has no registry here and so publishes nothing until it has enrolled again.
+    /// removed). That is a residual, not a safe state (review finding Z16): such a store starts a registry at its
+    /// first sync if the transport holds no header for the account (`startRegistryIfAccountPredatesIt`), and the
+    /// header it then makes seals whichever Personal vault the row names.
     func requirePersonalVaultBinding(_ account: AccountRecord, unlockKey: EncryptionKey) async throws {
         guard let row = try await store.record(Self.headerKey(account.accountID)) else {
             if await readAnchor(account.accountID) == nil { return }

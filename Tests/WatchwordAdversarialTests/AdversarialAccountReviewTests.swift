@@ -548,4 +548,172 @@ extension AdversarialAccountTests {
             await b.session.setAwayWorkHook(nil)
         }
     }
+
+    // MARK: - Claims of Z1 to Z8 that no test held (Z17)
+
+    /// Z1: with `ignoringPasswordChange`, a password that opens a pending change and not this device's own header
+    /// opens nothing: no candidate is so much as tried. A sync keeps one candidate header per author, its newest,
+    /// however many changes that author chained. And a device named to follow whose header no sync kept is fetched
+    /// from the transport then.
+    @Test("the flag tries no candidate, a sync keeps one header per author, and a follow fetches one not kept")
+    func candidateClaims() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        let lost = try await f.enrolled(Self.deviceX)
+        let chain = try await Self.rogueChange(from: lost, passwords: [nil, nil, nil])
+        try await f.a.session.changePassword(current: TestVault.password, new: Self.newPassword)
+        try await f.a.session.sync()
+        await Self.plant(chain, in: f)
+        _ = try await b.session.syncAll()
+        let store = try #require(b.store as? InMemoryRecordStore)
+        let kept = await store.records(in: f.accountID, kind: .accountHeader).filter { $0.recordID != f.accountID }
+            .compactMap { try? AccountHeaderObject.parse($0.envelope) }
+        #expect(kept.count == 2, "one per author")
+        #expect(kept.first { $0.author == Self.deviceX }?.generation == 3, "its newest")
+        await b.session.lock()
+
+        await #expect(throws: CryptoError.authenticationFailed) {
+            try await b.session.unlock(password: Self.newPassword, ignoringPasswordChange: true)
+        }
+        #expect(await b.session.account?.credentialGeneration == 0)
+
+        // The genuine change's header gone from the file: following it by name fetches it.
+        let genuine = kept.filter { $0.author != Self.deviceX }
+        try await store.commit(
+            StoreChange(
+                deletions: await store.records(in: f.accountID, kind: .accountHeader).filter {
+                    $0.recordID != f.accountID
+                }.map(\.key)))
+        try await b.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
+        let phone = try #require(genuine.first?.author)
+        try await b.session.followPasswordChange(by: phone, current: TestVault.password, password: Self.newPassword)
+        #expect(try await f.registryView(b).state.credential.id == genuine.first?.credentialID)
+    }
+
+    /// Z3: sync's merge-and-publish gate asks the Keychain's anchor, not only the registry in the file. With the
+    /// change's credential entry and header gone from the file and from the transport (A8 and A1 together), the
+    /// registry evaluates with nothing pending and this device active; only the anchor remembers the change, and a
+    /// sync from a session opened with `ignoringPasswordChange` must still neither merge nor publish.
+    @Test("a sync publishes nothing while the anchor remembers a pending change the file and transport lost")
+    func syncGateAsksTheAnchor() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        try await f.a.session.changePassword(current: TestVault.password, new: Self.newPassword)
+        try await f.a.session.sync()
+        let change = try await f.registryView(f.a).state.credential
+        #expect(try await b.session.syncAll().awaitingNewPassword)
+        await b.session.lock()
+
+        let store = try #require(b.store as? InMemoryRecordStore)
+        let removed =
+            await store.records(in: f.accountID, kind: .accountHeader).filter { $0.recordID != f.accountID }.map(\.key)
+            + store.records(in: f.accountID, kind: .deviceRegistry).filter {
+                ObjectDigest(hashing: $0.envelope) == change.id
+            }.map(\.key)
+        try await store.commit(StoreChange(deletions: removed))
+        await f.transport.tamper(
+            AccountObjectLocation.registryEntry(accountID: f.accountID, id: change.id.hex).name, contents: nil)
+        await f.transport.tamper(
+            AccountObjectLocation.header(accountID: f.accountID, generation: 1, author: change.author).name,
+            contents: nil)
+
+        try await b.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
+        #expect(try await f.registryView(b).state.pendingCredentials.isEmpty, "the file still shows the change")
+        let personal = try #require(await b.session.personalVaultID)
+        try await b.session.save(
+            Item(vaultID: personal, title: "Written while a change is pending", scopes: [], fields: []))
+        let log = "vault/\(personal.uuidString)/log/\(Self.deviceB.uuidString)/"
+        let before = await f.transport.list(prefix: log)
+        let report = try await b.session.syncAll()
+        #expect(report.awaitingNewPassword)
+        #expect(await f.transport.list(prefix: log) == before, "published while a password change was pending")
+    }
+
+    /// Z6: more competing changes at the entry followed than are replayed side by side: none is replayed, and every
+    /// device of the account is in question, not one of them chosen.
+    @Test("more competing password changes than are replayed hold every device of the member in question")
+    func moreBranchesThanReplayed() throws {
+        var f = RegistryFixture(seed: 41)
+        let phone = RegistryFixture.deviceID(0xA0)
+        let genesis = f.genesis(device: phone)
+        var entries = [genesis]
+        var adds: [RegistryEntry] = []
+        for index in 0..<(VaultSession.maximumMemberBranches + 1) {
+            let add = f.add(RegistryFixture.deviceID(UInt8(0x10 + index)), by: phone, parents: [adds.last ?? genesis])
+            adds.append(add)
+            entries.append(add)
+        }
+        let early = VaultSession.evaluateMemberRegistry(
+            entries.map { $0.serialized() }, accountID: f.accountID, signingKey: f.accountSigningKey, pin: nil)
+        _ = f.nextUnlockKey()
+        for (index, add) in adds.enumerated() {
+            entries.append(
+                f.credential(
+                    generation: 1, previous: genesis, by: RegistryFixture.deviceID(UInt8(0x10 + index)),
+                    parents: [add]))
+        }
+        let contested = VaultSession.evaluateMemberRegistry(
+            entries.map { $0.serialized() }, accountID: f.accountID, signingKey: f.accountSigningKey, pin: early.pin)
+        #expect(contested.unsettled && contested.state?.devices.isEmpty == true)
+        #expect(contested.pin?.credential == genesis.id)
+    }
+
+    // MARK: - Tracked: the member pins are local state (Z15) and header names carry no digest (Z16)
+
+    /// Threat: A8 deletes the saved pins of other members' registries (or puts back an older signed copy: the blob
+    /// carries no counter). The device then anchors again from what the transport shows, with the base wherever it
+    /// lands now, so a branch that should compete from the base it had (Z12) no longer does. Tracked: the fix keeps a
+    /// digest or counter of the pins in the Keychain, and needs a rule for what a mismatch does now that nothing
+    /// settles a contested registry (Z11).
+    @Test("TRACKED Z15: member pins deleted from the file are anchored again from the transport")
+    func memberPinsDeletedFromTheFile() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 2300)
+        let (owner, member) = (home.owner, home.members[0])
+        try await AdversarialSharedVaultTests.syncAll([owner, member])
+        func pin(_ session: VaultSession) async -> MemberRegistryPin? {
+            await session.sharing.registryPins.first { $0.key.accountID == member.accountID }?.value
+        }
+        let early = try #require(await pin(owner.session))
+        try await member.session.changePassword(current: TestVault.password, new: Self.newPassword)
+        try await member.session.sync()
+        try await AdversarialSharedVaultTests.syncAll([owner])
+        let followed = try #require(await pin(owner.session))
+        #expect(followed.base == early.base && followed.credential != early.credential)
+
+        await owner.state.setValue(nil, for: .memberDevices, vaultID: home.vaultID)
+        await owner.session.lock()
+        let relaunched = owner.vault.relaunched()
+        await relaunched.session.configureSharing(
+            SharingSettings(
+                state: owner.state, contacts: owner.contacts, directory: household.directory,
+                shareAccess: owner.shareAccess))
+        try await relaunched.session.unlock(password: TestVault.password)
+        try await relaunched.session.sync()
+        let again = try #require(await pin(relaunched.session))
+        withKnownIssue("Z15: the pins are the file's; deleted, the base is wherever the device lands now") {
+            #expect(again.base == early.base)
+        }
+    }
+
+    /// Threat: the Z1 adversary (a revoked device that can still create objects on the store and delete none)
+    /// creates the header name a device will publish its next password change under, `header/<generation>-<device>`,
+    /// before that device does. Objects are created, never overwritten: the genuine header is never published there,
+    /// and no lagging or new device can follow the change. Tracked: the fix is a digest in the header's name, as
+    /// sharing objects have (S20), with the old names still read.
+    @Test("TRACKED Z16: a header name created first by someone else keeps the genuine header off the store")
+    func squattedHeaderName() async throws {
+        let f = try await Self.fixture()
+        let b = try await f.enrolled(Self.deviceB)
+        let phone = try #require(await f.a.session.account?.deviceID)
+        let name = AccountObjectLocation.header(accountID: f.accountID, generation: 1, author: phone).name
+        await f.transport.tamper(name, contents: Array("not a header".utf8))
+        try await f.a.session.changePassword(current: TestVault.password, new: Self.newPassword)
+        try await f.a.session.sync()
+        let report = try await b.session.syncAll()
+        #expect(report.awaitingNewPassword)
+        withKnownIssue("Z16: header names carry no digest, so a name created first squats the genuine header") {
+            #expect(report.account.candidateHeadersFetched == 1)
+        }
+    }
 }
