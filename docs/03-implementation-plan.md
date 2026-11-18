@@ -346,7 +346,7 @@ half delivered** on a Mac; the transports are open.
   signed persistence), `writePermission` and `writeStanding` (F4.5): whether an account may write now, and which of
   its writes count once it may not, by the **write cut** that the record ending its permission carries, the same on
   every device;
-- fingerprint verification: the typed safety number and the scannable `FingerprintCode`, `VerifiedContacts` (signed
+- fingerprint verification: the typed full code (the 60-digit fingerprint) and the scannable `FingerprintCode`, `VerifiedContacts` (signed
   pins behind the `VerifiedContactStore` port), the `KeyBundleDirectory` port, and both sides of an invitation
   (`OutgoingInvitation`, `IncomingInvitation`) as state machines that cannot wrap or accept a key before the
   fingerprint is confirmed (F4.1, F4.2), and `MemberKeyCheck`, the comparison of a chain's member keys with the
@@ -389,9 +389,27 @@ device seals again, after a rotation, only what it has judged against the new he
 §8.10). The rename control in `VaultsView` follows `VaultRow.mayRename`; that view change
 is not built.
 
+**Delivered: vault sharing codes** (ADR 0010, the owner's option A; `02-architecture.md` §8.4), on Linux: the
+`SharingBoard` port with `InMemorySharingBoard`, the session's three board messages and the transcript
+(`VaultSharingCode.swift`), both sides as state machines (`SharingCodeStarter`, `SharingCodeJoiner`) that yield
+`SharingCodeEvidence` only from a typed code or a scan that matched, `VerificationMethod.sharingCode`, the scanned
+`ScannedSharingCode`, and the invitation sent inside the session; in `VaultSession`, the session in memory with the
+lock checked before anything reaches the board, the pins it makes, "keys changed" settled only to keys a chain lists,
+and the invitation through it (`VaultSession+SharingCode.swift`); the screen models (`InvitationModel`,
+`AcceptInvitationModel`, `MemberVerificationModel`), with the full code as the fallback and "I compared them myself"
+removed (G3); a fuzz target (`sharing-code`); and the SwiftUI screens, a VisionKit scanner on iPhone and iPad, and
+XCUITests over a Debug-only stand-in for the other person and the camera, written and not yet built on a Mac. Tests:
+"Vault sharing codes" (`WatchwordSharingTests`, known answers from Python `hashlib`), "Vault sharing codes through
+VaultSession", the screen models in "Screen models: sharing", and the adversarial areas "sharing and membership"
+(`AdversarialSharingCodeTests.swift`) and "shared vaults through the session"
+(`AdversarialSharedVaultSharingCodeTests.swift`); reviewed in `06-adversarial-review.md` §U. The manual cases are
+`docs/manual-tests/camera-scanning.md` and `vault-sharing-code.md`.
+
 **Still open:**
 
 - A macOS run of all of it against CryptoKit, and of `SQLiteSharingStore` at all.
+- The sharing board's production adapter, beside the key directory's (neither exists): until then a vault sharing
+  code session runs only in tests and a `--uitest` launch, and a release build offers none.
 - Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself.
 - An erasure summary claims what a late writer had seen when the deleting device had merged its version (S45), and a
   late version's claims about current members' future edits are carried on (S46).
@@ -401,13 +419,15 @@ is not built.
   for the file transport (the `ShareAccessControl` port is the seam), and the key directory's adapter (the account
   record; `KeyBundleDirectory` is the port, `VaultSession.publicKeyBundle` what it publishes).
 - The sharing UI is **written, not yet built on a Mac** (milestone 3's account screens above): share a vault,
-  invite (name the account by ID or fingerprint code, compare the safety number by typing it, by the code, or by
-  eye, choose a role, send the invitation as text), accept (paste, compare the owner's number, join), the member list
-  with unverified members and changed keys shown as such (D17), roles changed and members removed as the rules
-  allow, leave, rotate, "pending rotation" (F4.3), the held-aside count linking to the quarantine, and this
-  account's own safety number with a QR code. A demotion to read-only is followed by a rotation (S42's way out).
-  `VaultSharingTests` invites `UITestPeer`'s second account. Still open: scanning a QR code (camera), and the
-  transports' own share sheets.
+  invite by vault sharing code (show the number and its QR code, type or scan their code, show this device's, choose
+  a role, the invitation sent inside the session) or by the full code (name the account by ID or fingerprint code,
+  type their sixty digits, send the invitation as text), accept (type or scan their number, the codes both ways, join
+  once the invitation arrives; or paste and type the owner's full code), the member list with unverified members and
+  changed keys shown as such (D17) and a session offered with each, roles changed and members removed as the rules
+  allow, leave, rotate, "pending rotation" (F4.3), the held-aside count linking to the quarantine, and this account's
+  own full code with a QR code. A demotion to read-only is followed by a rotation (S42's way out). `VaultSharingTests`
+  invites `UITestPeer`'s second account by code and by scan, and joins its vault. Still open: the camera on a real
+  device (manual cases), and the transports' own share sheets.
 - The manual CloudKit run of S3 and S4.
 - The screen that tells the person to update when a shared vault has gone on in a later format is **written**
   (the vault's banner and row, the item detail's read-only banner with Edit and Move to Trash disabled, and "update

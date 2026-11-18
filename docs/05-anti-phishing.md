@@ -178,13 +178,18 @@ asks a second time ("Accept Anyway"). The switch is off to begin with, as every 
 this, the screen showed the host as the file spelled it, so a file could offer the bank's item a look-alike that
 rendered as the bank (review of the account screens, finding 3).
 
-**Comparing fingerprints before sharing.** A fingerprint code (`WWFP1-…`) pasted from a message only names the
-account: anyone who can message the person can send a code for an account of their own. The invite screen still asks
-for the typed safety number or the person's own "they match", and the pin records which (`VerificationMethod`,
-S16). `scannedCode` is for a code read by the camera from the other person's screen, which the app does not do yet,
-so it never records one. The role step names the account being invited and says how its keys were confirmed, never
-"the numbers match" unless they were compared (finding 2). Accepting an invitation from an owner verified before
-still asks before joining (finding 8).
+**Checking each other before sharing** (ADR 0010). The invite screen runs a vault sharing code session: eight digits
+one way, then six typed on each device from the other's screen, each compared by the device, never a "they match"
+taken on the person's word (G3). The screens say whose screen the digits come from and warn against digits that
+arrive in a message (`SharingCodeWording.channelWarning`): a voice imitated on a call, or a person persuaded to type
+digits someone sent, defeats this as it defeats every out-of-band comparison, and nothing in the protocol can tell.
+A scan reads the other person's screen with the live camera only, never the photo library or the pasteboard, so a QR
+code passed on in a message is no scan. A fingerprint code (`WWFP1-…`) pasted on the fallback path only names the
+account: anyone who can message the person can send a code for an account of their own, so the full code must still be
+typed, and the pin records how it was made (`VerificationMethod`, S16). The role step names the account being invited
+and says how its keys were checked (finding 2). Accepting an invitation from an owner verified before still asks
+before joining (finding 8), and an invitation whose owner is not the person just checked waits for the owner to be
+checked too: nobody vouches for an owner.
 
 **Ambiguous match.** Both accounts listed with their distinguishing field (username/email) and the
 matched scope. Nothing pre-selected.

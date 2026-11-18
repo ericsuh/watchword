@@ -62,7 +62,10 @@ UI tests launch the app with `--uitest`, which (Debug builds only) swaps in in-m
 over an in-memory transport with `UITestPeer`, the rest of a household the test drives from a Debug-only Settings
 section: a second device of the same account (it enrols with `WATCHWORD_UITEST_PASSWORD` from the launch environment,
 and can rename items, change the password and write an implausible version) and another person's account that accepts
-invitations. A `--uitest` launch also has sharing over an in-memory key directory, no auto-lock, a version-jump ceiling
+invitations, and that, at a vault sharing code session, types, reads out, scans and is scanned from Debug-only buttons on
+the sharing screens themselves (the "(UI test)" buttons, `AccessibilityID.Debug.member…`), which also stand in for the
+camera, so XCUITests drive the scan through the same `cameraScanned` entry the camera does.
+A `--uitest` launch also has sharing over an in-memory key directory and sharing board, no auto-lock, a version-jump ceiling
 of 16 (so the peer's version lands in the quarantine), breach checks answered in process by `UITestPwnedPasswords`, and
 buttons that stand in for the system file picker (a sample CSV, the last exported archive). Account screens open from
 Settings in sheets of their own, each with a Done button (`screen.done`). UI tests find elements by `AccessibilityID`
@@ -186,7 +189,9 @@ Fifteen shipped modules, dependency-ordered, plus test support:
 - **`WatchwordSharing`** — milestone 4's protocol core for shared vaults: the signed membership chain
   (`MembershipRecord`, `MembershipRules`, `MembershipLedger`, `writePermission`, `writeStanding` and the
   `WriteCut`, `administratorStanding` for the vault's name, `status(of:)`), fingerprint
-  verification (`FingerprintCode`, `VerifiedContacts` and its `VerifiedContact` token, `MemberKeyCheck`), both sides
+  verification (`FingerprintCode`, `VerifiedContacts` and its `VerifiedContact` token, `MemberKeyCheck`), vault sharing
+  code sessions (ADR 0010: `SharingCodeStarter`, `SharingCodeJoiner`, `SharingCodeEvidence`, `ScannedSharingCode`,
+  over the `SharingBoard` port with `InMemorySharingBoard`), both sides
   of an invitation, key grants (`KeyGrantCodec`, `grantSender`/`openGrant`), `LeaveRequest`, and rotation as data
   (`RotationPlanner`, `RotationPlan`, `PendingRotation`, `recordsToReseal`). Ports: `KeyBundleDirectory`,
   `VerifiedContactStore`. Depends on `WatchwordEnvelope`, `WatchwordCrypto` and `SecureMemory`; not on
@@ -552,6 +557,18 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   take a predictable record's name (S20).
 - Cheap checks, then the signature, then anything that costs work: unsigned junk costs one signature check, and no
   examination is bounded by a count that junk can fill (ledger candidates, grants, leave requests).
+- **Vault sharing codes** (ADR 0010, `docs/02-architecture.md` §8.4). A pin comes only from evidence a device
+  checked: a completed session (`SharingCodeEvidence`, made only by `SharingCodeStarter`/`SharingCodeJoiner` after a
+  typed code or a scan matched, naming the keys it is about and the account it is for), a scan, or the full code typed.
+  There is no "the person says they match" (`comparedByEye` is gone; raw value 3 is reserved and a pin carrying it is
+  ignored): never add a bare "yes". Each side looks the other's bundle up **once, before its own nonce is public**, and
+  the starter reveals **once, for the one reply it holds**; never re-read the reply slot or the directory afterwards.
+  The transcript hashes `accountID ‖ X25519 ‖ Ed25519`, never a bundle's self-signature (randomised on CryptoKit). A
+  session lives in the actor's memory only, runs one step at a time (`busy`), checks the lock before anything reaches
+  the board (`beforeReveal`, `beforeReply`), and `lock()` drops it. A session never replaces a pin on its own; the
+  person's choice replaces one only to keys a chain lists (`replacePinFromSharingCode`). An invitation through a
+  session is accepted only once its owner is pinned by the invitee's own check: nobody vouches for an owner. A scanned
+  code reaches the session only through the screens' `cameraScanned`, from the live camera.
 - Nothing is wrapped to, and no chain is anchored on, a bundle that is not a `VerifiedContact`; only
   `VerifiedContacts` makes one. Keep that typing, as with `NormalizedHost`. Wrapping to the bundles a chain lists
   (a rotation, `makeGrant`) takes a `MemberKeyCheck` made on the current head, which only

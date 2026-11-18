@@ -164,3 +164,20 @@ authentic and public.
   exhausted codes; a lock mid-session; a session's evidence refused for any other session or account.
 - The camera is a new permission on iOS (`NSCameraUsageDescription`), used only on the scanning screen, and cannot
   be exercised by CI: `docs/manual-tests/` lists what a person checks on real devices.
+
+## Implementation note (2026-11-18)
+Built as decided (`docs/02-architecture.md` §8.4; review in `06-adversarial-review.md` §U), with these specifics:
+
+- The transcript hashes each bundle as `accountID ‖ X25519 key ‖ Ed25519 key`, not in `KeyBundleCodec` bytes: those
+  carry the self-signature, which CryptoKit randomises, so a device's own bundle and the directory's copy would hash
+  apart (V12). The self-signature says nothing about whose keys they are.
+- Board objects carry the session ID in every message (`"WWVS" ‖ version ‖ kind ‖ session ‖ …`), so a reply or reveal
+  of another session is refused at once; the invitation object is `"WWVI"`, bound to the session, its number and the
+  joiner. Each device's lookup in the directory happens once, before its own nonce is published.
+- A lock is checked after the board and the directory answer and before anything is held or published (V9); one step
+  of a session runs at a time.
+- A session never replaces a pin on its own. "Keys changed" is settled only by the person's explicit choice, and only
+  to keys a vault's chain lists for that account (V13, an owner decision still open).
+- No production board adapter exists yet, as none exists for the directory, and a release build configures no sharing
+  at all; sessions run in tests and in a `--uitest` launch. A configuration with a directory and no board offers the
+  full code only (`SharedVaultError.sharingBoardNotConfigured`).

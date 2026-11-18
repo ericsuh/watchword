@@ -46,6 +46,7 @@ that a test target may contain both as long as a single test does not mix their 
 | --- | --- |
 | F1.x items/fields | Codable round trips; property test "any item survives encode→decode"; history kept whatever its age or length, with `FakeClock`, and an edit past the payload limit refused rather than pruned; `WatchwordModelTests`: "Binary text encodings", "OTP parameters" (the canonical `otpauth` URI round trip, issuers and accounts containing a colon included), "Passkey credential field", "Byte-exact equality of item values", "Sync metadata as stored" |
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
+| F4.2 checking a contact (ADR 0010) | `WatchwordSharingTests` "Vault sharing codes" (typed and scanned input parsed exactly, every board message at its one length, the commitment and codes against Python `hashlib`, the transcript binding every input and ignoring a re-signed bundle, an honest session, a scan each way, the invitation inside a session); "Fingerprint verification and invitations" (`reservedMethodIsNoPin`: a pin carrying the removed "compared by eye" is no pin). `WatchwordKitTests` "Vault sharing codes through VaultSession" (pins both ways, the invitation through the session joins the vault, a scan each way, a lock ends the session, no board, a malformed number). `WatchwordPresentationTests` "Screen models: sharing" (`inviteBySharingCode`, `memberVerification`, the fallback by full code) and the wording tests. Adversarial: "sharing and membership" (`AdversarialSharingCodeTests.swift`) and "shared vaults through the session" (`AdversarialSharedVaultSharingCodeTests.swift`), §6.4. Fuzz: `sharing-code`. UI: `VaultSharingTests`. Manual: `camera-scanning.md`, `vault-sharing-code.md` |
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes (protocol core, milestone 4, `WatchwordSharingTests`: "Membership record format", "Sharing formats: known answers", "Membership chain rules", "Membership ledger", "Fingerprint verification and invitations", "Key grants and rotation", and "Shared vault simulation" — two and three members with real keysets over a hostile store: create, invite, verify, accept, write, role change, removal with rotation, leaving, an interrupted rotation, concurrent administrators, deletion; through `VaultSession`s of different accounts over `InMemorySyncTransport`: `WatchwordKitTests` "Shared vaults through VaultSession", S3 and S4 with invitation, verification, read-only refusal, promotion, removal with rotation; over CloudKit: open) |
 | F4.7 renaming a shared vault | `WatchwordSharingTests` "Key grants and rotation": which of an account's descriptions count along a chain (all, the cut that ended the role, none), and a cut required exactly where a permission or an administrator's role ends. `WatchwordKitTests` "Shared vaults through VaultSession": `renamingASharedVault` (the typed refusal before anything is sealed, the owner's and an administrator's renames on every device, the member's own vaults unaffected, the role deciding in both directions, a rename made before the device heard of its demotion never published). `WatchwordPresentationTests` "Screen models: sharing": `whoMayRename`. Adversarial: "shared vaults through the session" (`AdversarialSharedVaultRenameTests.swift`) and "sharing and membership" (`administratorStandingFollowsTheOwnersRecord`), below. The view's control (`VaultsView`): not built here |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
@@ -102,9 +103,11 @@ with password re-entry, import of 1PUX/CSV fixtures.
   itself until the extension answers requests (milestone 5). The accessibility audit is not wired
   in yet.
 - The account screens (vaults and sharing, devices, the quarantine, the security report, import, export and
-  restore) add, on both platforms: `VaultSharingTests` (a vault created, renamed and shared; the other person's
-  safety number shown and confirmed before a role is offered; the invitation issued, accepted by `UITestPeer`'s
-  second account and the member listed with the role given), `DeviceRevocationTests` (a password changed on the other device announced after a sync, the
+  restore) add, on both platforms: `VaultSharingTests` (a vault created, renamed and shared, and the other person
+  invited with a vault sharing code: no role offered before both codes are checked, a wrong code refused with the
+  tries left, the invitation sent inside the session and accepted by `UITestPeer`'s second account, the member listed
+  with the role given; the same with their screen scanned through the camera's stand-in; and this account joining the
+  other person's vault, number typed, codes both ways, the invitation arriving inside the session), `DeviceRevocationTests` (a password changed on the other device announced after a sync, the
   old one refused with the way out shown and taken, then that device removed with a new password, which then
   unlocks), `QuarantineTests` (a version jumping past the
   launch's ceiling held aside, listed by item and discarded only through the confirmation) and `ImportExportTests`
@@ -198,9 +201,11 @@ job, runs it with the other UI tests, and a flow that breaks fails it there.
   its password filled in by the generator), `item-list`, `item-detail` (password hidden), `item-detail-revealed`,
   `trash-confirmation`, `locked`, `unlock-failed`, `settings`, `item-list-conflict` (the badge after a concurrent
   rename), `conflict-resolution`; then the account screens: `vault-list`, `vault-new`, `vault-detail` (not shared
-  yet), `invite-fingerprint` (the other person's safety number, before anything can be sent), `invite-code`,
-  `vault-members` (owner and member after the acceptance), `own-safety-number` (the number and the QR code),
-  `accept-invitation`, `quarantine` (a held-aside version with its item, vault and device), `security-report` (a
+  yet), `invite-start` (what a vault sharing code session asks of both), `invite-sharing-code` (the eight digits and
+  their QR code), `invite-their-code` (typing the six digits on their screen), `invite-own-code` (this device's six
+  and the role), `invite-sent`, `vault-members` (owner and member after the acceptance), `own-full-code` (the full
+  vault sharing code and its QR code), `accept-number`, `accept-codes`, `accept-confirm` (their invitation arrived,
+  asked before joining), `accept-invitation` (the fallback: pasting), `quarantine` (a held-aside version with its item, vault and device), `security-report` (a
   breached password reused by two items, after Check Now), `import`, `import-review` (a duplicate waiting for a
   choice), `import-merge` (the `www` host and the sign-in details a merge would add, none accepted, the password
   hidden), `import-done`, `export` (the standing plaintext warning), `export-report`, `restore-review` (the date the
@@ -424,6 +429,21 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   their pushed segments are rejected by remaining members.
 - Read-only member's writes are rejected by the transport fake and never merged.
 - Two admins remove each other concurrently → deterministic outcome, no vault lock-out.
+- Vault sharing codes (ADR 0010, its security analysis), "sharing and membership": an adversary in the middle of two
+  sessions it runs back to back, in either interleaving, gets codes that do not match and evidences nothing
+  (`middle`); a directory that lies to one side (`directoryLiesToOneSide`); a bundle published after a device fixed
+  its own (`bundleFetchedLater`); a reply replaced after the reveal, never read and never revealed for
+  (`replyReplacedAfterTheReveal`); a reveal planted early (`earlyReveal`); a reply and a commitment with its reveal
+  replayed from another session (`replay`); a sniper answering first (`sniping`); three wrong codes and input that
+  is not a code (`wrongCodes`); ten minutes without progress (`timing`); the same account on both ends
+  (`sameAccount`); a scan of another account or other keys (`wrongScans`); evidence and an invitation used for another
+  account or session, forged or altered (`evidenceStaysInItsSession`); junk under a session's names
+  (`junkOnTheBoard`). "Shared vaults through the session": a lock while a step waits on the board reveals and pins
+  nothing (`lockMidSession`, which failed before the lock was checked ahead of the reveal); two steps at once
+  (`oneStepAtATime`); an administrator's invitation accepted only once the owner is checked by the invitee
+  (`noVouching`); a directory that changes the invitee's keys after the session (`directoryChangesAfterTheSession`);
+  an invitation planted in a session's slot (`plantedInvitation`); a "keys changed" warning settled only to keys the
+  chain lists (`keysChangedSettledOnlyToListedKeys`).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed
@@ -892,7 +912,9 @@ Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`,
 selected by `WATCHWORD_FUZZ_TARGET`: `csv`, `password-csv`, `inflate`, `zip`, `1pux`, `1pux-archive`, `cxf`,
 `amplify`, `envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the
 import's scope derivation), `otpauth`, `passkey` and `archive` (`AccountArchive.parse`, everything checked before a key
-is derived; its seed is the archive an independent implementation wrote). Each target runs a parser over arbitrary bytes and then checks
+is derived; its seed is the archive an independent implementation wrote), and since ADR 0010 a sixteenth,
+`sharing-code` (what a vault sharing code session reads from the camera, a keyboard or the board: `ScannedSharingCode`,
+`FingerprintCode`, typed numbers and codes, and the three board messages, each held to its one spelling). Each target runs a parser over arbitrary bytes and then checks
 what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports and names no
 host that no exported item was scoped to, an inflated
 stream is within its caps, every imported scope passes `ScopePolicy`, every one-time-password and passkey
@@ -1075,8 +1097,12 @@ other does, and reported as not required on Linux, where they cannot compile.
 What no runner can check is written down as cases a person runs, in `docs/manual-tests/` (one file per area, each
 case a heading and numbered steps whose **Expected** lines are the checks): Face ID and Touch ID with the Secure
 Enclave, what the Keychain keeps on one device and a restored backup does not carry, exported files and the
-`.watchwordbackup` type as the Files app and Finder treat them, the Emergency Kit on paper, and what the app
-switcher shows. A feature that adds something only a person can check adds its cases in the same pull request;
+`.watchwordbackup` type as the Files app and Finder treat them, the Emergency Kit on paper, what the app
+switcher shows, the camera scanning a vault sharing code on iPhone and iPad (`camera-scanning.md`: the permission,
+the live camera only, a code that is not Watchword's, the stand-in absent from a release build), and a vault sharing
+code session between two people (`vault-sharing-code.md`: what each reads and types, a wrong code, the ten-minute
+limit, a lock mid-session, VoiceOver reading the digits; it needs the sharing board's production adapter, which does
+not exist yet, so until then it runs as far as the cases say). A feature that adds something only a person can check adds its cases in the same pull request;
 they are run before a release and after any change to the adapters or screens they name. They are not a gate: no
 CI job reads them.
 

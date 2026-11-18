@@ -1401,13 +1401,14 @@ account record on the transport. It is a store like any other: what it returns i
 account asked about, and is then only a *candidate*.
 
 A bundle's **fingerprint** is `SHA-512("WW-fingerprint-v1" ‖ accountID ‖ pkX ‖ pkEd)` truncated to 60 bytes, shown as
-a 60-digit **safety number** in twelve groups of five, and as a QR code carrying
+a 60-digit **full vault sharing code** (the API's `safetyNumber`; the screens no longer say "safety number", ADR 0010)
+in twelve groups of five, and as a QR code carrying
 `"WWFP1-" ‖ hex(accountID ‖ fingerprint)` (158 characters; one scan names the account and authenticates its bundle).
 A typed number matches only as sixty ASCII digits with ASCII spaces ignored; a scanned payload is parsed exactly;
 both comparisons are constant-time.
 
-**Verified contacts** (`VerifiedContacts` over the `VerifiedContactStore` port). Confirming a fingerprint, by typed
-number, by scan, or by the person's own comparison, **pins** the bundle: a record signed by the pinning account's own
+**Verified contacts** (`VerifiedContacts` over the `VerifiedContactStore` port). Confirming a bundle, by a completed
+vault sharing code session (below), by a scan, or by the full code typed, **pins** the bundle: a record signed by the pinning account's own
 key. From then on a different bundle for that account is refused and reported (`SharingError.keySubstituted`),
 never silently adopted, in the three places the module meets one: the key directory's answer on either side of an
 invitation, and the member list of a chain (below). Replacing a pin is a separate, explicit act. A pin that does
@@ -1460,11 +1461,56 @@ members the check on the current head found pinned to the keys listed, or `nil` 
 locked since the head changed); the member list calls a member verified only from that list, and anyone it does not
 name "not checked yet". An empty `unverifiedMembers` is not evidence of anything.
 
-**What the screens accept as a comparison** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). The typed
-safety number (`.safetyNumber`) or the person's own "the numbers match" (`.comparedByEye`), in that order. A
-fingerprint code pasted from a message only names the account to look up: it is not `.scannedCode`, which is for a
-code read by the camera from the other person's screen and is never recorded until the app can scan one (finding 2).
-`VerifiedContact.method` therefore says what the person did (S16).
+**Vault sharing codes** (ADR 0010; `VaultSharingCode.swift`, `SharingBoard.swift`, `VaultSession+SharingCode.swift`).
+Before a key is wrapped to someone, or a chain anchored on an owner, the two people run a **session** over the
+**sharing board**, a port (`SharingBoard`) of objects created once and fetched by exact name, never listed, which A1
+runs like the directory; no production adapter exists for either yet (`InMemorySharingBoard` serves tests and the
+UI-test household). The construction is the ADR's, a short authentication string over a commitment:
+
+```
+starter S: number (8 digits), session (16), Ns (32);   C = SHA-256("WWSC1-commit" ‖ session ‖ S.account ‖ Ns)
+           board[number]/commit = session ‖ S.account ‖ C
+joiner  J: fetch commit; bundle(S) from the directory, fixed now;   board[number]/reply = session ‖ J.account ‖ Nj
+S:         fetch reply; bundle(J) from the directory, fixed now;    board[number]/reveal = session ‖ Ns   (once)
+J:         fetch reveal; check C
+both:      T = SHA-256("WWSC1-code" ‖ session ‖ number ‖ S.account ‖ keys(S) ‖ J.account ‖ keys(J) ‖ C ‖ Ns ‖ Nj)
+           joiner's code = T[0..<8] mod 10^6, starter's = T[8..<16] mod 10^6, six digits each
+```
+
+Each board object is `"WWVS" ‖ version ‖ kind ‖ session ‖ …` of one fixed length, parsed exactly. `keys(B)` is
+`accountID ‖ X25519 ‖ Ed25519`, the fingerprint's inputs, not the ADR's `KeyBundleCodec` bytes: those carry the
+self-signature, which CryptoKit randomises, so a device's own bundle and the directory's copy would hash apart on a Mac
+(deterministic BoringSSL signing would hide it on Linux). The person on S reads eight digits; the person on J types
+them (or scans S's QR code, `"WWSC1-" ‖ number ‖ FingerprintCode`), reads six back, S's person types them, and only
+then does S show its six for J's person to type. Each device compares what was typed with its own transcript in
+constant time; three wrong codes, ten minutes without progress (the injected clock), a lock or a restart end the
+session, and every ending is shown (G2). Each device looks the other's bundle up **once, before its own nonce is
+public**, and S reveals **once, for the one reply it holds**, never again: a bundle or a reply chosen after a nonce is
+public could be searched for. A scan replaces typing in its direction and authenticates by the whole fingerprint
+(`.scannedCode`); a starter scans the joiner's `FingerprintCode` in place of typing their code.
+
+What a completed direction yields is `SharingCodeEvidence`: the bundle it authenticated, the account it was made for,
+and the session. Only `SharingCodeStarter` and `SharingCodeJoiner` make one (the typing discipline of
+`VerifiedContact`), and `VerifiedContacts.verify(_:)` pins it as `VerificationMethod.sharingCode` (or `.scannedCode`)
+for that account alone. The session pins as soon as evidence exists; a different pin already there is not replaced
+(`keysDifferFromPin`), and the person's explicit "use their new keys" replaces it only to keys a shared vault's chain
+lists for that account (`replacePinFromSharingCode(listedIn:)`), so a session with the wrong device cannot settle a
+"keys changed" warning to keys nobody listed. After a session the starter invites as before (`invite`: the grant to the
+pinned bundle and the record that adds them) and sends the `Invitation` as one more board object, `"WWVI"`, signed by
+its account key and bound to the session, its number and the joiner (`inviteThroughSharingCode`); the joiner opens it
+only under the bundle the session authenticated (`sharingCodeInvitation`) and accepts with every existing check. **No
+vouching:** an invitation whose owner is not the starter is accepted only once the joiner has pinned the owner by a
+session (or the full code) of their own. The session lives in memory in the actor (`sharingCodeRun`), runs one step
+at a time (a second is `busy`), checks the lock before anything reaches the board, and `lock()` drops it.
+
+**What the screens accept as a check** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). A vault sharing code
+session, or the fallback: the full vault sharing code typed (`.safetyNumber`), behind a secondary action, for two
+people who cannot be at their devices together. The person's own "the numbers match" is gone (ADR 0010, G3): the case
+is removed and its raw value (3) reserved, so a pin that carries it is ignored and the contact is unverified again. A
+fingerprint code pasted from a message only names the account to look up; `.scannedCode` comes only from the camera,
+through the screens' `cameraScanned` entry points (finding 2). `VerifiedContact.method` says what the person did
+(S16). The member list offers a session with any member it shows as unverified or with changed keys
+(`MemberVerificationModel`); a session another account answers is ended before anything is pinned.
 
 **Names of shared vaults.** Only a shared vault's owner or an administrator may rename it (owner decision,
 2026-11-17). The review of the account screens (finding 4) had left renaming with every member who may write, for the
@@ -1853,7 +1899,10 @@ anything is sealed; vaults that are not shared, and the Personal vault, are rena
 is the owner's and also proposes `deleteVault`; a member leaves instead.
 
 **The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
-own safety number), `contactCandidate` and `verifyContact` (fingerprint by typed number, scanned code or comparison;
+own full vault sharing code), the vault sharing code session (`startSharingCodeSession`, `joinSharingCodeSession`,
+`refreshSharingCodeSession`, `enterSharingCode`, `scanSharingPartnerCode`, `inviteThroughSharingCode`,
+`sharingCodeInvitation`, `replacePinFromSharingCode`; §8.4), `contactCandidate` and `verifyContact` (the full code
+typed, or a scanned code;
 a different pinned bundle is `keySubstituted` unless the person replaces the pin), `shareVault` (the genesis
 record), `invite` (needs a verified contact: wraps the current key and proposes the addition), `acceptInvitation`
 (confirms the owner's fingerprint if not pinned, continues any ledger the device ever held for the vault, S26, and
@@ -3242,7 +3291,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordAutoFill     credential provider request model, TOTP, passkey
                                 authenticator, identity planner (§9.2)             [milestone 5; extension adapter open]
   Sources/WatchwordSharing      membership chain, verified contacts, invitations,
-                                key grants, rotation plans                         [milestone 4; protocol core
+                                vault sharing codes (board port), key grants,
+                                rotation plans                                     [milestone 4; protocol core
                                                                                     and session wiring done;
                                                                                     transports, UI open]
   Sources/WatchwordHygiene      HIBP clients, scan schedule, strength estimator,

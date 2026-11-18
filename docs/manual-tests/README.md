@@ -11,10 +11,12 @@ enrolled finger or face, no camera, no signed and entitled build, and no second 
 | [`export-and-backup.md`](export-and-backup.md) | Exported files, the `.watchwordbackup` type, restore | The system file picker and the Files app are outside the app's process. |
 | [`emergency-kit.md`](emergency-kit.md) | The Emergency Kit PDF | Printing, and scanning a printed page, need paper and a camera. |
 | [`screen-privacy.md`](screen-privacy.md) | The app switcher, locking on leaving | The app switcher's snapshot is taken by the system. |
+| [`camera-scanning.md`](camera-scanning.md) | Scanning a vault sharing code (ADR 0010) | CI has no camera, and the permission prompt is the system's. |
+| [`vault-sharing-code.md`](vault-sharing-code.md) | Two people checking each other with a vault sharing code | Needs two people at two devices (one, with the UI-test stand-ins, until the board adapter exists). |
 
 Cases are added with the feature they cover, in the same pull request. Not here yet, because the feature is not
-built: scanning a vault sharing code with the camera (ADR 0010), AutoFill in Safari and other apps, and sync over
-iCloud.
+built: AutoFill in Safari and other apps, and sync over iCloud. The two sharing-code files use a Debug build launched
+with `--uitest`, not the normal launch below, until the sharing board has a production adapter: each says so.
 
 ## Before you start
 
