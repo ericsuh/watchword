@@ -15,6 +15,15 @@ extension VaultSession {
         await syncRetiredAuthors(vaultID: vaultID)
     }
 
+    /// For tests: whether this device recorded the segment at `sequence` of `device`'s stream, and what it skipped.
+    func recordedSegment(_ device: UUID, _ sequence: UInt64, in vaultID: UUID) -> Bool {
+        sharing.vaults[vaultID]?.index.segment(device: device, sequence: sequence) != nil
+    }
+
+    func skippedSegment(_ device: UUID, in vaultID: UUID) -> UInt64? {
+        sharing.vaults[vaultID]?.index.skippedPassedOver[device]
+    }
+
     /// For tests: whether the vault's items were last judged against the basis as it stands, with no replay due.
     func judgementIsSettled(_ vaultID: UUID) async -> Bool {
         let basis = await judgedBasis(vaultID)
@@ -272,5 +281,80 @@ extension AdversarialSharedVaultTests {
         for account in [owner, victim] {
             #expect((try? await account.session.item(id: later.id))?.title == later.title)
         }
+    }
+}
+
+// Review finding Z155: what a member who may never write could add to the signed stream index had no bound.
+extension AdversarialSharedVaultTests {
+    /// Signs `entries` as `sequence` of `device`'s stream with `signer`'s keys and puts it on the transport.
+    static func plantSegment(
+        by signer: SharingAccount, as device: UUID, sequence: UInt64, in vaultID: UUID, entries: [SyncEntry] = [],
+        on transport: InMemorySyncTransport
+    ) async throws {
+        let location = SyncObjectLocation.segment(vaultID: vaultID, author: device, sequence: sequence)
+        let payload = SyncPayload(
+            kind: .segment, vaultID: vaultID, author: device, number: sequence, vector: [:], entries: entries)
+        let adapter = VaultSyncAdapter(session: signer.session)
+        let envelope = try await adapter.seal(payload.encoded(), at: location)
+        let signature = try await adapter.sign(envelope, at: location)
+        try await transport.create(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+    }
+
+    /// Threat: a read-only member (A4) who signs segment after segment into the streams of devices of their own, or
+    /// at numbers ahead of another member's stream. Since Z146 each was recorded, by digest and signer, in every
+    /// device's signed index, about 60 bytes apiece with no limit: past the index's 64 MiB bound it is refused and
+    /// rebuilt from the log at every load. Such a segment names no stream and is filed nowhere; it is needed only
+    /// where a write cut's chain runs over it, below a segment of another account's in the same stream. So it is
+    /// recorded only there, and a segment of the stream's own above one that was skipped asks for the replay that
+    /// records it.
+    @Test("a read-only member's segments are recorded only where a write cut can need them")
+    func readOnlyFloodIsNotRecorded() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 3900)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let victim = try await household.account(seed: 3901)
+        let reader = try await household.account(seed: 3902)
+        try await owner.invite(victim, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(reader, to: vaultID, as: .readOnly, owner: owner)
+        _ = try await victim.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, victim, reader])
+        let victimDevice = try await Self.deviceID(of: victim)
+        let head = try await Self.head(of: victim, in: vaultID)
+        let rogue = try await household.secondDevice(of: reader, deviceID: victimDevice)
+        let own = try await household.secondDevice(of: reader)
+        let ownDevice = try await Self.deviceID(of: own)
+        for device in [rogue, own] {
+            try await device.session.acceptInvitation(
+                Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+                ownerEvidence: .safetyNumber(owner.safetyNumber))
+            try await device.session.sync()
+        }
+        for sequence in 1...12 {
+            try await Self.plantSegment(
+                by: own, as: ownDevice, sequence: UInt64(sequence), in: vaultID, on: household.transport)
+        }
+        try await Self.plantSegment(
+            by: rogue, as: victimDevice, sequence: head + 1, in: vaultID, on: household.transport)
+        try await owner.session.sync()
+        for sequence in 1...12 {
+            #expect(await !owner.session.recordedSegment(ownDevice, UInt64(sequence), in: vaultID))
+        }
+        #expect(await owner.session.skippedSegment(ownDevice, in: vaultID) == 1)
+        #expect(await !owner.session.recordedSegment(victimDevice, head + 1, in: vaultID))
+
+        // The victim steps over the planted segment and publishes above it: the owner records it, once.
+        var item = Self.bank(in: vaultID)
+        item.title = "Above the plant"
+        item = try await victim.session.save(item)
+        try await victim.session.sync()
+        try await Self.syncAll([owner], rounds: 2)
+        #expect(await owner.session.recordedSegment(victimDevice, head + 1, in: vaultID), "a cut's chain has a gap")
+        #expect(await owner.session.recordedSegment(victimDevice, head + 2, in: vaultID))
+        #expect(try await owner.session.item(id: item.id).title == item.title)
+        #expect(await owner.session.judgementIsSettled(vaultID))
+        try await owner.session.sync()
+        #expect(await owner.session.judgementIsSettled(vaultID), "the log is replayed at every sync")
     }
 }

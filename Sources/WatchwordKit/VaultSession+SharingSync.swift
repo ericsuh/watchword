@@ -696,6 +696,19 @@ extension VaultSession {
                     Self.mayHaveWritten($0, in: vault.ledger)
                 }
             } ?? true
+        // Such a segment is recorded only below a segment of another account's in the same stream, where a write
+        // cut's chain can run over it; any other is noted as skipped, and recorded by the replay that a segment above
+        // it asks for (review finding Z155).
+        if !counts, let index = sharing.vaults[location.vaultID]?.index,
+            !index.hasCountedSegment(location.author, above: location.number),
+            index.segment(device: location.author, sequence: location.number) == nil
+        {
+            if (index.skippedPassedOver[location.author] ?? .max) > location.number {
+                sharing.vaults[location.vaultID]?.index.skippedPassedOver[location.author] = location.number
+                sharing.vaults[location.vaultID]?.indexChanged = true
+            }
+            return
+        }
         let opened = opened && counts
         let entries = counts ? entries : []
         // Not recorded while locked: a segment is recorded once, so it must be recorded with its values. A lock that
@@ -738,6 +751,11 @@ extension VaultSession {
         vault.indexChanged = true
         sharing.vaults[location.vaultID] = vault
         guard counts else { return }
+        // A segment of a passed-over account below this one was skipped: the replay records it, for the cut's chain.
+        if let skipped = vault.index.skippedPassedOver[location.author], skipped < location.number {
+            sharing.vaults[location.vaultID]?.index.skippedPassedOver[location.author] = nil
+            requestReplay(location.vaultID)
+        }
         // An earlier segment of the stream arrived after a later one, and another account signed it: the stream is
         // that account's, and whatever was judged while it looked like someone else's is judged again (Z51).
         if let streamWas, streamWas != vault.index.account(ofStream: location.author) {

@@ -64,7 +64,7 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// stream's account by the first segment that happened to open. 5 since `ownTakenOut` (Z54) moved to a row of its
     /// own, which a rebuild of the index leaves alone (`OwnTakenOutRow`, Z121). 6 since `relied` (Z153): an earlier
     /// index does not say which revocations what it admitted rested on, so it is rebuilt by a replay; with it
-    /// `collected` (Z151) and each segment's `keyID` (Z152).
+    /// `collected` (Z151), each segment's `keyID` (Z152) and `skippedPassedOver` (Z155).
     static let formatVersion: UInt8 = 6
     static let maximumLength = 64 << 20
 
@@ -75,6 +75,8 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// (`account(ofStream:)`), asked for with every value judged.
     private var lowestNaming: [UUID: UInt64] = [:]
     private var lowestOther: [UUID: UInt64] = [:]
+    /// The highest sequence recorded of each stream whose signer is not `passedOver`.
+    private var highestCounted: [UUID: UInt64] = [:]
     /// The account and key pairs whose segments name a stream before any other's (review finding Z152): the accounts
     /// that first appeared in the chain, while that key was current, in a role that may write. A member let write
     /// only later (a read-only member promoted) did not, and a segment it signed under that key may have been written
@@ -114,8 +116,20 @@ struct SharedStreamIndex: Sendable, Hashable {
     /// segments no snapshot covers is merely missing them here (a lagging listing, a store withholding them) and is
     /// waited for.
     var collected: [UUID: UInt64] = [:]
+    /// For each stream, the lowest sequence of a `passedOver` account's segment that was not recorded because no
+    /// segment of another account's is recorded above it there (review finding Z155). Such a segment names nothing and
+    /// is filed nowhere; it matters only to a write cut's chain, which runs over a stream up to a segment of the
+    /// stream's own, so it is recorded once one is above it (a replay, asked for when that segment is recorded). A
+    /// member who may never write can sign any number of segments into streams of devices they list, and recording
+    /// each grew the signed index without bound; now it grows only by what another account's segments sit above.
+    var skippedPassedOver: [UUID: UInt64] = [:]
 
     init() {}
+
+    /// Whether a segment of an account that is not `passedOver` is recorded in `device`'s stream above `sequence`.
+    func hasCountedSegment(_ device: UUID, above sequence: UInt64) -> Bool {
+        (highestCounted[device] ?? 0) > sequence
+    }
 
     /// The account a device's stream belongs to: the one whose keys signed its lowest-numbered segment recorded here,
     /// passing over the segments of an account whose work cannot count (`passedOver`, Z146), and of those the lowest
@@ -139,6 +153,7 @@ struct SharedStreamIndex: Sendable, Hashable {
 
     private mutating func noteLowest(_ segment: Segment, device: UUID, sequence: UInt64) {
         guard !passedOver.contains(segment.account) else { return }
+        highestCounted[device] = max(highestCounted[device] ?? 0, sequence)
         if names(segment) {
             lowestNaming[device] = min(lowestNaming[device] ?? .max, sequence)
         } else {
@@ -199,6 +214,7 @@ struct SharedStreamIndex: Sendable, Hashable {
         naming = keys
         lowestNaming = [:]
         lowestOther = [:]
+        highestCounted = [:]
         firstCarrier = [:]
         valueCarriers = [:]
         for (device, stream) in streams {
@@ -300,9 +316,11 @@ struct SharedStreamIndex: Sendable, Hashable {
             out += SharedBytes.littleEndian32(UInt32(devices.count))
             for device in devices { out += SharedBytes.bytes(device) }
         }
-        let covered = collected.keys.sorted { $0.precedes($1) }
-        out += SharedBytes.littleEndian32(UInt32(covered.count))
-        for device in covered { out += SharedBytes.bytes(device) + SharedBytes.littleEndian(collected[device]!) }
+        for map in [collected, skippedPassedOver] {
+            let devices = map.keys.sorted { $0.precedes($1) }
+            out += SharedBytes.littleEndian32(UInt32(devices.count))
+            for device in devices { out += SharedBytes.bytes(device) + SharedBytes.littleEndian(map[device]!) }
+        }
         return out + (try keyset.sign(out, domain: .membership))
     }
 
@@ -379,14 +397,16 @@ struct SharedStreamIndex: Sendable, Hashable {
                 index[keyPath: keyPath].insert(device)
             }
         }
-        guard let coveredCount = reader.uint32(), Int(coveredCount) <= reader.remaining / 24 else { return nil }
-        var previousCovered: UUID?
-        for _ in 0..<coveredCount {
-            guard let device = reader.uuid(), previousCovered.map({ $0.precedes(device) }) ?? true,
-                let sequence = reader.uint64(), sequence > 0
-            else { return nil }
-            previousCovered = device
-            index.collected[device] = sequence
+        for keyPath in [\SharedStreamIndex.collected, \SharedStreamIndex.skippedPassedOver] {
+            guard let count = reader.uint32(), Int(count) <= reader.remaining / 24 else { return nil }
+            var previous: UUID?
+            for _ in 0..<count {
+                guard let device = reader.uuid(), previous.map({ $0.precedes(device) }) ?? true,
+                    let sequence = reader.uint64(), sequence > 0
+                else { return nil }
+                previous = device
+                index[keyPath: keyPath][device] = sequence
+            }
         }
         guard reader.remaining == 0 else { return nil }
         return index
