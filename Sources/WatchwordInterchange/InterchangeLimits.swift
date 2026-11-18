@@ -25,6 +25,7 @@ public struct InterchangeLimits: Hashable, Sendable {
         case urlsPerItem
         case scopeDerivations
         case storedItemBytes
+        case totalStoredBytes
     }
 
     /// The whole file as handed to a parser: an archive, a CSV file or a JSON document. 100 MB.
@@ -65,8 +66,15 @@ public struct InterchangeLimits: Hashable, Sendable {
     /// The size of one draft as the vault will store it, by `StoredItemSize`'s estimate. 768 KiB, under the vault's
     /// 1 MiB item payload (`ItemCodec.maximumPayloadLength`) with room for the item to be edited afterwards.
     public private(set) var maximumStoredItemBytes: Int
+    /// The drafts of the whole import as the vault will store them, the sum of `StoredItemSize`'s estimates. 512 MiB,
+    /// above what `maximumTotalFields` of small fields store (each costs about 270 bytes stored), so it binds only on
+    /// shapes that cost more stored than their fields count.
+    /// The stored form costs far more than the file for some shapes (each line of notes is stored again with its sync
+    /// metadata, about 272 bytes for one line feed), so a few megabytes of file could otherwise commit gigabytes of
+    /// sealed rows, published to every device of the account (review §Z, Z81). Reaching it fails the file.
+    public private(set) var maximumTotalStoredBytes: Int
 
-    /// The ceilings (docs/02-architecture.md §14).
+    /// The ceilings for a file from another app (docs/02-architecture.md §14). No initialiser can loosen them.
     public static let standard = InterchangeLimits(
         uncheckedInputBytes: 100 * 1024 * 1024,
         documentBytes: 100 * 1024 * 1024,
@@ -82,12 +90,50 @@ public struct InterchangeLimits: Hashable, Sendable {
         csvColumns: 100,
         urlsPerItem: 32,
         scopeDerivations: 100_000,
-        storedItemBytes: 768 * 1024)
+        storedItemBytes: 768 * 1024,
+        totalStoredBytes: 512 << 20)
+
+    /// The limits for an encrypted Watchword archive, sized to what the vault and the archive format accept, so that
+    /// an archive this app wrote restores (review §Z, Z82). The file is bounded by `AccountArchive` (256 MiB, 200,000
+    /// entries of at most 1 MiB and 64 KiB) before any of this is reached, and each entry was decoded as `ItemCodec`
+    /// decodes a stored item (1 MiB of payload at most):
+    ///
+    /// - items: `AccountArchive.maximumEntries`, 200,000;
+    /// - stored size of one draft: the vault's own payload limit, 1 MiB (`ItemCodec.maximumPayloadLength`);
+    /// - fields, scopes, tags and unresolved values in one item: 16,384, more than an item within 1 MiB can hold;
+    /// - fields over the whole archive, history included: 4,194,304, one for every 64 bytes the largest archive holds,
+    ///   which no field `ItemCodec` writes is shorter than (`InterchangeSessionTests` holds both numbers to the
+    ///   codec), so the budget cannot fail an archive this app wrote;
+    /// - scopes considered: 1,024 in one item and 400,000 in all, two per entry;
+    /// - stored size over the whole archive: 1 GiB, four times the largest archive, for the drafts' sync metadata
+    ///   that the archive does not carry (an attacker's archive can still leave its notes' line metadata out: the
+    ///   budget is what bounds that).
+    ///
+    /// Only `ArchivedItems` uses it, and only the session's restore reaches that; the public initialiser still clamps
+    /// to `standard`. Whatever an archive holds beyond these is listed when it is made (`exportArchive` reports it).
+    public static let archive = InterchangeLimits(
+        uncheckedInputBytes: 100 * 1024 * 1024,
+        documentBytes: 100 * 1024 * 1024,
+        archiveEntries: 50_000,
+        items: 200_000,
+        compressionRatio: 100,
+        entryBytes: 512 * 1024,
+        fieldBytes: 1024 * 1024,
+        fieldsPerItem: 16_384,
+        nestingDepth: 64,
+        entryNameBytes: 1_024,
+        totalFields: 4_194_304,
+        csvColumns: 100,
+        urlsPerItem: 1_024,
+        scopeDerivations: 400_000,
+        storedItemBytes: 1 << 20,
+        totalStoredBytes: 1 << 30)
 
     private init(
         uncheckedInputBytes: Int, documentBytes: Int, archiveEntries: Int, items: Int, compressionRatio: Int,
         entryBytes: Int, fieldBytes: Int, fieldsPerItem: Int, nestingDepth: Int, entryNameBytes: Int,
-        totalFields: Int, csvColumns: Int, urlsPerItem: Int, scopeDerivations: Int, storedItemBytes: Int
+        totalFields: Int, csvColumns: Int, urlsPerItem: Int, scopeDerivations: Int, storedItemBytes: Int,
+        totalStoredBytes: Int
     ) {
         maximumInputBytes = uncheckedInputBytes
         maximumDocumentBytes = documentBytes
@@ -104,6 +150,7 @@ public struct InterchangeLimits: Hashable, Sendable {
         maximumURLsPerItem = urlsPerItem
         maximumScopeDerivations = scopeDerivations
         maximumStoredItemBytes = storedItemBytes
+        maximumTotalStoredBytes = totalStoredBytes
     }
 
     /// Limits no looser than `standard`: each argument is clamped to `1...ceiling`, and one left out is the ceiling.
@@ -112,7 +159,8 @@ public struct InterchangeLimits: Hashable, Sendable {
         maximumItems: Int? = nil, maximumCompressionRatio: Int? = nil, maximumEntryBytes: Int? = nil,
         maximumFieldBytes: Int? = nil, maximumFieldsPerItem: Int? = nil, maximumNestingDepth: Int? = nil,
         maximumEntryNameBytes: Int? = nil, maximumTotalFields: Int? = nil, maximumCSVColumns: Int? = nil,
-        maximumURLsPerItem: Int? = nil, maximumScopeDerivations: Int? = nil, maximumStoredItemBytes: Int? = nil
+        maximumURLsPerItem: Int? = nil, maximumScopeDerivations: Int? = nil, maximumStoredItemBytes: Int? = nil,
+        maximumTotalStoredBytes: Int? = nil
     ) {
         let ceiling = InterchangeLimits.standard
         func clamp(_ value: Int?, _ ceiling: Int) -> Int {
@@ -134,7 +182,8 @@ public struct InterchangeLimits: Hashable, Sendable {
             csvColumns: clamp(maximumCSVColumns, ceiling.maximumCSVColumns),
             urlsPerItem: clamp(maximumURLsPerItem, ceiling.maximumURLsPerItem),
             scopeDerivations: clamp(maximumScopeDerivations, ceiling.maximumScopeDerivations),
-            storedItemBytes: clamp(maximumStoredItemBytes, ceiling.maximumStoredItemBytes))
+            storedItemBytes: clamp(maximumStoredItemBytes, ceiling.maximumStoredItemBytes),
+            totalStoredBytes: clamp(maximumTotalStoredBytes, ceiling.maximumTotalStoredBytes))
     }
 
     /// The value of the limit named `kind`.
@@ -155,6 +204,7 @@ public struct InterchangeLimits: Hashable, Sendable {
         case .urlsPerItem: return maximumURLsPerItem
         case .scopeDerivations: return maximumScopeDerivations
         case .storedItemBytes: return maximumStoredItemBytes
+        case .totalStoredBytes: return maximumTotalStoredBytes
         }
     }
 

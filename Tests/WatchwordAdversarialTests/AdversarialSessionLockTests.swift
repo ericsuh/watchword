@@ -83,7 +83,7 @@ extension AdversarialSessionInterchangeTests {
         try await Self.lockWins(at: .passwordCheck, in: vault) {
             try await vault.session.exportPlaintext(.onePUX, vaults: [personal], password: TestVault.password)
         }
-        for step in [AwayWork.passwordCheck, .archiveKeyDerivation] {
+        for step in [AwayWork.passwordCheck, .archiveKeyDerivation, .archiveRestoreCheck] {
             try await vault.session.unlock(password: TestVault.password)
             try await Self.lockWins(at: step, in: vault) {
                 try await vault.session.exportArchive(

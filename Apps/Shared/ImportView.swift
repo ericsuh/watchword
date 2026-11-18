@@ -111,10 +111,16 @@ struct ImportView: View {
                     .accessibilityIdentifier(AccessibilityID.Import.addsApex)
                 Toggle("Also import what the other app kept in its trash", isOn: $model.includesTrash)
                     .accessibilityIdentifier(AccessibilityID.Import.includesTrash)
+            } else {
+                // The backup's trash is the person's to restore or not (Z82); the review lists what it leaves out.
+                Toggle("Also restore what was in the trash", isOn: $model.includesTrash)
+                    .accessibilityIdentifier(AccessibilityID.Import.includesTrash)
             }
         } footer: {
             if restoring {
-                Text("Every item in the backup goes into the vault you choose, naming the vault it came from.")
+                Text(
+                    "Every item in the backup goes into the vault you choose, naming the vault it came from. What "
+                        + "you had put in the trash comes back only if you choose it above.")
             } else {
                 Text("Export your passwords from the other app first. Nothing is saved until you review the import.")
             }

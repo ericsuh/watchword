@@ -192,6 +192,9 @@ public struct ArchiveExport: Sendable, Hashable {
     public var vaultCount: Int
     /// Records in the chosen vaults that would not open, and so are not in the archive.
     public var unreadable: [UUID]
+    /// What a restore of this archive would not bring back, if anything (review §Z, Z82): the archive holds it, but
+    /// this version's restore would skip it or refuse the file. Checked with the restore's own assembler and limits.
+    public var restoreCheck: ArchiveRestoreCheck = ArchiveRestoreCheck()
 }
 
 /// The drafts of one import, between preview and commit. Session state; `lock()` drops it.
@@ -240,6 +243,8 @@ enum AwayWork: Sendable, Hashable {
     case passwordCheck
     /// A new archive's key derivation, under this account's parameters.
     case archiveKeyDerivation
+    /// A new archive's items run through the restore's assembler, to report what it would not bring back (Z82).
+    case archiveRestoreCheck
     /// An import's drafts compared with what is saved: which accounts each would hide, and which hosts are
     /// look-alikes. Linear in the file for a fixed vault, but the file and the vault are both large.
     case importReview
@@ -531,9 +536,14 @@ extension VaultSession {
             archiveID: archiveID, accountID: accountID, createdAt: now, wrappingKey: wrappingKey, salt: salt,
             parameters: parameters, using: &random)
         _ = try requireKeys(since: epoch)
+        let fork = ForkedGenerator(forkingFrom: &random)
+        let check = try await awayFromSession(.archiveRestoreCheck, since: epoch) { () -> ArchiveRestoreCheck in
+            var fork = fork
+            return ArchivedItems.restoreCheck(items, using: &fork)
+        }
         return ArchiveExport(
             bytes: bytes, itemCount: chosen.items.count, vaultCount: chosen.vaults.count,
-            unreadable: chosen.unreadable)
+            unreadable: chosen.unreadable, restoreCheck: check)
     }
 
     // MARK: - Helpers

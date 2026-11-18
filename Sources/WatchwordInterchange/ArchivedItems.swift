@@ -36,7 +36,7 @@ public struct ArchivedEntry: Sendable {
 /// mark and the exclusion from suggestions.
 public enum ArchivedItems {
     public static func importEntries(
-        _ entries: [ArchivedEntry], into vaultID: UUID, limits: InterchangeLimits = .standard,
+        _ entries: [ArchivedEntry], into vaultID: UUID, limits: InterchangeLimits = .archive,
         options: ImportOptions = ImportOptions(), using generator: inout some RandomNumberGenerator
     ) throws -> ImportResult {
         var assembler = ImportAssembler(format: .watchwordArchive, vaultID: vaultID, limits: limits, options: options)
@@ -52,6 +52,53 @@ public enum ArchivedItems {
         }
         return assembler.result
     }
+
+    /// What a restore of an archive holding `items` would not bring back, worked out when the archive is made, so the
+    /// person learns of it before relying on the file (review §Z, Z82). The same assembler and limits as the restore,
+    /// with the trash included (whether to restore it is the person's choice then, not a loss). The drafts are thrown
+    /// away; `generator` only fills their IDs.
+    public static func restoreCheck(
+        _ items: [Item], limits: InterchangeLimits = .archive, using generator: inout some RandomNumberGenerator
+    ) -> ArchiveRestoreCheck {
+        do {
+            let result = try importEntries(
+                items.map { ArchivedEntry(.item($0)) }, into: UUID(), limits: limits,
+                options: ImportOptions(includesTrashed: true), using: &generator)
+            let skipped = result.report.skipped.compactMap { record -> ArchiveRestoreCheck.Skipped? in
+                guard let id = record.entry.sourceID.flatMap(UUID.init(uuidString:)) else { return nil }
+                return ArchiveRestoreCheck.Skipped(itemID: id, reason: record.reason)
+            }
+            return ArchiveRestoreCheck(skipped: skipped, limitReached: nil)
+        } catch InterchangeError.limitExceeded(let kind, _) {
+            return ArchiveRestoreCheck(skipped: [], limitReached: kind)
+        } catch {
+            return ArchiveRestoreCheck(skipped: [], limitReached: nil, failed: true)
+        }
+    }
+}
+
+/// What restoring an archive would not bring back (`ArchivedItems.restoreCheck`). Empty when everything restores.
+public struct ArchiveRestoreCheck: Hashable, Sendable {
+    public struct Skipped: Hashable, Sendable {
+        public var itemID: UUID
+        public var reason: ImportSkipReason
+    }
+
+    /// Items a restore would leave out, each with why.
+    public var skipped: [Skipped]
+    /// A budget that would fail the whole restore, if one would.
+    public var limitReached: InterchangeLimits.Kind?
+    /// The check itself failed for another reason: whether the archive restores is unknown.
+    public var failed: Bool
+
+    public init(skipped: [Skipped] = [], limitReached: InterchangeLimits.Kind? = nil, failed: Bool = false) {
+        self.skipped = skipped
+        self.limitReached = limitReached
+        self.failed = failed
+    }
+
+    /// Everything in the archive would come back.
+    public var restoresEverything: Bool { skipped.isEmpty && limitReached == nil && !failed }
 }
 
 extension ImportAssembler {
@@ -202,7 +249,7 @@ extension ImportAssembler {
             id: RandomUUID.make(using: &generator), vaultID: vaultID, title: title, scopes: scopes, fields: fields,
             tags: tags, notes: archived.notes, createdAt: createdAt, modifiedAt: modified ?? createdAt,
             archived: archived.archived, history: history, excludedFromSuggestions: archived.excludedFromSuggestions)
-        guard StoredItemSize.estimate(item) <= limits.maximumStoredItemBytes else {
+        guard try countStored(item) else {
             skip(reference, .tooLarge(.storedItemBytes, limit: limits.maximumStoredItemBytes))
             return
         }

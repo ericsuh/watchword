@@ -142,9 +142,13 @@ public final class ExportModel: LockSensitive {
                     vaults: vaultIDs, passphrase: passphrase, password: password)
                 var bytes = archive.bytes
                 contents = SecureBytes(wiping: &bytes)
+                // What a restore would not bring back, if anything (Z82): before the person relies on the file.
+                let lines =
+                    archive.restoreCheck.restoresEverything
+                    ? [] : InterchangeWording.lines(for: archive.restoreCheck, titles: try await Self.titles(session))
                 file = ExportFile(
                     id: UUID(), kind: kind, filename: "Watchword Backup \(stamp).\(kind.fileExtension)",
-                    itemCount: archive.itemCount, lines: [], unreadableCount: archive.unreadable.count)
+                    itemCount: archive.itemCount, lines: lines, unreadableCount: archive.unreadable.count)
             case .applePasswordsCSV, .onePUX:
                 let format: PlaintextExportFormat = kind == .onePUX ? .onePUX : .applePasswordsCSV
                 let export = try await session.exportPlaintext(format, vaults: vaultIDs, password: password)

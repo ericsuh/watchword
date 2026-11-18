@@ -97,6 +97,26 @@ public enum InterchangeWording {
         }
     }
 
+    /// What a restore of a new archive would not bring back (`ArchiveRestoreCheck`, Z82), one line each, for the
+    /// export screen to show before the person relies on the file. Empty when everything restores.
+    public static func lines(for check: ArchiveRestoreCheck, titles: [UUID: String]) -> [String] {
+        func item(_ id: UUID) -> String { titles[id].map { "“\($0)”" } ?? "An item" }
+        if let kind = check.limitReached {
+            return [
+                "This backup holds more than this version of Watchword can restore (\(kind.rawValue)). Everything "
+                    + "is in the file, but do not delete the vault in reliance on it."
+            ]
+        }
+        if check.failed {
+            return [
+                "Whether this backup can be restored could not be checked. Do not delete the vault in reliance on it."
+            ]
+        }
+        return check.skipped.map {
+            item($0.itemID) + " is in the backup but would not be restored from it: " + text(for: $0.reason)
+        }
+    }
+
     /// What an entry the review raised a concern about would do, a sentence per effect (review finding Z62). The
     /// words say what AutoFill would do afterwards, since that is what the person is deciding.
     static func explanation(

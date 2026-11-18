@@ -206,6 +206,61 @@ struct ArchivedItemsTests {
         #expect(result.report.warnings.map(\.warning).contains(.implausibleDate(label: "")))
     }
 
+    /// Z82: restore applied the limits of another app's file, so an archive this app wrote could be refused whole
+    /// past 50,000 items, though the format holds 200,000 (X3 was fixed so that such an archive could be restored).
+    @Test("an archive of more than 50,000 items restores under the archive's own limits")
+    func manyItems() throws {
+        let entries = (0..<50_001).map { index in
+            ArchivedEntry(
+                .item(Item(id: UUID(), vaultID: Self.sourceVault, title: "Item \(index)", scopes: [], fields: [])))
+        }
+        #expect(throws: InterchangeError.limitExceeded(.items, limit: 50_000)) {
+            var generator = SeededGenerator(seed: 5)
+            _ = try ArchivedItems.importEntries(entries, into: Fixtures.vaultID, limits: .standard, using: &generator)
+        }
+        let result = try Self.importing(entries)
+        #expect(result.entries.count == 50_001 && result.report.skipped.isEmpty)
+    }
+
+    /// Z82: an item the vault stores between 768 KiB and 1 MiB was in every backup and came out of none.
+    @Test("an item larger than an import allows but within the vault's 1 MiB restores")
+    func largeItem() throws {
+        let history = (0..<220).map { index in
+            ItemHistoryEntry(
+                replacedAt: Date(timeIntervalSince1970: 1_500_000_000), version: UInt64(index),
+                fields: [Field(kind: .text, label: "Note", value: String(repeating: "a", count: 3_800))])
+        }
+        let item = Item(
+            id: UUID(), vaultID: Self.sourceVault, title: "Long-lived", scopes: [], fields: [], history: history)
+        let size = StoredItemSize.estimate(item)
+        #expect(size > InterchangeLimits.standard.maximumStoredItemBytes && size <= 1 << 20, "\(size)")
+        var generator = SeededGenerator(seed: 6)
+        let tight = try ArchivedItems.importEntries(
+            [ArchivedEntry(.item(item))], into: Fixtures.vaultID, limits: .standard, using: &generator)
+        #expect(tight.entries.isEmpty, "the import limits skip it")
+        #expect(try Self.importing([ArchivedEntry(.item(item))]).entries.count == 1)
+    }
+
+    /// Z82's other half: what a restore would still not bring back is found when the archive is made.
+    @Test("the restore check names what a restore would skip, and a budget that would refuse the whole file")
+    func restoreCheck() throws {
+        var generator = SeededGenerator(seed: 8)
+        let archived = Self.archivedItem()
+        var trashed = Item(id: UUID(), vaultID: Self.sourceVault, title: "Thrown away", scopes: [], fields: [])
+        trashed.trashedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        #expect(ArchivedItems.restoreCheck([archived, trashed], using: &generator).restoresEverything)
+        var large = archived
+        large.id = UUID()
+        large.notes = String(repeating: "a", count: 200_000)
+        let tooLarge = ArchivedItems.restoreCheck(
+            [archived, large, trashed], limits: InterchangeLimits(maximumStoredItemBytes: 100_000), using: &generator)
+        #expect(tooLarge.skipped.map(\.itemID) == [large.id])
+        #expect(tooLarge.skipped.first?.reason == .tooLarge(.storedItemBytes, limit: 100_000))
+        let tooMany = ArchivedItems.restoreCheck(
+            [archived, trashed], limits: InterchangeLimits(maximumItems: 1), using: &generator)
+        #expect(tooMany.limitReached == .items && !tooMany.restoresEverything)
+    }
+
     @Test("the import's field budget counts history too")
     func budget() throws {
         let archived = Self.archivedItem()
