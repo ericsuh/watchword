@@ -235,6 +235,13 @@ public actor InMemorySyncTransport: SyncTransport {
         unreadableCopies[name, default: []].append(contents)
     }
 
+    /// Takes back the last copy `plantUnreadableCopy` left under `name`: A1 changing the count it lists.
+    public func withdrawUnreadableCopy(_ name: String) {
+        guard var copies = unreadableCopies[name], !copies.isEmpty else { return }
+        copies.removeLast()
+        unreadableCopies[name] = copies.isEmpty ? nil : copies
+    }
+
     /// The copies `plantUnreadableCopy` left under `name` can be read from now on.
     public func makeCopiesReadable(_ name: String) {
         otherCopies[name, default: []] += unreadableCopies[name] ?? []

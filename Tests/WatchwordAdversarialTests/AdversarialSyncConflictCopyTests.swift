@@ -211,8 +211,9 @@ extension AdversarialSyncTests {
     /// them) under many names this device has already merged. Nothing about such a name is remembered as examined
     /// (R11, rightly: it may be readable later), so each one cost part of the late half of the per-sync bound at
     /// every sync, in name order; enough of them sorting first kept a late fork of the writer's own stream from ever
-    /// being read. A name whose copies were unread at the count listed now goes after the rest, so the fork is read
-    /// at the latest in the sync after the unreadable copies were first seen, and they are still looked at again.
+    /// being read. A name whose copies were unread goes after the rest, so a fork under a name with no unread copy is
+    /// read within two syncs here, and the unreadable copies are still looked at again. (How long a fork under one of
+    /// those names waits is R19's test, `unreadNamesTakeTurns`.)
     @Test("copies that are never readable cannot keep a late fork from being read")
     func unreadableCopiesStarveNothing() async throws {
         let f = try await Self.fixture()
@@ -257,6 +258,69 @@ extension AdversarialSyncTests {
             settled = report.copiesExamined == 0 && report.copiesNotExamined == 0
         }
         #expect(settled, "once readable, every copy is examined, and then not read again")
+    }
+
+    /// Threat: A1 (review finding R19), withholding the contents of copies under more names than the late half of the
+    /// per-sync bound covers, and a fork of the writer's own stream under one of those names: unread when first
+    /// seen, readable later. The names behind the rest were examined in name order, so the same ones took the bound at
+    /// every sync and those sorting last were never examined again, the fork with them. And a name whose count A1
+    /// changed at every sync was never put behind the rest. Now the names behind the rest take turns, least recently
+    /// examined first, whatever count is listed: the fork is read within as many syncs as the names need turns, and a
+    /// changing count brings nothing forward.
+    @Test("names with unread copies take turns, and a changing count brings none forward")
+    func unreadNamesTakeTurns() async throws {
+        let f = try await Self.fixture()
+        for index in 1...12 {
+            try await f.writer.save(Self.login("Item \(index)", password: "item-\(index)"))
+            try await f.writer.sync()
+        }
+        var configuration = SyncTestClient.configuration
+        configuration.maximumCopiesPerSync = 4
+        await f.keys.trust(device: Self.b)
+        let reader = SyncTestClient(
+            deviceID: Self.b, vaultID: Self.vault, keys: f.keys, transport: f.transport, configuration: configuration)
+        #expect(try await reader.sync().applied == 12)
+
+        // Eleven names with an unread copy each, and a fork of the writer's own stream under the twelfth, unread when
+        // it arrives: twelve names behind the rest, at the same count from sync to sync. The bound covers four per sync.
+        for sequence in 1...11 {
+            await f.transport.plantUnreadableCopy(f.segmentName(UInt64(sequence)), contents: [UInt8(sequence)])
+        }
+        let elsewhere = InMemorySyncTransport()
+        let restored = SyncTestClient(deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: elsewhere)
+        for index in 1...11 {
+            try await restored.save(Self.login("Fork \(index)", password: "fork-\(index)"))
+            try await restored.sync()
+        }
+        let forked = try await restored.save(Self.login("Only in the fork", password: "fork-secret"))
+        try await restored.sync()
+        let name = f.segmentName(12)
+        await f.transport.plantUnreadableCopy(name, contents: try #require(await elsewhere.allObjects[name]))
+        for _ in 0..<4 { try await reader.sync() }
+
+        // iCloud delivers the fork's contents; the count listed is unchanged.
+        await f.transport.makeCopiesReadable(name)
+        var forkRead = false
+        for _ in 0..<4 where !forkRead {
+            forkRead = try await reader.sync().forkedObjects == [name]
+        }
+        #expect(forkRead, "the fork is read within the turns twelve names need at four a sync")
+        #expect(try await reader.item(forked.id).title == "Only in the fork")
+
+        // A1 changes the count of every name with an unread copy. A late fork under a name with none is still read
+        // first: no name comes forward on a changed count.
+        try await f.writer.save(Self.login("Thirteenth", password: "thirteen"))
+        try await f.writer.sync()
+        try await reader.sync()
+        let second = try await restored.save(Self.login("A later fork", password: "later-secret"))
+        try await restored.sync()
+        let later = f.segmentName(13)
+        for sequence in 1...11 {
+            await f.transport.plantUnreadableCopy(f.segmentName(UInt64(sequence)), contents: [UInt8(sequence), 1])
+        }
+        await f.transport.plantCopy(later, contents: try #require(await elsewhere.allObjects[later]))
+        #expect(try await reader.sync().forkedObjects == [later], "the late fork goes first")
+        #expect(try await reader.item(second.id).title == "A later fork")
     }
 
     /// Threat: A1 (review finding R13) plants junk under names no device will ever merge, snapshot names of a real

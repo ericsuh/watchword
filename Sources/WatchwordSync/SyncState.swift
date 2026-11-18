@@ -78,11 +78,18 @@ public struct SyncState: Sendable, Hashable {
     /// decision about them is remembered here. Pruned to the names still listed with copies.
     public var examinedCopies: [SyncObjectLocation: Int] = [:]
     /// Names whose copies could not all be read when last examined, with the count the transport gave then (review
-    /// finding R17). Such a name is looked at again at every sync (R11: nothing about it is remembered as examined,
-    /// and its author does not collect it), but after every name not here or listed at another count, so copies that
-    /// never become readable cannot spend the bound before a copy that can. Only the order changes: nothing is
-    /// skipped, forgotten or deleted. Pruned to the names still listed with copies.
+    /// finding R17). Such a name is looked at again (R11: nothing about it is remembered as examined, and its author
+    /// does not collect it), but after every name not here, whatever count is listed now (R19: a count A1 alternates
+    /// does not bring it forward), so copies that never become readable cannot spend the bound before a copy that
+    /// can. Only the order changes: nothing is skipped, forgotten or deleted. Pruned to the names still listed with
+    /// copies.
     public var unreadCopies: [SyncObjectLocation: Int] = [:]
+    /// For each name in `unreadCopies`, when it was last examined: a number above every other one held here at the
+    /// time (review finding R19). The names behind the rest are taken least recently examined first, so beyond the
+    /// per-sync bound they take turns, and each is examined again within a number of syncs bounded by how many there
+    /// are, rather than the same ones every time in name order. A name missing here (a row from before this was
+    /// kept) counts as examined longest ago. Pruned with `unreadCopies`.
+    public var unreadCopiesExamined: [SyncObjectLocation: UInt64] = [:]
     /// This device owes a snapshot of everything it holds, beyond the ones `SyncEngine` owes for a revoked device's
     /// work: its own stream forked (several verifying copies of one of its names, which no other device can be
     /// assumed to have seen both of). Cleared when the snapshot is written; until then it collects nothing.

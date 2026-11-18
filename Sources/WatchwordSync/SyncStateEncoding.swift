@@ -44,6 +44,8 @@ struct EncodedState: Codable {
     var handOnOwed: Bool?
     /// Absent in a row written before unread copies were put last (R17).
     var unreadCopies: [String: Int]?
+    /// Absent in a row written before unread names took turns (R19).
+    var unreadCopiesExamined: [String: UInt64]?
     /// Absent in a row written before a reset could be answered (§7.10).
     var collectedThrough: UInt64?
     var handedOn: Snapshot?
@@ -78,6 +80,9 @@ struct EncodedState: Codable {
         unreadCopies =
             state.unreadCopies.isEmpty
             ? nil : Dictionary(uniqueKeysWithValues: state.unreadCopies.map { ($0.key.name, $0.value) })
+        unreadCopiesExamined =
+            state.unreadCopiesExamined.isEmpty
+            ? nil : Dictionary(uniqueKeysWithValues: state.unreadCopiesExamined.map { ($0.key.name, $0.value) })
         collectedThrough = state.collectedThrough
         handedOn = state.handedOn.map { Snapshot(name: $0.snapshot.name, coverage: Self.strings($0.holding)) }
         storeResetSuspected = state.storeResetSuspected
@@ -127,6 +132,10 @@ struct EncodedState: Codable {
         for (name, count) in unreadCopies ?? [:] {
             guard let location = SyncObjectLocation(name: name), count >= 0 else { return nil }
             state.unreadCopies[location] = count
+        }
+        for (name, examined) in unreadCopiesExamined ?? [:] {
+            guard let location = SyncObjectLocation(name: name) else { return nil }
+            state.unreadCopiesExamined[location] = examined
         }
         state.collectedThrough = collectedThrough
         if let handedOn {

@@ -480,6 +480,7 @@ public actor SyncEngine {
         var state = try await syncState.loadState(vaultID: vaultID) ?? SyncState(vaultID: vaultID)
         let examined = state.examinedCopies
         let unread = state.unreadCopies
+        let unreadExamined = state.unreadCopiesExamined
         do {
             let listing = try await list(retired: await keyring.retiredAuthors(vaultID: vaultID), report: &report)
             try await fetch(listing, state: &state, report: &report)
@@ -487,8 +488,12 @@ public actor SyncEngine {
             report.noteTransportFailure(error)
         }
         // Which copies were looked at and found to be junk is remembered while locked too, so they are not read again,
-        // and which could not be read, so they wait behind the rest (R17).
-        if state.examinedCopies != examined || state.unreadCopies != unread { try await syncState.saveState(state) }
+        // and which could not be read, so they wait behind the rest and take turns (R17, R19).
+        if state.examinedCopies != examined || state.unreadCopies != unread
+            || state.unreadCopiesExamined != unreadExamined
+        {
+            try await syncState.saveState(state)
+        }
         return report
     }
 
@@ -535,6 +540,9 @@ public actor SyncEngine {
         // What was decided about copies is remembered only for names that still have them.
         state.examinedCopies = state.examinedCopies.filter { listing.copies[$0.key] != nil }
         state.unreadCopies = state.unreadCopies.filter { listing.copies[$0.key] != nil }
+        state.unreadCopiesExamined = state.unreadCopiesExamined.filter { state.unreadCopies[$0.key] != nil }
+        // Above every turn taken so far: what is examined in this sync goes behind every name examined before (R19).
+        let turn = (state.unreadCopiesExamined.values.max() ?? 0) &+ 1
 
         // Every snapshot not yet merged, not only the newest: which one is newest is not which one covers most, and a
         // device's own garbage collection may rely on any of them.
@@ -562,7 +570,8 @@ public actor SyncEngine {
                 // the sync's bound spent, the current file alone, as for any name; its copies are looked at later.
                 if let count = listing.copies[location], budget > 0 {
                     try await examine(
-                        location, listed: count, late: false, budget: &budget, state: &state, report: &report)
+                        location, listed: count, late: false, turn: turn, budget: &budget, state: &state,
+                        report: &report)
                     continue
                 }
                 guard
@@ -584,18 +593,28 @@ public actor SyncEngine {
         }
         // Copies under a name this device has already merged (a second copy that appeared since, or junk planted
         // beside the object): looked at once per count the transport gives, and what verifies is applied late. A
-        // name whose copies could not all be read at the count listed now goes after every other (R17): read again,
-        // since it may be readable now, but never ahead of a copy that is.
+        // name whose copies could not all be read when last examined goes after every other (R17), at whatever count
+        // is listed now (R19: A1 alternating the count does not bring it forward): read again, since it may be
+        // readable now, but never ahead of a copy that is. Those names take turns, least recently examined first, so
+        // however many there are, each is examined again within a bounded number of syncs (R19), a fork of this
+        // device's own stream unread when first seen included.
         budget = max(0, budget) + allowance / 2
         let wantedNames = Set(wanted)
         let examined = state.examinedCopies
         let unread = state.unreadCopies
+        let unreadExamined = state.unreadCopiesExamined
         let late = listing.copies.filter { location, count in
             !wantedNames.contains(location) && !alreadyStaged.contains(location) && examined[location] != count
         }.sorted { lhs, rhs in
-            let left = unread[lhs.key] == lhs.value
-            let right = unread[rhs.key] == rhs.value
-            return left != right ? right : lhs.key.name < rhs.key.name
+            let left = unread[lhs.key] != nil
+            let right = unread[rhs.key] != nil
+            if left != right { return right }
+            if left {
+                let leftTurn = unreadExamined[lhs.key] ?? 0
+                let rightTurn = unreadExamined[rhs.key] ?? 0
+                if leftTurn != rightTurn { return leftTurn < rightTurn }
+            }
+            return lhs.key.name < rhs.key.name
         }
         for (location, count) in late {
             guard budget > 0 else {
@@ -603,7 +622,8 @@ public actor SyncEngine {
                 continue
             }
             do {
-                try await examine(location, listed: count, late: true, budget: &budget, state: &state, report: &report)
+                try await examine(
+                    location, listed: count, late: true, turn: turn, budget: &budget, state: &state, report: &report)
             } catch let error as SyncTransportError where error.stopsSync {
                 throw error
             } catch {
@@ -698,8 +718,8 @@ public actor SyncEngine {
     /// binds one digest per position (§8.10). `late` is a name whose position this device has already merged: nothing
     /// waits on it, a refusal is only reported, and the count is remembered so the copies are not read again.
     private func examine(
-        _ location: SyncObjectLocation, listed count: Int, late: Bool, budget: inout Int, state: inout SyncState,
-        report: inout SyncReport
+        _ location: SyncObjectLocation, listed count: Int, late: Bool, turn: UInt64, budget: inout Int,
+        state: inout SyncState, report: inout SyncReport
     ) async throws {
         let name = location.name
         let found = try await transport.fetchCopies(
@@ -714,6 +734,7 @@ public actor SyncEngine {
         // could be read (R17). Its author does not collect it meanwhile.
         let whole = found.unread == 0
         state.unreadCopies[location] = whole ? nil : count
+        state.unreadCopiesExamined[location] = whole ? nil : turn
         report.fetched += found.copies.count
         var seen: Set<[UInt8]> = []
         var verified: [(bytes: [UInt8], object: SignedObject)] = []
