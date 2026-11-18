@@ -99,6 +99,14 @@ public struct SharingCodeStatus: Sendable, Hashable {
     /// This device's own account, for the screens to show ("You are …"), so each person can compare it with the
     /// account the other screen names.
     public let ownAccount: UUID
+    /// This device's own fingerprint (its account ID and keys), which every step of either side shows as the account
+    /// check, so that a person whose camera read a code can compare what the scan names with the other screen
+    /// (review finding L2: an 8-hex prefix of an account ID, which anyone may choose, can be ground; this cannot
+    /// without breaking SHA-512).
+    public let ownFingerprint: Fingerprint
+    /// The other account's fingerprint as this device holds its bundle, once it knows which it is: a joiner's from
+    /// the scanned code or the directory, a starter's from the reply.
+    public let partnerFingerprint: Fingerprint?
     /// Starter: the vault sharing code, "1234 5678".
     public let number: String?
     /// What this device shows as a QR code: the starter's `ScannedSharingCode`, or the joiner's `FingerprintCode`.
@@ -566,6 +574,7 @@ extension VaultSession {
             }
             return SharingCodeStatus(
                 role: .starter, step: step, runID: run.generation, ownAccount: starter.account.accountID,
+                ownFingerprint: starter.account.fingerprint, partnerFingerprint: starter.joiner?.fingerprint,
                 number: starter.number.grouped,
                 scanPayload: starter.scanPayload,
                 ownCode: starter.code, attemptsLeft: starter.attemptsLeft, partner: starter.joiner?.accountID,
@@ -581,7 +590,8 @@ extension VaultSession {
             case .failed(let error): step = .failed(error)
             }
             return SharingCodeStatus(
-                role: .joiner, step: step, runID: run.generation, ownAccount: joiner.account.accountID, number: nil,
+                role: .joiner, step: step, runID: run.generation, ownAccount: joiner.account.accountID,
+                ownFingerprint: joiner.account.fingerprint, partnerFingerprint: joiner.starter.fingerprint, number: nil,
                 scanPayload: joiner.scanPayload, ownCode: joiner.code,
                 attemptsLeft: joiner.attemptsLeft, partner: joiner.starter.accountID, pinned: run.pinned,
                 keysDifferFromPin: run.pinConflict, scanned: joiner.scanned)

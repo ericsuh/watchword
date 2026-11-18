@@ -58,6 +58,7 @@ enum AccessibilityID {
     }
 
     enum Invite {
+        static let ownAccount = "invite.ownAccount"
         static let startSession = "invite.startSession"
         static let number = "invite.number"
         static let qr = "invite.qr"
@@ -86,6 +87,7 @@ enum AccessibilityID {
     }
 
     enum Accept {
+        static let ownAccount = "accept.ownAccount"
         static let number = "accept.number"
         static let joinWithNumber = "accept.joinWithNumber"
         static let scan = "accept.scan"
@@ -114,6 +116,7 @@ enum AccessibilityID {
 
     /// Checking a member of a shared vault with a vault sharing code session (`MemberVerificationView`).
     enum MemberCheck {
+        static let ownAccount = "memberCheck.ownAccount"
         static let notListed = "memberCheck.notListed"
         static let start = "memberCheck.start"
         static let number = "memberCheck.number"

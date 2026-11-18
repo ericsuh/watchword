@@ -41,6 +41,13 @@ struct InviteView: View {
                 if let confirmation { ownCode(confirmation) }
                 issued(code)
             }
+            // On every step, both sides: what the other person compares with what their device names (L2).
+            if let check = model.ownAccountCheck {
+                Section {
+                    Text(SharingCodeWording.ownAccountLine(check)).font(.footnote).foregroundStyle(.secondary)
+                        .accessibilityIdentifier(AccessibilityID.Invite.ownAccount)
+                }
+            }
             ErrorText(message: model.errorMessage)
         }
         .formStyle(.grouped)
@@ -88,9 +95,6 @@ struct InviteView: View {
                     .accessibilityIdentifier(AccessibilityID.Invite.number)
                 QRCodeView(text: payload)
                     .accessibilityIdentifier(AccessibilityID.Invite.qr)
-                if let own = model.status?.ownAccount {
-                    Text("You are the account \(shortIdentifier(own)).").font(.footnote).foregroundStyle(.secondary)
-                }
             } header: {
                 Text("Your vault sharing code")
             } footer: {
@@ -417,6 +421,13 @@ struct AcceptInvitationView: View {
             case .compareOwner(let comparison):
                 compareOwner(comparison)
             }
+            // On every step, both sides: what the other person compares with what their device names (L2).
+            if let check = model.ownAccountCheck {
+                Section {
+                    Text(SharingCodeWording.ownAccountLine(check)).font(.footnote).foregroundStyle(.secondary)
+                        .accessibilityIdentifier(AccessibilityID.Accept.ownAccount)
+                }
+            }
             ErrorText(message: model.errorMessage)
         }
         .formStyle(.grouped)
@@ -545,14 +556,12 @@ struct AcceptInvitationView: View {
     }
 
     /// A scan names the account it is for before anything is pinned (ADR 0010, Scans): the person compares it with
-    /// what the other screen says ("You are …") and says yes, or stops. Decided by the session; this only asks.
+    /// the account check the other screen shows on every step (L2) and says yes, or stops. Decided by the session; this
+    /// only asks.
     private func confirmScan(_ accountID: UUID) -> some View {
         Section {
-            Text(
-                "Your camera read the code of the account \(shortIdentifier(accountID)). Their screen says \"You are "
-                    + "the account \(shortIdentifier(accountID))\" if it is theirs."
-            )
-            .accessibilityIdentifier(AccessibilityID.Accept.scannedAccount)
+            Text(SharingCodeWording.scannedAccount(check: model.partnerAccountCheck ?? ""))
+                .accessibilityIdentifier(AccessibilityID.Accept.scannedAccount)
             Button("It Is Theirs") { Task { await model.confirmScannedAccount() } }
                 .disabled(model.isWorking)
                 .accessibilityIdentifier(AccessibilityID.Accept.confirmScan)
@@ -659,9 +668,6 @@ struct MemberVerificationView: View {
                 Section {
                     SharingDigits(code: number).accessibilityIdentifier(AccessibilityID.MemberCheck.number)
                     QRCodeView(text: payload)
-                    if let own = model.status?.ownAccount {
-                        Text("You are the account \(shortIdentifier(own)).").font(.footnote).foregroundStyle(.secondary)
-                    }
                 } header: {
                     Text("Your vault sharing code")
                 }
@@ -722,6 +728,13 @@ struct MemberVerificationView: View {
             case .failed(let message):
                 Section {
                     Banner(text: message).accessibilityIdentifier(AccessibilityID.MemberCheck.failed)
+                }
+            }
+            // On every step, both sides: what the other person compares with what their device names (L2).
+            if let check = model.ownAccountCheck {
+                Section {
+                    Text(SharingCodeWording.ownAccountLine(check)).font(.footnote).foregroundStyle(.secondary)
+                        .accessibilityIdentifier(AccessibilityID.MemberCheck.ownAccount)
                 }
             }
             ErrorText(message: model.errorMessage)

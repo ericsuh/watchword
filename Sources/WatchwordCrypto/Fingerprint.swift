@@ -7,8 +7,9 @@ import SecureMemory
 /// `SHA-512("WW-fingerprint-v1" ‖ accountID ‖ X25519 public key ‖ Ed25519 public key)`, truncated to 60 bytes and
 /// shown as twelve groups of five digits (each group is a 40-bit big-endian chunk mod 100,000). SHA-512 rather than
 /// SHA-256 because a 60-digit safety number needs 60 bytes of digest. All inputs are fixed-length, so the
-/// concatenation is unambiguous. Equality is constant-time.
-public struct Fingerprint: Sendable, Equatable {
+/// concatenation is unambiguous. Equality is constant-time. Hashable, so that a screen's step and a sharing code
+/// session's status can carry the fingerprint that was shown; the digest is public.
+public struct Fingerprint: Sendable, Hashable {
     public static let groupCount = 12
     static let domain = Array("WW-fingerprint-v1".utf8)
 
@@ -36,5 +37,9 @@ public struct Fingerprint: Sendable, Equatable {
 
     public static func == (lhs: Fingerprint, rhs: Fingerprint) -> Bool {
         ConstantTime.equal(lhs.digest, rhs.digest)
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(digest)
     }
 }

@@ -852,3 +852,42 @@ extension SharingScreenTests {
         #expect(accept.step == .joined(vaultID: home.vaultID), "\(accept.errorMessage ?? "")")
     }
 }
+
+extension SharingScreenTests {
+    /// When a joiner's scan names an account (review finding L2), the starter is on "type their code", which showed no
+    /// account at all; and the comparison was of 8-hex prefixes of account IDs, which whoever makes an account chooses.
+    /// Every step of either side now shows this device's account check, derived from its fingerprint, and the
+    /// joiner's confirmation names the check of the keys it scanned: the two are the same for the real starter.
+    @Test("the starter's step at the joiner's scan confirmation shows the account check the scan names")
+    func accountCheckOnEveryStep() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 721)
+        let invitee = try await household.account(seed: 722)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let ownerCheck = SharingCodeWording.accountCheck(owner.bundle.fingerprint)
+        #expect(ownerCheck.count == 23 && !ownerCheck.contains(shortIdentifier(owner.accountID)))
+
+        let invite = InvitationModel(vaultID: vaultID, context: ContextProbe().context(owner.session))
+        await invite.startSession()
+        #expect(invite.ownAccountCheck == ownerCheck)
+        let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        await accept.cameraScanned(try #require(invite.status?.scanPayload))
+        await invite.refresh()
+        guard case .typeTheirCode = invite.step else {
+            Issue.record("expected the starter to type their code, got \(invite.step)")
+            return
+        }
+        await accept.refresh()
+        guard case .confirmScan = accept.step else {
+            Issue.record("expected the scan to name its account, got \(accept.step)")
+            return
+        }
+        #expect(invite.ownAccountCheck == ownerCheck, "the starter's screen at that moment shows its check")
+        #expect(accept.partnerAccountCheck == ownerCheck, "and the joiner's names the same one")
+        let joinerCheck = SharingCodeWording.accountCheck(invitee.bundle.fingerprint)
+        #expect(accept.ownAccountCheck == joinerCheck)
+        let question = SharingCodeWording.scannedAccount(check: try #require(accept.partnerAccountCheck))
+        #expect(question.contains(SharingCodeWording.ownAccountLine(ownerCheck)))
+    }
+}
