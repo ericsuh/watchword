@@ -480,7 +480,11 @@ extension VaultSession {
     /// The devices revoked from the account, whose streams sync no longer reads or waits for (review finding Y6).
     func syncRetiredAuthors(vaultID: UUID? = nil) async -> Set<UUID> {
         guard let record = try? await loadAccount(), let view = try? await registry(record) else { return [] }
-        return Set(view.state.revoked.keys).union(vaultID.map(sharedRetiredAuthors) ?? [])
+        // A shared vault's are those whose revocation counts there, by the same rule as the judge's (Z150).
+        if let vaultID, sharing.vaults[vaultID] != nil {
+            return sharedRetiredAuthors(vaultID, ownView: view, account: record)
+        }
+        return Set(view.state.revoked.keys)
     }
 
     /// What a sync object's signature covers: its name and its envelope. The envelope already binds the location

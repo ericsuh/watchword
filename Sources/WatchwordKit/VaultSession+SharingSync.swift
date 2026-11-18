@@ -657,10 +657,12 @@ extension VaultSession {
         return true
     }
 
-    /// The devices whose streams a shared vault no longer reads: revoked from their own account.
-    func sharedRetiredAuthors(_ vaultID: UUID) -> Set<UUID> {
-        guard sharing.vaults[vaultID] != nil, let me = account?.accountID else { return [] }
-        return Set(memberRegistries(vaultID, account: me).flatMap(\.state.revoked.keys))
+    /// The devices whose streams a shared vault no longer reads: revoked from their own account (`revokedDevices`, the
+    /// same set the judge believes, Z150). Never this device by another account's word.
+    func sharedRetiredAuthors(_ vaultID: UUID, ownView: RegistryView?, account: AccountRecord) -> Set<UUID> {
+        guard sharing.vaults[vaultID] != nil else { return [] }
+        refreshPassedOver(vaultID)
+        return revokedDevices(in: vaultID, ownView: ownView, account: account)
     }
 
     // MARK: - The judge (`WriteJudge`)
@@ -843,7 +845,7 @@ extension VaultSession {
         guard let values = attributedValues(of: record, keys: keys) else { return false }
         var ownCopy: Set<SharedStreamIndex.ValueKey>?
         let vouched = Self.vouchesForUncarriedValues(record, in: vault, account: account.accountID)
-        let retired = revokedDevices(in: record.vaultID, ownView: ownView, account: account.accountID)
+        let retired = revokedDevices(in: record.vaultID, ownView: ownView, account: account)
         var awaited: Set<UUID> = []
         var admitted = true
         // Every value is filed under the device its stamp names (`attributedValues`).
@@ -979,7 +981,7 @@ extension VaultSession {
             self.accountsListing(device, in: location.vaultID, ownView: ownView, account: account)
         }
         let vouched = Self.vouchesForUncarriedValues(sealedUnder: keyID, in: vault, account: account.accountID)
-        let retired = revokedDevices(in: location.vaultID, ownView: ownView, account: account.accountID)
+        let retired = revokedDevices(in: location.vaultID, ownView: ownView, account: account)
         var awaited: Set<UUID> = []
         var admitted = true
         let key = VersionKey(recordID: entry.recordID, kind: entry.kind.rawValue, version: entry.version)
@@ -1040,9 +1042,32 @@ extension VaultSession {
     /// The devices revoked from their own account, in this account's registry or in a member's as `vaultID`'s chain
     /// anchors it. Their streams are not read (`syncRetiredAuthors`), and a shared vault writes no snapshot to hand
     /// their work on, so nothing of theirs is ever waited for (review finding Z144).
-    func revokedDevices(in vaultID: UUID, ownView: RegistryView?, account: UUID) -> Set<UUID> {
-        var devices = Set(ownView.map { Array($0.state.revoked.keys) } ?? [])
-        for (_, state) in memberRegistries(vaultID, account: account) { devices.formUnion(state.revoked.keys) }
+    ///
+    /// A device ID is chosen by its device, and any member can list another member's in their own registry (S33) and
+    /// then revoke it there. So a registry's revocation counts only for a device that is that registry's account's
+    /// (review finding Z150): the stream is that account's (`SharedStreamIndex.account(ofStream:)`), or, for a stream
+    /// nothing was recorded of, every registry that lists the device has revoked it (an account that lists it as
+    /// registered says it is in use). The same rule for this account's registry as for a member's, so that every
+    /// device that holds the same segments and registries answers alike, except for this device itself, which its own
+    /// registry alone revokes and no other account's. Called after `refreshPassedOver`.
+    func revokedDevices(in vaultID: UUID, ownView: RegistryView?, account: AccountRecord) -> Set<UUID> {
+        var registries = memberRegistries(vaultID, account: account.accountID)
+        if let ownView { registries.insert((account.accountID, ownView.state), at: 0) }
+        var devices: Set<UUID> = []
+        if ownView?.state.revoked[account.deviceID] != nil { devices.insert(account.deviceID) }
+        guard let index = sharing.vaults[vaultID]?.index else {
+            return devices.union(ownView.map { Set($0.state.revoked.keys) } ?? [])
+        }
+        for (accountID, state) in registries {
+            for device in state.revoked.keys where device != account.deviceID && !devices.contains(device) {
+                if let stream = index.account(ofStream: device) {
+                    if stream == accountID { devices.insert(device) }
+                    continue
+                }
+                if registries.contains(where: { $0.state.devices[device] != nil }) { continue }
+                devices.insert(device)
+            }
+        }
         return devices
     }
 
