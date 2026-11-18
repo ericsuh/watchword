@@ -111,17 +111,23 @@ extension AdversarialSharedVaultTests {
         #expect((try? await member.session.item(id: copy.id)) == nil, "the copy reached a device after all")
     }
 
-    /// Threat: none needed; round 7's Low (F7.6), the move of `moveByANonCommittingDevice` restored onto other hardware.
-    /// The copy holds edits of the old ID only, which no member counts (Z157), so it reached nobody; the original's
-    /// deletion is pending. The restore registers a new, committing ID (no device key), carries the old ID's pending
-    /// deletions over to it, and before Z167 the new ID, whose rows hold nothing unpublished, sent the deletion out: the
-    /// original was gone everywhere and the copy was here only, under an ID nobody counts. The deletion now stays
-    /// parked, reported, while any shared vault holds an edit of the old ID; moving the copy out again from this device
-    /// (written as its own) lets it go, after the new copy.
-    @Test("restoring a non-committing device onto other hardware does not send a move's deletion ahead of its copy")
-    func restoredNonCommittingMove() async throws {
+    /// `moveByANonCommittingDevice`'s move under an older build, then this build restored onto other hardware: the
+    /// store and its sync state, and no device key, so the installation registers a new, committing ID at unlock.
+    struct RestoredMove {
+        let household: SharedVaultHousehold
+        let vaultID: UUID
+        let owner: SharingAccount
+        let member: SharingAccount
+        let device: SharingAccount
+        let personal: UUID
+        let original: Item
+        let copy: Item
+        let oldID: UUID
+    }
+
+    static func restoredMove(seed: UInt64) async throws -> RestoredMove {
         let household = SharedVaultHousehold()
-        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 16_230)
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: seed)
         let member = members[0]
         let device = try await Self.legacyDevice(of: member, in: household, modified: true)
         try await device.session.acceptInvitation(
@@ -144,14 +150,34 @@ extension AdversarialSharedVaultTests {
         #expect(first.vaults[vaultID]?.segmentsWritten == 1, "the older build published the copy")
         #expect(first.vaults[other]?.ownStreamConflict != nil)
 
-        // This build, restored onto other hardware: the store and its state, and no device key.
         await device.session.playModifiedClient(false)
         await Self.remove(squat, from: household.transport)
+        try await Self.restoreOntoOtherHardware(device, account: member.accountID)
+        #expect(try await Self.deviceID(of: device) != oldID, "the restore did not register a new device")
+        return RestoredMove(
+            household: household, vaultID: vaultID, owner: owner, member: member, device: device, personal: personal,
+            original: original, copy: copy, oldID: oldID)
+    }
+
+    /// The device's store and sync state on other hardware, without its device key: it registers a new ID at unlock.
+    static func restoreOntoOtherHardware(_ device: SharingAccount, account: UUID) async throws {
         await device.session.lock()
-        await device.vault.forgetDeviceKey(accountID: member.accountID)
+        await device.vault.forgetDeviceKey(accountID: account)
         try await device.session.unlock(password: TestVault.password)
-        let newID = try await Self.deviceID(of: device)
-        #expect(newID != oldID, "the restore did not register a new device")
+    }
+
+    /// Threat: none needed; round 7's Low (F7.6), the move of `moveByANonCommittingDevice` restored onto other hardware.
+    /// The copy holds edits of the old ID only, which no member counts (Z157), so it reached nobody; the original's
+    /// deletion is pending. The restore registers a new, committing ID (no device key), carries the old ID's pending
+    /// deletions over to it, and before Z167 the new ID, whose rows hold nothing unpublished, sent the deletion out: the
+    /// original was gone everywhere and the copy was here only, under an ID nobody counts. The deletion now stays
+    /// parked, reported, while any shared vault holds an edit of the old ID; moving the copy out again from this device
+    /// (written as its own) lets it go, after the new copy.
+    @Test("restoring a non-committing device onto other hardware does not send a move's deletion ahead of its copy")
+    func restoredNonCommittingMove() async throws {
+        let restored = try await Self.restoredMove(seed: 16_230)
+        let (vaultID, owner, member, device) = (restored.vaultID, restored.owner, restored.member, restored.device)
+        let (personal, original, copy) = (restored.personal, restored.original, restored.copy)
         let second = try await device.session.syncAll()
         #expect(second.sharing[vaultID]?.deviceIDDoesNotCommit == false)
         #expect(second.deletionsHeldBack.contains(vaultID), "the parked deletion was not reported")
@@ -172,6 +198,59 @@ extension AdversarialSharedVaultTests {
         try await Self.syncAll([member, owner])
         #expect((try? await member.session.item(id: again.id)) != nil, "the new copy did not arrive")
         #expect((try? await member.session.item(id: original.id)) == nil, "the parked deletion never went out")
+    }
+
+    /// Threat: none needed; the review of round 8 (L1, F7.6). The installation of `restoredNonCommittingMove` is
+    /// restored again, from a backup taken under its second ID, onto a third. Registration parked deletions only while a
+    /// shared vault held an edit, nobody received, of the ID it was leaving, and the second ID commits: the deletions the
+    /// second had parked for the first were recorded as the third's own, and the original's deletion went out while the
+    /// copy was here only. Registration now parks them again whatever it finds, and parks the leaving ID's own while
+    /// any device ID of the registry that does not commit has such an edit, so only the one release decides.
+    @Test("a second restore keeps a move's deletion parked while its copy has reached nobody")
+    func twiceRestoredNonCommittingMove() async throws {
+        let restored = try await Self.restoredMove(seed: 16_250)
+        let (vaultID, owner, member, device) = (restored.vaultID, restored.owner, restored.member, restored.device)
+        let second = try await device.session.syncAll()
+        #expect(second.deletionsHeldBack.contains(vaultID))
+        let secondID = try await Self.deviceID(of: device)
+
+        try await Self.restoreOntoOtherHardware(device, account: member.accountID)
+        #expect(try await Self.deviceID(of: device) != secondID, "the second restore did not register a new device")
+        let third = try await device.session.syncAll()
+        #expect(third.deletionsHeldBack.contains(vaultID), "the parked deletion was not reported after the second")
+        try await Self.syncAll([member, owner])
+        #expect((try? await member.session.item(id: restored.original.id)) != nil, "the original was erased")
+    }
+
+    /// Threat: none needed; the review of round 8 (L2, F7.6, Z44). While the move's deletion is parked, the original
+    /// comes back on the restored device from the account's other devices, and the person deletes it again there. That
+    /// deletion is the new ID's own, and the gate looked only for unpublished work in the new ID's rows: it went out, and
+    /// the item existed only as the copy nobody received. The gate now counts every row of a shared vault that holds an
+    /// edit, nobody received, of a device ID of this account's registry that does not commit, so no vault's deletions go
+    /// out while the copy is here only, and the report names the copy.
+    @Test("deleting the original again while its move's deletion is parked does not send that deletion out")
+    func deletionWhileParked() async throws {
+        let restored = try await Self.restoredMove(seed: 16_260)
+        let (vaultID, owner, member, device) = (restored.vaultID, restored.owner, restored.member, restored.device)
+        let second = try await device.session.syncAll()
+        #expect(second.deletionsHeldBack.contains(vaultID))
+        // Renamed on the account's other device a few times, so that the new deletion is stamped above the parked one
+        // and replaces it (one pending deletion per record, the higher stamp kept).
+        for round in 1...4 {
+            var renamed = try await member.session.item(id: restored.original.id)
+            renamed.title = round == 4 ? "Bank, renamed" : "Bank \(round)"
+            _ = try await member.session.save(renamed)
+        }
+        try await Self.syncAll([member])
+        _ = try await device.session.syncAll()
+        #expect(try await device.session.item(id: restored.original.id).title == "Bank, renamed")
+
+        try await device.session.trash(id: restored.original.id)
+        try await device.session.deletePermanently(id: restored.original.id)
+        let third = try await device.session.syncAll()
+        #expect(third.deletionsHeldBack.contains(vaultID), "the deletion was not held back")
+        try await Self.syncAll([member, owner])
+        #expect((try? await member.session.item(id: restored.original.id)) != nil, "the original was erased")
     }
 
     /// Threat: none needed; the review of round 7. A Keychain read of the device key that fails for a moment (the

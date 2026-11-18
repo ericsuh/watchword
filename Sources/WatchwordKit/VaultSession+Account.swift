@@ -826,9 +826,10 @@ extension VaultSession {
     /// carried over, or nobody would ever publish it (`SyncEngine` publishes only rows of its own device): each such
     /// row is written again by the new ID, unchanged (`ItemMerge.written`), in the commit that registers it, and
     /// each of the old ID's pending deletions is recorded again as the new ID's (PRD F7.7) — unless a shared vault
-    /// holds an edit of the old ID that nobody received (`holdsEditsNobodyReceived`, review finding Z167): then they
-    /// are parked for the new ID (`parkedDeletionDevice`), and go out only once no such edit remains
-    /// (`releaseParkedDeletions`).
+    /// holds an edit nobody received of the old ID or of any device ID of the registry that does not commit
+    /// (`vaultsHoldingEditsNobodyReceived`, review findings Z167, Z170): then they are parked for the new ID
+    /// (`parkedDeletionDevice`), and go out only once no such edit remains (`releaseParkedDeletions`). What the old ID
+    /// had parked itself is parked again for the new ID whatever registration finds: only that release lets it go.
     func registerThisDevice(account: AccountRecord, keys: UnlockedKeys, asNewDevice: Bool) async throws {
         let epoch = lockEpoch
         // Before a current key is picked for any row carried over.
@@ -839,10 +840,13 @@ extension VaultSession {
         let created = asNewDevice ? try await deviceKeys.createDevice(accountID: account.accountID) : nil
         if let created { updated.deviceID = created.id }
         let unpublished = asNewDevice ? try await unpublishedRows(of: account) : (rows: [], deletions: [:])
-        // The old ID's deletions wait while a shared vault holds an edit of it that nobody received (Z167).
+        // The old ID's deletions wait while a shared vault holds an edit that nobody received, of it or of any device
+        // ID of the registry that does not commit (Z167, Z170): the release's own predicate, so that an ID which commits
+        // (a second restore) does not let go of what an earlier one left.
         var parksDeletions = false
         if asNewDevice, !unpublished.deletions.isEmpty {
-            parksDeletions = await holdsEditsNobodyReceived(of: account.deviceID, account: account, view: view)
+            let nobodyReceived = Self.idsNobodyReceives(account: account, view: view, including: account.deviceID)
+            parksDeletions = !(await vaultsHoldingEditsNobodyReceived(of: nobodyReceived, account: account)).isEmpty
         }
         let now = await clock.now()
         let keys = try requireKeys(since: epoch)
@@ -949,16 +953,18 @@ extension VaultSession {
     /// The sync state of a new device ID: what the old ID published and acknowledged is not this device's to
     /// continue (its stream, its sequence numbers), so each vault starts over — but the old ID's pending deletions
     /// are recorded again as this device's, each stamped above the old one so that it replaces it in one write.
-    /// With `parking` (review finding Z167) they, and those the old ID had parked itself (`parked`), are parked for the
-    /// new ID instead (`parkedDeletionDevice`), which the engine neither publishes nor applies.
+    /// With `parking` (review finding Z167) they are parked for the new ID instead (`parkedDeletionDevice`), which the
+    /// engine neither publishes nor applies. Those the old ID had parked itself (`parked`) are always parked again
+    /// (Z170): registration never releases one, `releaseParkedDeletions` alone does.
     func startNewDeviceSyncState(
         carrying deletions: [UUID: [RecordKey: PendingDeletion]], parked: [PendingDeletion] = [],
         as updated: AccountRecord, parking: Bool = false
     ) async throws {
         guard let base = syncSettings?.state, let syncState else { return }
-        let carried = deletions.values.flatMap(\.values) + parked
-        for deletion in carried where deletion.stamp.version < .max - 1 {
-            if parking {
+        let carried =
+            deletions.values.flatMap(\.values).map { (deletion: $0, parks: parking) } + parked.map { ($0, true) }
+        for (deletion, parks) in carried where deletion.stamp.version < .max - 1 {
+            if parks {
                 try await base.addPendingDeletion(
                     try signedPendingDeletion(
                         Self.restamped(deletion, device: Self.parkedDeletionDevice(of: updated.deviceID))))
@@ -1014,59 +1020,71 @@ extension VaultSession {
         return parked
     }
 
-    /// Whether a shared vault holds an edit of `deviceID`, an ID this installation wrote under, that nobody else
-    /// received (review finding Z167): an edit in a row of that ID or of this device, where the ID does not commit to
-    /// the account under the key the registry lists for it (or the registry does not list it). Every member's device
-    /// counts only devices whose IDs commit (Z157), so such an edit reached nobody whatever the state recorded as
-    /// published (Z162), and it keeps its writer's ID in every value it stamped: carried over to a new ID, it would
-    /// still be held aside on every other device. The same predicate as `holdsUnpublishedWork`'s for a device whose own
-    /// ID does not commit (`holdsEdit`). Fails closed: a vault or row that cannot be read, or a row that does not open,
-    /// counts; "shared" is `isMarkedShared`, so a vault is counted until the markers say it is private.
-    func holdsEditsNobodyReceived(of deviceID: UUID, account: AccountRecord, view: RegistryView?) async -> Bool {
-        await vaultHoldingEditsNobodyReceived(of: deviceID, account: account, view: view) != nil
-    }
-
-    /// The vault `holdsEditsNobodyReceived` found such an edit in, or `nil`; the Personal vault where the directory
-    /// could not be read.
-    func vaultHoldingEditsNobodyReceived(of deviceID: UUID, account: AccountRecord, view: RegistryView?) async
-        -> UUID?
+    /// The device IDs whose edits in a shared vault nobody else received (review findings Z157, Z162, Z170): every ID
+    /// of `account`'s registry, current or revoked, that does not commit to the account under the key the registry
+    /// lists for it, and `deviceID` (an ID this installation wrote under) unless the registry lists it with a key it
+    /// commits under. Every member's device counts only devices whose IDs commit, so such an edit reached nobody
+    /// whatever the sync state recorded as published, and it keeps its writer's ID in every value it stamped: carried
+    /// over to a new ID, or merged into a row of another of this account's devices, it is still held aside everywhere
+    /// else.
+    static func idsNobodyReceives(account: AccountRecord, view: RegistryView, including deviceID: UUID? = nil)
+        -> Set<UUID>
     {
-        if let listed = view?.state.devices[deviceID] ?? view?.state.revoked[deviceID],
-            DeviceIdentifier.commits(deviceID, to: account.accountID, key: listed.key)
-        {
-            return nil
+        var ids: Set<UUID> = []
+        for device in Array(view.state.devices.values) + Array(view.state.revoked.values)
+        where !DeviceIdentifier.commits(device.id, to: account.accountID, key: device.key) {
+            ids.insert(device.id)
         }
-        guard let vaults = try? await vaultDirectory(account).keys else { return account.personalVaultID }
-        for vaultID in vaults.sorted(by: { $0.uuidString < $1.uuidString })
-        where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
-            guard let rows = try? await store.records(in: vaultID, kind: .item) else { return vaultID }
-            for row in rows where row.deviceID == deviceID || row.deviceID == account.deviceID {
-                if holdsEdit(of: deviceID, in: row) { return vaultID }
+        if let deviceID {
+            let listed = view.state.devices[deviceID] ?? view.state.revoked[deviceID]
+            if listed.map({ !DeviceIdentifier.commits(deviceID, to: account.accountID, key: $0.key) }) ?? true {
+                ids.insert(deviceID)
             }
         }
-        return nil
+        return ids
+    }
+
+    /// The items of `vaultID`, if it is shared, whose rows hold an edit of one of `deviceIDs` (`idsNobodyReceives`),
+    /// whichever device's row it is (Z170: one this installation carried over under an intermediate ID holds the first
+    /// ID's values too); `nil` where the vault's rows cannot be read. Fails closed: a row that does not open counts, and
+    /// "shared" is `isMarkedShared`, so a vault counts until the markers say it is private.
+    func itemsHoldingEdits(of deviceIDs: Set<UUID>, in vaultID: UUID, account: AccountRecord) async -> Set<UUID>? {
+        guard !deviceIDs.isEmpty, isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) else {
+            return []
+        }
+        guard let rows = try? await store.records(in: vaultID, kind: .item) else { return nil }
+        var items: Set<UUID> = []
+        for row in rows where holdsEdit(ofAny: deviceIDs, in: row) { items.insert(row.recordID) }
+        return items
+    }
+
+    /// The shared vaults whose rows hold an edit of one of `deviceIDs` (`itemsHoldingEdits`); the Personal vault where
+    /// the directory could not be read. The predicate both registration and `releaseParkedDeletions` decide by, and the
+    /// one the deletion gate applies (`holdsUnpublishedWork`).
+    func vaultsHoldingEditsNobodyReceived(of deviceIDs: Set<UUID>, account: AccountRecord) async -> Set<UUID> {
+        guard !deviceIDs.isEmpty else { return [] }
+        guard let vaults = try? await vaultDirectory(account).keys else { return [account.personalVaultID] }
+        var held: Set<UUID> = []
+        for vaultID in vaults {
+            let items = await itemsHoldingEdits(of: deviceIDs, in: vaultID, account: account)
+            if items?.isEmpty != true { held.insert(vaultID) }
+        }
+        return held
     }
 
     /// The pending deletions made under an earlier ID of this installation that registering as a new device parked
     /// (review finding Z167), stamped for this device (`parkedDeletionDevice`), so the engine neither publishes nor
     /// applies them. While a shared vault holds an edit nobody received of a device ID of this account's registry that
-    /// does not commit (the earlier ID among them), they stay parked, and this returns the vaults holding one (the
-    /// sync reports them in `deletionsHeldBack`); once none remains (the person moved the copy out, or deleted it),
+    /// does not commit (the earlier ID among them; `vaultsHoldingEditsNobodyReceived`), they stay parked, and this
+    /// returns the vaults holding one (the sync reports them in `deletionsHeldBack`, and the deletion gate holds every
+    /// other deletion back too, Z170); once none remains (the person moved the copy out, or deleted it),
     /// each is recorded again as this device's, as at registration (`startNewDeviceSyncState`), and goes out like any
     /// other. Fails closed: with no registry, or parked deletions that cannot be read, nothing is released.
     func releaseParkedDeletions(account: AccountRecord, view: RegistryView?) async -> Set<UUID> {
         guard let syncState, let parked = try? await parkedDeletions(of: account), !parked.isEmpty else { return [] }
         guard let view else { return [account.personalVaultID] }
-        let registered = Array(view.state.devices.values) + Array(view.state.revoked.values)
-        var held: Set<UUID> = []
-        for device in registered
-        where device.id != account.deviceID
-            && !DeviceIdentifier.commits(device.id, to: account.accountID, key: device.key)
-        {
-            if let vaultID = await vaultHoldingEditsNobodyReceived(of: device.id, account: account, view: view) {
-                held.insert(vaultID)
-            }
-        }
+        let held = await vaultsHoldingEditsNobodyReceived(
+            of: Self.idsNobodyReceives(account: account, view: view), account: account)
         guard held.isEmpty else { return held }
         for deletion in parked {
             try? await syncState.addPendingDeletion(Self.restamped(deletion, device: account.deviceID))

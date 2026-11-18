@@ -230,6 +230,13 @@ extension VaultSession {
         return (ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[deviceID] ?? 0) > version
     }
 
+    /// Whether `row` holds an edit of any of `deviceIDs`, opening it once. One that does not open here counts.
+    func holdsEdit(ofAny deviceIDs: Set<UUID>, in row: StoredRecord) -> Bool {
+        guard let keys, let item = try? openItem(row, keys: keys) else { return true }
+        let clock = ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries
+        return deviceIDs.contains { (clock[$0] ?? 0) > 0 }
+    }
+
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
         guard let syncState, let base = syncSettings?.state else { return false }
         let state = try? await syncState.loadState(vaultID: vaultID)
@@ -240,6 +247,18 @@ extension VaultSession {
         // A key that cannot be read counts as one that does not commit here: the gate fails closed.
         let receivedNowhere =
             sharing.vaults[vaultID] != nil ? !((try? await thisDeviceCommits(account)) ?? false) : false
+        // Nor did anything a device ID of this account's registry that does not commit wrote there, in whichever row of
+        // this device it now sits (review finding Z170): an earlier ID of this installation, restored onto other
+        // hardware once or more, whose copy of a move is here only. Its deletions are parked, and the new ID's own wait
+        // with every other vault's while the copy is here, or one made again of an original that came back would go out.
+        // A registry that cannot be read here counts as one listing such an ID.
+        if isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+            guard let view = try? await registry(account),
+                let items = await itemsHoldingEdits(
+                    of: Self.idsNobodyReceives(account: account, view: view), in: vaultID, account: account)
+            else { return true }
+            if !items.isEmpty { return true }
+        }
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
             if receivedNowhere, holdsUnpublishedEdit(row, published: nil, account: account) { return true }
             guard let stamp = known[row.key] else { return true }
