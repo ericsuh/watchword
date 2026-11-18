@@ -46,26 +46,38 @@ struct MemberRegistryAnchor: Hashable, Sendable {
 }
 
 /// What this device has anchored of another account's device registry (review finding Z6): the one genesis entry it
-/// took, and the credential entry (password change) it follows. From there the registry moves only forward, along
-/// credential entries that descend from `credential` one after another; it never crosses to a branch that leaves the
-/// chain at or before it, whatever generation that branch reaches.
+/// took, the credential entry (password change) it first anchored, and the one it follows now. From there the
+/// registry moves only forward, along credential entries that descend from `credential` one after another; it never
+/// crosses to a branch that leaves the chain before `base`, whatever generation that branch reaches, and a branch that
+/// leaves it at `base` or after competes with the one followed (Z12).
 struct MemberRegistryPin: Hashable, Sendable {
     var genesis: ObjectDigest
+    /// The credential entry this device first anchored: a walk forward never moves it (Z12).
+    var base: ObjectDigest
     var credential: ObjectDigest
     /// A digest of the disagreeing entries the person last settled: they are not reported again, and anything new is.
     /// Read from pins saved by an earlier version, which settled with a code (removed, review finding Z11); nothing
     /// in this version sets it.
     var settled: ObjectDigest?
+
+    init(genesis: ObjectDigest, base: ObjectDigest? = nil, credential: ObjectDigest, settled: ObjectDigest?) {
+        self.genesis = genesis
+        self.base = base ?? credential
+        self.credential = credential
+        self.settled = settled
+    }
 }
 
-/// One vault's saved pins. `"WWMD" ‖ version u8 = 1 ‖ own account 16 ‖ vault 16 ‖ count u16 ‖ { account 16 ‖
-/// signing key 32 ‖ genesis 32 ‖ credential 32 ‖ settled flag u8 ‖ settled 32? } ‖ signature 64`, in the order of
-/// account then signing key. Local state like the saved ledger and the stream index: signed by this account's own key
+/// One vault's saved pins. `"WWMD" ‖ version u8 = 2 ‖ own account 16 ‖ vault 16 ‖ count u16 ‖ { account 16 ‖
+/// signing key 32 ‖ genesis 32 ‖ base 32 ‖ credential 32 ‖ settled flag u8 ‖ settled 32? } ‖ signature 64`, in the
+/// order of account then signing key. Version 1, written before `base` existed, has no base and is read with the base
+/// at the credential followed (Z12). Local state like the saved ledger and the stream index: signed by this account's own key
 /// under `SignatureDomain.membership` with its own magic, and refused whole if it does not verify, so a file edited on
 /// the device (A8) can make this device anchor again from what the transport shows, and never choose its anchor.
 enum MemberRegistryPins {
     static let magic: [UInt8] = Array("WWMD".utf8)
-    static let formatVersion: UInt8 = 1
+    static let formatVersion: UInt8 = 2
+    static let firstFormatVersion: UInt8 = 1
     static let maximumPins = 4096
 
     static func signed(
@@ -78,7 +90,8 @@ enum MemberRegistryPins {
         var out = magic + [formatVersion] + SharedBytes.bytes(account) + SharedBytes.bytes(vaultID)
         out += SharedBytes.littleEndian16(UInt16(ordered.count))
         for (anchor, pin) in ordered {
-            out += SharedBytes.bytes(anchor.accountID) + anchor.signingKey + pin.genesis.bytes + pin.credential.bytes
+            out += SharedBytes.bytes(anchor.accountID) + anchor.signingKey + pin.genesis.bytes + pin.base.bytes
+            out += pin.credential.bytes
             if let settled = pin.settled {
                 out += [1] + settled.bytes
             } else {
@@ -99,14 +112,21 @@ enum MemberRegistryPins {
                 != nil
         else { return nil }
         var reader = SharedReader(body)
-        guard reader.read(4) == magic, reader.read(1) == [formatVersion], reader.uuid() == account.accountID,
+        guard reader.read(4) == magic, let version = reader.read(1)?.first,
+            version == formatVersion || version == firstFormatVersion, reader.uuid() == account.accountID,
             reader.uuid() == vaultID, let count = reader.uint16(), Int(count) <= maximumPins
         else { return nil }
         var pins: [MemberRegistryAnchor: MemberRegistryPin] = [:]
         for _ in 0..<count {
             guard let member = reader.uuid(), let signingKey = reader.read(32),
-                let genesis = reader.read(32).flatMap(ObjectDigest.init(bytes:)),
-                let credential = reader.read(32).flatMap(ObjectDigest.init(bytes:)), let flag = reader.read(1)
+                let genesis = reader.read(32).flatMap(ObjectDigest.init(bytes:))
+            else { return nil }
+            var base: ObjectDigest?
+            if version == formatVersion {
+                guard let read = reader.read(32).flatMap(ObjectDigest.init(bytes:)) else { return nil }
+                base = read
+            }
+            guard let credential = reader.read(32).flatMap(ObjectDigest.init(bytes:)), let flag = reader.read(1)
             else { return nil }
             var settled: ObjectDigest?
             switch flag {
@@ -117,7 +137,7 @@ enum MemberRegistryPins {
             default: return nil
             }
             pins[MemberRegistryAnchor(accountID: member, signingKey: signingKey)] = MemberRegistryPin(
-                genesis: genesis, credential: credential, settled: settled)
+                genesis: genesis, base: base, credential: credential, settled: settled)
         }
         guard reader.remaining == 0 else { return nil }
         return pins

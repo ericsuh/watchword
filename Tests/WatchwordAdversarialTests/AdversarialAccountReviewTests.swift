@@ -272,4 +272,64 @@ extension AdversarialAccountTests {
         }
         #expect(reached == 20 && refreshes == 3)
     }
+
+    // MARK: - The branch published first is not the branch trusted (Z12)
+
+    /// Threat: the D9 adversary of Z6, on a device that anchored the member's registry long before the theft. The
+    /// laptop's holder publishes the forged branch first (they have the keys from the moment of theft; no collusion
+    /// with the store is needed), and exactly one change then follows the anchored entry, so the device moved
+    /// forward onto it and pinned it. When the member's own change arrived it "left the chain at or before the
+    /// anchored entry": never followed, reported only, and the takeover stood (the laptop writing as the member, the
+    /// phone revoked) on every member's device that had been anchored before. Now the entry first anchored is kept as
+    /// the base, apart from the tip followed: a change beside any followed entry beyond the base is a competing
+    /// branch, and only devices every branch keeps count.
+    @Test("a branch followed forward does not win over a sibling that arrives later, beyond the entry first anchored")
+    func firstPublishedBranchDoesNotWin() throws {
+        typealias S = MemberRegistryScenario
+        let s = try S()
+        let early = s.evaluate(s.before, pin: nil)
+        #expect(early.pin?.credential == s.genesis.id)
+
+        let forward = s.evaluate(s.before + s.forged, pin: early.pin)
+        #expect(forward.pin?.credential == s.forgedTip.id, "one change followed the anchored entry: followed")
+        #expect(forward.state?.standing(of: S.laptop) == .active && !forward.unsettled)
+
+        let late = s.evaluate(s.before + s.forged + s.genuine, pin: forward.pin)
+        #expect(late.unsettled && late.disagreement.contains(s.change.id))
+        #expect(late.state?.devices[S.laptop] == nil && late.state?.devices[S.phone] == nil, "a branch was taken")
+        #expect(late.state?.standing(of: S.tablet) == .active)
+        #expect(late.state?.credential.id == s.genesis.id, "the registry stands at the entry both branches leave")
+        // The tip followed is kept: if the member's change is withheld again, nothing new is believed of it.
+        #expect(late.pin?.credential == s.forgedTip.id && late.pin?.genesis == s.genesis.id)
+    }
+
+    /// The saved pins' second format (Z12) carries the base; one saved in the first, before the base existed, is read
+    /// with the base at the credential it followed, which is what that version trusted. Signed as before: an edited
+    /// blob of either format is refused whole.
+    @Test("member pins round-trip their base, and pins of the first format read with the base at the tip")
+    func memberPinsCarryTheBase() throws {
+        typealias S = MemberRegistryScenario
+        let s = try S()
+        var generator = SeededGenerator(seed: 5)
+        let me = Keyset.generate(
+            accountID: UUID(uuidString: "AC000000-0000-4000-8000-0000000000BC")!, using: &generator)
+        let bundle = try me.publicKeyBundle()
+        let vaultID = UUID(uuidString: "5A000000-0000-4000-8000-0000000000CD")!
+        let anchor = MemberRegistryAnchor(accountID: s.f.accountID, signingKey: s.f.accountSigningKey)
+        let pin = MemberRegistryPin(genesis: s.genesis.id, base: s.genesis.id, credential: s.forgedTip.id, settled: nil)
+        let saved = try MemberRegistryPins.signed(
+            [anchor: pin], account: bundle.accountID, vaultID: vaultID, keyset: me)
+        #expect(saved[4] == 2)
+        #expect(MemberRegistryPins.parse(saved, account: bundle, vaultID: vaultID) == [anchor: pin])
+
+        var first = Array("WWMD".utf8) + [1] + SharedBytes.bytes(bundle.accountID) + SharedBytes.bytes(vaultID)
+        first += SharedBytes.littleEndian16(1)
+        first += SharedBytes.bytes(anchor.accountID) + anchor.signingKey + s.genesis.id.bytes + s.change.id.bytes + [0]
+        let signed = first + (try me.sign(first, domain: .membership))
+        let read = try #require(MemberRegistryPins.parse(signed, account: bundle, vaultID: vaultID)?[anchor])
+        #expect(read.base == s.change.id && read.credential == s.change.id && read.genesis == s.genesis.id)
+        var edited = signed
+        edited[4] = 2
+        #expect(MemberRegistryPins.parse(edited, account: bundle, vaultID: vaultID) == nil)
+    }
 }

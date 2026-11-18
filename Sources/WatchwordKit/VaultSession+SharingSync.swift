@@ -369,14 +369,16 @@ extension VaultSession {
     /// device that revoked it, and extend it to any generation. Following the highest generation therefore followed
     /// whoever published most, and un-revoked that device in every other member's eyes.
     ///
-    /// So no rule here picks between two branches. What this device took once (`pin`: the genesis entry and the
-    /// credential entry it follows) moves **only forward**, one credential entry at a time, and only where exactly
-    /// one change follows that replays as a chain. A change that leaves the chain at or before the anchored entry
-    /// is never followed, whatever its generation. Where two or more follow the anchored entry, neither is taken:
-    /// the registry stays at the entry before them, and a device counts only if it is registered there **and in
-    /// every one of the competing branches** — each side's revocations are honoured, so neither the device a branch
-    /// revokes nor the one it keeps signs anything that counts here, while a device nobody contests carries on.
-    /// With nothing anchored, more than one genesis entry anchors none.
+    /// So no rule here picks between two branches. What this device took once (`pin`: the genesis entry, the
+    /// credential entry it first anchored, `base`, and the one it follows now) moves **only forward**, one credential
+    /// entry at a time, and only where exactly one change follows that replays as a chain. A change that leaves the
+    /// chain before the base is never followed, whatever its generation. One that leaves it at the base or after,
+    /// beside a change this device has since followed forward, competes with it (review finding Z12): being published
+    /// first earns a branch nothing. Where two or more compete, neither is taken: the registry stays at the entry
+    /// they leave, and a device counts only if it is registered there **and in every one of the competing
+    /// branches** — each side's revocations are honoured, so neither the device a branch revokes nor the one it keeps
+    /// signs anything that counts here, while a device nobody contests carries on. With nothing anchored, more than
+    /// one genesis entry anchors none.
     ///
     /// Every such sight is returned as a disagreement, for the screens to say that this person's devices disagree.
     /// Nothing in this version settles one (review finding Z11): the twelve-digit code that once moved an anchor to
@@ -416,16 +418,67 @@ extension VaultSession {
             }
             genesis = geneses[0]
         }
-        guard var state = evaluate(genesis, pin?.credential ?? genesis) else {
+        let tip = pin?.credential ?? genesis
+        guard var state = evaluate(genesis, tip) else {
             result.pin = pin
             result.complete = false
             return result
         }
+        // Whether `entry` was signed by the enrolment key of the generation it replaces: made with that password.
+        func madeWithPassword(_ entry: RegistryEntry, replacing key: [UInt8]) -> Bool {
+            (try? Signatures.verify(
+                entry.previousCredentialSignature, for: entry.previousCredentialMessage, domain: .deviceRegistry,
+                signingKey: key)) != nil
+        }
 
-        // Forward, while exactly one change follows the one followed and replays as a chain.
+        // The base (review finding Z12): the entry first anchored, which a walk forward never moves. A change beside
+        // any followed entry from the base on is a competing branch, however long this device has followed the
+        // other: whichever branch was published first is not thereby the account's. Found earliest first; the
+        // registry then stands at the entry they leave, and only devices every branch keeps count.
+        let path = state.credentialChain
+        let baseIndex = pin.map { pin in path.firstIndex { $0.id == pin.base } ?? 0 } ?? path.count - 1
         var branches: [DeviceRegistryState] = []
         var everyDeviceInQuestion = false
-        for step in 0...maximumSteps {
+        var forkIndex: Int?
+        if baseIndex < path.count - 1 {
+            let position = Dictionary(uniqueKeysWithValues: path.enumerated().map { ($1.id, $0) })
+            var siblings: [Int: [ObjectDigest]] = [:]
+            for (id, entry) in entries where position[id] == nil {
+                guard case .credential(let generation, _, let previous) = entry.body, let at = position[previous],
+                    at >= baseIndex, at < path.count - 1, path[at].generation < .max,
+                    generation == path[at].generation + 1, madeWithPassword(entry, replacing: path[at].enrolmentKey)
+                else { continue }
+                siblings[at, default: []].append(id)
+            }
+            var budget = maximumMemberBranches
+            for at in siblings.keys.sorted() {
+                let here = siblings[at, default: []].sorted()
+                guard here.count <= budget else {
+                    everyDeviceInQuestion = true
+                    forkIndex = at
+                    result.disagreement.formUnion(here)
+                    break
+                }
+                budget -= here.count
+                let followable = here.compactMap { evaluate(genesis, $0) }
+                guard !followable.isEmpty, let kept = evaluate(genesis, path[at + 1].id) else { continue }
+                forkIndex = at
+                branches = followable + [kept]
+                result.disagreement.formUnion(followable.map(\.credential.id) + [path[at + 1].id])
+                break
+            }
+            if let forkIndex {
+                guard let atFork = evaluate(genesis, path[forkIndex].id) else {
+                    result.pin = pin
+                    result.complete = false
+                    return result
+                }
+                state = atFork
+            }
+        }
+
+        // Forward, while exactly one change follows the one followed and replays as a chain.
+        for step in 0...maximumSteps where forkIndex == nil {
             let next = state.pendingCredentials.filter { $0.previous == state.credential.id }
             guard !next.isEmpty else { break }
             guard step < maximumSteps else {
@@ -464,11 +517,7 @@ extension VaultSession {
             case .genesis(_, _, let key)?, .credential(_, let key, _)?: replaced = key
             default: replaced = nil
             }
-            guard let replaced,
-                (try? Signatures.verify(
-                    entry.previousCredentialSignature, for: entry.previousCredentialMessage, domain: .deviceRegistry,
-                    signingKey: replaced)) != nil
-            else { continue }
+            guard let replaced, madeWithPassword(entry, replacing: replaced) else { continue }
             result.disagreement.insert(id)
         }
 
@@ -483,7 +532,11 @@ extension VaultSession {
             }
         }
         result.state = state
-        result.pin = MemberRegistryPin(genesis: genesis, credential: state.credential.id, settled: pin?.settled)
+        // At a fork beyond the base the tip followed is kept, so that a branch withheld again is not taken for gone;
+        // on first sight the base is where this device lands.
+        result.pin = MemberRegistryPin(
+            genesis: genesis, base: pin == nil ? state.credential.id : path[baseIndex].id,
+            credential: forkIndex == nil ? state.credential.id : tip, settled: pin?.settled)
         result.unsettled =
             !result.disagreement.isEmpty && pin?.settled != Self.disagreementDigest(result.disagreement)
         return result

@@ -16,9 +16,9 @@ extension AdversarialSharedVaultTests {
     /// change (the D9 adversary: the account key, the laptop's own key, the retired password). It publishes a
     /// password change of its own from the generation before its revocation, sealing a back-dated revocation of the
     /// member's phone, and a second one on top, then writes into a vault the member shares, as the member. The other
-    /// members have no password to tell the two branches by. One who had already followed the member's own change
-    /// keeps to it; one who sees both at once follows neither, reads neither contested device, and says so, and
-    /// nothing in this version settles it (Z11).
+    /// members have no password to tell the two branches by. One who had followed the member's own change forward
+    /// before the forged branch appeared, and one who sees both at once, alike follow neither, read neither contested
+    /// device, and say so (Z12), and nothing in this version settles it (Z11).
     @Test("a member's revoked device does not write as that member in a shared vault by changing the password itself")
     func revokedDeviceOfAMemberForksTheRegistry() async throws {
         let household = SharedVaultHousehold()
@@ -69,10 +69,14 @@ extension AdversarialSharedVaultTests {
         let log = "vault/\(vaultID.uuidString)/log/\(laptopID.uuidString)/"
         #expect(await household.transport.list(prefix: log).count >= 2, "the laptop wrote nothing: nothing is tested")
 
-        // The owner had followed the member's change before the forged branch appeared: it stays there.
+        // The owner had followed the member's change forward from where it first anchored, before the forged branch
+        // appeared. Being seen first earns a branch nothing (Z12): had the forged one been published first, the
+        // owner would have followed that. Both now compete beyond the base: neither contested device is read.
         try await Self.syncAll([owner], rounds: 3)
         let ownerTitles = Set(try await owner.session.items().items.filter { $0.vaultID == vaultID }.map(\.title))
-        #expect(ownerTitles.contains(genuine.title) && !ownerTitles.contains(planted.title))
+        #expect(!ownerTitles.contains(planted.title), "the revoked laptop wrote as the member")
+        #expect(!ownerTitles.contains(genuine.title), "the branch seen first was kept in force")
+        #expect(ownerTitles.contains(before.title))
         #expect(try await owner.session.sharedVaultStatus(vaultID).membersWithDisagreeingDevices == [member.accountID])
 
         // The other member last saw this account before the theft, and now sees both branches at once: neither is
