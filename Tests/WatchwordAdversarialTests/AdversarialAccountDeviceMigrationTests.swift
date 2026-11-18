@@ -7,7 +7,7 @@ import WatchwordTestSupport
 
 @testable import WatchwordKit
 
-// The review of round 10 (docs/06-adversarial-review.md Z181): moving a restored installation's sync state from
+// The review of round 10 (docs/06-adversarial-review.md Z181, Z184): moving a restored installation's sync state from
 // its old device ID to its new one. In the suite "account enrolment and device registry".
 extension AdversarialAccountTests {
     /// A's store and sync state, a deletion made and never published, restored onto other hardware (no device key)
@@ -127,5 +127,20 @@ extension AdversarialAccountTests {
         #expect(try await store.loadAccount()?.migration == nil, "the planted move was kept")
         let pending = try await state.base.pendingDeletions(vaultID: fixture.personal)
         #expect(pending[copied.record.key]?.stamp.device == otherID, "another device's deletion was taken as its own")
+    }
+
+    /// Threat: none needed; the review of round 10 (Z184). The empty state a move saves for each vault was written to
+    /// the raw store, unsigned, so it read back as no state (Z20): a second restore before the next sync then carried
+    /// items over and no vault's description (`unpublishedRows`). It is signed now.
+    @Test("the empty state a restore saves for each vault verifies and reads back as that state")
+    func migratedStateIsSigned() async throws {
+        let fixture = try await Self.fixture(seed: 18_130)
+        let state = InterceptingStateStore()
+        let (restored, _, _) = try await Self.restoredWithUnpublishedDeletion(fixture, state: state)
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        let syncState = try #require(await restored.session.syncState)
+        var loaded = try #require(try await syncState.loadState(vaultID: fixture.personal))
+        loaded.authenticator = []
+        #expect(loaded == SyncState(vaultID: fixture.personal))
     }
 }

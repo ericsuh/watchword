@@ -961,7 +961,9 @@ extension VaultSession {
     /// registration with the account record that names the new ID (`AccountRecord.migration`) and made here, again
     /// at each unlock and each sync until it is complete; a failure throws, and the record stays. What the old ID
     /// published and acknowledged is not this device's to continue (its stream, its sequence numbers), so each vault's
-    /// state is first saved empty. Then the old ID's pending deletions are recorded again as this
+    /// state is first saved empty, signed by this session for the new ID through `syncState`: one the session did not
+    /// sign is no state (Z20), which reads back as none, so that a second restore before the next sync would carry no
+    /// vault's description over (`unpublishedRows`, Z184). Then the old ID's pending deletions are recorded again as this
     /// device's, each stamped above the old one so that it replaces it in one write, so a move made twice finds only
     /// what the first did not do; or, while a shared vault holds an edit nobody received of the old ID or of any
     /// device ID of the registry that does not commit (`vaultsHoldingEditsNobodyReceived`, Z167, Z170), parked for the
@@ -982,7 +984,7 @@ extension VaultSession {
             let view = try await registry(account)
             for vaultID in try await vaultDirectory(account).keys {
                 _ = try requireKeys(since: epoch)
-                try await base.saveState(SyncState(vaultID: vaultID))
+                try await syncState.saveState(SyncState(vaultID: vaultID))
             }
             let deletions = try await signedPendingDeletions(stampedBy: previous, account: account)
             let parked = try await signedPendingDeletions(
