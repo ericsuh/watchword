@@ -23,7 +23,10 @@ import Foundation
 /// scan. Which copy is genuine is not decided here (docs/02-architecture.md §7.5, "Conflict copies"). With
 /// `listsUbiquityPlaceholders`, a renamed duplicate iCloud has not downloaded (`.<name> 2.wwe.icloud`) is counted too,
 /// and read as unread, never as absent: otherwise a copy that exists only as a placeholder would be seen by nobody and
-/// collected with its object unread (review finding R18).
+/// collected with its object unread (review finding R18). The other side of that, accepted (R21, with R17 (a)): a
+/// literal `.<name> 2.wwe.icloud` file that A1 syncs into the folder is indistinguishable from iCloud's own placeholder,
+/// so it counts as a copy that is never readable, and the author never collects that name: storage, not loss, and
+/// nothing A1 could not do by withholding a real conflict version's contents.
 ///
 /// This is the portable core. On iCloud Drive every access also goes through `NSFileCoordinator`, with an
 /// `NSFilePresenter` for change notification: `WatchwordPlatform.CoordinatedFileSyncTransport`, which runs the

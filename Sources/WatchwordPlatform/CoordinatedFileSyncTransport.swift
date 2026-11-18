@@ -52,13 +52,27 @@
 
         public let base: FileSyncTransport
         let deadline: Deadline
+        /// How long a request for a conflict version's contents may wait for its coordinated read to be granted, which
+        /// is while iCloud downloads it: longer than `deadline`, which bounds what a sync waits for, since nothing waits
+        /// for this and a deadline cut short would cancel a slow download (review finding R20).
+        let downloadDeadline: Deadline
+        /// The version downloads asked for and not yet ended, shared by every copy of this transport, so the app keeps
+        /// one transport per folder (R20).
+        public let pendingDownloads: PendingDownloads
 
         public static let standardDeadline: Deadline = { try? await Task.sleep(for: .seconds(120)) }
+        /// Ten minutes: a version of up to the engine's object limit over a slow connection.
+        public static let standardDownloadDeadline: Deadline = { try? await Task.sleep(for: .seconds(600)) }
 
-        public init(root: URL, coordinationDeadline: @escaping Deadline = CoordinatedFileSyncTransport.standardDeadline)
-        {
+        public init(
+            root: URL, coordinationDeadline: @escaping Deadline = CoordinatedFileSyncTransport.standardDeadline,
+            downloadDeadline: @escaping Deadline = CoordinatedFileSyncTransport.standardDownloadDeadline,
+            pendingDownloads: PendingDownloads = PendingDownloads()
+        ) {
             base = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
             deadline = coordinationDeadline
+            self.downloadDeadline = downloadDeadline
+            self.pendingDownloads = pendingDownloads
         }
 
         /// `<ubiquity container>/Watchword/<accountID>`: outside the container's `Documents`, so the Files app does
@@ -186,15 +200,24 @@
         /// a version nobody had asked for could stay unread for good, re-examined at every sync. Apple documents a
         /// coordinated read of a version's `url` as what downloads its contents when `hasLocalContents` is false (the
         /// documentation of `NSFileVersion.hasLocalContents`; unverified until a Mac run), so each is one coordinated
-        /// read in a detached task, after the copies' own read has ended, bounded by the coordination deadline and
-        /// never awaited: no sync waits for the network. Its body reads nothing; the next sync reads the version.
+        /// read, after the copies' own read has ended, never awaited: no sync waits for the network. Its body reads
+        /// nothing; the next sync reads the version. A version already asked for is not asked for again until that
+        /// request ends, at most `pendingDownloads.capacity` wait at once, and they wait side by side, each up to
+        /// `downloadDeadline` (review finding R20).
         func requestVersionDownloads(_ urls: [URL]) {
             guard !urls.isEmpty else { return }
-            let deadline = deadline
+            let deadline = downloadDeadline
+            let pending = pendingDownloads
             Task.detached(priority: .utility) {
-                for url in urls {
-                    let attempt = CoordinationAttempt<Bool>()
-                    _ = try? await attempt.run(.read([.withoutChanges]), at: url, deadline: deadline) { true }
+                let claimed = await pending.claim(urls)
+                await withTaskGroup(of: Void.self) { group in
+                    for url in claimed {
+                        group.addTask {
+                            let attempt = CoordinationAttempt<Bool>()
+                            _ = try? await attempt.run(.read([.withoutChanges]), at: url, deadline: deadline) { true }
+                            await pending.finish(url)
+                        }
+                    }
                 }
             }
         }
