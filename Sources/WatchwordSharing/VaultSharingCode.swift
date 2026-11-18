@@ -668,8 +668,11 @@ public struct SharingCodeJoiner: Sendable {
             session: session, number: number, starter: starter, joiner: account, commitment: commitment,
             starterNonce: reveal.value, joinerNonce: nonce)
         if scanned {
-            // The scanned code matched the directory's bundle for the account the commit names, and that account's
-            // device has now revealed the nonce it committed to: the scan is evidence.
+            // The scanned code matched the directory's bundle for the account the commit names, and a reveal opened
+            // the commitment. Neither is signed, so this does not show that that account's device took part (A1 with
+            // the board can make both); it shows that the session was live when the scan was made, so a code held up
+            // by someone nearby (A4) has to belong to a session that answered this device. The scan is evidence of
+            // the keys the camera read, which the person confirms by the account check on the other screen (V18, L2).
             evidence = SharingCodeEvidence(
                 contact: starter, pinningAccount: account.accountID, method: .scannedCode, session: session)
             phase = .verified

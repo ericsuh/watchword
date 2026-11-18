@@ -123,6 +123,40 @@ final class VaultSharingTests: XCTestCase {
         }
     #endif
 
+    #if os(iOS)
+        /// The joiner's scan (ADR 0010, Scans; V18, L2): this device reads the other person's screen, which names
+        /// nothing until their device has revealed; the screen then names the account check of the keys it read, which
+        /// their screen shows on every step, and pins it only on the person's yes. iPhone and iPad only, as above.
+        @MainActor
+        func testJoinByScanningTheirScreen() throws {
+            step("launch")
+            let app = XCUIApplication.launchedWithAccount()
+            app.openSettings()
+            app.syncNow(expecting: ".")
+            app.openScreen(AccessibilityID.Settings.vaults)
+            app.tap(AccessibilityID.Vaults.accept)
+
+            step("scan their screen")
+            XCTAssertTrue(app.element(AccessibilityID.Accept.number).appears(within: 10), app.debugDescription)
+            app.tap(AccessibilityID.Debug.memberStarts)
+            XCTAssertTrue(app.element(AccessibilityID.Debug.scanMember).appears(within: 10), app.debugDescription)
+            app.tap(AccessibilityID.Debug.scanMember)
+            step("the scan names their account check; they type this device's code; say it is theirs")
+            XCTAssertTrue(app.element(AccessibilityID.Accept.scannedAccount).appears(within: 20), app.debugDescription)
+            XCTAssertTrue(app.element(AccessibilityID.Accept.ownAccount).exists, app.debugDescription)
+            app.tap(AccessibilityID.Debug.memberTypes)
+            app.tapWhenEnabled(AccessibilityID.Accept.confirmScan)
+            XCTAssertTrue(
+                app.element(AccessibilityID.Accept.awaitingInvitation).appears(within: 15), app.debugDescription)
+            step("their invitation arrives; join")
+            app.tap(AccessibilityID.Debug.memberInvites)
+            XCTAssertTrue(app.element(AccessibilityID.Accept.confirmText).appears(within: 20), app.debugDescription)
+            app.tap(AccessibilityID.Accept.join)
+            XCTAssertTrue(app.element(AccessibilityID.Accept.joined).appears(within: 20), app.debugDescription)
+            app.closeScreen()
+        }
+    #endif
+
     /// This account joins a vault the other person shares: their number typed here (or their screen scanned), each
     /// types the other's six digits, and their invitation arrives inside the session.
     @MainActor
