@@ -84,8 +84,24 @@ extension XCUIElement {
         UIQuery.tolerating("waitForNonExistence") { waitForNonExistence(timeout: timeout) }
     }
 
-    /// `typeText`, through `UIQuery.tolerating`: the field is looked up before any key is sent.
+    /// `typeText`, through `UIQuery.tolerating`: the field is looked up before any key is sent, and only once it holds
+    /// keyboard focus (`focusForTyping`).
     func enterText(_ text: String) {
+        focusForTyping()
         UIQuery.tolerating("typeText") { typeText(text) }
+    }
+
+    /// Waits for the element to hold keyboard focus, tapping it again if focus does not arrive. A tap made while the
+    /// screen is still settling (an editor presenting, the keyboard arriving) can leave focus where it was, and
+    /// `typeText` then fails with "Neither element nor any descendant has keyboard focus" (run 44314899872, an iOS
+    /// simulator). Each attempt waits up to two seconds for the focus before tapping again, three attempts in all; if
+    /// focus never arrives, the keys are sent anyway and `typeText` reports the failure as before.
+    func focusForTyping() {
+        let focused = NSPredicate(format: "hasKeyboardFocus == true")
+        for _ in 0..<3 {
+            let arrived = XCTNSPredicateExpectation(predicate: focused, object: self)
+            if XCTWaiter().wait(for: [arrived], timeout: 2) == .completed { return }
+            click()
+        }
     }
 }
