@@ -338,3 +338,37 @@ extension AdversarialSharedVaultTests {
         #expect(await owner.session.judgementIsSettled(vaultID), "the log is replayed at every sync")
     }
 }
+
+// Round 5's Lows (docs/06-adversarial-review.md Z161): the judged basis worked out without this account's registry.
+extension AdversarialSharedVaultTests {
+    /// Threat: someone with the device's files (A8) who removes what this account's registry needs (here its anchor
+    /// in the Keychain; equally a registry row the anchor names), or a failure reading it. The judged basis binds the
+    /// revocations a judgement rested on, this account's among them; worked out without the registry it lacked them,
+    /// differed from the one settled, and the next take-out removed and replayed every version for nothing, at will.
+    /// A basis that cannot be worked out is none: nothing is taken out or settled until the registry reads again.
+    @Test("an unreadable own registry takes nothing out and settles nothing")
+    func unreadableRegistrySettlesNothing() async throws {
+        let household = SharedVaultHousehold()
+        let home = try await household.household(roles: [.readWrite], seed: 5800)
+        let (owner, member) = (home.owner, home.members[0])
+        let item = try await owner.session.save(Self.bank(in: home.vaultID))
+        try await Self.syncAll([owner, member])
+        #expect(await member.session.judgedBasis(home.vaultID) != nil)
+
+        let accountID = member.accountID
+        let anchor = try #require(
+            try await member.vault.keychain.read(.deviceRegistryAnchor(accountID: accountID), prompt: ""))
+        try await member.vault.keychain.delete(.deviceRegistryAnchor(accountID: accountID))
+        await member.session.invalidateRegistry()
+        #expect(await member.session.judgedBasis(home.vaultID) == nil, "a basis without this account's registry")
+        try await member.session.takeOutWhatNoLongerCounts(home.vaultID)
+        #expect(try await member.session.item(id: item.id).title == item.title, "an item was taken out")
+        #expect(await !member.session.replayIsRequested(home.vaultID))
+
+        try await member.vault.keychain.store(anchor, for: .deviceRegistryAnchor(accountID: accountID))
+        await member.session.invalidateRegistry()
+        try await member.session.sync()
+        #expect(await member.session.judgementIsSettled(home.vaultID))
+        #expect(try await member.session.item(id: item.id).title == item.title)
+    }
+}

@@ -138,7 +138,9 @@ extension VaultSession {
                 vault.index.judgedHead = nil
             } else {
                 vault.needsReconcile = false
-                vault.index.judgedHead = basis ?? vault.ledger.state.hash.bytes
+                // A basis that cannot be worked out now settles nothing: what was owed stays owed (`judgedHead`
+                // unchanged), and the next take-out that can tell decides.
+                if let basis { vault.index.judgedHead = basis }
                 // What the replay did not rebuild is held aside whole: gone from the vault, for the hygiene engine too.
                 hygieneRuntime?.takenOut = []
             }
@@ -1057,11 +1059,13 @@ extension VaultSession {
         return ObjectDigest(hashing: Array("WW-judged-v1".utf8) + head + bound.flatMap(SharedBytes.bytes)).bytes
     }
 
-    /// `judgedBasis` for `vaultID` as this device stands now; `nil` for a vault with no ledger here.
+    /// `judgedBasis` for `vaultID` as this device stands now; `nil` for a vault with no ledger here, and when this
+    /// account's own registry cannot be read: its revocations are part of the basis, and a basis worked out without
+    /// them took out and replayed for nothing (round 5's Lows). Nothing is taken out, nor settled, on a `nil` basis.
     func judgedBasis(_ vaultID: UUID) async -> [UInt8]? {
-        guard let head = sharing.vaults[vaultID]?.ledger.state.hash.bytes else { return nil }
-        guard let account = try? await loadAccount() else { return head }
-        let ownView = try? await registry(account)
+        guard sharing.vaults[vaultID] != nil, let account = try? await loadAccount(),
+            let ownView = try? await registry(account)
+        else { return nil }
         guard let vault = sharing.vaults[vaultID] else { return nil }
         return Self.judgedBasis(
             head: vault.ledger.state.hash.bytes, index: vault.index,
