@@ -591,7 +591,9 @@ lists, is never written at (`SyncReport.ownStreamExhausted`). An unsigned object
 stops this vault's publishing while it is there, reported at every sync (`ownStreamConflict`) with nothing marked as
 sent; passing it needs a skip the author signs and readers honour, which is open. In a shared vault, an object there
 that verifies as another member's is staged and held aside in sequence, so the device steps over it after one sync
-that reports the conflict (Z30); junk, or a member whose writes never count, still squats.
+that reports the conflict (Z30), and so is one signed by a member whose writes never count, which the judge passes over
+keeping nothing (Z128); junk, or an object under keys that differ from the pin or by an account the chain does not
+list, still squats, reported and worded.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
 value (`EnvelopeKind.criticality(ofRawValue:)`: 10 to 127 ignorable, everything else critical; `scanStatus` is the first
@@ -1872,8 +1874,10 @@ logs download.
 
 **Verifying** (`SyncKeyring.verify`, `sharedVerify`): an object of a shared vault must carry the dual signature of a
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
-whose permission ended, the key in the record that ended it), and that account's standing must not be
-`nothingCounts`, nor that account one whose chain keys differ from this device's pin (`MemberKeyCheck.substituted`).
+whose permission ended, the key in the record that ended it), and that account must not be one whose chain keys differ
+from this device's pin (`MemberKeyCheck.substituted`). A segment of an account whose standing is `nothingCounts`
+verifies, and the judge passes over it in sequence and keeps nothing of it (`SegmentAdmission.passOver`, Z128): refused
+here, no device ever staged it, and in another member's device stream it squatted at its number for good.
 A snapshot needs the owner's account: a shared vault writes none, so an honest one is from before the vault was
 shared, when the owner's devices were its only writers, and it is read for one thing, the gap in a stream whose first
 segments were collected then (refusing it would stop that stream at a new member and at every replay). A member's
