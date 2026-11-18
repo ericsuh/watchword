@@ -762,13 +762,13 @@ extension VaultSession {
         }
         let keys = try requireKeys(since: epoch)
         let vaultKey: VaultKey
+        var listed: [[UInt8]] = []
         if isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
             // Marked, with no ledger here. If the only thing that says so is this account's own marker naming this
             // account, and no key of the vault came by grant, the vault is this account's and its sharing was cut
             // short after the marker (a lock, the process ending) or happened on another of its devices: it is
-            // finished from here, under the key the genesis record names either way (Z50). The record's content is
-            // the vault, the owner and that key, so a second one says nothing the first did not. Anything else is a
-            // vault somebody else's chain governs, and no second genesis is signed for it (Z41).
+            // finished from here (Z50), and the chain already on the transport is taken up if there is one (Z122).
+            // Anything else is a vault somebody else's chain governs, and no second genesis is signed for it (Z41).
             guard sharing.markers[vaultID] == account.accountID, !sharing.markerConflicts.contains(vaultID),
                 !keys.vaultKeys.values.contains(where: { $0.vaultID == vaultID && $0.arrivedByGrant })
             else { throw SharedVaultError.ledgerUnavailable(vaultID) }
@@ -782,13 +782,30 @@ extension VaultSession {
                 let own = try requireKeys(since: epoch).vaultKeys[keyID]
             else { throw VaultError.unknownVault(vaultID) }
             vaultKey = own
+            listed = try await listSharingObjects(
+                prefix: SharingObjectLocation.membershipPrefix(vaultID), maximumLength: MembershipRecord.maximumLength
+            ).filter { SharingObjectLocation(name: $0.name)?.isName(of: $0.contents) == true }.map(\.contents)
         } else {
             vaultKey = try await writableVaultKey(vaultID, keys: keys, account: account)
             // Before anything says the vault is shared: a refusal here leaves it exactly as it was.
             try await requireWholeLog(vaultID)
         }
         let current = try requireKeys(since: epoch)
-        let ledger = try MembershipLedger.create(vaultKey: vaultKey, owner: current.keyset)
+        // A genesis record of this account's for the vault already on the transport (another of its devices shared it,
+        // or this one did and lost its ledger) is the chain's first record, with whatever was built on it: taken up,
+        // verified back to this account's own bundle, never signed again. A second one is a second root wherever
+        // signing is randomised (CryptoKit's Ed25519), and the fork rule then sets an invitee's addition on one of
+        // them aside (review finding Z122).
+        let ledger: MembershipLedger
+        if !listed.isEmpty,
+            let joined = try? MembershipLedger.join(
+                vaultID: vaultID, owner: try verifiedContacts(try sharingSettings()).myself, candidates: listed
+            ).ledger
+        {
+            ledger = joined
+        } else {
+            ledger = try MembershipLedger.create(vaultKey: vaultKey, owner: current.keyset)
+        }
         // The marker first: from here on every device of the account that syncs learns the vault is shared, whether
         // or not it ever sees the chain. If it cannot be signed and stored, the vault is not shared.
         try await markShared(vaultID, owner: account.accountID, account: account, epoch: epoch)

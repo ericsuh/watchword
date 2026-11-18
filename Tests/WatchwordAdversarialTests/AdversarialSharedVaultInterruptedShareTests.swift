@@ -110,9 +110,12 @@ extension AdversarialSharedVaultTests {
 extension AdversarialSharedVaultTests {
     /// Threat: none. The same rule that finishes a share cut short lets the owner's other device take up a vault
     /// the account shared elsewhere, while it has not rotated: its own marker names this account and every key it
-    /// holds is the account's own, so the genesis record it would sign is the one that exists. It then holds the
-    /// chain's first record and takes the rest from the store. Once a key of the vault has come by grant (a
-    /// rotation), that is no longer so, and `shareVault` is refused there as on a member's device (Z41).
+    /// holds is the account's own. It takes up the chain the store holds, genesis and all, and signs no genesis of
+    /// its own (review finding Z122): signed again, the record is a second root wherever Ed25519 signing is
+    /// randomised (CryptoKit), and the fork rule sets one invitee's addition aside. So the check does not rest on a
+    /// signature being a function of its message: right after `shareVault`, before any sync, the device's head is
+    /// the chain's, members and all, and nothing was added to the chain's objects. Once a key of the vault has come
+    /// by grant (a rotation), `shareVault` is refused there as on a member's device (Z41).
     @Test("the owner's other device takes up a vault its account shared by sharing it, until the vault has rotated")
     func ownerOtherDeviceSharesAgain() async throws {
         let household = SharedVaultHousehold()
@@ -126,6 +129,12 @@ extension AdversarialSharedVaultTests {
         let records = Set(await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID)))
 
         try await second.session.shareVault(vaultID)
+        let taken = try await second.session.sharedVaultStatus(vaultID)
+        #expect(
+            taken.membership.hash == (try await owner.session.sharedVaultStatus(vaultID).membership.hash),
+            "a genesis of its own was signed rather than the chain on the transport taken up")
+        #expect(taken.membership.members.count == 3)
+        #expect(Set(await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID))) == records)
         try await second.session.sync()
         let status = try await second.session.sharedVaultStatus(vaultID)
         #expect(status.role == .owner && status.membership.members.count == 3)
@@ -134,11 +143,7 @@ extension AdversarialSharedVaultTests {
         try await Self.syncAll([second, owner, member])
         #expect(try await member.session.item(id: bank.id).archived)
         #expect(try await member.session.sharedVaultStatus(vaultID).heldAside == 0)
-        // On Linux a signature is a function of its message, so the record signed again is the same object.
-        #if !canImport(Darwin)
-            #expect(
-                Set(await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID))) == records)
-        #endif
+        #expect(Set(await household.transport.list(prefix: SharingObjectLocation.membershipPrefix(vaultID))) == records)
 
         // After a rotation the new key reaches a third device of the owner's by grant: no second genesis there.
         try await owner.session.removeMember(other.accountID, from: vaultID)
