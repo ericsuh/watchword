@@ -10,8 +10,12 @@ public enum ExportWarning: Hashable, Sendable {
     case passkeyUnreadable(itemID: UUID)
     /// Fields the format has no column for were written into the notes as `label: value` lines.
     case fieldsMovedToNotes(itemID: UUID, count: Int)
-    /// The item is in the trash and was left out.
+    /// The item is in the person's trash (`Item.isTrashedByPerson`) and was left out.
     case trashedItemOmitted(itemID: UUID)
+    /// The item was in the trash only because sync left it there (kept after a deletion that had not seen it,
+    /// trashed without seeing every edit, or over a concurrent restore), not by the person's choice, and was written
+    /// as a live item: the export is what a person moving away reads before deleting this copy (review §Z, Z87; X4).
+    case syncTrashExported(itemID: UUID)
     /// A one-time-password field that is not a usable `otpauth://totp/` URI was written as a concealed field.
     case oneTimePasswordUnusable(itemID: UUID)
     /// The item holds field values that sync is keeping until the person chooses between them (`Item.conflicts`,
@@ -68,6 +72,19 @@ public struct ExportResult: Hashable, Sendable {
 /// What every exporter does the same way: the URLs it writes for an item, the values sync is keeping, and the
 /// warnings for what no format here can carry. Kept in one place so that no format forgets a line of the report.
 enum ExportSupport {
+    /// Whether an exporter writes `item`, reporting the decision. Only the person's own trash is left out
+    /// (`Item.isTrashedByPerson`, as an archive's restore reads it, X4); an item sync left in the trash is data nobody
+    /// chose to discard, written as a live item with its own line (review §Z, Z87).
+    static func exports(_ item: Item, report: inout ExportReport) -> Bool {
+        guard item.isTrashed else { return true }
+        guard !item.isTrashedByPerson else {
+            report.warnings.append(.trashedItemOmitted(itemID: item.id))
+            return false
+        }
+        report.warnings.append(.syncTrashExported(itemID: item.id))
+        return true
+    }
+
     static let unresolvedLabel = "Unresolved values"
 
     /// The URLs to write where a format keeps an entry's sign-in URLs, and the `url` fields they came from.

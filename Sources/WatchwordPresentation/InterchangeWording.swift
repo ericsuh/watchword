@@ -83,6 +83,9 @@ public enum InterchangeWording {
         case .fieldsMovedToNotes(let id, let count):
             return item(id) + ": \(count) field(s) were written into the notes."
         case .trashedItemOmitted(let id): return item(id) + " is in the Trash and was left out."
+        case .syncTrashExported(let id):
+            return item(id) + " was in the Trash only because of sync, not because you put it there, and was "
+                + "written as a live item."
         case .oneTimePasswordUnusable(let id):
             return item(id) + ": its one-time password was written as a concealed field."
         case .unresolvedValuesAdded(let id, let count):

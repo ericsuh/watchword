@@ -161,10 +161,7 @@ public enum PasswordCSV {
         var report = ExportReport()
         var rows = [applePasswordsHeader]
         for item in items {
-            guard !item.isTrashed else {
-                report.warnings.append(.trashedItemOmitted(itemID: item.id))
-                continue
-            }
+            guard ExportSupport.exports(item, report: &report) else { continue }
             let username = item.fields.first { $0.kind == .username } ?? item.fields.first { $0.kind == .email }
             let password = item.field(.password)
             let oneTimePassword = item.fields.first { $0.kind == .totp && (try? $0.otpParameters()) != nil }
