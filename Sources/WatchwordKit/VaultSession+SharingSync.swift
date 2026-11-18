@@ -973,8 +973,9 @@ extension VaultSession {
             admitted = Self.knowledgeCounts(
                 ItemMerge.effectiveClock(item, origin: Self.origin(record)),
                 of: VersionKey(recordID: record.recordID, kind: record.kind.rawValue, version: record.version),
-                author: writersOwn ? record.deviceID : nil, judgedBy: account.deviceID, in: vault, vouched: vouched,
-                retired: retired, listing: listing, awaited: &awaited, relied: &relied)
+                author: writersOwn ? record.deviceID : nil, judgedBy: account.deviceID,
+                ownUnreceived: ownUnreceived(in: local, account: account, view: ownView, listing: listing), in: vault,
+                vouched: vouched, retired: retired, listing: listing, awaited: &awaited, relied: &relied)
         }
         noteJudgement(record.vaultID, awaited: awaited, relied: relied, counted: retired)
         return admitted
@@ -995,26 +996,30 @@ extension VaultSession {
     /// checked, and a current member's edits there are believed as before; one whose first segment is not here has not
     /// published it yet (a shared vault keeps its whole log), and the claim waits for it (Z136). A version that vouches
     /// (S42) vouches for others' edits as for its values. A device no account lists names nobody's work and is passed
-    /// over.
+    /// over, unless it is one of this account's own that nobody receives and whose values this device's row holds
+    /// (`ownUnreceived`), which is refused unless carried, like this device's own (Z179).
     ///
     /// `author` is the device whose own edits are not asked about: the version's writer, where the version is known
     /// to be its work (`judgeAdmits`), or the device whose stream carried a tombstone. `nil` exempts nobody.
     static func knowledgeCounts(
-        _ clock: VersionVector, of record: VersionKey, author: UUID?, judgedBy me: UUID, in vault: SharedVault,
-        vouched: Bool, retired: Set<UUID>, listing: (UUID) -> [UUID], awaited: inout Set<UUID>,
-        relied: inout Set<UUID>
+        _ clock: VersionVector, of record: VersionKey, author: UUID?, judgedBy me: UUID,
+        ownUnreceived: (UUID) -> Bool, in vault: SharedVault, vouched: Bool, retired: Set<UUID>,
+        listing: (UUID) -> [UUID], awaited: inout Set<UUID>, relied: inout Set<UUID>
     ) -> Bool {
         for (device, count) in clock.entries where device != author {
-            let accounts = listing(device)
-            guard !accounts.isEmpty else { continue }
             let carriers = (vault.index.firstCarrier[device] ?? [:]).filter {
                 $0.key.recordID == record.recordID && $0.key.kind == record.kind && $0.key.version >= count
             }
             if carriers.contains(where: { Self.segmentCounts(device, sequence: $0.value, in: vault) }) { continue }
             // A claim about this device's own edits beyond what it published is refused, whatever else is known: it
             // knows what it wrote, and no version vouches for that, nor does a stream it has not published in yet
-            // (review finding Z136).
-            if device == me { return false }
+            // (review finding Z136). So is one about an ID of this account's that no member counts, whose values this
+            // device's row holds (`ownUnreceived`; an earlier ID of this installation among them): that work reached
+            // nobody, and a claim to have seen it would supersede or erase a copy that is here alone. Both are asked
+            // before an ID no account lists is passed over, which every such ID is (Z179).
+            if device == me || ownUnreceived(device) { return false }
+            let accounts = listing(device)
+            guard !accounts.isEmpty else { continue }
             relied.insert(device)
             // A stream that will never show the edits here (review finding Z144): a revoked device's, never read again,
             // so a device that recorded none of it (enrolled, joined or rebuilt its index since) waited for it for
@@ -1044,6 +1049,28 @@ extension VaultSession {
         return true
     }
 
+    /// The device IDs of this account whose edits nobody else received (`idsNobodyReceives`, review of round 10, Z179)
+    /// and whose values `local`, this device's row of the record, holds, as a test for `knowledgeCounts`: a claim
+    /// about one is judged as a claim about this device's own work, refused unless a segment that counts carried it.
+    /// Such a value is this account's own work that reached nobody (a copy carried over from an earlier ID), here
+    /// alone, and a version or deletion claiming to have seen it would supersede or erase it, and with it release the
+    /// deletions parked behind it (`releaseParkedDeletions`). Where this device's row holds none, there is nothing of
+    /// that ID's here to supersede, and the claim is passed over as before: so the person's own edit of such a copy,
+    /// once it holds no value of the ID, does not hold every member's later edit aside. Fails closed: a row that does
+    /// not open counts as holding a value of every such ID, and with this account's registry unreadable every ID no
+    /// counted registry lists may be one.
+    func ownUnreceived(
+        in local: StoredRecord?, account: AccountRecord, view: RegistryView?, listing: @escaping (UUID) -> [UUID]
+    ) -> (UUID) -> Bool {
+        guard let view else { return { listing($0).isEmpty } }
+        let ids = Self.idsNobodyReceives(account: account, view: view, including: account.deviceID)
+        guard !ids.isEmpty, let local, local.kind == .item else { return { _ in false } }
+        guard let keys, let item = try? openItem(local, keys: keys) else { return { ids.contains($0) } }
+        let held = Set(ItemMerge.attributedValues(item, origin: Self.origin(local)).map(\.revision.device))
+            .intersection(ids)
+        return { held.contains($0) }
+    }
+
     /// Whether a permanent deletion's erasure summary counts (review finding S45): every edit its author says it had
     /// seen is judged as a version's clock is (`knowledgeCounts`). A device that merged a late write and then deleted
     /// the item claims what the late writer had seen, and would erase an honest version it was shown only through that
@@ -1071,11 +1098,14 @@ extension VaultSession {
         // snapshot's entry names whichever device its signer chose: nobody is exempt, the named device included, and
         // a claim about this device's own edits beyond what it published is refused (review finding Z34).
         let author = location.kind == .segment ? entry.device : nil
+        let local = try await store.record(RecordKey(recordID: entry.recordID, kind: entry.kind))
+        let ownUnreceived = ownUnreceived(in: local, account: account, view: ownView, listing: listing)
         for erasure in ItemErasures(summary: entry.erasure).elements where erasure != .void {
             guard
                 Self.knowledgeCounts(
-                    erasure.seen, of: key, author: author, judgedBy: account.deviceID, in: vault,
-                    vouched: vouched, retired: retired, listing: listing, awaited: &awaited, relied: &relied)
+                    erasure.seen, of: key, author: author, judgedBy: account.deviceID, ownUnreceived: ownUnreceived,
+                    in: vault, vouched: vouched, retired: retired, listing: listing, awaited: &awaited,
+                    relied: &relied)
             else {
                 admitted = false
                 break
