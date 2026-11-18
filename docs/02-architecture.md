@@ -3372,7 +3372,9 @@ with `.completeFileProtection` on iOS, for the file mover; the staged copy goes 
 the PDF in a view's state. The kit and the screen say to print it or keep it on a device of one's own, never in a
 synced folder (`EmergencyKitText.storageWarning`): saved beside the vault's ciphertext and archives, it would leave
 the password as the only barrier against A1 (ADR 0008). Core Graphics and Core Text keep copies of their own while
-drawing, which nothing here can wipe (review §Z, Z84).
+drawing, which nothing here can wipe (review §Z, Z84). A lock can land after the session's last epoch check and
+reach the screen model before the call returns there; `EmergencyKitModel` and `ExportModel` count the locks they
+hear and keep nothing from a call a lock overtook (the export's bytes are wiped; review finding Z127).
 
 **The encrypted Watchword archive (PRD F8.4; ADR 0008).** A versioned, portable, whole-account backup that only
 Watchword reads, made of the vault's own envelope format (`AccountArchive` in `WatchwordCrypto`):

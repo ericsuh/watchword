@@ -77,8 +77,12 @@ public final class EmergencyKitModel: LockSensitive {
         }
         isWorking = true
         defer { isWorking = false }
+        // A lock can land after the session's last check and reach this model before the call returns here: what
+        // the call then hands back is dropped with everything else the lock dropped (review finding Z127).
+        let drops = self.drops
         errorMessage = await ScreenOperation(context: context).run {
             let opened = try await context.session.emergencyKit(password: password)
+            guard self.drops == drops else { return }
             kit = opened
             shownAt = privacy.mayReveal ? privacy.concealments : nil
         }
@@ -119,11 +123,15 @@ public final class EmergencyKitModel: LockSensitive {
     }
 
     public func dropOnLock() {
+        drops += 1
         removeStagedPDF()
         password = ""
         kit = nil
         shownAt = nil
     }
+
+    /// How many locks this model has heard: an open whose call a lock overtook keeps nothing (Z127).
+    private var drops = 0
 
     private func removeStagedPDF() {
         if let stagedPDF { staging.remove(stagedPDF) }

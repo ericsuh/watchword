@@ -89,12 +89,16 @@ public final class ExportModel: LockSensitive {
     /// On every lock: the bytes, any staged copy and the typed password and passphrase go (finding 6), and the
     /// staging folder is swept whatever this model remembers of it (Z80).
     public func dropOnLock() {
+        drops += 1
         discardFile()
         staging.sweep()
         password = ""
         passphrase = ""
         passphraseConfirmation = ""
     }
+
+    /// How many locks this model has heard: an export whose calls a lock overtook keeps nothing (Z127).
+    private var drops = 0
 
     /// Whether the model still holds a file's bytes (for tests: the bytes themselves never leave but by `stage`).
     public var holdsContents: Bool { contents != nil }
@@ -133,6 +137,10 @@ public final class ExportModel: LockSensitive {
         self.passphrase = ""
         passphraseConfirmation = ""
         discardFile()
+        // A lock can land after the session's last check and reach this model before a call returns here: the bytes
+        // that call hands back are wiped, not kept (review finding Z127).
+        let drops = self.drops
+        defer { if self.drops != drops { discardFile() } }
         await perform {
             let session = context.session
             let stamp = Self.stamp(self.now())
@@ -143,6 +151,7 @@ public final class ExportModel: LockSensitive {
                 var bytes = archive.bytes
                 archive.bytes = []
                 contents = SecureBytes(wiping: &bytes)
+                guard self.drops == drops else { return }
                 // What a restore would not bring back, if anything (Z82): before the person relies on the file.
                 let lines =
                     archive.restoreCheck.restoresEverything
@@ -153,6 +162,10 @@ public final class ExportModel: LockSensitive {
             case .applePasswordsCSV, .onePUX:
                 let format: PlaintextExportFormat = kind == .onePUX ? .onePUX : .applePasswordsCSV
                 let export = try await session.exportPlaintext(format, vaults: vaultIDs, password: password)
+                guard self.drops == drops else {
+                    export.bytes.zeroise()
+                    return
+                }
                 let titles = try await Self.titles(session)
                 // Already zeroising memory, the session's own (Z83): no copy is made here.
                 contents = export.bytes
