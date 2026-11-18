@@ -217,7 +217,9 @@ struct VaultSharingCodeTests {
         }
         _ = try starter.enterJoinerCode(try #require(joiner.code), at: Self.now)
         let object = try starter.invitationObject(invitation, signedBy: rig.starter.keyset)
-        #expect(object.name == SharingBoardName.invitation(starter.number))
+        #expect(object.name == SharingBoardName.invitation(starter.number, session: starter.session))
+        #expect(object.name == joiner.invitationName, "both ends name the slot after the session")
+        #expect(object.name.hasSuffix("/invitation/" + SharingBytes.hex(starter.session)))
         #expect(throws: SharingCodeError.notReady, "before the starter is evidenced") {
             try joiner.openInvitation(object.contents)
         }

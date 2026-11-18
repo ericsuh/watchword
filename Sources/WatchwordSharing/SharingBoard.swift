@@ -29,14 +29,23 @@ public enum SharingBoardError: Error, Hashable, Sendable {
 }
 
 /// The names of one session's objects on the board: `vault-sharing/<number>/<part>`, the number exactly eight ASCII
-/// digits. The board keeps no other names for a session, so a session's whole footprint is these four.
+/// digits, and for the invitation `vault-sharing/<number>/invitation/<session>` (the session ID, lower-case hex). The
+/// board keeps no other names for a session, so a session's whole footprint is these four.
+///
+/// The invitation's name carries the session because it is created last, after the people have finished: a slot named
+/// by the number alone could be taken by anyone who heard the number before the session even began, and another
+/// session under the same number later would meet the old one's. It does not stop someone who heard the number and
+/// read the commit, which names the session (docs/06-adversarial-review.md, V22: that leaves the invitation undelivered,
+/// and the starter hands it over as text).
 public enum SharingBoardName {
     static let prefix = "vault-sharing/"
 
     public static func commit(_ number: SharingSessionNumber) -> String { name(number, "commit") }
     public static func reply(_ number: SharingSessionNumber) -> String { name(number, "reply") }
     public static func reveal(_ number: SharingSessionNumber) -> String { name(number, "reveal") }
-    public static func invitation(_ number: SharingSessionNumber) -> String { name(number, "invitation") }
+    public static func invitation(_ number: SharingSessionNumber, session: [UInt8]) -> String {
+        name(number, "invitation/" + SharingBytes.hex(session))
+    }
 
     static func name(_ number: SharingSessionNumber, _ part: String) -> String {
         prefix + number.digits + "/" + part

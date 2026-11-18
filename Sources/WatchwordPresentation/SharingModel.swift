@@ -442,8 +442,15 @@ public final class InvitationModel {
         guard case .chooseRole(_, let contact) = step else { return }
         await perform {
             if throughSession {
-                invitation = try await context.session.inviteThroughSharingCode(to: vaultID, as: role)
-                step = .issued(code: nil)
+                do {
+                    invitation = try await context.session.inviteThroughSharingCode(to: vaultID, as: role)
+                    step = .issued(code: nil)
+                } catch SharedVaultError.invitationNotDelivered(let issued) {
+                    // Issued, not delivered: the invitation as text, for them to paste (V22).
+                    invitation = issued
+                    step = .issued(code: SharingCodes.text(for: issued))
+                    stepMessage = ErrorWording.invitationNotDelivered
+                }
             } else {
                 let issued = try await context.session.invite(contact.accountID, to: vaultID, as: role)
                 invitation = issued

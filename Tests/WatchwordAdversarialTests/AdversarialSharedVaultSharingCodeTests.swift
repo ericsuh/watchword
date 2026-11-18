@@ -89,6 +89,13 @@ extension AdversarialSharedVaultTests {
         return try #require(SharingSessionNumber(typed: text))
     }
 
+    /// Where a session's invitation goes on `board`: named after the session its commit names, as A1 reads it there.
+    static func invitationName(_ number: SharingSessionNumber, on board: InMemorySharingBoard) async throws -> String {
+        let bytes = try #require(await board.allObjects[SharingBoardName.commit(number)])
+        let commit = try SharingSessionMessage.parse(bytes, expecting: .commit)
+        return SharingBoardName.invitation(number, session: commit.session)
+    }
+
     /// An account whose sharing board is `board` rather than the household's.
     static func account(_ household: SharedVaultHousehold, seed: UInt64, board: any SharingBoard) async throws
         -> SharingAccount
@@ -192,7 +199,7 @@ extension AdversarialSharedVaultTests {
         await #expect(throws: SharingError.keySubstituted(accountID: invitee.accountID)) {
             _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
         }
-        #expect(await household.board.allObjects.keys.contains { $0.hasSuffix("/invitation") } == false)
+        #expect(await household.board.allObjects.keys.contains { $0.contains("/invitation/") } == false)
     }
 
     /// Threat: A1 plants an invitation in a session's slot: before the joiner has checked the starter, or signed by
@@ -216,19 +223,19 @@ extension AdversarialSharedVaultTests {
         let accepted = try await starter.session.enterSharingCode(try #require(shown.ownCode))
         _ = try await joiner.session.enterSharingCode(try #require(accepted.ownCode))
         let junk = Array(repeating: UInt8(0x57), count: SharingCodeJoiner.invitationLength)
-        await household.board.tamper(SharingBoardName.invitation(number), contents: junk)
+        let slot = try await Self.invitationName(number, on: household.board)
+        await household.board.tamper(slot, contents: junk)
         await #expect(throws: SharingCodeError.invitationInvalid) {
             _ = try await joiner.session.sharingCodeInvitation()
         }
         // Signed by an attacker over a well-formed content naming an attacker's vault.
         var forged = Array(junk.prefix(SharingCodeJoiner.invitationLength - 64))
         forged = forged + (try attacker.keyset.sign(forged, domain: .membership))
-        await household.board.tamper(SharingBoardName.invitation(number), contents: forged)
+        await household.board.tamper(slot, contents: forged)
         await #expect(throws: SharingCodeError.invitationInvalid) {
             _ = try await joiner.session.sharingCodeInvitation()
         }
-        await household.board.tamper(
-            SharingBoardName.invitation(number), contents: Array(repeating: 0, count: 1 << 12))
+        await household.board.tamper(slot, contents: Array(repeating: 0, count: 1 << 12))
         await #expect(throws: SharingBoardError.tooLarge) { _ = try await joiner.session.sharingCodeInvitation() }
     }
 
@@ -419,5 +426,40 @@ extension AdversarialSharedVaultTests {
         await gated.releaseCreate()
         let replaced = try await replacing.value
         #expect(replaced.step == .showNumber && replaced.number != old.number)
+    }
+
+    /// Threat: someone who heard the eight digits (a shoulder-surfer, a sniper, A1) takes the session's invitation slot
+    /// before the starter sends (V22). The invitation is issued (the joiner added, the grant published) and then cannot
+    /// be delivered: the starter is told so and given the invitation as text, a retry never invites a second time, and
+    /// the joiner, who checked the starter in the session, accepts the text.
+    @Test("a taken invitation slot leaves the invitation to hand over as text, and a retry invites nobody again")
+    func invitationSlotTaken() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 1_311)
+        let invitee = try await household.account(seed: 1_312)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let (checked, _) = try await owner.checkSharingCode(with: invitee)
+        let slot = try await Self.invitationName(try Self.number(checked), on: household.board)
+        await household.board.tamper(slot, contents: Array(repeating: 0x57, count: 40))
+
+        var issued: Invitation?
+        do {
+            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
+            Issue.record("delivered into a taken slot")
+        } catch SharedVaultError.invitationNotDelivered(let invitation) {
+            issued = invitation
+        }
+        let invitation = try #require(issued)
+        #expect(invitation == Invitation(vaultID: vaultID, ownerAccountID: owner.accountID))
+        await #expect(throws: SharedVaultError.invitationNotDelivered(invitation), "a retry only delivers again") {
+            _ = try await owner.session.inviteThroughSharingCode(to: vaultID, as: .readWrite)
+        }
+        try await owner.session.sync()
+        let status = try await owner.session.sharedVaultStatus(vaultID)
+        #expect(status.membership.members.count == 2)
+        try await invitee.session.acceptInvitation(invitation)
+        try await invitee.session.sync()
+        #expect(try await invitee.session.sharedVaultStatus(vaultID).role == .readWrite)
     }
 }

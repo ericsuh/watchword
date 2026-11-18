@@ -451,7 +451,9 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   (`unrestoredSharedVaultIsUnavailable`, V19; "Screen models: sharing" `unrestoredSharedVaultOnScreen`).
   A lock while a joiner waits on the board publishes no reply (`lockWhileJoining`, V9's other half); an end while a
   start or a join waits on the board is not undone (`endWhileStartingOrJoining`, V20), and a step of a replaced session
-  reveals nothing (`replacedSessionRevealsNothing`, V20).
+  reveals nothing (`replacedSessionRevealsNothing`, V20). A taken invitation slot leaves the invitation to hand over
+  as text and a retry invites nobody again (`invitationSlotTaken`, V22; "Screen models: sharing"
+  `undeliveredInvitationAsText`).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed

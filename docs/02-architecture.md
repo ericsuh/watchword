@@ -1502,7 +1502,10 @@ the account named); evidence not pinned lives in the run and goes with it. A dif
 lists for that account (`replacePinFromSharingCode(listedIn:)`), so a session with the wrong device cannot settle a
 "keys changed" warning to keys nobody listed. After a session the starter invites as before (`invite`: the grant to the
 pinned bundle and the record that adds them) and sends the `Invitation` as one more board object, `"WWVI"`, signed by
-its account key and bound to the session, its number and the joiner (`inviteThroughSharingCode`); the joiner opens it
+its account key and bound to the session, its number and the joiner (`inviteThroughSharingCode`), under a name that
+carries the session (`vault-sharing/<number>/invitation/<session>`). Inviting is resumable: a retry delivers the same
+signed bytes and never invites again, and a slot someone else took leaves the invitation to hand over as text
+(`invitationNotDelivered`, V22). The joiner opens it
 only under the bundle the session authenticated (`sharingCodeInvitation`) and accepts with every existing check. **No
 vouching:** an invitation whose owner is not the starter is accepted only once the joiner has pinned the owner by a
 session (or the full code) of their own. The session lives in memory in the actor (`sharingCodeRun`), runs one step

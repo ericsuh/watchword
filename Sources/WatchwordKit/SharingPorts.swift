@@ -118,4 +118,9 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// this device can verify, so nothing is written, renamed, deleted, shared again or accepted into it until its owner
     /// is checked again (docs/06-adversarial-review.md, V19).
     case sharedVaultUnavailable(UUID)
+    /// The invitation was issued (the joiner is added and holds a grant) but could not be delivered inside the vault
+    /// sharing code session: something else is in its slot (anyone who heard the number may take it). Hand it over as
+    /// text (`SharingCodes.text(for:)`); the joiner, who checked this device, pastes it (docs/06-adversarial-review.md,
+    /// V22).
+    case invitationNotDelivered(Invitation)
 }

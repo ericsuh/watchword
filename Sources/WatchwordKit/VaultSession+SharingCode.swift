@@ -2,6 +2,12 @@ import Foundation
 import WatchwordCrypto
 import WatchwordSharing
 
+/// A board object a session made, kept so that a retry puts the same bytes there again (signing is randomised).
+struct SharingBoardObject: Sendable, Hashable {
+    let name: String
+    let contents: [UInt8]
+}
+
 /// One vault sharing code session as this device runs it (ADR 0010): in memory only, so a lock (`lock()` drops it),
 /// a restart, or ten minutes without progress abandons it, and a new one draws everything fresh.
 struct SharingCodeRun: Sendable {
@@ -23,6 +29,11 @@ struct SharingCodeRun: Sendable {
     var pinConflict = false
     /// The starter sent its invitation in this run.
     var invitationSent = false
+    /// The starter's invitation, once `invite` has issued it (the grant published and the record that adds the joiner
+    /// proposed), and the board object that carries it, once signed: a retry delivers these again and never invites a
+    /// second time (V22).
+    var issued: Invitation?
+    var invitationObject: SharingBoardObject?
     /// Joiner: the person said yes to the account a scan named (`confirmScannedSharingPartner`). A scan is pinned
     /// only then, and only once the starter's reveal has made it evidence (ADR 0010, Scans: "the device names what it
     /// is about to pin"; docs/06-adversarial-review.md, V18).
@@ -243,6 +254,12 @@ extension VaultSession {
     /// Invites the account this session authenticated (the starter's side of ADR 0010, After the session): the usual
     /// invitation (`invite`: the grant to the pinned bundle and the record that adds them), and the invitation itself
     /// as a board object of the session, signed by this account, so nothing is pasted. One invitation per session.
+    ///
+    /// Resumable (V22): once `invite` has issued the invitation the run keeps it and its signed object, so a retry
+    /// after a failed delivery delivers the same bytes again and never invites a second time. A slot already holding
+    /// those bytes (a create whose answer was lost) counts as delivered; one holding anything else (someone who heard
+    /// the number took it) throws `SharedVaultError.invitationNotDelivered` with the invitation, for the screen to hand
+    /// over as text.
     public func inviteThroughSharingCode(to vaultID: UUID, as role: MemberRole) async throws -> Invitation {
         let (board, _) = try sharingCodeSettings()
         let epoch = lockEpoch
@@ -252,11 +269,32 @@ extension VaultSession {
         guard run.pinned else { throw SharingError.fingerprintNotVerified }
         guard !run.invitationSent else { throw SharingError.invitationAlreadyCompleted }
         let generation = run.generation
-        let invitation = try await invite(partner, to: vaultID, as: role)
+        let invitation: Invitation
+        if let issued = run.issued {
+            guard issued.vaultID == vaultID else { throw SharingError.invitationAlreadyCompleted }
+            invitation = issued
+        } else {
+            invitation = try await invite(partner, to: vaultID, as: role)
+            // The chain has changed: remember what was issued before anything else can fail.
+            guard sharingCodeRun?.generation == generation else { throw SharingCodeError.notReady }
+            sharingCodeRun?.issued = invitation
+        }
         let keys = try requireKeys(since: epoch)
         guard sharingCodeRun?.generation == generation else { throw SharingCodeError.notReady }
-        let object = try starter.invitationObject(invitation, signedBy: keys.keyset)
-        try await board.create(object.name, contents: object.contents)
+        let object: SharingBoardObject
+        if let signed = sharingCodeRun?.invitationObject {
+            object = signed
+        } else {
+            let made = try starter.invitationObject(invitation, signedBy: keys.keyset)
+            object = SharingBoardObject(name: made.name, contents: made.contents)
+            sharingCodeRun?.invitationObject = object
+        }
+        do {
+            try await board.create(object.name, contents: object.contents)
+        } catch SharingBoardError.taken {
+            let there = try await board.fetch(object.name, maximumLength: SharingCodeJoiner.invitationLength)
+            guard there == object.contents else { throw SharedVaultError.invitationNotDelivered(invitation) }
+        }
         if sharingCodeRun?.generation == generation { sharingCodeRun?.invitationSent = true }
         return invitation
     }
@@ -271,7 +309,7 @@ extension VaultSession {
         guard run.pinned else { throw SharingError.fingerprintNotVerified }
         guard
             let bytes = try await board.fetch(
-                SharingBoardName.invitation(joiner.number), maximumLength: SharingCodeJoiner.invitationLength)
+                joiner.invitationName, maximumLength: SharingCodeJoiner.invitationLength)
         else { return nil }
         return try joiner.openInvitation(bytes)
     }
@@ -356,6 +394,8 @@ extension VaultSession {
         run.pinned = current.pinned
         run.pinConflict = current.pinConflict
         run.invitationSent = current.invitationSent
+        run.issued = current.issued
+        run.invitationObject = current.invitationObject
         run.scanConfirmed = current.scanConfirmed
         sharingCodeRun = run
         if let thrown { throw thrown }

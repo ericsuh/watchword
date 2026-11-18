@@ -618,3 +618,50 @@ extension SharingScreenTests {
         #expect(detail.errorMessage == ErrorWording.sharedVaultUnavailable)
     }
 }
+
+extension SharingScreenTests {
+    /// The invitation slot taken by someone who heard the number (V22): the screen says so and hands the invitation
+    /// over as text, which the invitee, who checked the inviter in the session, pastes and accepts.
+    @Test("an invitation that cannot be delivered in the session is offered as text")
+    func undeliveredInvitationAsText() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 701)
+        let invitee = try await household.account(seed: 702)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        let invitation = InvitationModel(vaultID: vaultID, context: ContextProbe().context(owner.session))
+        await invitation.startSession()
+        guard case .showCode(let number, _) = invitation.step else {
+            Issue.record("expected the code, got \(invitation.step)")
+            return
+        }
+        _ = try await invitee.session.joinSharingCodeSession(number: number)
+        await invitation.refresh()
+        let shown = try await invitee.session.refreshSharingCodeSession()
+        invitation.typedCode = try #require(shown.ownCode)
+        await invitation.confirmTheirCode()
+        _ = try await invitee.session.enterSharingCode(try #require(invitation.status?.ownCode))
+        let parsed = try #require(SharingSessionNumber(typed: number))
+        let commitBytes = try #require(await household.board.allObjects[SharingBoardName.commit(parsed)])
+        let commit = try SharingSessionMessage.parse(commitBytes, expecting: .commit)
+        await household.board.tamper(
+            SharingBoardName.invitation(parsed, session: commit.session), contents: Array(repeating: 1, count: 9))
+
+        await invitation.invite()
+        guard case .issued(let text?) = invitation.step else {
+            Issue.record("expected the invitation as text, got \(invitation.step)")
+            return
+        }
+        #expect(invitation.errorMessage == ErrorWording.invitationNotDelivered)
+        let accept = AcceptInvitationModel(context: ContextProbe().context(invitee.session))
+        await accept.useFullCode()
+        accept.codeText = text
+        await accept.read()
+        guard case .confirmJoin = accept.step else {
+            Issue.record("expected to be asked, got \(accept.step) \(accept.errorMessage ?? "")")
+            return
+        }
+        await accept.confirmJoin()
+        #expect(accept.step == .joined(vaultID: vaultID), "\(accept.errorMessage ?? "")")
+    }
+}

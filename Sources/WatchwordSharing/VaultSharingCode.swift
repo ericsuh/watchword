@@ -507,7 +507,10 @@ public struct SharingCodeStarter: Sendable {
         guard keyset.accountID == account.accountID else { throw SharingError.notPermitted }
         let content = SessionInvitationCodec.content(
             session: session, number: number, joiner: joiner.accountID, invitation: invitation)
-        return (SharingBoardName.invitation(number), content + (try keyset.sign(content, domain: .membership)))
+        return (
+            SharingBoardName.invitation(number, session: session),
+            content + (try keyset.sign(content, domain: .membership))
+        )
     }
 
     private mutating func accept(_ joiner: PublicKeyBundle, method: VerificationMethod, at now: Date) {
@@ -697,6 +700,9 @@ public struct SharingCodeJoiner: Sendable {
 
     /// The most bytes `openInvitation` takes: fetch no more.
     public static var invitationLength: Int { SessionInvitationCodec.encodedLength }
+
+    /// Where this session's invitation is put on the board.
+    public var invitationName: String { SharingBoardName.invitation(number, session: session) }
 
     /// Ends the session with `error`, which the caller throws.
     private mutating func fail(_ error: SharingCodeError) -> SharingCodeError {

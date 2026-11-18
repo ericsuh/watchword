@@ -181,6 +181,8 @@ Built as decided (`docs/02-architecture.md` §8.4; review in `06-adversarial-rev
 - The full-code fallback's screens show this device's own sixty digits and none of the directory's for the other
   account: the person types the code the other device shows, so a directory that publishes its own keys under that
   account cannot be passed by copying the screen (V17, from the follow-up audit of the sharing surface).
+- The invitation's board name carries the session (`…/invitation/<session>`), and sending it is resumable: once
+  issued it is delivered again, never issued twice, and if its slot was taken the starter hands it over as text (V22).
 - A scan is the person's choice and is named before it is pinned (V18): the scanner hands over only the code tapped;
   a joiner's scan is evidence only after the starter's reveal opened its commitment, and the screen names the account
   and pins it on a yes (`confirmScannedSharingPartner`). Nothing unpinned outlives the session.

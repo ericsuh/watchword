@@ -133,8 +133,15 @@ public enum ErrorWording {
                 + "changed. Remove them from the vault, or have them invited again."
         case .sharedVaultUnavailable:
             return sharedVaultUnavailable
+        case .invitationNotDelivered:
+            return invitationNotDelivered
         }
     }
+
+    /// The invitation was issued and could not be sent inside the session (V22): the screen shows it as text.
+    public static let invitationNotDelivered =
+        "Someone else wrote where the invitation goes, so it could not be sent inside this session. They are added: "
+        + "send them the invitation below, and they paste it."
 
     /// A shared vault this device could not restore: shared, and closed here until its owner is checked again (V19).
     public static let sharedVaultUnavailable =

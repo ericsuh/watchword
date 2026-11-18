@@ -208,7 +208,8 @@ public enum SharingCodeWording {
         case .notReady:
             return "That step is not ready yet. Wait for the other device, then try again."
         case .invitationInvalid:
-            return "The invitation did not come from the person you checked, and was refused."
+            return "The invitation did not come from the person you checked, and was refused. Ask them to send it as "
+                + "text, and paste it instead."
         case .busy:
             return ""
         }
