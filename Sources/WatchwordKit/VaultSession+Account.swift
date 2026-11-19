@@ -862,8 +862,34 @@ extension VaultSession {
         // unlock (Z177). The move reads the deletions again (`completeDeviceMigration`), and decides what it parks.
         let unpublished = asNewDevice ? try await unpublishedRows(of: account) : (rows: [], deletions: [:])
         if asNewDevice { _ = try await parkedDeletions(of: account) }
-        // Then a new device's key, so that its ID can commit to the account under it (review finding Z157).
+        // Then a new device's key, so that its ID can commit to the account under it (review finding Z157). Made
+        // before what follows can fail (the label is sealed for its ID, the entry signed with it), so any failure
+        // before the commit deletes it again: a retry leaves no key under an ID nothing registered (review of round 11,
+        // I2; Z182).
         let created = asNewDevice ? try await deviceKeys.createDevice(accountID: account.accountID) : nil
+        do {
+            try await commitRegistration(
+                account: account, as: &updated, created: created, view: view, unpublished: unpublished.rows,
+                asNewDevice: asNewDevice, epoch: epoch)
+        } catch {
+            if created != nil { try? await deviceKeys.delete(accountID: account.accountID) }
+            throw error
+        }
+        registryView = nil
+        if let refreshed = try? await registry(updated) {
+            try? await pinRegistry(refreshed, accountID: account.accountID)
+        }
+        // After the registry is pinned again, so that the move reads the registry that lists the new ID. A move that
+        // fails throws, and is made again at the next unlock or sync (Z181).
+        if asNewDevice { try await completeDeviceMigration(account: updated) }
+    }
+
+    /// `registerThisDevice` from its new key to its commit: everything that can fail while a key just made is not yet
+    /// registered.
+    private func commitRegistration(
+        account: AccountRecord, as updated: inout AccountRecord, created: DeviceIdentity?, view: RegistryView,
+        unpublished: [StoredRecord], asNewDevice: Bool, epoch: UInt64
+    ) async throws {
         if let created { updated.deviceID = created.id }
         let now = await clock.now()
         let keys = try requireKeys(since: epoch)
@@ -895,7 +921,7 @@ extension VaultSession {
                 change.migration = .set(migration)
             }
             change.account = .update(updated, expectedKeysetVersion: account.keysetVersion)
-            for row in try carriedOver(unpublished.rows, keys: try requireKeys(since: epoch), as: updated) {
+            for row in try carriedOver(unpublished, keys: try requireKeys(since: epoch), as: updated) {
                 change.upserts.append(row.row)
                 change.expectations[row.row.key] = .version(row.replacing)
             }
@@ -907,13 +933,6 @@ extension VaultSession {
                 highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, row.version)
             }
         }
-        registryView = nil
-        if let refreshed = try? await registry(updated) {
-            try? await pinRegistry(refreshed, accountID: account.accountID)
-        }
-        // After the registry is pinned again, so that the move reads the registry that lists the new ID. A move that
-        // fails throws, and is made again at the next unlock or sync (Z181).
-        if asNewDevice { try await completeDeviceMigration(account: updated) }
     }
 
     /// The rows this device wrote that its sync state does not record as published, and its pending deletions

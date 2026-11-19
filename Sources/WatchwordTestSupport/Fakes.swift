@@ -162,6 +162,9 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
     private var held: [UUID: (deviceID: UUID, key: SoftwareDeviceKey)] = [:]
     private var generator: SeededGenerator
     public private(set) var signatures = 0
+    /// How many keys have been made, by either `create`: with `isEmpty` and `publicKey`, whether a failure left one
+    /// behind (review of round 11, I2).
+    public private(set) var created = 0
 
     public init(seed: UInt64 = 1) {
         generator = SeededGenerator(seed: seed)
@@ -172,12 +175,14 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
         let publicKey = try key.publicKey()
         let deviceID = DeviceIdentifier.derive(accountID: accountID, key: publicKey)
         held[accountID] = (deviceID, key)
+        created += 1
         return DeviceIdentity(id: deviceID, key: publicKey)
     }
 
     public func create(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey {
         let key = SoftwareDeviceKey.generate(using: &generator)
         held[accountID] = (deviceID, key)
+        created += 1
         return try key.publicKey()
     }
 

@@ -14,7 +14,8 @@ extension AdversarialAccountTests {
     /// A's store and sync state, a deletion made and never published, restored onto other hardware (no device key)
     /// over `state`: the restored device, not yet unlocked, and the deleted item's ID.
     static func restoredWithUnpublishedDeletion(
-        _ fixture: Fixture, state: InterceptingStateStore, into store: any RecordStore = InMemoryRecordStore()
+        _ fixture: Fixture, state: InterceptingStateStore, into store: any RecordStore = InMemoryRecordStore(),
+        deviceKeys: FakeDeviceKeyStore = FakeDeviceKeyStore(seed: 181)
     ) async throws -> (restored: TestVault, other: TestVault, doomed: UUID) {
         let other = try await fixture.enrolled(Self.deviceC)
         let doomed = try await fixture.a.session.save(
@@ -36,7 +37,7 @@ extension AdversarialAccountTests {
         }
         let restored = TestVault(
             store: store, sync: SyncSettings(state: state, transport: fixture.transport), seed: 181,
-            deviceName: "Restored phone", deviceKeys: FakeDeviceKeyStore(seed: 181))
+            deviceName: "Restored phone", deviceKeys: deviceKeys)
         return (restored, other, doomed.id)
     }
 
@@ -197,6 +198,36 @@ extension AdversarialAccountTests {
         #expect((try? await other.session.item(id: doomed.id)) == nil, "the deletion never went out")
     }
 
+    /// Threat: none needed but a database that refuses one write (full, or busy past its timeout) while a restore
+    /// registers its new device ID; the review of round 11 (I2, Z182's residual). The new device's key is made before
+    /// the label is sealed for its ID and the registry entry signed with it, and a failure after it and before the
+    /// commit left the key in the Keychain under an ID nothing registered, one per failed attempt. It is deleted again.
+    @Test("a restore's registration that fails before its commit leaves no device key behind")
+    func failedRegistrationLeavesNoKey() async throws {
+        let fixture = try await Self.fixture(seed: 18_700)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let keys = FakeDeviceKeyStore(seed: 18_701)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, into: store, deviceKeys: keys)
+        let oldID = try #require(try await store.loadAccount()?.deviceID)
+        await store.failNextAccountCommit()
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.deviceID == oldID, "registered although the commit failed")
+        #expect(await keys.created == 1)
+        #expect(await keys.isEmpty(), "the failed registration left its key behind")
+
+        await restored.session.lock()
+        try await restored.session.unlock(password: TestVault.password)
+        let account = try #require(try await store.loadAccount())
+        #expect(account.deviceID != oldID, "the next unlock did not register")
+        #expect(await keys.created == 2)
+        #expect(try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID) != nil)
+        try await restored.session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
     /// Threat: none needed; the review of round 11 (L1). A password change reads the account record, derives and signs
     /// across several awaits, and commits the record it read. A move completed during those awaits cleared the record's
     /// migration, and the commit wrote it back: the move ran again after the device had published under its new ID
@@ -226,14 +257,18 @@ extension AdversarialAccountTests {
     }
 }
 
-/// A record store that runs a step once, the next time the account's headers are listed: where a password change
-/// is between reading the account record and committing it.
+/// A record store that runs a step once, the next time the account's headers are listed (where a password change
+/// is between reading the account record and committing it), and that can fail the next commit of the account record.
 actor HookedRecordStore: RecordStore {
     let base = InMemoryRecordStore()
     private var hook: (@Sendable () async -> Void)?
     private(set) var hookRan = false
 
+    private var accountCommitFails = false
+
     func onNextHeaderListing(_ hook: @escaping @Sendable () async -> Void) { self.hook = hook }
+    /// The next commit that writes the account record fails, as a database that cannot be written would.
+    func failNextAccountCommit() { accountCommitFails = true }
 
     func loadAccount() async throws -> AccountRecord? { await base.loadAccount() }
     func record(_ key: RecordKey) async throws -> StoredRecord? { await base.record(key) }
@@ -245,6 +280,12 @@ actor HookedRecordStore: RecordStore {
         }
         return await base.records(in: vaultID, kind: kind)
     }
-    func commit(_ change: StoreChange) async throws { try await base.commit(change) }
+    func commit(_ change: StoreChange) async throws {
+        if accountCommitFails, change.account != nil {
+            accountCommitFails = false
+            throw RecordStoreError.checkpointIncomplete
+        }
+        try await base.commit(change)
+    }
     func eraseAll() async throws { await base.eraseAll() }
 }
