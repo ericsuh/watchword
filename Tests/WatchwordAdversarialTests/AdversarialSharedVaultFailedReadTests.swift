@@ -133,3 +133,105 @@ actor ListingFailingStore: RecordStore {
     func commit(_ change: StoreChange) async throws { try await base.commit(change) }
     func eraseAll() async throws { try await base.eraseAll() }
 }
+
+/// A sync state store over `base` whose reads of one vault's state (`loadState`) throw, as a busy or damaged database
+/// would: once, at the read after the next `skipping` of them, every read while `failing` says so, or as `script`
+/// says, one read at a time.
+actor LoadFailingSyncState: SyncStateStore {
+    struct LoadFailed: Error {}
+
+    /// What one read of the vault's state does, in `script`.
+    enum ScriptedRead: Sendable {
+        /// Reads the state.
+        case read
+        /// Answers that there is none, as a store that lost the row would.
+        case none
+        /// Runs the step, if any, and throws.
+        case fail(before: (@Sendable () async -> Void)?)
+    }
+
+    let base: any SyncStateStore
+    let vaultID: UUID
+    private var skipping: Int?
+    private var failing: (@Sendable () async -> Bool)?
+    private var script: [ScriptedRead] = []
+    private(set) var failed = 0
+
+    init(base: any SyncStateStore, vaultID: UUID) {
+        self.base = base
+        self.vaultID = vaultID
+    }
+
+    /// The read after the next `skipping` of the vault's state throws, once.
+    func arm(skipping: Int) {
+        self.skipping = skipping
+    }
+
+    /// Every read of the vault's state throws while `failing` returns `true`; `nil` reads every one again.
+    func fail(while failing: (@Sendable () async -> Bool)?) {
+        self.failing = failing
+    }
+
+    /// The next reads of the vault's state, one answer each, before anything else armed.
+    func script(_ reads: [ScriptedRead]) {
+        script = reads
+    }
+
+    func loadState(vaultID: UUID) async throws -> SyncState? {
+        if vaultID == self.vaultID {
+            if !script.isEmpty {
+                switch script.removeFirst() {
+                case .read:
+                    return try await base.loadState(vaultID: vaultID)
+                case .none:
+                    return nil
+                case .fail(let step):
+                    if let step { await step() }
+                    failed += 1
+                    throw LoadFailed()
+                }
+            }
+            if let skipping {
+                if skipping == 0 {
+                    self.skipping = nil
+                    failed += 1
+                    throw LoadFailed()
+                }
+                self.skipping = skipping - 1
+            }
+            if let failing, await failing() {
+                failed += 1
+                throw LoadFailed()
+            }
+        }
+        return try await base.loadState(vaultID: vaultID)
+    }
+    func saveState(_ state: SyncState) async throws { try await base.saveState(state) }
+    func stage(_ object: StagedObject) async throws { try await base.stage(object) }
+    func staged(vaultID: UUID) async throws -> [StagedObject] { try await base.staged(vaultID: vaultID) }
+    func unstage(_ locations: [SyncObjectLocation]) async throws { try await base.unstage(locations) }
+    func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion { try await base.prepared(deletion) }
+    func addPendingDeletion(_ deletion: PendingDeletion) async throws { try await base.addPendingDeletion(deletion) }
+    func pendingDeletions(vaultID: UUID) async throws -> [RecordKey: PendingDeletion] {
+        try await base.pendingDeletions(vaultID: vaultID)
+    }
+    func removePendingDeletions(_ deletions: [RecordKey: RecordStamp], vaultID: UUID) async throws {
+        try await base.removePendingDeletions(deletions, vaultID: vaultID)
+    }
+    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
+        try await base.quarantine(entry, vaultID: vaultID)
+    }
+    func quarantined(vaultID: UUID) async throws -> [SyncEntry] { try await base.quarantined(vaultID: vaultID) }
+    func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async throws {
+        try await base.discardQuarantined(entries, vaultID: vaultID)
+    }
+    func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
+        try await base.holdsQuarantined(entry, vaultID: vaultID)
+    }
+    func quarantineUsage(vaultID: UUID) async throws -> QuarantineUsage {
+        try await base.quarantineUsage(vaultID: vaultID)
+    }
+    func stash(vaultID: UUID) async throws -> [UInt8]? { try await base.stash(vaultID: vaultID) }
+    func saveStash(_ bytes: [UInt8], vaultID: UUID) async throws { try await base.saveStash(bytes, vaultID: vaultID) }
+    func eraseAll() async throws { try await base.eraseAll() }
+}

@@ -416,12 +416,20 @@ actor ChainRowUnreadableSharingStore: SharingStateStore {
 
     func readAgain() { failing = 0 }
 
+    /// Runs `step` once, inside the next read that throws, before it throws.
+    func onNextRefusal(_ step: @escaping @Sendable () async -> Void) { refusalStep = step }
+    private var refusalStep: (@Sendable () async -> Void)?
+
     func sharedVaultIDs() async throws -> [UUID] { await base.sharedVaultIDs() }
 
     func value(_ key: SharingStateKey, vaultID: UUID) async throws -> [UInt8]? {
         if failing > 0, key == .restoredChain, failingVault == nil || vaultID == failingVault {
             failing -= 1
             refused += 1
+            if let step = refusalStep {
+                refusalStep = nil
+                await step()
+            }
             throw ReadFailed()
         }
         return await base.value(key, vaultID: vaultID)

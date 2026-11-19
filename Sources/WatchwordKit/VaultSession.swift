@@ -248,7 +248,13 @@ public actor VaultSession: SharesExecutor {
     /// The configured sync state store, behind the wrapper that signs pending deletions as they are recorded and
     /// ignores any that does not verify (`AuthenticatedSyncState`).
     var syncState: (any SyncStateStore)? {
-        syncSettings.map { AuthenticatedSyncState(base: $0.state, session: self) }
+        syncState(within: nil)
+    }
+
+    /// `syncState`, with the states and stashes it saves bound to what one sync began with (`SyncStateWrites`, review
+    /// of round 22, Z253): signed only while that sync is still entitled to write them.
+    func syncState(within writes: SyncStateWrites?) -> (any SyncStateStore)? {
+        syncSettings.map { AuthenticatedSyncState(base: $0.state, session: self, writes: writes) }
     }
 
     // MARK: - State

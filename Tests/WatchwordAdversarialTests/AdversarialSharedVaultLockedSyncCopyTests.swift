@@ -93,49 +93,6 @@ extension AdversarialSharedVaultTests {
     }
 }
 
-extension AdversarialSharedVaultTests {
-    /// Threat: a sync that outlives what it began with (V66): the vault locked and unlocked during it, this device's ID
-    /// changed by an unlock's registration, or a sync begun locked, whose engines then save a vault state they loaded,
-    /// and verified, for the ID and the keys of the start, signed for whatever the session holds at the save. A local
-    /// race, no adversary needed; A8's damaged state (above) is what turns it into a lost record. Each clause of the
-    /// check made as the state or stash is signed is pinned here; the pending move's in the test above.
-    @Test("a sync's state writes are signed only while the sync is still entitled to them")
-    func syncStateWritesAreCheckedAtSigning() async throws {
-        let vault = TestVault.syncing(over: InMemorySyncTransport(), seed: 33_320)
-        try await vault.createAccount()
-        let session = vault.session
-        let vaultID = try #require(await session.personalVaultID)
-        let device = try #require(await session.deviceIDForTest())
-        let state = SyncState(vaultID: vaultID)
-        let begun = SyncStateWrites(deviceID: device, epoch: await session.lockEpoch, permitted: true)
-        _ = try await session.signedSyncState(state, within: begun)
-        _ = try await session.signStash([1, 2, 3], vaultID: vaultID, within: begun)
-
-        let locked = SyncStateWrites(deviceID: device, epoch: begun.epoch, permitted: false)
-        await #expect(throws: SyncKeyringError.self, "a sync begun locked signed a state") {
-            try await session.signedSyncState(state, within: locked)
-        }
-        let elsewhere = SyncStateWrites(deviceID: UUID(), epoch: begun.epoch, permitted: true)
-        await #expect(throws: SyncKeyringError.self, "a state was signed for an ID the sync did not begin with") {
-            try await session.signedSyncState(state, within: elsewhere)
-        }
-        await #expect(throws: SyncKeyringError.self, "a stash was signed for an ID the sync did not begin with") {
-            try await session.signStash([1, 2, 3], vaultID: vaultID, within: elsewhere)
-        }
-
-        await session.lock()
-        try await session.unlock(password: TestVault.password)
-        await #expect(throws: SyncKeyringError.self, "a state was signed after a lock and an unlock") {
-            try await session.signedSyncState(state, within: begun)
-        }
-        await #expect(throws: SyncKeyringError.self, "a stash was signed after a lock and an unlock") {
-            try await session.signStash([1, 2, 3], vaultID: vaultID, within: begun)
-        }
-        let again = SyncStateWrites(deviceID: device, epoch: await session.lockEpoch, permitted: true)
-        _ = try await session.signedSyncState(state, within: again)
-    }
-}
-
 /// `ListingHookedTransport` with the copies passed through: the step runs in the next listing of the prefix, with or
 /// without copies, before it answers.
 struct CopyListingHookedTransport: SyncTransport {

@@ -1076,7 +1076,9 @@ extension VaultSession {
     /// last caller turned away, holding the older record, made nothing and the newer move waited. And an attempt's
     /// failure is kept until an attempt makes the move: a later one that returns without making it (a record it does
     /// not hold, a wait for sharing) does not turn the failure into success, so a sync whose move failed on a chain
-    /// row still says so (`restoredChainUnreadable`), and an unlock still notes it (Z247).
+    /// row still says so (`restoredChainUnreadable`), and an unlock still notes it (Z247). The failure kept is the
+    /// first, not the latest, except that a chain row that could not be read is kept over any other (review of round
+    /// 22, Z259): a `locked` from an attempt after a lock replaced it, and the sync did not say why its move failed.
     func completeDeviceMigration(account caller: AccountRecord) async throws {
         guard caller.migration != nil, syncSettings?.state != nil, syncState != nil else { return }
         guard !migrationInFlight else {
@@ -1091,7 +1093,12 @@ extension VaultSession {
             do {
                 if try await makeDeviceMigration(account: next) { failure = nil }
             } catch {
-                failure = error
+                // The first failure, unless a later one is a chain row that could not be read: that is the one the
+                // sync reports (`restoredChainUnreadable`), and a `locked` from an attempt after a lock must not hide
+                // it (review of round 22, Z259).
+                if failure == nil || (error is RestoredChainRowUnreadable && !(failure is RestoredChainRowUnreadable)) {
+                    failure = error
+                }
             }
             guard migrationAskedAgain else { break }
             migrationAskedAgain = false
@@ -1304,7 +1311,14 @@ extension VaultSession {
     /// be signed as this device's: it stays parked, is tried again at the next sync, and its vault is returned too, so
     /// that the sync says it waits (review of round 12). Fails closed: with no
     /// registry, or parked deletions that cannot be read, nothing is released.
-    func releaseParkedDeletions(account: AccountRecord, view: RegistryView?) async -> Set<UUID> {
+    ///
+    /// Each is signed only while the sync that releases it is still entitled to write (`writes`,
+    /// `requireEntitlement`, review of PR #22's V66, Z256): checked on the actor, with no suspension between the check
+    /// and the signature, so that a lock, an unlock that registers a new ID and its move, landing during the awaits
+    /// above, leave it parked rather than restamped for an ID the move has already read.
+    func releaseParkedDeletions(account: AccountRecord, view: RegistryView?, within writes: SyncStateWrites? = nil)
+        async -> Set<UUID>
+    {
         guard let syncState, let parked = try? await parkedDeletions(of: account), !parked.isEmpty else { return [] }
         guard let view else { return [account.personalVaultID] }
         let held = await vaultsHoldingEditsNobodyReceived(
@@ -1313,7 +1327,9 @@ extension VaultSession {
         var waiting: Set<UUID> = []
         for deletion in parked {
             do {
-                try await syncState.addPendingDeletion(Self.restamped(deletion, device: account.deviceID))
+                try requireEntitlement(writes)
+                let own = try authenticatePendingDeletion(Self.restamped(deletion, device: account.deviceID))
+                try await syncState.addPendingDeletion(own)
             } catch {
                 // Not signed as this device's (no current key for its vault here, Z185): it waits, and says so
                 // (review of round 12).
