@@ -552,9 +552,9 @@ history writers), becomes `(k, n)`, and the vectors of `o`'s and `n`'s own parts
 The bound `p'` is the most of three, each meant as a lower bound on what `o` published *and what members' merges
 reach*: `p`, the last version of the record `o`'s own signed state recorded; the highest version of the record `o`'s
 stream carried, as the stream index shows it and `o`'s own segments downloaded since the restore carry it
-(`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`; the carry waits for the vault's log to be downloaded, so
-the bound is the transport's and not the backup's), in a vault with a judge only as far as a merge here can take `o`'s
-stream in sequence (`SyncEngine.mergeReach`; Z221, V56); and what
+(`publishedBound`, `SyncEngine.stagedEntries`; the carry waits for the vault's log to be downloaded, so
+the bound is the transport's and not the backup's), never at or past a name a merge here does not pass for its copies
+(`SyncEngine.mergeReach(of:stoppedAt:)`; Z221, V56, V58); and what
 the item itself, the row, shows a third device `x` (neither `o` nor `n`) saw of `o`: `o`'s count in each of `x`'s
 stamps and discards, each `o` line one of `x`'s lines is anchored after, each `o` line `x` removed (`seenByOthers`).
 Whatever an honest `x` saw, `o` published, and the row's versions are ones the judge admitted (a claim of `x` about
@@ -569,9 +569,14 @@ edited (A8), `p` reads as 0 and the carry renames it, so that members hold it tw
 verifying segments under one number (old hardware still running under `o`, A1 keeping both) every member that sees
 both refuses the name (`conflictingVersions`) and merges the stream no further, and the values only that name carried
 count on no member that did not merge it first, so whatever holds them is held aside there. The stream routes
-therefore stop at the first position the download refused, a merge would refuse, or that is not here yet; a gap so
-renames more of `o`'s work, which members that merged it already hold twice, as conflicts. `p` is not bounded so, and
-a version `o`'s signed state names but only a refused name carried keeps `o`'s stamps (V56, open). Before Z197 only `p`
+therefore stop before the first name, above what the state or a staged snapshot covers, that the sync's download
+refused for two verifying copies or left unfetched for them, or that is staged with copies (a merge refuses it); such
+a name is never staged in a vault with a judge, so every download refuses it again and nothing signed need remember
+it. A position merely not here yet (an iCloud placeholder, an object unreadable for now, segments collected before
+sharing) stops nothing: the move starts the state over, so stopping there bounded the routes by the staged run from
+position 1 and, at the first sync after a restore that met a gap, renamed what `o` had published, which every member
+then held twice (V58). `p` is not bounded so, and a version `o`'s signed state names but only a refused name carried
+keeps `o`'s stamps (V56, open; the same per-sync refusals could bound it, with no new field). Before Z197 only `p`
 was used and every vector was renamed:
 with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
 `(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every

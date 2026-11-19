@@ -223,6 +223,11 @@ public struct SyncReport: Sendable, Equatable {
     /// Copies the transport held and did not hand over (past `maximumCopiesPerObject` or the size limit), and names
     /// listed with copies that were left for a later sync because `maximumCopiesPerSync` was spent.
     public var copiesNotExamined = 0
+    /// Names listed with copies that a vault with a judge left unfetched in this sync, its bound of copies spent
+    /// (`maximumCopiesPerSync`; counted in `copiesNotExamined` too): never fetched as the current file alone, which
+    /// such a vault would then merge though it refuses a fork (§7.5, "Conflict copies"; a merge review of round 17,
+    /// V59). Their streams wait at them for a sync with the budget to examine them whole.
+    public var copiesLeftUnfetched: [String] = []
     /// Names under which more than one copy verified, all of which were merged: a device signed different bytes under
     /// one name (its state was rolled back and it wrote again before seeing what it had published).
     public var forkedObjects: [String] = []
@@ -245,6 +250,23 @@ public struct SyncReport: Sendable, Equatable {
     public var replayPostponed = false
 
     public init() {}
+
+    /// The names a vault with a judge does not merge past for their copies, as this sync's download found them: those
+    /// it refused for two verifying copies (`conflictingVersions`; a name with copies is never staged there, so every
+    /// download examines it again and refuses it again) and those it left unfetched (`copiesLeftUnfetched`). What a
+    /// restore's carry stops at (`SyncEngine.mergeReach(of:stoppedAt:)`; a merge review of round 17, V58): a position
+    /// that is merely not downloaded yet is not one.
+    public var copyStops: Set<SyncObjectLocation> {
+        var stops = Set(copiesLeftUnfetched.compactMap(SyncObjectLocation.init(name:)))
+        for rejection in rejected {
+            if case .transport(.conflictingVersions(let name)) = rejection.reason,
+                let location = SyncObjectLocation(name: name)
+            {
+                stops.insert(location)
+            }
+        }
+        return stops
+    }
 
     /// Records that the transport could not be used, and why. The first reason in a sync is kept.
     public mutating func noteTransportFailure(_ error: SyncTransportError) {
@@ -606,79 +628,98 @@ public actor SyncEngine {
     /// not merged yet, each entry its segment's author's own. Each segment is opened (`open`: kind, context, both
     /// signatures, AEAD, payload location) and its entries' structure checked (`validate`); a segment that fails gives
     /// nothing, and so does a retired author's (`SyncKeyring.retiredAuthors`), which no pass reads. In a vault with a
-    /// judge, only what a merge can apply in sequence counts: each author's run of staged positions from the one after
-    /// its stream's reach in the state (`mergeReach`), stopping at the first position that is not staged (refused at
-    /// the download, as a name with two verifying copies is there, `conflictingVersions`, or not downloaded yet), that
-    /// has conflict copies (refused by the merge, `openCopies`) or that does not open; the merge does not pass it, and
-    /// nothing at or past it counts (a merge review of round 16, Z221; of round 17, V56). That only lowers the carry's
-    /// bound: a gap at carry time renames more of the earlier ID's work as this device's, held twice, never lost.
-    /// Nothing else a merge asks is asked here: not the shared vault's judge (a segment's standing, write cuts, what a
-    /// version claims of other devices' work), nor the version bounds that quarantine (U5). So what a segment says of
-    /// its own author's versions is all a caller may take from it: a restore's carry, which needs to know, after a
-    /// `download` and before the pass that merges it, what the earlier device ID's own stream carried of those records
+    /// judge, only a segment within its stream's reach (`mergeReach(of:stoppedAt:)`) counts: nothing at or past a name
+    /// the merge does not pass for its copies, one that this sync's download refused for two verifying copies or left
+    /// unfetched (`stops`, `SyncReport.copyStops`), or one staged with copies (a merge review of round 16, Z221; of
+    /// round 17, V56 and V58). A position that is merely not here (not downloaded yet, unreadable, collected) stops
+    /// nothing: the merge waits there for a while, never for good, and counting only the run up to it renamed published
+    /// work as this device's at the first sync after every restore whose earlier ID's stream had a gap (V58). Nothing
+    /// else a merge asks is asked here: not the shared vault's judge (a segment's standing, write cuts, what a version
+    /// claims of other devices' work), nor the version bounds that quarantine (U5). So what a segment says of its own
+    /// author's versions is all a caller may take from it: a restore's carry, which needs to know, after a `download`
+    /// and before the pass that merges it, what the earlier device ID's own stream carried of those records
     /// (docs/10-sync-correctness.md §9; review of round 14, L1, and of round 15, Z208: a third device's claim read here
     /// had never been judged). Merges nothing; throws what the state store threw.
-    public func stagedEntries(of keys: Set<RecordKey>, authoredBy authors: Set<UUID>) async throws -> [SyncEntry] {
+    public func stagedEntries(
+        of keys: Set<RecordKey>, authoredBy authors: Set<UUID>, stoppedAt stops: Set<SyncObjectLocation>
+    ) async throws -> [SyncEntry] {
         guard !keys.isEmpty, !authors.isEmpty else { return [] }
         let retired = await keyring.retiredAuthors(vaultID: vaultID)
-        let segments = try await syncState.staged(vaultID: vaultID).filter {
+        var segments = try await syncState.staged(vaultID: vaultID).filter {
             $0.location.kind == .segment && authors.contains($0.location.author)
                 && !retired.contains($0.location.author)
         }
+        if judge != nil {
+            // In a vault with a judge a stream is merged strictly in sequence and never past a name it refuses for its
+            // copies (`examine`, `openCopies`), unless a snapshot covers it: nothing at or past such a name counts as
+            // carried (Z221, V56, V58).
+            let reach = try await mergeReach(of: Set(segments.map(\.location.author)), stoppedAt: stops)
+            segments.removeAll { $0.location.number > reach[$0.location.author] ?? 0 }
+        }
         var entries: [SyncEntry] = []
-        func carried(by staged: StagedObject) async -> [SyncEntry]? {
+        for staged in segments {
             guard let payload = try? await open(staged), (try? validate(payload, at: staged.location)) != nil else {
-                return nil
+                continue
             }
-            return payload.entries.filter { keys.contains($0.key) && $0.device == staged.location.author }
-        }
-        guard judge != nil else {
-            for staged in segments {
-                entries += await carried(by: staged) ?? []
-            }
-            return entries
-        }
-        // In a vault with a judge a stream is merged strictly in sequence, a name with conflict copies is refused
-        // (`openCopies`) and one with two verifying copies is never staged (`examine`): only the run from the stream's
-        // reach counts as carried (Z221, V56).
-        let state = try await syncState.loadState(vaultID: vaultID)
-        let byAuthor = Dictionary(grouping: segments, by: \.location.author)
-        for author in byAuthor.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
-            let positions = Dictionary(
-                byAuthor[author]!.map { ($0.location.number, $0) }, uniquingKeysWith: { first, _ in first })
-            var next = Self.settledReach(of: author, in: state)
-            while next < .max, let staged = positions[next + 1], staged.alternates.isEmpty,
-                let found = await carried(by: staged)
-            {
-                entries += found
-                next += 1
-            }
+            entries += payload.entries.filter { keys.contains($0.key) && $0.device == staged.location.author }
         }
         return entries
     }
 
-    /// How far a merge here can take each of `authors`' streams in sequence (a merge review of round 17, V56): from
-    /// what `state` has merged of the stream or a merged snapshot covers of it (`settledReach`), through each next
-    /// position `staged` holds with no conflict copies, up to the first it does not hold (refused at the download, as
-    /// a name with two verifying copies is in a vault with a judge, or not downloaded yet) or holds with copies (which
-    /// a vault with a judge refuses, `openCopies`). A segment is merged strictly in sequence, so nothing of a stream
-    /// past that position is applied here while the state and the staging area stand as they are. Reads nothing of a
-    /// staged row but its place and its count of copies (`stagedEntries` also stops at one that does not open): a row
-    /// planted in the staging area (A8) can raise it, but the bound it sets counts only carriers a signed stream index
-    /// records, so at most what the stream index said before V56; a missing row lowers it. What a restore's carry may
-    /// count of the stream index (`highestVersionCarried(by:of:kind:through:)` in the session), so that the index's
-    /// route bounds the carry as `stagedEntries` does: a shared vault's judge records every staged segment, whatever
-    /// its place in its stream.
-    public static func mergeReach(of authors: Set<UUID>, state: SyncState?, staged: [StagedObject]) -> [UUID: UInt64] {
-        var held: [UUID: [UInt64: Bool]] = [:]
-        for object in staged where object.location.kind == .segment && authors.contains(object.location.author) {
-            held[object.location.author, default: [:]][object.location.number] = object.alternates.isEmpty
+    /// How far a merge here can take each of `authors`' streams in sequence before a name it does not pass for its
+    /// copies (a merge review of round 17, V56 and V58): the position before the lowest such name above what the
+    /// stream has settled here (`settledReach`) or a staged snapshot covers of it, or `UInt64.max` where there is none.
+    /// Such a name is one this sync's download refused for two verifying copies or left unfetched for want of budget
+    /// (`stops`, `SyncReport.copyStops`: a name with copies is never staged in a vault with a judge, so every download
+    /// examines it again and refuses it again, and no signed field needs to remember it), or one staged with copies
+    /// (which such a vault refuses at the merge, `openCopies`). The merge passes a refused position a snapshot covers,
+    /// so a staged one's coverage counts as the merge would take it, opened here (`openCopies`); one that does not
+    /// open covers nothing. A position merely not staged (not downloaded yet, an iCloud placeholder; unreadable for
+    /// now; collected) is passed: the merge waits there only until it arrives, and stopping at it renamed what the
+    /// earlier ID published at the first sync after every restore that met one, which every member then held twice
+    /// (V58, bringing back round 13's M2). What a restore's carry counts of the stream index
+    /// (`highestVersionCarried(by:of:kind:through:)` in the session) and of the staged segments (`stagedEntries`).
+    /// Throws what the state store threw.
+    public func mergeReach(of authors: Set<UUID>, stoppedAt stops: Set<SyncObjectLocation>) async throws
+        -> [UUID: UInt64]
+    {
+        let state = try await syncState.loadState(vaultID: vaultID)
+        let staged = try await syncState.staged(vaultID: vaultID)
+        let retired = await keyring.retiredAuthors(vaultID: vaultID)
+        var covered: [UUID: UInt64] = [:]
+        for snapshot in staged
+        where snapshot.location.kind == .snapshot && !retired.contains(snapshot.location.author)
+            && snapshot.location.number <= configuration.maximumVersion
+        {
+            guard let copies = try? await openCopies(snapshot) else { continue }
+            for copy in copies { covered.merge(copy.payload.vector, uniquingKeysWith: max) }
+        }
+        return Self.mergeReach(of: authors, state: state, staged: staged, stoppedAt: stops, covered: covered)
+    }
+
+    /// `mergeReach(of:stoppedAt:)` from `state`, the staging area and what staged snapshots `covered` of each stream,
+    /// read by the caller (a session asking without an engine passes none, which only lowers it). Reads nothing of a
+    /// staged segment but its place and its count of copies: a row planted in the staging area (A8) with copies can
+    /// lower it, and the bound it sets counts only carriers the signed stream index records or segments that open.
+    public static func mergeReach(
+        of authors: Set<UUID>, state: SyncState?, staged: [StagedObject], stoppedAt stops: Set<SyncObjectLocation>,
+        covered: [UUID: UInt64] = [:]
+    ) -> [UUID: UInt64] {
+        var stopping: [UUID: [UInt64]] = [:]
+        for location in stops where location.kind == .segment && authors.contains(location.author) {
+            stopping[location.author, default: []].append(location.number)
+        }
+        for object in staged
+        where object.location.kind == .segment && authors.contains(object.location.author)
+            && !object.alternates.isEmpty
+        {
+            stopping[object.location.author, default: []].append(object.location.number)
         }
         var reach: [UUID: UInt64] = [:]
         for author in authors {
-            var next = settledReach(of: author, in: state)
-            while next < .max, held[author]?[next + 1] == true { next += 1 }
-            reach[author] = next
+            let settled = max(settledReach(of: author, in: state), covered[author] ?? 0)
+            let first = (stopping[author] ?? []).filter { $0 > settled }.min()
+            reach[author] = first.map { $0 - 1 } ?? .max
         }
         return reach
     }
@@ -823,15 +864,44 @@ public actor SyncEngine {
         let allowance = max(0, configuration.maximumCopiesPerSync)
         var budget = allowance - allowance / 2
         let isOwn = { (location: SyncObjectLocation) in location.kind == .segment && location.author == self.deviceID }
+        // Of the names with copies, which alone spend the bound, first those at the next position of their stream,
+        // which the merge waits on, then the rest (snapshots, later positions), each group in the order it was in. So
+        // in a vault with a judge, where a name with copies is never fetched alone (below), what a stream waits on is
+        // examined in every sync unless the next positions of other streams spend the bound first. Each costs at
+        // most `maximumCopiesPerObject`, so that takes 16 streams (by default) holding copies at their next position,
+        // which an honest household's forks do not reach and A1's junk under authors of its own does (a merge review
+        // of round 17, V59; held, as R17: the store can stop any stream by withholding its object, and nothing is
+        // merged from such a name, so only liveness is at stake).
+        let settled = state
+        let waitedOn = { (location: SyncObjectLocation) in
+            location.kind == .segment && location.number == Self.settledReach(of: location.author, in: settled) &+ 1
+        }
+        wanted =
+            wanted.filter { listing.copies[$0] == nil || waitedOn($0) }
+            + wanted.filter { listing.copies[$0] != nil && !waitedOn($0) }
         for location in wanted where !alreadyStaged.contains(location) {
             var decided = false
             do {
-                // Several copies under one name: each is checked alone, and what verifies is staged together. With
-                // the sync's bound spent, the current file alone, as for any name; its copies are looked at later.
+                // Several copies under one name: each is checked alone, and what verifies is staged together.
                 if let count = listing.copies[location], budget > 0 {
                     try await examine(
                         location, listed: count, late: false, turn: turn, budget: &budget, listing: &listing,
                         state: &state, report: &report)
+                    continue
+                }
+                // With the sync's bound spent: in a vault with a judge, nothing, so that the stream waits there for a
+                // sync with the budget to examine the name whole. Fetched alone, whichever copy the provider calls
+                // current, one copy of a fork was staged and merged where every member that examined the name refuses
+                // it, so that members could merge different objects at one position, which a write cut's chain
+                // assumes never happens (V59). Elsewhere the current file alone, as for any name; its copies are
+                // looked at later.
+                if listing.copies[location] != nil, judge != nil {
+                    report.copiesNotExamined += 1
+                    report.copiesLeftUnfetched.append(location.name)
+                    if location.kind == .segment {
+                        report.waiting[location.author] = min(report.waiting[location.author] ?? .max, location.number)
+                    }
+                    if isOwn(location) { listing.ownUndecided.append(location.number) }
                     continue
                 }
                 guard

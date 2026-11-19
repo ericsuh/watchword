@@ -724,8 +724,16 @@ position past a forked name the judged download refused, at once and one sync af
 (`refusedForkCountsNothingAfterIt`, `refusedForkCountsNothingOnTheNextSync`, V56). In "shared vaults through the
 session": the stream index counts for the carry only as far as a merge reaches, so a restore's work that only a forked
 name of its earlier ID carried reaches a member who saw the fork first (`forkedNameOfTheEarlierIDCountsForNothing`,
-V56); and a move made again after its vault's state was damaged keeps an earlier restore's work there
-(`moveMadeAgainKeepsAnEarlierRestoresWork`, V57). Each fails at the commit before its fix.
+V56); a move made again after its vault's state was damaged keeps an earlier restore's work there
+(`moveMadeAgainKeepsAnEarlierRestoresWork`, V57); and a placeholder of the earlier ID's first segment at the first
+sync after a restore from a lagging backup, with the backup's state as it was and edited, renames nothing that ID
+published (`placeholderAtTheFirstCarryRenamesNothing`, V58). In "sync log": a staged snapshot that covers a refused
+forked name lets the reach pass it, as the merge does (`stagedSnapshotCoverPassesARefusedName`, V58); junk names with
+copies ahead of a forked name do not get one copy of it merged in a judged vault
+(`junkCopiesAheadOfAForkDoNotGetItMerged`, the review's PoC), and with the sync's bound of copies spent such a vault
+leaves the name unfetched, counts nothing past it, and refuses it at the next sync with budget
+(`spentBudgetLeavesAForkUnfetched`, V59). Each fails at the commit before its fix, or, where it names what that
+commit lacks, with the fix reverted (`refusedForkCountsNothingAfterIt` and the V58 and V59 tests).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

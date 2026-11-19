@@ -198,18 +198,23 @@ extension VaultSession {
                     // for the next.
                     carrying.insert(vaultID)
                     let pulled = try await engine(vaultID).download(transportStopped: stopped)
+                    // What this download refused or left for its copies is where the carry stops counting the
+                    // earlier ID's stream as published (V58).
+                    noteCopyStops(pulled, in: vaultID)
                     var carried = false
                     if stopped == nil, !pulled.transportUnavailable, pulled.transportFailure == nil,
                         let staged = await stagedBounds(in: vaultID, engine: engine(vaultID), since: keysEpoch)
                     {
                         carried = await carryRestoredWork(
-                            account: record, view: view, since: keysEpoch, in: [vaultID], staged: [vaultID: staged])
+                            account: record, view: view, since: keysEpoch, in: [vaultID], staged: [vaultID: staged],
+                            engine: engine(vaultID))
                     }
                     if carried {
                         let merged = try await engine(vaultID).sync(
                             reconcile: reconciled, deferringDeletions: true, publishing: false,
                             transportStopped: stopped)
                         vaultReport = Self.report(pulled, followedBy: merged)
+                        noteCopyStops(vaultReport, in: vaultID)
                     } else {
                         vaultReport = pulled
                         reconciled = false
@@ -219,6 +224,7 @@ extension VaultSession {
                     vaultReport = try await engine(vaultID).sync(
                         reconcile: reconciled, deferringDeletions: true, publishing: shared.publishing,
                         transportStopped: stopped, handingOn: reuploadAnswered(epoch))
+                    noteCopyStops(vaultReport, in: vaultID)
                     ranPublishing = shared.publishing
                 }
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
@@ -241,6 +247,7 @@ extension VaultSession {
                 }
             } else {
                 vaultReport = try await engine(vaultID).download(transportStopped: stopped)
+                noteCopyStops(vaultReport, in: vaultID)
                 vaultReport.deferredUntilUnlock = true
             }
             // A vault may hold the copy half of a move that this sync did not publish: it is not published to (this
@@ -277,6 +284,7 @@ extension VaultSession {
                 let second = try await engine(vaultID).sync(
                     reconcile: true, deferringDeletions: true,
                     publishing: shared.publishing && !carrying.contains(vaultID))
+                noteCopyStops(second, in: vaultID)
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 await sharedEngineDidRun(
                     vaultID, reconciled: !second.replayPostponed, judgedAgainst: shared.head, report: second,
@@ -300,7 +308,9 @@ extension VaultSession {
         if restPublished {
             for vaultID in deferred {
                 guard let first = report.vaults[vaultID] else { continue }
-                report.vaults[vaultID] = Self.report(first, followedBy: try await engine(vaultID).sync())
+                let last = try await engine(vaultID).sync()
+                noteCopyStops(last, in: vaultID)
+                report.vaults[vaultID] = Self.report(first, followedBy: last)
             }
         }
         if mayWrite, stopped == nil {
@@ -525,6 +535,14 @@ extension VaultSession {
     }
 
     /// One vault's report for two engine runs in one sync: counts added up, state as the second left it.
+    /// Remembers what `report`'s download found a vault with a judge does not merge past for their copies
+    /// (`downloadCopyStops`, V58), where it listed the vault: a download that could not list leaves what the last one
+    /// found.
+    func noteCopyStops(_ report: SyncReport, in vaultID: UUID) {
+        guard !report.transportUnavailable, report.transportFailure == nil else { return }
+        downloadCopyStops[vaultID] = report.copyStops
+    }
+
     static func report(_ first: SyncReport, followedBy second: SyncReport) -> SyncReport {
         var total = second
         total.fetched += first.fetched
@@ -555,6 +573,7 @@ extension VaultSession {
         total.copiesExamined += first.copiesExamined
         total.copiesRefused += first.copiesRefused
         total.copiesNotExamined += first.copiesNotExamined
+        total.copiesLeftUnfetched = first.copiesLeftUnfetched + second.copiesLeftUnfetched
         total.forkedObjects = first.forkedObjects + second.forkedObjects
         // Whether the store lacks what this device holds is as the second run left it; what the first refused or
         // postponed still happened.

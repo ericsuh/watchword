@@ -502,7 +502,7 @@ extension AdversarialSyncTests {
 
         let key = RecordKey(recordID: saved.id, kind: .item)
         let judged = engine(judge: AdmittingJudge())
-        let counted = try await judged.stagedEntries(of: [key], authoredBy: [Self.a])
+        let counted = try await judged.stagedEntries(of: [key], authoredBy: [Self.a], stoppedAt: [])
         #expect(counted.isEmpty, "a version no merge applies here counted as carried")
         let report = try await judged.sync()
         #expect(report.rejected.map(\.reason) == [.transport(.conflictingVersions(name))])
@@ -530,8 +530,8 @@ extension AdversarialSyncTests {
     /// when the log is first downloaded (review of the merge of round 17, finding 1). The download refuses the forked
     /// name (`conflictingVersions`) without staging it and stages the author's later positions, which hold no copies:
     /// Z221's rule, which skipped only from a staged name with copies, counted position 2 as carried though the merge
-    /// waits at the refused name for good, and the carry would then have dropped an entry no member merges. Only the
-    /// run a merge can apply in sequence counts now: here none of it.
+    /// waits at the refused name for good, and the carry would then have dropped an entry no member merges. Nothing at
+    /// or past a name the download refused counts now (`SyncReport.copyStops`): here none of it (V56, V58).
     @Test("with a judge at the download, nothing past a refused forked name counts as carried")
     func refusedForkCountsNothingAfterIt() async throws {
         let f = try await Self.fixture()
@@ -552,22 +552,22 @@ extension AdversarialSyncTests {
         #expect(staged.map(\.location.name) == [f.segmentName(2)], "position 2 not staged alone: nothing is tested")
         #expect(staged.allSatisfy { $0.alternates.isEmpty })
 
-        let counted = try await judged.stagedEntries(of: [key], authoredBy: [Self.a])
+        let counted = try await judged.stagedEntries(of: [key], authoredBy: [Self.a], stoppedAt: pulled.copyStops)
         #expect(counted.isEmpty, "a version past the refused name counted as carried")
         let state = try await syncState.loadState(vaultID: Self.vault)
-        let reach = SyncEngine.mergeReach(of: [Self.a], state: state, staged: staged)
+        let reach = SyncEngine.mergeReach(of: [Self.a], state: state, staged: staged, stoppedAt: pulled.copyStops)
         #expect(reach[Self.a] == 0, "the reach ran past the refused name")
         let report = try await judged.sync()
         #expect(report.rejected.map(\.reason) == [.transport(.conflictingVersions(name))])
         #expect(try await store.record(key) == nil, "the merge applied what the refused stream carried")
-        let after = try await judged.stagedEntries(of: [key], authoredBy: [Self.a])
+        let after = try await judged.stagedEntries(of: [key], authoredBy: [Self.a], stoppedAt: report.copyStops)
         #expect(after.isEmpty, "after the merge, a version past the refused name counted as carried")
     }
 
     /// Threat: as for `stagedCopiesCountForNothingWithAJudge`, one sync later (review of the merge of round 17,
     /// finding 1). The first judged merge refuses the staged name with copies and unstages it; the next download
     /// refuses it again without staging it, and position 2, staged since the first download, holds no copies. Z221's
-    /// rule then counted position 2 again. The run from the merged position counts nothing past the missing name.
+    /// rule then counted position 2 again. Nothing at or past the name the download refused again counts (V56, V58).
     @Test("one sync after a staged fork is refused, nothing past the name counts as carried")
     func refusedForkCountsNothingOnTheNextSync() async throws {
         let f = try await Self.fixture()
@@ -586,7 +586,7 @@ extension AdversarialSyncTests {
         }
         _ = try await engine(judge: nil).download()
         let judged = engine(judge: AdmittingJudge())
-        let before = try await judged.stagedEntries(of: [key], authoredBy: [Self.a])
+        let before = try await judged.stagedEntries(of: [key], authoredBy: [Self.a], stoppedAt: [])
         #expect(before.isEmpty, "a version at or past the staged name with copies counted as carried")
         let first = try await judged.sync()
         #expect(first.rejected.map(\.reason) == [.transport(.conflictingVersions(name))])
@@ -595,7 +595,7 @@ extension AdversarialSyncTests {
         let staged = try await syncState.staged(vaultID: Self.vault)
         #expect(staged.map(\.location.name) == [f.segmentName(2)], "position 2 not staged alone: nothing is tested")
 
-        let counted = try await judged.stagedEntries(of: [key], authoredBy: [Self.a])
+        let counted = try await judged.stagedEntries(of: [key], authoredBy: [Self.a], stoppedAt: pulled.copyStops)
         #expect(counted.isEmpty, "after the first judged sync, position 2 counted as carried")
         #expect(try await store.record(key) == nil, "the merge applied what the refused stream carried")
     }

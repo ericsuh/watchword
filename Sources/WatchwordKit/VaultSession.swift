@@ -147,6 +147,12 @@ public actor VaultSession: SharesExecutor {
     private var backgroundedAt: Date?
     /// Lamport high-water mark per vault, so one record with an absurd version cannot freeze writes elsewhere.
     var highestVersionSeen: [UUID: UInt64] = [:]
+    /// Per vault, the names the latest download in this session that listed the vault found it does not merge past
+    /// for their copies (`SyncReport.copyStops`): where a restore's carry, and the hold and the records that answer
+    /// to it, stop counting the earlier ID's stream as published (`mergeReach(in:of:)`, a merge review of round 17,
+    /// V58). Remembered only for that: a download makes them again, and a name not remembered (none downloaded in
+    /// this session yet) stops nothing, as a position not downloaded yet does not. Names of objects, no secret.
+    var downloadCopyStops: [UUID: Set<SyncObjectLocation>] = [:]
     /// Whoever asked to be told of every lock (`lockEvents()`), by a number of their own.
     var lockListeners: [Int: AsyncStream<Void>.Continuation] = [:]
     var nextLockListener = 0

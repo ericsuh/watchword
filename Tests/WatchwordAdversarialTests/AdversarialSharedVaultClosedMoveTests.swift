@@ -220,9 +220,11 @@ extension AdversarialSharedVaultTests {
                 index: await member.state.value(.streamIndex, vaultID: vaultID))
         }
 
-        func restore(_ member: SharingAccount, household: SharedVaultHousehold, seed: UInt64) async throws
-            -> TestVault
-        {
+        /// With `transport`, the restored device reaches the store through it (the store as that hardware sees it).
+        func restore(
+            _ member: SharingAccount, household: SharedVaultHousehold, seed: UInt64,
+            transport: (any SyncTransport)? = nil
+        ) async throws -> TestVault {
             await member.session.lock()
             let store = try #require(member.vault.store as? InMemoryRecordStore)
             await store.tamper(row)
@@ -230,7 +232,11 @@ extension AdversarialSharedVaultTests {
             if let state { await syncState.tamper(state) }
             await member.state.tamper(.streamIndex, vaultID: row.vaultID, value: index)
             await member.vault.forgetDeviceKey(accountID: member.accountID)
-            let restored = member.vault.relaunched(seed: seed)
+            var settings = try #require(member.vault.sync)
+            if let transport { settings.transport = transport }
+            let restored = TestVault(
+                store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+                clock: member.vault.clock, sync: settings, seed: seed, deviceKeys: member.vault.deviceKeys)
             await restored.session.configureSharing(
                 SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
             try await restored.session.unlock(password: TestVault.password)

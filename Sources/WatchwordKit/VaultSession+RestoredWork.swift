@@ -60,7 +60,11 @@ extension VaultSession {
         // was damaged or edited (A8) reads, besides the rows `previous` left, those of every other earlier ID the
         // vault's chain row names (`RestoredChainRow`, signed for this device's ID before that state was saved): an
         // earlier restore's work that state recorded, which no other record names now (a merge review of round 17,
-        // V57). Each as `rowsLeftByEarlierIDs` finds a row left without a state.
+        // V57). Each as `rowsLeftByEarlierIDs` finds a row left without a state, bounded by the same reach as the
+        // carry (V58): the move starts the vault's state over, and a reach that stopped at every position not staged
+        // was 0 here, recording work the ID had published long ago for a carry to rename at the next gap. No download
+        // is in hand at the move, so only a name staged with copies (or one an earlier download in this session
+        // refused) stops it; a reach that cannot be read records more.
         if earlier == nil, var chained = await restoredChainRow(in: vaultID, account: account) {
             chained.subtract([previous, account.deviceID])
             let reach = await mergeReach(in: vaultID, of: chained) ?? [:]
@@ -110,7 +114,7 @@ extension VaultSession {
     @discardableResult
     func carryRestoredWork(
         account: AccountRecord, view: RegistryView?, since epoch: UInt64, in vaults: Set<UUID>,
-        staged: [UUID: [RecordKey: [UUID: UInt64]]] = [:]
+        staged: [UUID: [RecordKey: [UUID: UInt64]]] = [:], engine: SyncEngine? = nil
     ) async -> Bool {
         guard let syncState, let base = syncSettings?.state, let view else { return false }
         let own = account.deviceID
@@ -140,7 +144,9 @@ extension VaultSession {
                 continue
             }
             guard let signingKey = try? resident()?.keys.keyset.publicKeyBundle().signingKey else { return false }
-            guard let reach = await mergeReach(in: vaultID, of: Set(state.restoredUnpublished.values.map(\.device)))
+            guard
+                let reach = await mergeReach(
+                    in: vaultID, of: Set(state.restoredUnpublished.values.map(\.device)), engine: engine)
             else {
                 finished = false
                 continue
@@ -265,7 +271,9 @@ extension VaultSession {
         let restored = (state?.restoredUnpublished ?? [:]).filter { !Self.isDismissed($0.value) }
         guard !restored.isEmpty else { return [:] }
         let earlier = Set(restored.values.map(\.device))
-        guard let entries = try? await engine.stagedEntries(of: Set(restored.keys), authoredBy: earlier),
+        guard
+            let entries = try? await engine.stagedEntries(
+                of: Set(restored.keys), authoredBy: earlier, stoppedAt: downloadCopyStops[vaultID] ?? []),
             (try? requireKeys(since: epoch)) != nil
         else { return nil }
         var bounds: [RecordKey: [UUID: UInt64]] = [:]
@@ -279,10 +287,12 @@ extension VaultSession {
     /// `left` (an entry of `SyncState.restoredUnpublished`) with its version raised to the highest version of the
     /// record that `left.device`'s own stream carried in `vaultID`, as the stream index shows it (review of round 13,
     /// M2): whatever that stream carried was published, whatever the earlier ID's state said. Only a segment within
-    /// `reach`, how far a merge here can take that stream in sequence (`mergeReach`; a merge review of round 17, V56):
-    /// the judge records every staged segment, one past a name the merge refuses included (two verifying copies of
-    /// one position, `conflictingVersions`), and the stream is never merged past that name. So the index's route
-    /// bounds the carry as `SyncEngine.stagedEntries` does, and lowers it only: a gap gives duplicates, never a loss.
+    /// `reach` (`mergeReach`; merge reviews of round 17, V56 and V58): the judge records every staged segment, one
+    /// past a name the merge refuses included (two verifying copies of one position, `conflictingVersions`), and the
+    /// stream is never merged past that name, so nothing at or past it counts, as `SyncEngine.stagedEntries` counts
+    /// nothing there; a position merely not downloaded yet stops nothing. Bounded in every vault the restore names,
+    /// judge or not: where there is none a name with copies is merged rather than refused, and the bound is only lower
+    /// than what the merge takes, which renames more and loses nothing.
     func publishedBound(
         _ left: RecordStamp, of key: RecordKey, in vaultID: UUID, reach: [UUID: UInt64]
     ) -> RecordStamp {
@@ -292,16 +302,21 @@ extension VaultSession {
         return RecordStamp(version: max(left.version, carried), device: left.device)
     }
 
-    /// How far a merge here can take each of `devices`' streams in `vaultID` in sequence (`SyncEngine.mergeReach`),
-    /// from the vault's state as this session signed it and from the staging area: what `publishedBound` may count of
-    /// the stream index (V56). A state that does not verify reads as none, which only lowers it. `nil` where either
-    /// cannot be read.
-    func mergeReach(in vaultID: UUID, of devices: Set<UUID>) async -> [UUID: UInt64]? {
+    /// How far each of `devices`' streams in `vaultID` counts as published before a name a merge here does not pass
+    /// for its copies (`SyncEngine.mergeReach(of:stoppedAt:)`, V58): those the latest download of the vault in this
+    /// session refused or left for them (`downloadCopyStops`) and those staged with copies, from the vault's state as
+    /// this session signed it. What `publishedBound` may count of the stream index, the same for the carry, the hold
+    /// and the records a move or a lost state makes. With `engine`, a staged snapshot's coverage passes a stop as the
+    /// merge passes it; without one it passes nothing, which only lowers the reach. A state that does not verify reads
+    /// as none, which only lowers it too. `nil` where either cannot be read.
+    func mergeReach(in vaultID: UUID, of devices: Set<UUID>, engine: SyncEngine? = nil) async -> [UUID: UInt64]? {
+        let stops = downloadCopyStops[vaultID] ?? []
+        if let engine { return try? await engine.mergeReach(of: devices, stoppedAt: stops) }
         guard let syncState else { return [:] }
         do {
             let state = try await syncState.loadState(vaultID: vaultID)
             let staged = try await syncState.staged(vaultID: vaultID)
-            return SyncEngine.mergeReach(of: devices, state: state, staged: staged)
+            return SyncEngine.mergeReach(of: devices, state: state, staged: staged, stoppedAt: stops)
         } catch {
             return nil
         }

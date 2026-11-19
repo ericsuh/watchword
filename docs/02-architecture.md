@@ -723,11 +723,18 @@ it for good. Now the transport says what it holds and the engine decides, as for
   is finished, so the most is 527), and half of that is kept for names already merged, so that junk under names a
   device still waits for, examined again at every sync, cannot keep a late copy from being read (R13): a flagged name the stream needs is fetched as its current file alone, as before
   this was built (its other copies are examined by a later sync, late), and already-merged names wait for a later
-  sync. So a flood of copies costs a bounded number of reads and signature
-  checks per sync, stalls no stream whose current file is genuine, and cannot stop this device publishing: rejections
-  are per object. What the bound gives up is a genuine copy hidden behind more than 15 planted ones, or a count that
-  A1 keeps equal while swapping copies; A1 can delete that copy outright, so this is withholding (Y7), not a new
-  capability. Copies of the account's own objects, and of the sharing objects, are not examined: those are named by
+  sync. **Not in a vault with a judge** (V59): there one copy of a fork fetched alone was staged and merged, though
+  every member that examined the name refuses it, so members could merge different objects at one position. Such a
+  vault leaves the name unfetched (`SyncReport.copiesLeftUnfetched`) and its stream waits there for a sync with the
+  budget to examine it whole. Names at the next position of their stream are examined before other flagged names
+  (snapshots, later positions), so a genuine name a stream waits on is passed over only while 16 or more other streams
+  hold copies at their next positions, which an honest household's forks do not reach and A1's junk under authors of
+  its own does: a liveness residual held as R17 is (A1 can withhold the object outright), with nothing merged from
+  the name meanwhile. So a flood of copies costs a bounded number of reads and signature checks per sync, stalls no
+  stream whose current file is genuine (outside a vault with a judge), and cannot stop this device publishing:
+  rejections are per object. What the bound gives up is a genuine copy hidden behind more than 15 planted ones, or a
+  count that A1 keeps equal while swapping copies; A1 can delete that copy outright, so this is withholding (Y7), not a
+  new capability. Copies of the account's own objects, and of the sharing objects, are not examined: those are named by
   their digests or written once per device, and are read as their current file.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
@@ -1032,16 +1039,24 @@ same way, so its summary claims nothing the old ID did not publish. Only the old
 renamed: another device's stamps, discards and lines stay byte for byte as its stream carried them (Z197). What counts
 as published is the most of three: the last version of the record the old ID's own signed state recorded, the highest
 version the old ID's own stream carried as the stream index and that stream's downloaded segments show it once the
-vault's log has been pulled (`SyncEngine.stagedEntries(of:authoredBy:)`, which opens and checks each segment but asks
+vault's log has been pulled (`SyncEngine.stagedEntries`, which opens and checks each segment but asks
 nothing of the judge, so only what a segment says of its own author's versions is taken from it), and what the row
-itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). In a vault with a
-judge both stream routes count only as far as a merge here can take the old ID's stream in sequence
-(`SyncEngine.mergeReach`: from what the vault's state merged or a merged snapshot covers, through each next position
-staged with one copy), never a segment at or past a position the download refused (two verifying copies of one name,
-`conflictingVersions`, which is never staged), one staged with conflict copies (which the merge refuses), or one not
-downloaded yet: the judge records every staged segment, a later position of a refused stream included, and the stream
-is never merged past the refused name (Z221, V56). That only lowers the bound, so a gap at carry time renames more of
-the old ID's work, and members that merged it before the fork hold it twice, as conflicts, losing neither. Never what a
+itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). Both stream
+routes stop before a name a merge here does not pass for its copies (`SyncEngine.mergeReach(of:stoppedAt:)`): one this
+sync's download refused (two verifying copies of one name, `conflictingVersions`, which is never staged, so every
+download examines it again and refuses it again) or left unfetched for want of the sync's bound of copies (V59), and one
+staged with conflict copies (which the merge refuses); never at or past it, unless the vault's state or a staged
+snapshot covers it, as the merge then passes it. The judge records every staged segment, a later position of a refused
+stream included, and the stream is never merged past the refused name (Z221, V56). A position merely not here (not
+downloaded yet, an iCloud placeholder, unreadable for now, collected) stops nothing: the move starts every vault's
+state over, so a reach that stopped there was the staged run from position 1, and at the first sync after a restore a
+placeholder of the old ID's first segment renamed everything it had published, which every member then held twice
+(V58, bringing back Z198). The names are the latest download's in the session (`downloadCopyStops`), so the carry, the
+hold and the records a move or a lost state makes (V57) bound alike; the move, which has no download in hand, stops
+only at a name staged with copies. The reach is applied in every vault the restore names, judge or not: where there
+is none a name with copies is merged, not refused, and the bound is only lower than what the merge takes, renaming
+more and losing nothing. Work that only segments at or past the refused name carried is renamed as the new ID's, and
+members that merged the name before the fork hold it twice, as conflicts, losing neither. Never what a
 downloaded version of a third device claims: nothing has judged it yet, and a member who may write could claim to have
 seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside (Z208). In a
 shared vault the log is whole from the day it was shared, so whatever an honest third device saw of the old ID since
