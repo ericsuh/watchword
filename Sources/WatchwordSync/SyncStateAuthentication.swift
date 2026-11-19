@@ -44,8 +44,13 @@ extension SyncState {
         writer.append(stashGeneration)
         // Fields added after the state was first signed (review findings Z33, Z38, then Z147 and Z149, then the
         // conflict copies and the reset of docs/02-architecture.md §7.5 and §7.10, then the device move's
-        // `syncedBefore`, V49, and `startedOverByMove`, V52, and a restore's `restoredUnpublished`, review of round 12),
-        // written only when one is set, so a row saved before them still verifies; their length tells the forms apart.
+        // `syncedBefore`, V49, and `startedOverByMove`, V52, and a restore's `restoredUnpublished`, review of round
+        // 12), written only when one is set, so a row saved before them still verifies; their length tells the forms
+        // apart. One exception, made when the two branches that added the last two groups were merged (V55): the
+        // restore's count is written, even at zero, whenever the reset's fields follow it, so a row the hygiene
+        // branch saved before that merge with any of the copies' or the reset's fields set (the reset's fields
+        // straight after `collectedThrough`) no longer verifies and reads as no state, and its vault replays once.
+        // Accepted because neither form had shipped.
         let copiesAndReset =
             !examinedCopies.isEmpty || !unreadCopies.isEmpty || !unreadCopiesExamined.isEmpty || handOnOwed
             || ownUnlistedThrough != nil || handedOn != nil || highestOwnSnapshot > 0 || storeResetSuspected

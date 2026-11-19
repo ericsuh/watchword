@@ -218,7 +218,11 @@ struct SyncStateAuthenticationTests {
     /// The two branches merged here each added fields after `collectedThrough`: a restore's `restoredUnpublished`
     /// (review of round 12) and the conflict copies and the reset's (§7.5, §7.10, V49, V52). Where the reset's are
     /// written the restore's count is too, even at zero, so a state with either and a state with both are signed
-    /// apart, and a row saved with the restore's alone still verifies.
+    /// apart, and a row saved with the restore's alone still verifies. A row the hygiene branch saved before the merge
+    /// with the reset's fields straight after `collectedThrough` does not (V55): that form is deliberately not kept,
+    /// and the test pins the chosen layout byte for byte, so that a layout that would have kept it (the restore's
+    /// stamps only when set, before or after the reset's fields) or any other change of this encoding fails here and
+    /// is a decision someone makes, not an accident.
     @Test("a restore's entries and the reset's fields are signed apart, alone and together")
     func restoredAndResetFieldsApart() {
         var neither = StateStoreFixtures.state()
@@ -242,6 +246,24 @@ struct SyncStateAuthenticationTests {
         // Both: the restore's entries, then the reset's fields.
         let entries = 8 + (16 + 1) + (8 + 16 + 1)
         #expect(both.authenticatedBytes.count == reset.authenticatedBytes.count + entries - 8)
+        // The layout, byte for byte (V55). `earlier` is everything through `collectedThrough`, the same in all four
+        // forms; the reset's fields with only `storeResetSuspected` set are three empty counts (the copies examined,
+        // the unread copies, those examined), `handOnOwed`, no `ownUnlistedThrough` and its zero, no `handedOn`, a zero
+        // `highestOwnSnapshot`, then `storeResetSuspected`.
+        let earlier = Array(restored.authenticatedBytes.dropLast(entries))
+        let zeroCount = [UInt8](repeating: 0, count: 8)
+        var resetFields: [UInt8] = zeroCount + zeroCount + zeroCount
+        resetFields += [0, 0] + zeroCount
+        resetFields += [0] + zeroCount
+        resetFields += [1]
+        let restoredEntries = Array(restored.authenticatedBytes.suffix(entries))
+        #expect(Array(restoredEntries.prefix(8)) == [0, 0, 0, 0, 0, 0, 0, 1])
+        #expect(reset.authenticatedBytes == earlier + zeroCount + resetFields)
+        #expect(both.authenticatedBytes == earlier + restoredEntries + resetFields)
+        #expect(moved.authenticatedBytes == earlier + restoredEntries + resetFields + [1, 1])
+        // The hygiene branch's form before the merge, the reset's fields straight after `collectedThrough`, is not
+        // what is signed now, so a row saved in it no longer verifies (V55).
+        #expect(reset.authenticatedBytes != earlier + resetFields)
     }
 
     @Test("what is signed does not depend on the order a dictionary happens to iterate in")

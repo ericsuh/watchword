@@ -590,8 +590,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   device, Z20): its erasures become this device's signed tombstones and its merged vector signed coverage, so a row
   the session did not sign is no state and the log is replayed. A field added to `SyncState` goes into
   `authenticatedBytes` (appended only when set, as `retryUnfinished` and `quarantineDropped` are, so that older rows
-  still verify); read and save the row through the session's `syncState`, never `syncSettings.state`, wherever what
-  it says is acted on (a state saved raw reads back as none, Z184).
+  still verify). One exception, accepted because neither form had shipped (V55): a restore's `restoredUnpublished`
+  count is written, even at zero, ahead of the copies' and the reset's fields whenever they follow, so rows this
+  branch saved before the merge with PR #23 that carry any of those fields no longer verify and read as no state
+  (`restoredAndResetFieldsApart` pins the layout). Read and save the row through the session's `syncState`, never
+  `syncSettings.state`, wherever what it says is acted on (a state saved raw reads back as none, Z184).
 
 ### `WatchwordSharing` invariants
 
@@ -813,8 +816,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   complete (Z181): never do any of it under `try?` after that commit, never publish while it is incomplete
   (`deviceMigrationIncomplete`, worded in the summary; `reuploadAfterStoreReset` refuses then too, V51), never let it
   forget that the installation had synced or that an upload was unfinished (`startSyncStatesOver`, V49), never register
-  a further ID over it, and act on no record the session did not sign. Nothing may make the move fail for good: a deletion it cannot sign as the new ID's (no current
-  key for its vault) is parked, never thrown (Z185). The migration changes only through `StoreChange.migration`
+  a further ID over it, and act on no record the session did not sign. Nothing may make the move fail for good: a
+  deletion it cannot sign as the new ID's (no current key for its vault) is parked, never thrown (Z185). The
+  migration changes only through `StoreChange.migration`
   (`.set` at registration, `.clear` by the move); every other account write keeps the stored value, and the session
   reads it back with `keepingStoredMigration` (Z186, Z196). A registration that fails before its commit deletes the key
   it made, and only that key (`delete(accountID:deviceID:)`), and registrations never overlap
@@ -842,8 +846,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   chain read from a state that does not verify names only IDs this account's registry lists whose registration this
   device's own registration entry descends from (`earlierRegisteredIDs`, Z206, Z211). Old hardware still running
   under the old ID that publishes the same work later leaves members both copies, recorded (Z198). A version kept
-  after this device's own pending deletion holds no deletion back (Z202, V46's non-publishing bound with what it
-  published added, in `waitsOnlyBehind`), and
+  after this device's own pending deletion holds no deletion back (Z202, the same bound as V46's non-publishing one,
+  in `waitsOnlyBehind`), and
   only pending deletions read through `syncState` (the session's signed ones) count there: never decide on
   `syncSettings.state`'s raw `pendingDeletions` without checking the signature (Z203).
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,

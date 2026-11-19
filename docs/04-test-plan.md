@@ -1487,7 +1487,9 @@ other does, and reported as not required on Linux, where they cannot compile.
   on and that snapshot was collected, a later reset another device answers ends here without asking, V52,
   `movedThenHandedOnAsksOnlyOnce`) and "account enrolment and device registry"
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
-  revoked device cannot answer and stays revoked; a password change survives). `LongRunningSyncSimulationTests`
+  revoked device cannot answer and stays revoked; a password change survives). The signed state's layout where a
+  restore's entries and the reset's fields meet is pinned byte for byte, failing for a layout that kept the pre-merge
+  form verifying ("Sync state authentication", `restoredAndResetFieldsApart`, V55). `LongRunningSyncSimulationTests`
   resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone
   recreated by `startStoreAgain` alone, left alone when it exists and found by a zone fetch and a one-record
   `BEGINSWITH` query, never `TRUEPREDICATE` (SR20), deleted first after a key reset that only the records answer, the

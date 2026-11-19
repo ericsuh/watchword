@@ -1020,8 +1020,9 @@ never run at once (Z189, Z193); one reads the account record again once it runs,
 names the ID its caller saw, and commits only over that ID (`StoreChange.expectedDeviceID`), and a restore whose
 registration did not happen at its unlock registers at the next sync (Z201). A version this device kept after its own
 deletion, which follows that deletion out, holds no deletion back (Z202, the bound of V46's rule where a vault's pass
-does not publish, §8.8); only pending deletions the session signed count there (Z203). A record the session did not sign moves nothing: planted in the file (A8), it would
-make this device take another device's pending deletions for its own.
+does not publish, §8.8); only pending deletions the session signed count there (Z203). A record the session did not
+sign moves nothing: planted in the file (A8), it would make this device take another device's pending deletions for
+its own.
 
 What is carried into a vault that may be shared, from an old ID that commits, has the old ID's work above what it
 published written again as the new ID's (`ItemMerge.reattributed`, docs/10 §9): carried with the old ID's stamps, it
