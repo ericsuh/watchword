@@ -72,6 +72,58 @@ struct ItemReattributionTests {
         #expect(clock.entries[Self.earlier] == nil)
     }
 
+    /// Review of round 13, M1: the earlier ID's state says less was published than another device saw (lost, rolled
+    /// back, or saved before a later publish). The earlier ID's title at version 2 was published, and device B wrote
+    /// its username on top of it; the restore then reads 1 as published. Before, B's stamp had its `seen` rewritten
+    /// (`{a: 1, new: 2, b: 3}`), bytes no segment of B's stream carried, so every member's judge held the carried
+    /// version aside; and the published title was renamed, so it came back beside itself. The bound is raised to what
+    /// B saw: B's stamp is unchanged, the title stays the earlier ID's, and only the unpublished password is renamed.
+    @Test("a third device's stamps are never rewritten, and what it saw of the earlier ID stays that ID's")
+    func neverRewritesAnotherDevice() throws {
+        let published = F.base()
+        let titled = F.edit(published, by: Self.earlier, at: 2) { $0.title = "Bank, renamed" }
+        let elsewhere = F.edit(titled, by: F.b, at: 3) { $0.fields[0].value = "pat.b" }
+        let merged = F.merge((titled, Self.earlier), (elsewhere, F.b))
+        let backedUp = F.edit(merged, by: Self.earlier, at: 4) { $0.fields[1].value = "new-password" }
+        let origin = F.origin(backedUp, Self.earlier)
+        let carried = ItemMerge.reattributed(backedUp, origin: origin, from: Self.earlier, above: 1, to: Self.restored)
+
+        let username = ItemGroup.field(F.fieldID(1))
+        let before = try #require(backedUp.revisions[username])
+        #expect(before.seen.entries[Self.earlier] == 2)
+        #expect(carried.revisions[username] == before, "device B's stamp was rewritten")
+        #expect(carried.revisions[.title]?.revision == Revision(version: 2, device: Self.earlier))
+        let password = ItemGroup.field(F.fieldID(2))
+        #expect(carried.revisions[password]?.revision == Revision(version: 4, device: Self.restored))
+        let clock = ItemMerge.effectiveClock(carried, origin: F.origin(carried, Self.restored))
+        #expect(clock.entries[Self.earlier] == 2)
+        #expect(clock.entries[Self.restored] == 4)
+        // Merged with what B holds, the carried version supersedes B's copy of the title and keeps B's username.
+        let atB = F.merge((elsewhere, F.b), (carried, Self.restored))
+        #expect(!atB.hasConflicts)
+        #expect(atB.fields == backedUp.fields)
+    }
+
+    /// The same for the other parts a third device can name the earlier ID in: a line anchored after the earlier
+    /// ID's line, a removal of one, and a discard.
+    @Test("a third device's line anchored after, or removal of, the earlier ID's line raises the bound")
+    func linesRaiseTheBound() {
+        let published = F.base(notes: "First line")
+        let added = F.edit(published, by: Self.earlier, at: 2) { $0.notes = "First line\nSecond line" }
+        let elsewhere = F.edit(added, by: F.b, at: 3) { $0.notes = "First line\nThird line" }
+        let backedUp = F.edit(
+            F.merge((added, Self.earlier), (elsewhere, F.b)), by: Self.earlier, at: 4
+        ) { $0.title = "Bank, renamed" }
+        let origin = F.origin(backedUp, Self.earlier)
+        #expect(
+            ItemMerge.seenByOthers(ItemState(backedUp, origin: origin), of: Self.earlier, besides: Self.restored) == 2)
+        let carried = ItemMerge.reattributed(backedUp, origin: origin, from: Self.earlier, above: 0, to: Self.restored)
+        let lines = carried.noteLines.map(\.id.revision)
+        #expect(lines.contains(Revision(version: 2, device: Self.earlier)), "a line device B removed was renamed")
+        #expect(!lines.contains(Revision(version: 2, device: Self.restored)))
+        #expect(carried.revisions[.title]?.revision == Revision(version: 4, device: Self.restored))
+    }
+
     @Test("an item with nothing above the published version is unchanged")
     func nothingToCarry() {
         let (published, _) = Self.unpublished()
