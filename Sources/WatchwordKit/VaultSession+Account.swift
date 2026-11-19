@@ -1060,8 +1060,20 @@ extension VaultSession {
     /// under `SignatureDomain.deviceMigration`) moves nothing: planted in the database (A8), it would make this
     /// device take another device's genuine pending deletions, copied into its state file, for its own. It is cleared.
     /// Without sync configured there is nothing to move, and the record waits for a session that has it.
-    func completeDeviceMigration(account: AccountRecord) async throws {
-        guard let migration = account.migration, let base = syncSettings?.state, let syncState else { return }
+    ///
+    /// One at a time, and only the move the store still records (review of round 19, Z237): the unlock, a sync and
+    /// `configureSharing` each make it from an account they read before an await, and one made after another had
+    /// cleared the record started each vault's state over after the engine had published there. A move begun while
+    /// another is under way returns, leaving the record to the one under way; and the account is read again under the
+    /// flag, so one whose record has been cleared, or replaced, since the caller read it does nothing.
+    func completeDeviceMigration(account caller: AccountRecord) async throws {
+        guard caller.migration != nil, syncSettings?.state != nil, syncState != nil, !migrationInFlight else { return }
+        migrationInFlight = true
+        defer { migrationInFlight = false }
+        guard let account = try await store.loadAccount(), account.deviceID == caller.deviceID,
+            let migration = account.migration, migration == caller.migration, let base = syncSettings?.state,
+            let syncState
+        else { return }
         let epoch = lockEpoch
         let previous = migration.previousDeviceID
         if try verifiedMigration(migration, to: account, keyset: try requireKeys(since: epoch).keyset) {

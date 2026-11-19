@@ -348,6 +348,44 @@ extension AdversarialAccountTests {
         let report = try await session.syncAll()
         #expect(!report.deviceMigrationIncomplete)
     }
+
+    /// Threat: none needed; the review of round 19 (Z237). A restore's move is made by the unlock, by each sync and by
+    /// `configureSharing`, each from an account it read before an await. One made while another was under way, or
+    /// after another had cleared the record, from an account read before that, started each vault's state over after
+    /// the engine had published there (what the state recorded of this device's publishing lost, and the old ID's
+    /// deletions carried again). Here a sync runs while the unlock's move waits on its first save: the sync's move
+    /// returns, the record stays and the sync publishes nothing; and a move made afterwards from the account read
+    /// while the record stood changes nothing.
+    @Test("a restore's move is made once at a time, and never again from an account read before it finished")
+    func moveIsMadeOnceAtATime() async throws {
+        let fixture = try await Self.fixture(seed: 18_120)
+        let state = InterceptingStateStore()
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(fixture, state: state)
+        let observed = MoveObservation()
+        let session = restored.session
+        let store = restored.store
+        await state.intercept { _ in
+            guard await observed.claim(), let stale = try? await store.loadAccount(), stale.migration != nil else {
+                return
+            }
+            await observed.record(stale: stale, during: try? await session.syncAll())
+        }
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        await state.intercept(afterSave: nil)
+        let stale = try #require(await observed.stale, "no state was saved while the move was pending")
+        let during = try #require(await observed.during, "the sync during the move did not run")
+        #expect(during.deviceMigrationIncomplete, "a second move ran while the first was under way")
+        #expect(during.combined.segmentsWritten == 0, "the sync published while a move was under way")
+        #expect(try await restored.store.loadAccount()?.migration == nil, "the unlock's move did not finish")
+
+        try await restored.session.sync()
+        let published = try #require(await state.loadState(vaultID: fixture.personal))
+        #expect(published.lastPublishedSequence > 0, "nothing was published: nothing is tested")
+        try await restored.session.completeDeviceMigration(account: stale)
+        #expect(await state.loadState(vaultID: fixture.personal) == published, "a stale move started the state over")
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
 }
 
 /// A record store that runs a step once, the next time the account's headers are listed (where a password change
@@ -390,4 +428,21 @@ actor HookedRecordStore: RecordStore {
         try await base.commit(change)
     }
     func eraseAll() async throws { await base.eraseAll() }
+}
+
+/// What `moveIsMadeOnceAtATime` saw from inside the unlock's move: the account then, and the report of the sync it ran.
+actor MoveObservation {
+    private var claimed = false
+    private(set) var stale: AccountRecord?
+    private(set) var during: AccountSyncReport?
+
+    func claim() -> Bool {
+        defer { claimed = true }
+        return !claimed
+    }
+
+    func record(stale: AccountRecord, during: AccountSyncReport?) {
+        self.stale = stale
+        self.during = during
+    }
 }

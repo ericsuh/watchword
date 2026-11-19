@@ -154,6 +154,11 @@ public actor VaultSession: SharesExecutor {
     /// begun by an unlock or a sync meanwhile, would make a second device key over the first and register an ID whose
     /// key the first's failure then deleted (review of round 12, L1). One at a time.
     var registrationInFlight = false
+    /// A restore's move of its earlier device ID's sync state is between its first await and its end
+    /// (`completeDeviceMigration`): another, begun by an unlock, a sync or `configureSharing` meanwhile from an account
+    /// read before the first cleared its record, would start each vault's state over after the engine had published
+    /// there (review of round 19, Z237). One at a time.
+    var migrationInFlight = false
     /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
     var registryView: RegistryView?
     /// Registry entries fetched from the transport and found worth nothing (they can never count, or wait on a
