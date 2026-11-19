@@ -768,8 +768,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   a damaged state (Z200). The row needs the keys and sharing configured, so `backfillRestoredChains` adds what a
   verified state names and the row lacks when sharing is configured unlocked, after each unlock and at each sync (Z222):
   a new way for sharing to become configured calls it too. Only the carry and Stop Waiting narrow the row. Where no
-  state verifies, the move finds the rows of the IDs the chain row names (this device's row, or the earlier ID's own,
-  Z226). Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
+  state verifies, the move finds the rows of the IDs the chain row names (this device's row,
+  or the earlier ID's own, Z226), read through sharing: a move that would read one without sharing configured waits,
+  record kept and nothing published, until `configureSharing` (which makes it) or the next unlock or sync (Z229,
+  `moveAwaitsSharing`); never let it complete without them, and never make an ordinary move wait.
+  Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
   Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
   cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves
   members both copies, recorded (Z198). A version kept after this device's own pending deletion holds no deletion back

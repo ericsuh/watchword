@@ -955,11 +955,14 @@ earlier ID counts only from a migration record this session signed (Z227). In a 
 verify, a row still that ID's, holding its work above what its stream carried, holds as if an entry named it
 (`rowsLeftByEarlierIDs`), and is recorded again in a state this session signs before the logs; the move does the same
 where neither this device's state nor the earlier ID's verifies, for the IDs the vault's chain row names (the row of an
-earlier attempt at the move, or the earlier ID's own, from its own restore; Z225, Z226). The hold ends when the vault
-opens here and the row is carried, when a version that holds none of the work replaces the row, when the vault is
-deleted or this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync
-reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault
-that will not open (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
+earlier attempt at the move, or the earlier ID's own, from its own restore; Z225, Z226). Those rows are read through
+sharing, so a move that would read one while sharing is not configured waits, its record kept and nothing published,
+and `configureSharing` makes it, or the next unlock or sync after it (`moveAwaitsSharing`, Z229); a vault whose state
+verifies needs no row, so an ordinary move does not wait. The hold ends when the vault opens here and the row is
+carried, when a version that holds none of the work replaces the row, when the vault is deleted or this account's
+membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows kept on this
+device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open
+(`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
 `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
 owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;
 later edits of those items reach no member either, and the confirmation says so. Where the bound understates what the

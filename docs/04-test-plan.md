@@ -675,6 +675,11 @@ it (`restoredChainRowWrittenBeforeTheState`, which fails without the row written
 restored twice keeps its first restore's uncarried copy held, both where the middle ID's state does not verify in the
 backup and where the second restore's first attempt at the move failed and its state was then damaged
 (`restoredTwiceAfterADamagedState`, both failing before the move found the rows its chain row names, Z225, Z226).
+The review of the eighteenth round (Z229 to Z233), in "shared vaults through the session": a store restored twice
+whose middle ID's state does not verify keeps its first restore's uncarried copy held when sharing is configured only
+after the unlock, with a sync in between: the move waits, publishing nothing, and `configureSharing` makes it
+(`restoredTwiceWithSharingConfiguredLate`, which fails at round 17's end: the move finished without the chain row and
+the waiting sync deleted the original on the other device, Z229).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

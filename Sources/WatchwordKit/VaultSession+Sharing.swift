@@ -255,11 +255,21 @@ extension VaultSession {
     /// On an unlocked session, the chain rows of a restore's earlier device IDs are then filled in from the vaults'
     /// states (`backfillRestoredChains`, review of round 17, Z222): a move made before sharing was configured wrote
     /// none, and the hold for what it left would end with the next damage to a state. Locked, the next unlock does it.
+    /// First a restore's move that waited for sharing is made (`moveAwaitsSharing`, review of round 18, Z229), so
+    /// that it reads the chain rows it needs, and the backfill reads the state it saves; one that fails is made again
+    /// at the next unlock or sync, as any move is (Z181).
     public func configureSharing(_ settings: SharingSettings) async {
         let epoch = lockEpoch
         sharing.settings = settings
         sharing.loaded = false
-        guard keys != nil, let account = try? await loadAccount() else { return }
+        guard keys != nil, var account = try? await loadAccount() else { return }
+        if account.migration != nil, epoch == lockEpoch {
+            // As at the unlock: the markers first, or every vault but the Personal one is held closed (Z190).
+            await loadSharedMarkersIfNeeded()
+            try? await completeDeviceMigration(account: account)
+            guard epoch == lockEpoch, let moved = try? await loadAccount() else { return }
+            account = moved
+        }
         await backfillRestoredChains(account: account, since: epoch)
     }
 

@@ -26,7 +26,9 @@ extension VaultSession {
     /// the IDs before it: those are found again from the vault's chain row (`RestoredChainRow`), the one an earlier
     /// attempt at this move wrote, bound to this device's ID, or the earlier ID's own, from its own restore, bound to
     /// that ID, and the rows those IDs left are recorded as `rowsLeftByEarlierIDs` would find them (review of round 17,
-    /// Z225 and Z226: a retried move, or a second restore, otherwise lost the chain and the hold for those rows).
+    /// Z225 and Z226: a retried move, or a second restore, otherwise lost the chain and the hold for those rows). The
+    /// chain rows are read through sharing, so the move does not get here without it where it would read them
+    /// (`moveAwaitsSharing`, Z229).
     func restoredWork(in vaultID: UUID, leftBy previous: UUID, account: AccountRecord, since epoch: UInt64)
         async throws -> [RecordKey: RecordStamp]
     {
@@ -68,6 +70,30 @@ extension VaultSession {
             if restored[key] == nil { restored[key] = left(key) }
         }
         return restored
+    }
+
+    /// Whether the move from `previous` would read a chain row and cannot (review of round 18, Z229): sharing, which
+    /// keeps the rows, is not configured, and a vault that may be shared holds no state that verifies for this device's
+    /// ID or for `previous` (none, or one lost, damaged or edited, A8), where `restoredWork` finds what the IDs before
+    /// `previous` left only through the vault's chain rows (Z225, Z226). Made then, the move recorded nothing for those
+    /// rows, saved a state that verifies and cleared its record, and nothing read the earlier ID's row again (the
+    /// backfill reads only verified states, Z222), so the hold ended while the rows were on this device only (PRD
+    /// F7.6). So the move waits, its record kept, publishing nothing (`deviceMigrationIncomplete`), until sharing is
+    /// configured: `configureSharing` makes it, and so does the next unlock or sync after it. Only that case waits:
+    /// a vault whose state verifies needs no row (the earlier ID's own state names the IDs before it, and the backfill
+    /// writes this device's row from the state the move saves), so a process that never configures sharing (the
+    /// AutoFill extension) still makes an ordinary move, and leaves this one to the app. Nothing a sync does while it
+    /// waits replaces the state: a download only stages, and nothing that may write runs while a move is pending.
+    func moveAwaitsSharing(from previous: UUID, account: AccountRecord) async throws -> Bool {
+        guard sharing.settings == nil, let base = syncSettings?.state else { return false }
+        for vaultID in try await vaultDirectory(account).keys
+        where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+            guard let raw = try await base.loadState(vaultID: vaultID) else { return true }
+            if await verifiedSyncState(raw, vaultID: vaultID, deviceID: account.deviceID) != nil { continue }
+            if await verifiedSyncState(raw, vaultID: vaultID, deviceID: previous) != nil { continue }
+            return true
+        }
+        return false
     }
 
     /// Carries what a restore left in each vault that has a current key here now (`SyncState.restoredUnpublished`):
@@ -340,7 +366,8 @@ extension VaultSession {
 
     /// The earlier IDs `vaultID`'s chain row names (`RestoredChainRow`), if it verifies for this device's ID, or for
     /// `device` (the move's earlier ID, whose own row a second restore finds, Z226). `nil` where there is none, it
-    /// does not verify, sharing is not configured, or no trusted signing key is at hand.
+    /// does not verify, sharing is not configured (the move waits for sharing where it would read one,
+    /// `moveAwaitsSharing`, Z229), or no trusted signing key is at hand.
     func restoredChainRow(in vaultID: UUID, account: AccountRecord, device: UUID? = nil) async -> Set<UUID>? {
         guard let settings = sharing.settings,
             let bytes = try? await settings.state.value(.restoredChain, vaultID: vaultID),

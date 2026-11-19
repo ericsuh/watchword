@@ -318,6 +318,73 @@ extension AdversarialSharedVaultTests {
         #expect(try await owner.session.item(id: copy.id).title == copy.title, "the copy never reached the owner")
         #expect((try? await other.session.item(id: original.id)) == nil, "the original's deletion never went out")
     }
+
+    /// Threat: a damaged sync state file, or one edited by an attacker with the device's files (A8), on a store
+    /// restored twice (E, then N, then N2) whose N state for a shared vault does not verify in N2's backup, as in
+    /// `restoredTwiceAfterADamagedState(retried: false)`, on a session given sharing only after the unlock that makes
+    /// the move: a process given sync and not sharing (the AutoFill extension is not given it) that unlocks first
+    /// after the restore (review of round 18, Z229). N's chain row, bound to N and naming E, is in the sharing store,
+    /// and the move can read it only through sharing: without it the move recorded nothing for E's uncarried copy,
+    /// saved a state that verifies, and cleared its record; the backfill reads only verified states, so nothing read
+    /// N's row again, the hold ended, and the original's deletion went out while its copy existed on this device only
+    /// (PRD F7.6). The move now waits, its record kept and nothing published, while it would read a chain row and
+    /// sharing is not configured; `configureSharing` makes it.
+    @Test("a store restored twice keeps its first restore's uncarried copy held when sharing is configured late")
+    func restoredTwiceWithSharingConfiguredLate() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_300)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+        let middle = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 31_301)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        let recorded = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(recorded.values.contains { $0.device == first }, "the first restore recorded nothing to carry")
+        #expect(await member.state.value(.restoredChain, vaultID: vaultID) != nil, "the middle ID wrote no row")
+
+        // Restored again, before anything was carried, with the middle ID's state damaged in the backup.
+        await middle.session.lock()
+        await middle.forgetDeviceKey(accountID: member.accountID)
+        var damaged = try #require(await raw.loadState(vaultID: vaultID))
+        damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
+        await raw.tamper(damaged)
+        let second = TestVault(
+            store: middle.store, keychain: middle.keychain, biometrics: middle.biometrics, clock: middle.clock,
+            sync: middle.sync, seed: 31_302, deviceKeys: middle.deviceKeys)
+        try await second.session.unlock(password: TestVault.password)
+        #expect(try await second.store.loadAccount()?.migration != nil, "the move finished without the chain row")
+        // A sync before sharing: the move still waits, and this device publishes nothing meanwhile.
+        let waiting = try await second.session.syncAll()
+        #expect(waiting.deviceMigrationIncomplete, "the move finished at a sync without the chain row")
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original went while the move waited")
+
+        await second.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        #expect(try await second.store.loadAccount()?.migration == nil, "configuring sharing did not make the move")
+        let state = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(state[RecordKey(recordID: copy.id, kind: .item)]?.device == first, "the copy was not recorded again")
+
+        let report = try await second.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete)
+        #expect(report.deletionsHeldBack.contains(vaultID), "the hold ended without the middle ID's chain row")
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+
+        try await second.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        _ = try await second.session.syncAll()
+        _ = try await second.session.syncAll()
+        try await Self.syncAll([owner, other])
+        #expect(try await owner.session.item(id: copy.id).title == copy.title, "the copy never reached the owner")
+        #expect((try? await other.session.item(id: original.id)) == nil, "the original's deletion never went out")
+    }
 }
 
 /// A record store over `base` whose first commit that clears the account's device migration fails, when `failing`:
