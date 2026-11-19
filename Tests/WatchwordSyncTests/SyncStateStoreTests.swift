@@ -258,12 +258,20 @@ struct SyncStateAuthenticationTests {
         resetFields += [1]
         let restoredEntries = Array(restored.authenticatedBytes.suffix(entries))
         #expect(Array(restoredEntries.prefix(8)) == [0, 0, 0, 0, 0, 0, 0, 1])
-        #expect(reset.authenticatedBytes == earlier + zeroCount + resetFields)
-        #expect(both.authenticatedBytes == earlier + restoredEntries + resetFields)
-        #expect(moved.authenticatedBytes == earlier + restoredEntries + resetFields + [1, 1])
-        // The hygiene branch's form before the merge, the reset's fields straight after `collectedThrough`, is not
-        // what is signed now, so a row saved in it no longer verifies (V55).
-        #expect(reset.authenticatedBytes != earlier + resetFields)
+        // Each expected form is built apart: Xcode 16.4's type checker gives up on the sums inside `#expect`. The
+        // reset's alone is not the hygiene branch's form before the merge (the reset's fields straight after
+        // `collectedThrough`), so a row saved in that form no longer verifies (V55).
+        var resetAlone: [UInt8] = earlier
+        resetAlone += zeroCount
+        resetAlone += resetFields
+        var restoredAndReset: [UInt8] = earlier
+        restoredAndReset += restoredEntries
+        restoredAndReset += resetFields
+        var movedForm: [UInt8] = restoredAndReset
+        movedForm += [1, 1]
+        #expect(reset.authenticatedBytes == resetAlone)
+        #expect(both.authenticatedBytes == restoredAndReset)
+        #expect(moved.authenticatedBytes == movedForm)
     }
 
     @Test("what is signed does not depend on the order a dictionary happens to iterate in")
