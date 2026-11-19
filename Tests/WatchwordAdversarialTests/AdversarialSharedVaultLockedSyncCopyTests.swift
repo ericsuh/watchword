@@ -93,6 +93,62 @@ extension AdversarialSharedVaultTests {
     }
 }
 
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed but a lock and an unlock during a sync begun unlocked, as it downloads a vault this device
+    /// only downloads in (shared, with no ledger here, so no current key) beside a listed name whose copy cannot be
+    /// read (iCloud Drive's ordinary state for a conflict version, or A1's one file, R21); the review of this branch's
+    /// seventh merge (finding 1). On this branch that download saves what it examined of copies in the vault's state
+    /// (`savingState`, which a sync begun as a writer passes as true), loaded under the keys of the sync's start and,
+    /// unbound, signed after the lock by the keys of the new unlock: had that unlock registered a new ID, V66's harm.
+    /// PR #23's tests reach the push and the stash, never this save. Nothing is saved after the lock now, and the next
+    /// sync saves it. Fails with the engines' store unbound (`writes: nil`).
+    @Test(
+        "a sync locked and unlocked as it only downloads saves no copies after the lock; the next saves them")
+    func lockAndUnlockAcrossADownloadThatSavesCopies() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, _, members) = try await household.household(roles: [.readWrite], seed: 33_360)
+        let member = members[0]
+        let hook = TransportListingHook()
+        let transport: any SyncTransport = CopyListingHookedTransport(base: household.transport, hook: hook)
+        // Another device of the member's, sharing never configured: the vault is marked shared and has no ledger here.
+        let device = try await member.vault.enrolledDevice(over: transport, seed: 33_361)
+        try await device.session.unlock(password: TestVault.password)
+        let first = try await device.session.syncAll()
+        #expect(
+            first.vaults[vaultID]?.deferredUntilUnlock == true, "the vault was not only downloaded: nothing is tested")
+        let raw = try #require(device.sync?.state as? InMemorySyncStateStore)
+
+        let junk = SyncObjectLocation.snapshot(vaultID: vaultID, author: UUID(), lamport: 1).name
+        try await household.transport.create(junk, contents: [1, 2, 3])
+        await household.transport.plantUnreadableCopy(junk, contents: [4, 5, 6])
+        let before = Self.unsigned(await raw.loadState(vaultID: vaultID))
+
+        let session = device.session
+        await hook.onNextListing(of: SyncObjectLocation.vaultPrefix(vaultID)) {
+            await session.lock()
+            try? await session.unlock(password: TestVault.password)
+        }
+        let report = try await device.session.syncAll()
+        #expect(await hook.ran, "the vault's log was not listed: nothing is tested")
+        #expect(try await device.session.state() == .unlocked, "the unlock did not unlock")
+        #expect((report.vaults[vaultID]?.copiesNotExamined ?? 0) > 0, "no copy was left unread: nothing is tested")
+        #expect(Self.unsigned(await raw.loadState(vaultID: vaultID)) == before, "the download saved after the lock")
+
+        _ = try await device.session.syncAll()
+        let saved = Self.unsigned(await raw.loadState(vaultID: vaultID))
+        #expect(saved != before, "the next sync saved nothing of the copies: the test cannot tell a refusal")
+        #expect(saved?.unreadCopies.isEmpty == false, "the next sync did not remember the unread copy")
+    }
+
+    /// A state as it reads without its signature (as `AdversarialVaultSyncTests.unsigned`): Ed25519 signing is
+    /// randomised on CryptoKit, so a state signed again with the same contents compares unequal on Apple platforms.
+    static func unsigned(_ state: SyncState?) -> SyncState? {
+        guard var state else { return nil }
+        state.authenticator = []
+        return state
+    }
+}
+
 /// `ListingHookedTransport` with the copies passed through: the step runs in the next listing of the prefix, with or
 /// without copies, before it answers.
 struct CopyListingHookedTransport: SyncTransport {

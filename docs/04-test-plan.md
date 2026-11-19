@@ -809,8 +809,13 @@ other device lost the original. `syncStateWritesAreCheckedAtSigning` pins each c
 state or stash is signed (begun locked, another device ID, a lock and unlock since); with that check disabled it fails,
 and the first test fails only at its probe that nothing may be signed while the move waits. PR #23 ported that test
 with the mechanism (Z253); merged, the two copies were identical and one is kept, in
-`AdversarialSharedVaultLockedSyncTests.swift`. `deviceMigrationIncomplete`
-in `WordingTests` checks that the error no longer promises the next sync (V69).
+`AdversarialSharedVaultLockedSyncTests.swift`. The review of the seventh merge found the bindings themselves unpinned
+(V66): PR #23's `lockAndUnlockAcrossAPush` and `lockAndUnlockBeforeAStashSave` (Z257, below) pin them here too, and
+`lockAndUnlockAcrossADownloadThatSavesCopies` pins this branch's own path, a download that saves what it examined of
+copies in a sync begun unlocked and locked and unlocked as it lists the vault. With the engines' store unbound the three
+fail (4, 1 and 2 issues), with `saveState` unchecked the same three (4, 1, 1), and with `signedStash` unchecked the
+stash test (1). `deviceMigrationIncomplete` in `WordingTests` checks that the error no longer promises the next sync,
+and says when the move is tried again (V69).
 The review of the twenty-second round, and of PR #22's seventh merge (Z253 to Z261). In "shared vaults through the
 session": a sync begun locked writes nothing as a restored store's earlier ID while the unlock registers it, whether the
 registration is under way at the sync's own registration step or the keys arrive just before the decision

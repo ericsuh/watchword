@@ -106,10 +106,13 @@ public enum ErrorWording {
                 + "out at a sync. Sync, then try again if it still waits."
         case .deviceMigrationIncomplete:
             // Not "after the next sync" (V69): a move that fails for good (a chain row that cannot be read, a process
-            // without sharing) is not finished by the next sync, as Z243 says of the notice. And the records are this
-            // installation's own from before the restore, not another device's.
-            return "This device is still moving its sync records over from before it was restored from a backup. "
-                + "That is tried again at each sync; try again once it is done."
+            // without sharing) is not finished by the next sync, as Z243 says of the notice; it is tried again at each
+            // sync and each unlock, as the notice says. And the records are this installation's own from before the
+            // restore, not another device's: a move follows wherever the store arrives without this device's key, a
+            // transfer to new hardware (Migration Assistant, a device-to-device transfer) as well as a backup.
+            return "This device is still moving its sync records over from before it was restored from a backup "
+                + "or transferred from another device. That is tried again at each sync and each unlock; "
+                + "try again once it is done."
         case .vaultDeletionNotConfirmed:
             return "Something arrived in the vault since you were asked. Review it and try again."
         case .itemHasUnresolvedValues:

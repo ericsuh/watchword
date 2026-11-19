@@ -142,7 +142,11 @@ struct WordingTests {
         #expect(refused.contains("try again once it is done"))
         #expect(!refused.contains("next sync"), "the next sync need not finish the move (V69)")
         #expect(!refused.contains("from the device"), "the records are this installation's own (V69)")
-        #expect(!refused.contains("unlock"), "the message is read in the open, unlocked app")
+        #expect(refused.contains("transferred from another device"), "a move follows a device transfer too (V69)")
+        #expect(refused.contains("tried again at each sync and each unlock"), "as the notice says (V69)")
+        // The one mention of an unlock is when the move is tried again; nothing else may name one, in any case.
+        let rest = refused.replacingOccurrences(of: "at each sync and each unlock", with: "")
+        #expect(!rest.lowercased().contains("unlock"), "the message is read in the open, unlocked app")
     }
 
     /// Review of round 20 (Z240): a chain row of a restore's earlier device IDs that the sharing store cannot read held
