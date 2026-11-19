@@ -46,8 +46,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// (`AccountSyncReport.restoredWorkKeptHere`, review of round 13, M3). By vault name and title.
     case restoredWorkKeptHere([UnreceivedCopy])
     /// Nothing made on this device in these vaults is going out, new edits included, and nothing from others there is
-    /// applied, until a restore's carry of what this device held there before it was restored has finished (`AccountSyncReport.publishingHeldForCarry`,
-    /// review of round 14, L4). By vault name, sorted, and how many more whose names could not be read.
+    /// applied, until a restore's carry of what this device held there before it was restored has finished
+    /// (`AccountSyncReport.publishingHeldForCarry`, review of round 14, L4). By vault name, sorted, and how many more whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.
@@ -164,6 +164,14 @@ public enum SyncNoticeAction: Hashable, Sendable {
     /// (`VaultSession.stopWaitingForRestoredWork(in:)`, review of round 13, M3): the person's choice, offered only for
     /// a vault that will not open on this device (review of round 14, L2).
     case stopWaitingForRestoredWork(vaultID: UUID, vault: String?)
+
+    /// The vault the action applies to: one action per vault, and the screen names each by it (its accessibility
+    /// identifier, review of round 15, Z215).
+    public var vaultID: UUID {
+        switch self {
+        case .stopWaitingForRestoredWork(let vaultID, _): return vaultID
+        }
+    }
 
     public var title: String {
         switch self {

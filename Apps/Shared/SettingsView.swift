@@ -185,7 +185,7 @@ struct SyncNoticeActionButton: View {
     var body: some View {
         Button(action.title, role: .destructive) { confirming = true }
             .disabled(model.isWorking)
-            .accessibilityIdentifier(AccessibilityID.Settings.syncNoticeAction)
+            .accessibilityIdentifier(AccessibilityID.Settings.syncNoticeAction(action.vaultID))
             .confirmationDialog(action.title, isPresented: $confirming, titleVisibility: .visible) {
                 Button(action.title, role: .destructive) { Task { await perform(action) } }
             } message: {

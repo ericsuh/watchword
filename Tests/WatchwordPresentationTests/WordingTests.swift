@@ -205,6 +205,7 @@ struct WordingTests {
         #expect(waiting.actions == [.stopWaitingForRestoredWork(vaultID: closed, vault: "Club")])
         let action = try #require(waiting.actions.first)
         #expect(action.title == "Stop Waiting for “Club”")
+        #expect(action.vaultID == closed, "the screen cannot tell one vault's button from another's")
         let confirmation = action.confirmation
         #expect(confirmation.contains("made in “Club” before it was restored stay on this device only"))
         #expect(confirmation.contains("even if the vault opens here again"))
