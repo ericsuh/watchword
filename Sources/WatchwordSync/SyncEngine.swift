@@ -442,6 +442,7 @@ public actor SyncEngine {
             state.ownUnlistedThrough = kept.ownUnlistedThrough
             state.handedOn = kept.handedOn
             state.highestOwnSnapshot = kept.highestOwnSnapshot
+            state.syncedBefore = kept.syncedBefore
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
             // so those are kept across it.
             var replayed = SyncStash()
@@ -478,7 +479,11 @@ public actor SyncEngine {
                 noteCovered(&state, listing: listing)
                 lacking = lackingStreams(state, listing: listing, retired: retired)
                 // The store stands for everything again (another device uploaded it, or this one did): no question.
-                if lacking.isEmpty { state.storeResetSuspected = false }
+                // Except in a state a device move started over that has not handed on since (V49): it holds no
+                // record of what it merged, so nothing lacking says nothing, and only its own hand-on ends the
+                // question. Where the log is kept whole (a shared vault) nothing is handed on, and the rule is as it was.
+                let unknowable = state.syncedBefore && state.handedOn == nil && configuration.maintainsLog
+                if lacking.isEmpty, !unknowable { state.storeResetSuspected = false }
                 report.storeLacksObjects = state.storeResetSuspected
                 // A shared vault writes no snapshot, so it has nothing to hand on with (§7.10): said whether or not
                 // the person has been asked, so that nobody is asked about a vault that cannot be uploaded.
@@ -502,7 +507,7 @@ public actor SyncEngine {
                 {
                     try await maintain(
                         state: &state, listing: listing, retired: retired,
-                        handingOn: handingOn && !lacking.isEmpty, report: &report)
+                        handingOn: handingOn && (!lacking.isEmpty || state.storeResetSuspected), report: &report)
                 }
             }
         } catch SyncKeyringError.locked {

@@ -137,6 +137,8 @@ struct SyncStateAuthenticationTests {
             changed("handedOn") { $0.handedOn = HandedOn(snapshot: Self.copied, holding: [SyncFixtures.deviceA: 1]) },
             changed("highestOwnSnapshot") { $0.highestOwnSnapshot = 6 },
             changed("storeResetSuspected") { $0.storeResetSuspected = true },
+            // The device move's fact (V49).
+            changed("syncedBefore") { $0.syncedBefore = true },
         ]
     }
 
@@ -152,7 +154,7 @@ struct SyncStateAuthenticationTests {
         #expect(resigned.authenticatedBytes == signed)
         // A field added to the state must be added to `authenticatedBytes` and to `variants`: this count is the
         // reminder.
-        #expect(Mirror(reflecting: base).children.count == 26)
+        #expect(Mirror(reflecting: base).children.count == 27)
         #expect(Set(Self.variants.map(\.1.authenticatedBytes)).count == Self.variants.count)
     }
 
@@ -174,6 +176,18 @@ struct SyncStateAuthenticationTests {
         state.collectedThrough = 4
         #expect(state.authenticatedBytes.count == withRetry.count + 1 + 8 + 8)
         #expect(Array(state.authenticatedBytes.prefix(withRetry.count)) == withRetry)
+    }
+
+    /// A device move's `syncedBefore` (V49) is written only when set, after the reset's fields, so a row saved before
+    /// it still verifies.
+    @Test("a state a device move did not start over is signed as it was before the move's fact existed")
+    func syncedBeforeOnlyWhenSet() {
+        var state = StateStoreFixtures.state()
+        state.storeResetSuspected = true
+        let before = state.authenticatedBytes
+        state.syncedBefore = true
+        #expect(state.authenticatedBytes.count == before.count + 1)
+        #expect(Array(state.authenticatedBytes.prefix(before.count)) == before)
     }
 
     @Test("what is signed does not depend on the order a dictionary happens to iterate in")
@@ -198,9 +212,13 @@ struct SyncStateAuthenticationTests {
 struct SyncStateEncodingTests {
     @Test("every field survives the encoding")
     func roundTrip() throws {
-        let state = StateStoreFixtures.state()
+        var state = StateStoreFixtures.state()
         let bytes = try JSONEncoder().encode(EncodedState(state))
         #expect(try JSONDecoder().decode(EncodedState.self, from: bytes).state == state)
+        state.syncedBefore = true
+        state.storeResetSuspected = true
+        let moved = try JSONEncoder().encode(EncodedState(state))
+        #expect(try JSONDecoder().decode(EncodedState.self, from: moved).state == state)
     }
 
     @Test("a row written before the stash had a row of its own decodes as saved")

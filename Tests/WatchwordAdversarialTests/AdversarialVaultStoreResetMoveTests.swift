@@ -1,0 +1,135 @@
+import Foundation
+import Testing
+import WatchwordModel
+import WatchwordStore
+import WatchwordTestSupport
+
+@testable import WatchwordKit
+@testable import WatchwordSync
+
+// A store reset meeting a device move (docs/02-architecture.md §7.10; owner decision, 2026-11-17: re-upload, "but
+// ask the user first"): an installation restored onto other hardware starts each vault's sync state over for its new
+// device ID (Z181), and must still know that it had synced, and that an upload it began was not finished
+// (docs/06-adversarial-review.md V49).
+extension AdversarialVaultSyncTests {
+    /// The device's store and sync state on other hardware: the same files, without the device key, so the next unlock
+    /// registers a new device ID and moves the old ID's sync state to it.
+    static func restoreOntoOtherHardware(_ device: TestVault) async throws {
+        let accountID = try #require(await device.store.loadAccount()).accountID
+        await device.session.lock()
+        await device.forgetDeviceKey(accountID: accountID)
+        try await device.session.unlock(password: TestVault.password)
+    }
+
+    static func login(_ title: String, in vaultID: UUID) -> Item {
+        Item(vaultID: vaultID, title: title, scopes: [], fields: [Field(kind: .password, label: "P", value: "s")])
+    }
+
+    /// Threat: none needed but the person's own act. They deleted Watchword's data from iCloud on purpose (the store
+    /// lists nothing, and an unmarked CloudKit zone is simply created), and then restored a backup of this device onto
+    /// new hardware: the `SyncStoreMarker` is not in the backup, and the move started every vault's state over, so
+    /// before V49 `hasSyncedBefore` read the installation as new and its first sync filled the store again, the
+    /// account's objects and every carried row, without asking. It asks now, publishes nothing however often it syncs,
+    /// and on the person's yes hands on everything it holds, the other device's work included.
+    @Test("a restore onto other hardware into a store the person emptied asks before it uploads anything")
+    func restoredIntoEmptiedStoreAsks() async throws {
+        let store = ResettableSyncTransport()
+        let a = TestVault.syncing(over: store)
+        try await a.createAccount()
+        let b = try await a.enrolledDevice(deviceID: Self.deviceB, over: store)
+        try await b.session.unlock(password: TestVault.password)
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Bank", in: vaultID))
+        _ = try await b.session.save(Self.login("Post", in: vaultID))
+        for _ in 0..<3 {
+            for device in [a, b] { try await device.session.sync() }
+        }
+
+        await store.base.removeEverything()
+        await store.forgetCreates()
+        let oldID = try #require(await b.store.loadAccount()).deviceID
+        try await Self.restoreOntoOtherHardware(b)
+        let moved = try #require(await b.store.loadAccount())
+        #expect(moved.deviceID != oldID && moved.migration == nil)
+
+        for round in 0..<3 {
+            let report = try await b.session.syncAll(reconcile: round == 2)
+            #expect(report.storeNeedsReupload)
+            #expect(report.transportFailure == .storeReset)
+        }
+        let created = await store.created
+        #expect(created.isEmpty, "\(created)")
+        #expect(await store.startsAgain == 0)
+
+        // A, which held "Bank" alone, is gone for good; the person says yes on the restored device.
+        let answered = try await b.session.reuploadAfterStoreReset(confirming: try await b.session.reuploadPlan())
+        #expect(!answered.storeNeedsReupload)
+        #expect(answered.vaults[vaultID]?.snapshotsWritten == 1)
+        let c = try await b.enrolledDevice(deviceID: Self.deviceC, over: store)
+        try await c.session.unlock(password: TestVault.password)
+        try await c.session.sync()
+        #expect(Set(try await c.session.items().items.map(\.title)) == ["Bank", "Post"])
+    }
+
+    /// Threat: none; the property the fix must not break. An installation that never synced (sync set up, the store
+    /// never reached) is restored onto other hardware: its store is new, not emptied, and its first sync publishes
+    /// without asking, as any new account's does.
+    @Test("a never-synced installation restored onto other hardware publishes without asking")
+    func neverSyncedRestorePublishes() async throws {
+        let store = ResettableSyncTransport()
+        let a = TestVault.syncing(over: store)
+        try await a.createAccount()
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Bank", in: vaultID))
+        try #require(await store.created.isEmpty, "the installation synced before the restore")
+
+        try await Self.restoreOntoOtherHardware(a)
+        let report = try await a.session.syncAll()
+        #expect(!report.storeNeedsReupload)
+        #expect(report.transportFailure == nil)
+        #expect(await !store.created.isEmpty)
+        let c = try await a.enrolledDevice(deviceID: Self.deviceC, over: store)
+        try await c.session.unlock(password: TestVault.password)
+        try await c.session.sync()
+        #expect(try await c.session.items().items.map(\.title) == ["Bank"])
+    }
+
+    /// Threat: none (SR21 meeting a device move). The person said yes after a reset, and the upload stopped part-way:
+    /// the store was started again and the account's objects went in, then the connection went before the vault's
+    /// snapshot, so only the engine's own sign (`storeResetSuspected`) still asks. A backup taken then is restored
+    /// onto new hardware; before V49 the move dropped that sign with the rest of the state, and the restored device
+    /// was never asked again while the vault was in no store. It still asks, until it has handed on.
+    @Test("an upload stopped part-way before a backup still asks after the restore's device move")
+    func interruptedUploadAsksAfterMove() async throws {
+        let store = ResettableSyncTransport()
+        let a = TestVault.syncing(over: store)
+        try await a.createAccount()
+        let b = try await a.enrolledDevice(deviceID: Self.deviceB, over: store)
+        try await b.session.unlock(password: TestVault.password)
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Bank", in: vaultID))
+        for _ in 0..<3 {
+            for device in [a, b] { try await device.session.sync() }
+        }
+
+        await store.reset()
+        await store.refuseCreates(under: SyncObjectLocation.vaultPrefix(vaultID))
+        let stopped = try await b.session.reuploadAfterStoreReset(confirming: try await b.session.reuploadPlan())
+        #expect(stopped.vaults[vaultID]?.snapshotsWritten == 0)
+        await store.refuseCreates(under: nil)
+
+        try await Self.restoreOntoOtherHardware(b)
+        #expect(try await b.store.loadAccount()?.migration == nil)
+        #expect(try await b.session.syncAll().storeNeedsReupload, "the move dropped the unfinished upload's question")
+        #expect(try await b.session.syncAll().storeNeedsReupload)
+
+        let finished = try await b.session.reuploadAfterStoreReset(confirming: try await b.session.reuploadPlan())
+        #expect(finished.vaults[vaultID]?.snapshotsWritten == 1)
+        #expect(!finished.storeNeedsReupload)
+        #expect(try await b.session.syncAll().storeNeedsReupload == false)
+        let c = try await b.enrolledDevice(deviceID: Self.deviceC, over: store)
+        try await c.session.unlock(password: TestVault.password)
+        try await c.session.sync()
+        #expect(try await c.session.items().items.map(\.title) == ["Bank"])
+    }
+}

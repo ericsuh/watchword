@@ -1425,7 +1425,10 @@ other does, and reported as not required on Linux, where they cannot compile.
   repeated resets reusing no name; an old copy of the store put back; the quarantine and an unpublished deletion; a
   shared vault never uploaded from one member's device; a lock while the store is started again, and an upload
   stopped part-way, which asks again until the device has handed on: SR21, `lockWhileStartingAgain`,
-  `uploadStoppedPartWay`) and "account enrolment and device registry"
+  `uploadStoppedPartWay`; and a restore onto other hardware, whose device move keeps what the installation knew, V49:
+  into a store the person emptied it asks and publishes nothing, then hands on everything on the yes,
+  `restoredIntoEmptiedStoreAsks`; a never-synced installation restored publishes, `neverSyncedRestorePublishes`; an
+  upload stopped part-way before the backup still asks after the move, `interruptedUploadAsksAfterMove`) and "account enrolment and device registry"
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
   revoked device cannot answer and stays revoked; a password change survives). `LongRunningSyncSimulationTests`
   resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone

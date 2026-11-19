@@ -138,6 +138,13 @@ public struct SyncState: Sendable, Hashable {
     /// this one was deleted, lowest first. A listed name at or below it is no segment of its stream any more (a stale
     /// listing, or a name anyone can create), so collection's contiguous run starts above it (review finding Z149).
     public var collectedThrough: UInt64 = 0
+    /// This state was started over by a move of the installation to a new device ID (a store restored onto other
+    /// hardware, `VaultSession.completeDeviceMigration`) after the installation had published or merged a log: the
+    /// state holds no record of what it merged, and the device's local store holds all of it (review of the second
+    /// merge, V49). It tells a store that was emptied from a new one where the rest of the state no longer can
+    /// (§7.10), and a reset suspected in such a state is not ended by finding nothing lacking, since the state cannot
+    /// say what the store should stand for: only handing everything on ends it. Never cleared; kept by a replay.
+    public var syncedBefore = false
     /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
     /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
     /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the

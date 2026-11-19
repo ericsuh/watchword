@@ -432,7 +432,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   first"). Three signs, each good only for stopping and asking: the transport's `storeReset`; a store that lists none
   of the registry entries this device retains although its sync state says it has published or merged a log
   (`syncAccountObjects`, `hasSyncedBefore`: reported as `storeReset`, and nothing is published, the account's objects
-  and new edits included); and the engine's own (`SyncState.storeResetSuspected`: an object of its own missing at a
+  and new edits included; an item or description another device ID wrote counts as having synced, and a device move
+  keeps the fact in each state it starts over, signed, as `SyncState.syncedBefore`, with the old state's
+  `storeResetSuspected`, which in such a state only the device's own hand-on ends, V49); and the engine's own (`SyncState.storeResetSuspected`: an object of its own missing at a
   listing *before* merging, and something merged that nothing listed stands for; sticky until the store stands for
   everything again). While suspected and unanswered the engine writes no snapshot, elected or owed, and collects
   nothing. **A replay never begins without a listing or while a reset is suspected** (`replayPostponed`): it would
@@ -805,7 +807,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the old ID's sync state is recorded, signed (`AccountRecord.migration`, `SignatureDomain.deviceMigration`), in the
   commit that names the new ID, and `completeDeviceMigration` makes it again at each unlock and sync until it is
   complete (Z181): never do any of it under `try?` after that commit, never publish while it is incomplete
-  (`deviceMigrationIncomplete`), never register a further ID over it, and act on no record the session did not sign.
+  (`deviceMigrationIncomplete`), never let it forget that the
+  installation had synced or that an upload was unfinished (`startSyncStatesOver`, V49), never register a further ID over it, and act on no record the session did not sign.
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
   whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's
   deletions go out, the new ID's own included (Z170); `copiesNobodyReceived` names those items for the summary (Z171). Every engine pass in

@@ -982,10 +982,7 @@ extension VaultSession {
         let previous = migration.previousDeviceID
         if try verifiedMigration(migration, to: account, keyset: try requireKeys(since: epoch).keyset) {
             let view = try await registry(account)
-            for vaultID in try await vaultDirectory(account).keys {
-                _ = try requireKeys(since: epoch)
-                try await syncState.saveState(SyncState(vaultID: vaultID))
-            }
+            try await startSyncStatesOver(account, from: previous, since: epoch)
             let deletions = try await signedPendingDeletions(stampedBy: previous, account: account)
             let parked = try await signedPendingDeletions(
                 stampedBy: Self.parkedDeletionDevice(of: previous), account: account)

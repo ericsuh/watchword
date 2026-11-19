@@ -1305,6 +1305,15 @@ that has something to add, because the person on another device may have deleted
    reports `storeReset` and the sync stops before anything is published, the account's own objects included, in
    every vault and in the sharing pass. A store that never held the account is told apart by what the device
    remembers doing, not by what the store shows: a device that has never published or merged a log publishes as ever.
+   *A device move keeps the fact* (V49): an installation restored onto other hardware starts each vault's state over
+   for its new device ID (`completeDeviceMigration`, Z181), which before V49 read as new, so a restore into a store
+   the person had emptied filled it again unasked (the `SyncStoreMarker` is device-local and outside the backup, and
+   CloudKit creates a zone nobody marked). The move asks `hasSyncedBefore` of the old ID's states first and saves each
+   empty state with the signed fact `SyncState.syncedBefore` (and the old state's `storeResetSuspected`); a move made
+   again finds the fact in the states a first attempt emptied. `hasSyncedBefore` also answers yes for any item or
+   description in the account's vaults that another device ID wrote, which only a merged log brings: a check that
+   can only ask. It also asks where a move left a row of the earlier ID behind (one that did not open, or a vault's
+   description where the old state was none), and the person's yes then uploads it.
 3. *The engine sees it* (`SyncReport.storeLacksObjects`, `SyncState.storeResetSuspected`): at a listing, before
    anything listed is merged, an object this device wrote and did not delete is missing — a segment past what it may
    have collected (`SyncState.ownUnlistedThrough`, named `collectedThrough` on the branch that made it and renamed at
@@ -1318,7 +1327,10 @@ that has something to add, because the person on another device may have deleted
    later self collected) and the second alone is not either (a provider that lags can show a snapshot's replacement
    late). The suspicion is remembered until everything the device has merged is listed or stood for again, because
    what another device uploads can stand for this device's own stream, and so hide the first half, while this device
-   still holds more of a third stream than the store does.
+   still holds more of a third stream than the store does. In a state a device move started over (`syncedBefore`)
+   and not handed on since, finding nothing lacking says nothing (the state has no record of what was merged, the
+   local store holds it all), so there the suspicion ends only with this device's hand-on, which writes the snapshot
+   of everything (V49); in a shared vault, which hands nothing on, the rule is unchanged.
 
 `AccountSyncReport.storeNeedsReupload` is any of the three (the third only for a vault that can be uploaded again).
 
@@ -1354,7 +1366,8 @@ or runs between the two steps. Then:
    only if a second look just before the deletion says so too, so a zone another device has started again by then is
    left alone (SR30; CloudKit has no conditional zone deletion, so the window narrows and does not close). A
    transport with no notion of a reset does nothing. Before it,
-   each of the account's own vaults that has synced is marked `storeResetSuspected`, which only its hand-on or a
+   each of the account's own vaults that has synced (or was started over by a move after the installation had) is
+   marked `storeResetSuspected`, which only its hand-on or a
    store standing for everything it holds clears, so an upload stopped part-way (a lock, the network, the app
    killed) asks again; after it, the lock epoch is checked again (SR21).
 2. One sync with `reuploadingSince` the epoch of the answer, which counts only while the vault is unlocked at that

@@ -1,5 +1,6 @@
 import Foundation
 import WatchwordCrypto
+import WatchwordEnvelope
 import WatchwordStore
 import WatchwordSync
 
@@ -140,7 +141,7 @@ extension VaultSession {
         for vaultID in try await vaultDirectory(account).keys.sorted(by: { $0.uuidString < $1.uuidString })
         where !isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
             guard var vault = try await state.loadState(vaultID: vaultID), !vault.storeResetSuspected,
-                vault.lastPublishedSequence > 0 || !vault.merged.isEmpty || !vault.snapshots.isEmpty
+                Self.recordsSyncing(vault)
             else { continue }
             vault.storeResetSuspected = true
             try await state.saveState(vault)
@@ -148,16 +149,76 @@ extension VaultSession {
     }
 
     /// Whether this device has ever published or merged a vault's log: what tells a store that was emptied from one
-    /// that is new (`syncAccountObjects`). Read from the sync state, which a reset of the store does not touch. A
-    /// device that has only ever published the account's objects reads as new; nothing but those objects was ever
-    /// in such a store.
+    /// that is new (`syncAccountObjects`). Read from the sync state, which a reset of the store does not touch, and
+    /// which a device move starts over carrying the fact (`SyncState.syncedBefore`, V49). A device that has only ever
+    /// published the account's objects reads as new; nothing but those objects was ever in such a store.
+    ///
+    /// Also true if a vault of the account's holds an item or a description another device ID wrote (the review of the
+    /// second merge's check, V49): only a merged log brings one here, so the store this device synced with held
+    /// something. It can only make the sync stop and ask, never publish; it also asks where a device move left a row
+    /// of the earlier ID behind (one that did not open, or a description of a vault whose state was none), which the
+    /// person's yes then uploads.
     func hasSyncedBefore(_ account: AccountRecord) async throws -> Bool {
+        let vaults = try await vaultDirectory(account).keys
         // The signed state only (Z20): a row the session did not sign is no state, and says nothing either way.
-        guard let state = syncState else { return false }
-        for vaultID in try await vaultDirectory(account).keys {
-            guard let vault = try await state.loadState(vaultID: vaultID) else { continue }
-            if vault.lastPublishedSequence > 0 || !vault.merged.isEmpty || !vault.snapshots.isEmpty { return true }
+        if let state = syncState {
+            for vaultID in vaults {
+                guard let vault = try await state.loadState(vaultID: vaultID) else { continue }
+                if Self.recordsSyncing(vault) { return true }
+            }
+        }
+        for vaultID in vaults {
+            for kind in [EnvelopeKind.item, .vaultMetadata] {
+                let rows = try await store.records(in: vaultID, kind: kind)
+                if rows.contains(where: { $0.deviceID != account.deviceID }) { return true }
+            }
         }
         return false
+    }
+
+    /// Whether a vault's state says this device published or merged its log, or was started over by a device move
+    /// after the installation had (`SyncState.syncedBefore`).
+    static func recordsSyncing(_ state: SyncState) -> Bool {
+        state.syncedBefore || state.lastPublishedSequence > 0 || !state.merged.isEmpty || !state.snapshots.isEmpty
+    }
+
+    /// The device move's first step (`completeDeviceMigration`, Z181; V49): each vault's state saved empty for the new
+    /// ID, signed through `syncState`, keeping two facts the old ID's states held that are the installation's, not
+    /// the ID's. Whether it had synced before (`hasSyncedBefore`, and the old ID's states, asked before any state is
+    /// emptied), so that a store the person emptied is not filled again unasked from a restore onto other hardware
+    /// (§7.10); a move made again after a first attempt emptied some states finds the fact in them. And each vault's
+    /// `storeResetSuspected`, so that an upload after a reset that stopped part-way before the backup still asks
+    /// (SR21); the engine keeps it in such a state until this device hands on. Both can only make a sync stop and ask.
+    func startSyncStatesOver(_ account: AccountRecord, from previous: UUID, since epoch: UInt64) async throws {
+        guard let state = syncState else { return }
+        let vaults = try await vaultDirectory(account).keys
+        var held: [UUID: SyncState] = [:]
+        for vaultID in vaults {
+            if let earlier = try await movedSyncState(vaultID: vaultID, from: previous, account: account) {
+                held[vaultID] = earlier
+            }
+        }
+        let syncedBefore = try await hasSyncedBefore(account) || held.values.contains(where: Self.recordsSyncing)
+        for vaultID in vaults {
+            _ = try requireKeys(since: epoch)
+            var fresh = SyncState(vaultID: vaultID)
+            fresh.syncedBefore = syncedBefore
+            fresh.storeResetSuspected = held[vaultID]?.storeResetSuspected ?? false
+            try await state.saveState(fresh)
+        }
+    }
+
+    /// A vault's state as this session signed it for `account`'s device ID (a move made again) or for `previous`,
+    /// the ID the move is from; `nil` for any other row (Z20). Read only for the two facts the move keeps.
+    func movedSyncState(vaultID: UUID, from previous: UUID, account: AccountRecord) async throws -> SyncState? {
+        if let current = try await syncState?.loadState(vaultID: vaultID) { return current }
+        guard let row = try await syncSettings?.state.loadState(vaultID: vaultID), row.vaultID == vaultID,
+            let signingKey = await trustedAccountSigningKey(account)
+        else { return nil }
+        let message = Self.syncStateMessage(row, deviceID: previous)
+        guard
+            (try? Signatures.verify(row.authenticator, for: message, domain: .syncState, signingKey: signingKey)) != nil
+        else { return nil }
+        return row
     }
 }
