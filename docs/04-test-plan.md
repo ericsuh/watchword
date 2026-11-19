@@ -717,7 +717,9 @@ stream withheld too, since the chain comes from the move's signed chain row and 
 (`plantedChainIDOfASiblingEnrolledBeforeARestore`, Z216; `restoredWorkSurvivesAnEditedState` keeps Z200's hold from
 that row); and the lock test lands a lock inside each read or record of the vault's pending deletions and inside the
 carry's commit of a row whose record also has a tombstone to rewrite (`lockDuringTheCarry`, which traps with either
-re-read replaced by keys held across the suspension, Z217).
+re-read replaced by keys held across the suspension, Z217). Merged into the branch with conflict copies, "sync log":
+in a vault with a judge a staged name with conflict copies, and every later segment of its author's stream, counts
+for nothing as carried, as the merge refuses that name (`stagedCopiesCountForNothingWithAJudge`, Z221).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

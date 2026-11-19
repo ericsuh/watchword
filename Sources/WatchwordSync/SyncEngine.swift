@@ -605,21 +605,33 @@ public actor SyncEngine {
     /// The entries for `keys` that the staged segments of the streams of `authors` carry in this vault, downloaded and
     /// not merged yet, each entry its segment's author's own. Each segment is opened (`open`: kind, context, both
     /// signatures, AEAD, payload location) and its entries' structure checked (`validate`); a segment that fails gives
-    /// nothing, and so does a retired author's (`SyncKeyring.retiredAuthors`), which no pass reads. Nothing else a
-    /// merge asks is asked here: not the shared vault's judge (a segment's standing, write cuts, what a version claims
-    /// of other devices' work), nor the version bounds that quarantine (U5). So what a segment says of its own
-    /// author's versions is all a caller may take from it: a restore's carry, which needs to know, after a `download`
-    /// and before the pass that merges it, what the earlier device ID's own stream carried of those records
-    /// (docs/10-sync-correctness.md §9; review of round 14, L1, and of round 15, Z208: a third device's claim read
-    /// here had never been judged). Merges nothing; throws what the state store threw.
+    /// nothing, and so does a retired author's (`SyncKeyring.retiredAuthors`), which no pass reads; in a vault with a
+    /// judge, so do a name with conflict copies and every later segment of its author's stream, which the merge does
+    /// not reach while it refuses that name (`openCopies`, Z221). Nothing else a merge asks is asked here: not the
+    /// shared vault's judge (a segment's standing, write cuts, what a version claims of other devices' work), nor the
+    /// version bounds that quarantine (U5). So what a segment says of its own author's versions is all a caller may
+    /// take from it: a restore's carry, which needs to know, after a `download` and before the pass that merges it,
+    /// what the earlier device ID's own stream carried of those records (docs/10-sync-correctness.md §9; review of
+    /// round 14, L1, and of round 15, Z208: a third device's claim read here had never been judged). Merges nothing;
+    /// throws what the state store threw.
     public func stagedEntries(of keys: Set<RecordKey>, authoredBy authors: Set<UUID>) async throws -> [SyncEntry] {
         guard !keys.isEmpty, !authors.isEmpty else { return [] }
         let retired = await keyring.retiredAuthors(vaultID: vaultID)
+        let segments = try await syncState.staged(vaultID: vaultID).filter {
+            $0.location.kind == .segment && authors.contains($0.location.author)
+                && !retired.contains($0.location.author)
+        }
+        // In a vault with a judge a name with conflict copies is refused (`openCopies`), and its stream is merged no
+        // further while it is: nothing at or past it counts as carried (a merge review of round 16, Z221).
+        var refusedFrom: [UUID: UInt64] = [:]
+        if judge != nil {
+            for staged in segments where !staged.alternates.isEmpty {
+                let author = staged.location.author
+                refusedFrom[author] = min(refusedFrom[author] ?? .max, staged.location.number)
+            }
+        }
         var entries: [SyncEntry] = []
-        for staged in try await syncState.staged(vaultID: vaultID)
-        where staged.location.kind == .segment && authors.contains(staged.location.author)
-            && !retired.contains(staged.location.author)
-        {
+        for staged in segments where staged.location.number < refusedFrom[staged.location.author] ?? .max {
             guard let payload = try? await open(staged), (try? validate(payload, at: staged.location)) != nil else {
                 continue
             }

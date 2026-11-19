@@ -457,6 +457,57 @@ extension AdversarialSyncTests {
         #expect(await freshJudge.recorded.isEmpty)
     }
 
+    /// Threat: a device whose signing key signed two segments under one sequence number (its restored backup, or old
+    /// hardware still running under the ID a restore left, Z198), with the provider (A1) keeping both, in a shared
+    /// vault this device first downloaded while the vault had no judge here (held closed): the staging area then holds
+    /// the position with a conflict copy, and once the judge is there the merge refuses the name (`openCopies`) and
+    /// that author's stream stops at it. A restore's carry asks the staged segments what the earlier device ID's own
+    /// stream carried (`stagedEntries`, docs/10-sync-correctness.md §9) and drops an entry its versions there cover;
+    /// counting a version at or past the refused name, which no member merges, it dropped the entry and left the
+    /// work the earlier ID's, which every member's judge holds aside (review of a merge of round 16, Z221). Nothing at
+    /// or past the first name with copies counts now, and the merge that follows applies none of it either.
+    @Test("in a shared vault a staged name with copies, and the rest of its stream, counts for nothing as carried")
+    func stagedCopiesCountForNothingWithAJudge() async throws {
+        let f = try await Self.fixture()
+        let saved = try await f.writer.save(Self.login("First", password: "first-copy"))
+        try await f.writer.sync()
+        _ = try await f.writer.edit(saved.id) { $0.title = "First, edited" }
+        try await f.writer.sync()
+        let elsewhere = InMemorySyncTransport()
+        let restored = SyncTestClient(deviceID: Self.a, vaultID: Self.vault, keys: f.keys, transport: elsewhere)
+        try await restored.save(Self.login("Second", password: "second-copy"))
+        try await restored.sync()
+        let name = f.segmentName(1)
+        await f.transport.plantCopy(name, contents: try #require(await elsewhere.allObjects[name]))
+
+        var configuration = SyncTestClient.configuration
+        configuration.maintainsLog = false
+        await f.keys.trust(device: Self.b)
+        let store = InMemoryRecordStore()
+        let syncState = InMemorySyncStateStore()
+        let keyring = FakeSyncKeyring(deviceID: Self.b, keys: f.keys)
+        func engine(judge: AdmittingJudge?) -> SyncEngine {
+            SyncEngine(
+                vaultID: Self.vault, deviceID: Self.b, store: store, syncState: syncState, transport: f.transport,
+                keyring: keyring, merger: FakeItemMerger(keyring: keyring), configuration: configuration,
+                judge: judge)
+        }
+        // Downloaded while the vault had no judge here: both copies of position 1 staged, and position 2.
+        _ = try await engine(judge: nil).download()
+        let staged = try await syncState.staged(vaultID: Self.vault)
+        let forked = staged.filter { $0.location.name == name }
+        #expect(forked.count == 1 && forked.first?.alternates.count == 1, "no copy staged: nothing is tested")
+        #expect(staged.contains { $0.location.name == f.segmentName(2) }, "position 2 not staged: nothing is tested")
+
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        let judged = engine(judge: AdmittingJudge())
+        let counted = try await judged.stagedEntries(of: [key], authoredBy: [Self.a])
+        #expect(counted.isEmpty, "a version no merge applies here counted as carried")
+        let report = try await judged.sync()
+        #expect(report.rejected.map(\.reason) == [.transport(.conflictingVersions(name))])
+        #expect(try await store.record(key) == nil, "the merge applied what the refused stream carried")
+    }
+
     /// Threat: A8, with the local file, edits the staging area so that a position holds a copy the download never
     /// verified beside the genuine one, or raises the count of copies "examined" to keep a real second copy from
     /// being looked at. Staged copies are verified again one by one before anything is applied, and a copy that

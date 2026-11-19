@@ -1033,12 +1033,13 @@ renamed: another device's stamps, discards and lines stay byte for byte as its s
 as published is the most of three: the last version of the record the old ID's own signed state recorded, the highest
 version the old ID's own stream carried as the stream index and that stream's downloaded segments show it once the
 vault's log has been pulled (`SyncEngine.stagedEntries(of:authoredBy:)`, which opens and checks each segment but asks
-nothing of the judge, so only what a segment says of its own author's versions is taken from it), and what the row
-itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). Never what a
-downloaded version of a third device claims: nothing has judged it yet, and a member who may write could claim to have
-seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside (Z208). In a
-shared vault the log is whole from the day it was shared, so whatever an honest third device saw of the old ID since
-then is in the old ID's own segments. Not what an owner's device published while the vault was private: those segments
+nothing of the judge, so only what a segment says of its own author's versions is taken from it, and in a vault with a
+judge counts nothing from an author's first staged name with conflict copies on, which the merge refuses, Z221), and
+what the row itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). Never
+what a downloaded version of a third device claims: nothing has judged it yet, and a member who may write could claim
+to have seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside
+(Z208). In a shared vault the log is whole from the day it was shared, so whatever an honest third device saw of the
+old ID since then is in the old ID's own segments. Not what an owner's device published while the vault was private: those segments
 may have been collected under a snapshot before the vault was shared (Z144), and the old ID's signed state is then the
 only bound; with that state lost or edited (A8) the carry writes the work again as the new ID's, and members hold it
 twice, as conflicts, losing neither (Z218, accepted).
