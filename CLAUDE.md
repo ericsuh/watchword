@@ -793,7 +793,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   clause carries the other two across the awaits after the check, Z255: never drop it, and accept the
   `ownStreamConflict` a lock during a push costs the next sync, Z257). The take-out runs only in a sync that may write.
   A state read that throws counts as work to carry, and a vault whose re-record fails merges nothing first (Z254); the
-  take-out does not run on a state it cannot read (Z258). Never decide a carry or a take-out on a `try?` read.
+  take-out does not run on a state it cannot read (Z258), and a take-out that began for a judged basis and did not
+  finish leaves it unsettled by any replay until one has (`takeOutsOwed`, Z262; a replay whose take-out throws waits).
+  Never decide a carry or a take-out on a `try?` read, and never let a pass settle a basis its take-out did not act
+  on. A key read that throws is never "no key" (`ownDeviceKey(of:)`, Z265): only an absent key registers a new device,
+  and an unlocked sync held back by the key alone says so (`ownDeviceKeyWait`), never "when you unlock" (Z264).
   Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
   Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
   cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves

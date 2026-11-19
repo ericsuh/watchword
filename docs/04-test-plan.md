@@ -724,10 +724,12 @@ session": a sync begun locked writes nothing as a restored store's earlier ID wh
 registration is under way at the sync's own registration step or the keys arrive just before the decision
 (`lockedSyncDecidesOnTheAccountAfterItsAwaits`, the review's PoC and a second landing; five issues each at 5b43bc5, two
 each with `mayWrite`'s new clauses removed); a sync during a pending move takes nothing out
-(`pendingMoveTakesNothingOut`); no state is signed while the move waits (in `lockedSyncAcrossTheUnlocksRegistration`);
-`syncStateWritesAreCheckedAtSigning` pins each clause of the signing check; a release of parked deletions, and a chain
-row, are signed only for a sync still entitled to (`releaseIsCheckedAtSigning`, Z256, failing with the release's check
-removed). In "sync with real keys", each layer of `SyncStateWrites` alone (Z257): `lockAndUnlockAcrossAPush` fails with
+(`pendingMoveTakesNothingOut`, whose failing state reads stop the take-out on their own since Z258, so the gate is
+pinned by `pendingMoveOnAChainRowTakesNothingOut`, Z263); no state is signed while the move waits (in
+`lockedSyncAcrossTheUnlocksRegistration`); `syncStateWritesAreCheckedAtSigning` pins each clause of the signing check;
+a release of parked deletions, and a chain row, are signed only for a sync still entitled to
+(`releaseIsCheckedAtSigning`, Z256, failing with the release's check removed and with the chain row's). In "sync with
+real keys", each layer of `SyncStateWrites` alone (Z257): `lockAndUnlockAcrossAPush` fails with
 the engines' store unbound and with the state's check removed, and records the cost (the next sync's
 `ownStreamConflict`, recovered by the one after); `lockAndUnlockBeforeAStashSave` fails with the stash's check removed.
 One failed state read anywhere in a restored device's sync still carries its work before the vault merges
@@ -739,6 +741,16 @@ attempt made again waits for sharing (`turnedAwayMoveKeepsAFailureWhenTheNextWai
 store's record, not the holder's (`turnedAwayMoveIsMadeFromTheStoreNotTheHolder`, `z247-reread`; Z259); a vault state
 that cannot be read as the chain is read holds and is not reported as a chain row (`stateReadFailingInTheChainHolds`,
 `z245-state` and `z245-rowonly`, Z260). Each fails with the part it pins undone.
+The review of the twenty-third round (Z262 to Z266). In "shared vaults through the session": a take-out that fails on
+its state read in a sync where a replay was owed is not settled away by that replay, and a demoted member's late write
+merged before the demotion was known is taken out in the same sync (`takeOutThatFailedIsNotSettledAway`, the review's
+PoC; fails at 4bf9f9d, the late write kept, Z262); a sync while a restore's move waits on an unreadable chain row takes
+none of the earlier ID's rows out (`pendingMoveOnAChainRowTakesNothingOut`, the review's PoC; fails with the take-out's
+`writing` gate removed, two issues, Z263); an unlocked sync held back by this device's own key reports why
+(`ownDeviceKeyWait`: `.registering` in `lockedSyncDecidesOnTheAccountAfterItsAwaits`, `.unreadable` in
+`unreadableDeviceKey`, which also checks that a key read that throws makes no device key, Z264, Z265). In
+`WordingTests`, `ownDeviceKeyWait` and `ownDeviceKeyWording` check that neither state says "when you unlock" and that
+each says it is tried again (Z264).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

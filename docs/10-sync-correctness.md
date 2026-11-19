@@ -618,7 +618,10 @@ turned away is made again from the record the store holds, keeping an attempt's 
 (Z249): it may write only as an ID this installation holds a key for, decided after its last await, with no registration
 under way, and it signs a state only for the ID and the keys it began with (Z253, `SyncStateWrites`). A state that
 cannot be read, or a re-record that fails, makes a vault wait for its carry rather than merge first (Z254), and the
-take-out leaves `o`'s rows alone then too (Z253, Z258).
+take-out leaves `o`'s rows alone then too (Z253, Z258). A take-out that does not finish keeps the judged basis from
+being settled by the replay after it (Z262): settled, the head that made a late write stop counting was never acted on
+here, and the write, current on this device alone, went into its later merges as its own work, where every other
+device holds it aside by `J`.
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

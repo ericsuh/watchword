@@ -721,15 +721,19 @@ read at the sync's start, and an unlock that installed the keys before the decis
 onto other hardware as a new device, left the sync deciding as the earlier ID, still active with no move recorded, and
 writing under it while the unlock made the move. So `mayWrite` also needs a key for the sync's device ID on this
 installation, read as the last await before the decision (a restored store has none for its earlier ID, and never gets
-one back), and no registration under way. And every vault state, stash, released deletion and chain row the sync signs
-is checked, synchronously before its signature, against what the sync began with (`SyncStateWrites`: the device ID, the
-lock epoch, and that it began as a writer; PR #22's V66), so a sync that outlives a lock, an unlock or a new ID saves
-none of what it loaded for the old. The epoch clause carries the other two across the awaits between a check and the
-store's write (Z255). Its cost: a lock and an unlock between a push's create and its save leave the segment published
-and the state unsaved, so the next sync reports its place taken (`ownStreamConflict`) and holds deletions for that sync,
-and the one after recovers (Z257). An unlock that registers a restored device and makes, or waits for, its move during a
-sync begun locked finds every vault's state as it left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands
-the unlock after the decision, `lockedSyncDecidesOnTheAccountAfterItsAwaits` before it).
+one back), and no registration under way. That read keeps a failure apart from an absent key (`ownDeviceKey(of:)`,
+Z265): only a key the Keychain says is absent registers this installation as a new device, and either makes the sync a
+download. An unlocked sync held back by the key alone says which (`AccountSyncReport.ownDeviceKeyWait`: the key could
+not be read, or the device is still registering), worded as such and never "when you unlock" (Z264). And every vault
+state, stash, released deletion and chain row the sync signs is checked, synchronously before its signature, against
+what the sync began with (`SyncStateWrites`: the device ID, the lock epoch, and that it began as a writer; PR #22's
+V66), so a sync that outlives a lock, an unlock or a new ID saves none of what it loaded for the old. The epoch clause
+carries the other two across the awaits between a check and the store's write (Z255). Its cost: a lock and an unlock
+between a push's create and its save leave the segment published and the state unsaved, so the next sync reports its
+place taken (`ownStreamConflict`) and holds deletions for that sync, and the one after recovers (Z257). An unlock that
+registers a restored device and makes, or waits for, its move during a sync begun locked finds every vault's state as it
+left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands the unlock after the decision,
+`lockedSyncDecidesOnTheAccountAfterItsAwaits` before it).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
@@ -987,7 +991,11 @@ so does a listing of the vault directory or a vault's state that fails while the
 not reported as a row's, Z260). A vault's state that cannot be read when a sync asks whether it has a restore's work to
 carry counts as having some, and a vault whose state does not verify and whose re-record of what a restore left fails
 merges nothing in that sync either: merged first, a row still holding the earlier ID's work becomes the new ID's before
-the carry (Z254). The take-out, which leaves those rows alone, does not run on a state it cannot read (Z258). But a row
+the carry (Z254). The take-out, which leaves those rows alone, does not run on a state it cannot read (Z258), and a
+take-out that did not finish leaves its judged basis unsettled: no replay settles a vault's basis while a take-out
+begun for it has not ended normally (`takeOutsOwed`), and a replay whose take-out throws waits for the next sync
+(Z262). Settled after one, every later take-out returned at its first guard, and a demoted member's late write merged
+before the demotion was known stayed current here for good. But a row
 is read only where it can decide something (Z239): by a move only where no state verifies, and to add to it what the
 vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault that may be shared
 whose state does not verify, or that has none (`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248),
