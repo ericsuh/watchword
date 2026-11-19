@@ -606,9 +606,9 @@ extension AdversarialSharedVaultTests {
     /// holding the sibling's published work was recorded as left by an earlier ID with nothing published, and the
     /// carry wrote what no listed segment of the sibling's stream showed again as this device's. With the stream
     /// withheld, that was all of it: every member then held the sibling's values twice, under two stamps, as conflicts
-    /// in every group it wrote. An earlier ID of this installation registered before this device did, and this
-    /// device's registration entry descends from its own: from a state that does not verify, only such an ID is read.
-    /// The sibling, enrolled after this device, is not; and its published work is never renamed.
+    /// in every group it wrote. No ID is read from a state that does not verify now (Z216; Z211's rule, an ID whose
+    /// registration this device's own descends from, kept out this sibling, enrolled after this device, but not one
+    /// enrolled before a restore): the sibling's published work is never renamed.
     @Test(
         "a sibling device named in an edited state as a restore's earlier ID keeps its published work",
         arguments: [false, true])
@@ -660,6 +660,85 @@ extension AdversarialSharedVaultTests {
         #expect(after?.deviceID != memberDevice, "the sibling's published row was written again as this device's")
         if !withheld { #expect(after?.deviceID == siblingDevice) }
         try await Self.syncAll([owner, sibling])
+        let atOwner = try await owner.session.item(id: saved.id)
+        #expect(atOwner.title == "Bank, by the sibling")
+        #expect(!atOwner.hasConflicts, "the sibling's values came back beside themselves")
+        #expect(!(try await sibling.session.item(id: saved.id)).hasConflicts)
+    }
+
+    /// Threat: A8, who can edit this device's sync state and sharing state files but not reach the Keychain, and in
+    /// the second case also the sync store (A1), which withholds the sibling's stream from this device (review of
+    /// round 16, Z216: Z211 on a restored device). The member's device has a sibling, enrolled before the member's
+    /// store is restored onto other hardware. The restored device registers a new ID, from the registry it holds,
+    /// which already lists the sibling: so the sibling's registration is an ancestor of the restored device's, and
+    /// Z211's rule read it from a state that does not verify as an earlier ID of this installation. A8 names it there
+    /// and deletes the stream index; with the sibling's stream withheld, the sibling's published item was recorded as
+    /// a restore's unpublished work and written again as the restored device's, so that every member held the
+    /// sibling's values twice. The chain is no longer read from a state that does not verify: it comes from the move's
+    /// own signed record (`RestoredChainRow`) and the states that verify, and names only the IDs this installation
+    /// had.
+    @Test(
+        "a sibling enrolled before a restore, named in an edited state as an earlier ID, keeps its published work",
+        arguments: [false, true])
+    func plantedChainIDOfASiblingEnrolledBeforeARestore(withheld: Bool) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 30_900)
+        let member = members[0]
+        let sibling = try await household.secondDevice(of: member)
+        try await sibling.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await Self.syncAll([owner, member, sibling])
+        let saved = try await sibling.session.save(Self.bank(in: vaultID))
+        var edited = try await sibling.session.item(id: saved.id)
+        edited.title = "Bank, by the sibling"
+        _ = try await sibling.session.save(edited)
+        try await Self.syncAll([sibling, owner, member])
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        let siblingDevice = try #require(await sibling.session.deviceIDForTest())
+        let before = try #require(try await member.vault.store.record(key))
+        #expect(before.deviceID == siblingDevice, "the sibling's row is not the sibling's: nothing is tested")
+
+        // The member's store restored onto other hardware, with nothing left unpublished; the move done.
+        let oldID = try #require(await member.session.deviceIDForTest())
+        let restored = try await Self.restoredOntoOtherHardware(member, household: household, seed: 30_901)
+        _ = try await restored.session.syncAll()
+        _ = try await restored.session.syncAll()
+        let newID = try #require(await restored.session.deviceIDForTest())
+        #expect(newID != oldID, "the restore registered no new ID: nothing is tested")
+
+        let raw = try #require(restored.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await raw.loadState(vaultID: vaultID))
+        state.restoredUnpublished[key] = RecordStamp(version: 0, device: siblingDevice)
+        state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+        await raw.tamper(state)
+        await member.state.tamper(.streamIndex, vaultID: vaultID, value: nil)
+        await restored.session.lock()
+        let view = WithholdingTransport(base: household.transport)
+        if withheld {
+            let stream = SyncObjectLocation.vaultPrefix(vaultID) + "log/\(siblingDevice.uuidString)/"
+            await view.withhold(Set(await household.transport.list(prefix: stream)))
+        }
+        let relaunched = TestVault(
+            store: restored.store, keychain: restored.keychain, biometrics: restored.biometrics,
+            clock: restored.clock, sync: SyncSettings(state: raw, transport: view), seed: 30_902,
+            deviceKeys: restored.deviceKeys)
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+        #expect(try #require(await relaunched.session.deviceIDForTest()) == newID)
+
+        _ = try await relaunched.session.syncAll()
+        _ = try await relaunched.session.syncAll()
+        let after = try await restored.store.record(key)
+        #expect(after?.deviceID != newID, "the sibling's published row was written again as the restored device's")
+        if !withheld { #expect(after?.deviceID == siblingDevice) }
+        let written = try await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(!written.values.contains { $0.device == siblingDevice }, "the sibling was recorded as an earlier ID")
+        for _ in 0..<3 {
+            _ = try await relaunched.session.syncAll()
+            try await Self.syncAll([owner, sibling])
+        }
         let atOwner = try await owner.session.item(id: saved.id)
         #expect(atOwner.title == "Bank, by the sibling")
         #expect(!atOwner.hasConflicts, "the sibling's values came back beside themselves")

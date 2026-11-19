@@ -1068,6 +1068,10 @@ extension VaultSession {
                 // this replaces, for a sync to carry once the vault has one (review of round 12, M1).
                 var state = SyncState(vaultID: vaultID)
                 state.restoredUnpublished = try await restoredWork(in: vaultID, leftBy: previous, account: account)
+                // Which earlier IDs those name, in a row of their own, before the state: a state that is later damaged
+                // or edited (A8) verifies no more, and the row keeps the chain (review of round 16, Z216).
+                _ = try requireKeys(since: epoch)
+                try await noteRestoredChain(state.restoredUnpublished, in: vaultID, account: account, keeping: false)
                 _ = try requireKeys(since: epoch)
                 try await syncState.saveState(state)
             }
