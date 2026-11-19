@@ -199,7 +199,9 @@ extension VaultSession {
     /// its log has been pulled (`SyncState.restoredUnpublished`, `carryRestoredWork`). A move made again reads what the
     /// first attempt recorded in the new ID's state. The earlier IDs those entries name are written to each vault's
     /// chain row (`RestoredChainRow`, review of round 16, Z216) before its state is saved, so that the chain outlives
-    /// a state later damaged or edited (A8).
+    /// a state later damaged or edited (A8). Made only once the chain rows `restoredWork` may read are at hand
+    /// (`moveAwaitsSharing`, review of round 18, Z229): by an unlock or sync with sharing configured, or by
+    /// `configureSharing` itself, all through `completeDeviceMigration`, so the facts above are kept the same way.
     func startSyncStatesOver(_ account: AccountRecord, from previous: UUID, since epoch: UInt64) async throws {
         guard let state = syncState else { return }
         let vaults = try await vaultDirectory(account).keys
@@ -210,7 +212,7 @@ extension VaultSession {
                 held[vaultID] = earlier
             }
             _ = try requireKeys(since: epoch)
-            restored[vaultID] = try await restoredWork(in: vaultID, leftBy: previous, account: account)
+            restored[vaultID] = try await restoredWork(in: vaultID, leftBy: previous, account: account, since: epoch)
         }
         let syncedBefore = try await hasSyncedBefore(account) || held.values.contains(where: Self.recordsSyncing)
         for vaultID in vaults {
@@ -222,10 +224,13 @@ extension VaultSession {
             fresh.restoredUnpublished = restored[vaultID] ?? [:]
             // Which earlier IDs those name, in a row of their own, before the state: a state that is later damaged
             // or edited (A8) verifies no more, and the row keeps the chain (review of round 16, Z216). Written from
-            // what verified (`restoredWork`: the old ID's signed state, or the new ID's in a move made again), keeping
-            // what the row names already: a move made again after a first attempt whose state for the vault no longer
-            // verifies reads less there, and only a later save of the entries narrows the row.
-            try await noteRestoredChain(fresh.restoredUnpublished, in: vaultID, account: account, keeping: true)
+            // what verified (`restoredWork`: the old ID's signed state, or the new ID's in a move made again), added
+            // to what the row names, never replacing it (V57, Z225): a move made again after a first attempt whose
+            // state for the vault no longer verifies reads less there (a store restored twice). Only the carry, Stop
+            // Waiting and the re-record of a started-over state narrow the row (Z232).
+            _ = try requireKeys(since: epoch)
+            try await noteRestoredChain(
+                fresh.restoredUnpublished, in: vaultID, account: account, keeping: true, since: epoch)
             _ = try requireKeys(since: epoch)
             try await state.saveState(fresh)
         }

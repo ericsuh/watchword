@@ -633,7 +633,11 @@ publishes nothing while something is still to carry, so that no merge of a row s
 `SyncState.restoredUnpublished` records it, with `p`, a take-out leaves it alone, and it holds every deletion back
 (`holdsRestoredWork`), so a source half never goes out ahead of a copy that is still only `o`'s. The hold fails closed
 on a state it cannot read or trust, and, where the state is lost or does not verify, finds such a row again from the row
-itself while any record names `o` (Z200).
+itself while a record that verifies names `o` (Z200): the move under way, a verified state, or the vault's chain row,
+which the move signs and which is filled in from the verified states whenever sharing and the keys are both here (Z216,
+Z222). A move made again, or a second restore, adds to that row and finds the rows it names again where no state
+verifies (Z225, Z226; V57 was the same fix), bounded by the same reach as the hold (V58); the rows are read through
+sharing, so such a move waits until sharing is configured (Z229).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,
