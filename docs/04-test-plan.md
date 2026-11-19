@@ -689,6 +689,21 @@ store fails to read fails the move, which the next sync makes (`unreadableChainR
 enrolment and device registry", a sync during the unlock's move does not make it again or publish, and a move from an
 account read before it finished changes nothing (`moveIsMadeOnceAtATime`, Z237); and the notice's wording
 (`deviceMigrationIncomplete` in `WordingTests`, Z238). All but Z235's fail at 54ce459.
+The review of the twentieth round (Z239 to Z244): in "shared vaults through the session", an ordinary restore's move
+finishes and its deletions go out while every chain row read fails, reading none
+(`ordinaryMoveWithEveryChainRowUnreadable`), and so do a never-restored device's deletions
+(`deletionsGoOutWithEveryChainRowUnreadable`), both failing at 1b228ab (Z239); where the row is the only record of a
+restore's uncarried copy, a row that cannot be read holds the deletions back and is reported, and the Personal vault's
+row is not read on the way (`unreadableChainRowHoldsWhereItIsTheOnlyRecord`, pinning the gate's fail-closed read, which
+no test did, Z239, Z240); a move that keeps failing on a row it needs is reported at each sync and made once the row
+reads (`lastingChainRowFailureIsReported`, Z240); `configureSharing` during a waiting move's read still makes it
+(`configureSharingDuringAWaitingMoveMakesIt`, Z241); Stop Waiting is refused for a move recorded in the store after the
+session read the account (`stopWaitingRereadsTheAccountBeforeItsSave`), and for a pending move before the vault's own
+reasons (in `stopWaitingRefusedWhileTheMoveWaits`, Z244). In "account enrolment and device registry", a lock and unlock
+during the unlock's move still has it made (`turnedAwayMoveIsMadeAfterwards`, Z241). The two Z241 tests fail with
+their fix reverted; the Stop Waiting and gate tests pin behaviour that was already right, each failing with the check
+it pins removed. The notices' wording is in `WordingTests` (`deviceMigrationIncomplete`, `restoredChainUnreadable`,
+Z240, Z243).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

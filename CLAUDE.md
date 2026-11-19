@@ -776,8 +776,13 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   never make a move wait whose vaults' states verify, for the earlier ID or this device's own (Z235). Nothing that may
   write a vault's sync state or chain row runs while a move is pending (Stop Waiting throws
   `deviceMigrationIncomplete`, the backfill waits, Z234); the move runs once at a time and only while the store still
-  records it (`migrationInFlight`, Z237); and a chain row that cannot be read throws (Z236): the move is made again,
-  and every other reader fails closed.
+  records it (`migrationInFlight`, Z237), a caller it turns away has it made once more when it ends
+  (`migrationAskedAgain`, Z241), and each attempt takes its epoch before its first await (Z242); and a chain row that
+  cannot be read throws (Z236): the move is made again, and every other reader fails closed, reported
+  (`restoredChainUnreadable`, Z240). Read a chain row only where it decides something (Z239): the move's keeping write
+  only with IDs to add, and the hold, report, re-record and Stop Waiting only for a vault that may be shared whose
+  state is lost or does not verify (`RestoredChainRead`), so a sharing store that cannot read rows holds back only what
+  depends on them; never add a reader that fails closed everywhere on one row.
   Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
   Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
   cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves

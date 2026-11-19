@@ -962,12 +962,19 @@ shared vault with no state at all, where the rows would be read too (Z238). A va
 earlier ID (a first restore) or for this device's own (a move made again), needs no row, so those moves do not wait
 (Z235). While a move is pending nothing that may write a vault's sync state or chain row runs: the sync's writes need it
 to be complete, Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`) and the backfill waits for it (Z234).
-The move is made once at a time, and only while the store still records it (`migrationInFlight`, Z237), and a chain row
-the sharing store cannot read fails it, to be made again, never read as none (Z236). The hold ends when the vault opens
-here and the row is
-carried, when a version that holds none of the work replaces the row, when the vault is deleted or this account's
-membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows kept on this
-device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open
+The move is made once at a time, and only while the store still records it (`migrationInFlight`, Z237); a caller turned
+away meanwhile (`configureSharing` while the move under way waits for sharing, an unlock after a lock that stops it) has
+it made once more when the move under way ends, with the keys of then (Z241), and each attempt takes its lock epoch
+before its first await (Z242). A chain row the sharing store cannot read fails the move, to be made again, never read as
+none (Z236), and holds the deletions back; but a row is read only where it can decide something (Z239): by a move only
+to add to it what the vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault
+that may be shared whose state does not verify, or that has none (`RestoredChainRead`), so a sharing store that cannot
+read the rows holds back only what depends on them, and an ordinary restore, or a device never restored, reads none.
+Where one is needed and cannot be read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded, Z240); the
+move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when the vault opens
+here and the row is carried, when a version that holds none of the work replaces the row, when the vault is deleted or
+this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows
+kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open
 (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
 `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
 owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;
