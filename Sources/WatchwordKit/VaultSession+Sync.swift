@@ -350,6 +350,16 @@ extension VaultSession {
             else { return true }
             if !items.isEmpty { return true }
         }
+        // This device's own pending deletions here: a version kept after one of them holds its erasure's write
+        // (the trash it records), which goes out with the deletion and is no edit of its own to wait for.
+        let ownDeletions: [RecordKey: PendingDeletion]
+        do {
+            ownDeletions = try await base.pendingDeletions(vaultID: vaultID).filter {
+                $0.value.stamp.device == account.deviceID
+            }
+        } catch {
+            return true
+        }
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
             if receivedNowhere, holdsValue(ofAny: [account.deviceID], in: row) { return true }
             guard let stamp = known[row.key] else { return true }
@@ -358,8 +368,16 @@ extension VaultSession {
             // made the copy look known; if the copy's vault then could not publish, the original's deletion went out
             // ahead of it (review finding Z148). Such a row holds the deletions back while it holds an edit of this
             // device's above what it published, as `unsharedWorkCount` measures it: a version a merge kept after a
-            // deletion holds none, and holds nothing back.
-            if stamp.deleted, holdsUnpublishedEdit(row, published: state?.published[row.key], account: account) {
+            // deletion holds none, and holds nothing back. Nor does what a deletion of this device's own wrote into a
+            // version kept after it (its erasure's revision, at most the deletion's stamp): that version goes out only
+            // after its deletion, and holding the deletion for it held both for good once another device's tombstone
+            // of the record had arrived (review of round 13, found by the restore step of the vault simulation; Z200).
+            let published = state?.published[row.key]
+            let ownDeletion = ownDeletions[row.key].map {
+                RecordStamp(version: $0.stamp.version, device: account.deviceID)
+            }
+            let bound = [published, ownDeletion].compactMap { $0 }.max()
+            if stamp.deleted, holdsUnpublishedEdit(row, published: bound, account: account) {
                 return true
             }
         }

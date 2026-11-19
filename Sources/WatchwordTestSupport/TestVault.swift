@@ -106,6 +106,31 @@ public struct TestVault: Sendable {
             sync: sync, seed: seed, deviceKeys: deviceKeys)
     }
 
+    /// A copy of this device's record store and sync state as they are now, for a later restore onto other hardware
+    /// (review of round 13): what a backup of the App Group container holds, and nothing of the Keychain. `nil` unless
+    /// both are the in-memory ones.
+    public func backup() async -> (store: InMemoryRecordStore, state: InMemorySyncStateStore)? {
+        guard let records = store as? InMemoryRecordStore, let state = sync?.state as? InMemorySyncStateStore,
+            let account = await records.loadAccount()
+        else { return nil }
+        let rows = await records.allRecords
+        let store = InMemoryRecordStore()
+        await store.tamper(account: account)
+        for row in rows { await store.tamper(row) }
+        let copy = InMemorySyncStateStore()
+        let vaults = Set(rows.map(\.vaultID)).union([account.accountID, account.personalVaultID])
+        for vaultID in vaults {
+            if let saved = await state.loadState(vaultID: vaultID) { await copy.tamper(saved) }
+            for deletion in await state.pendingDeletions(vaultID: vaultID).values {
+                await copy.addPendingDeletion(deletion)
+            }
+            for entry in await state.quarantined(vaultID: vaultID) { await copy.quarantine(entry, vaultID: vaultID) }
+            for object in await state.staged(vaultID: vaultID) { await copy.stage(object) }
+            if let stash = await state.stash(vaultID: vaultID) { await copy.tamperStash(stash, vaultID: vaultID) }
+        }
+        return (store, copy)
+    }
+
     /// Loses this device's signing key, as a store restored onto other hardware does (Keychain items never leave a
     /// device).
     public func forgetDeviceKey(accountID: UUID) async {

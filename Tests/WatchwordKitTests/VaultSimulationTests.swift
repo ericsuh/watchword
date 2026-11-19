@@ -13,9 +13,10 @@ import WatchwordTestSupport
 /// delays, reorders and duplicates. A random schedule of saves, edits, trashes, deletions and conflict resolutions
 /// across several vaults; vaults created, renamed and deleted; items copied and moved between vaults; devices locking
 /// and going offline; a device enrolling half-way; a device lost and revoked (with or without a password change)
-/// while the others keep working. Afterwards every device still in the account holds the same vaults and the same
-/// items, a device that enrols then sees the same, and nothing anyone typed was lost unless a person discarded it
-/// (PRD F7.6, F7.7).
+/// while the others keep working; and a device restored from an older backup onto other hardware, while the device
+/// it was backed up from keeps working under its old ID (review of round 13). Afterwards every device still in the
+/// account holds the same vaults and the same items, a device that enrols then sees the same, and nothing anyone
+/// typed was lost unless a person discarded it (PRD F7.6, F7.7).
 ///
 /// Named `LongRunning…` so the nightly `test:long` run widens it (`WATCHWORD_LONG_TESTS=1`) and varies it
 /// (`WATCHWORD_TEST_SEED`); a failing nightly is replayed with its seed.
@@ -106,6 +107,12 @@ struct LongRunningVaultSimulationTests {
         var counter = 0
         var enrolments = 0
         var revocations = 0
+        // A backup of one device's store and sync state, taken a sixth of the way in and restored onto other hardware
+        // a quarter of the way in (before any revocation, so with the password it was taken under), while the device
+        // it came from goes on under its old ID: old hardware still running. The restored device registers a new ID
+        // and carries over what the backup held that its state did not record as published.
+        var backup: (source: Device, password: String, store: InMemoryRecordStore, state: InMemorySyncStateStore)?
+        var restores = 0
         // What each device did, item by item: the failure message for a divergence is the history of the items
         // concerned, which with the seed is what it takes to reproduce it.
         var journal: [String] = []
@@ -115,8 +122,11 @@ struct LongRunningVaultSimulationTests {
         }
 
         func history(of ids: Set<UUID>) -> String {
-            journal.filter { line in line.contains("REVOKE") || ids.contains { line.contains($0.uuidString) } }
-                .joined(separator: "\n")
+            journal.filter { line in
+                line.contains("REVOKE") || line.contains("BACKUP") || line.contains("RESTORED")
+                    || ids.contains { line.contains($0.uuidString) }
+            }
+            .joined(separator: "\n")
         }
 
         func enrol(_ index: Int) async -> Bool {
@@ -169,6 +179,30 @@ struct LongRunningVaultSimulationTests {
                 } else if devices.count == 1 {
                     // Nothing is on the transport until the first device has synced once.
                     _ = try? await devices[0].session.sync()
+                }
+            }
+            if step >= steps / 6, backup == nil, let source = pick(devices.filter { !$0.isLost }),
+                let saved = await source.vault.backup()
+            {
+                backup = (source, source.password, saved.store, saved.state)
+                note(step, source, "BACKUP")
+            }
+            if step >= steps / 4, restores == 0, let saved = backup {
+                let index = devices.count
+                let vault = TestVault(
+                    store: saved.store,
+                    sync: SyncSettings(
+                        state: saved.state, transport: await server.transport(for: Fleet.deviceID(index)),
+                        configuration: configuration),
+                    seed: seed &+ UInt64(index + 1) &* 7_919, deviceName: "Device \(index)")
+                do {
+                    // A new Keychain: the Secret Key off the Emergency Kit, and no device key.
+                    try await vault.session.unlock(password: saved.password, secretKey: kit.secretKey)
+                    devices.append(Device(index: index, vault: vault, password: saved.password))
+                    restores += 1
+                    note(step, saved.source, "RESTORED from its backup as d\(index)")
+                } catch {
+                    // The transport did not show enough yet: tried again at the next step.
                 }
             }
             let active = devices.filter { !$0.isLost }
@@ -344,6 +378,8 @@ struct LongRunningVaultSimulationTests {
                 }
             }
         }
+        // The restore happened, once, in every run: a quarter of the way in, retried at each step until it unlocks.
+        #expect(restores == 1, "seed \(seed): no device was restored from its backup")
         #expect(settled, "seed \(seed): devices kept changing after the partition healed")
         #expect(survivors.count >= 2, "seed \(seed)")
 
