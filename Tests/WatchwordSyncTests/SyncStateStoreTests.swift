@@ -220,9 +220,10 @@ struct SyncStateAuthenticationTests {
     /// written the restore's count is too, even at zero, so a state with either and a state with both are signed
     /// apart, and a row saved with the restore's alone still verifies. A row the hygiene branch saved before the merge
     /// with the reset's fields straight after `collectedThrough` does not (V55): that form is deliberately not kept,
-    /// and the test pins the chosen layout byte for byte, so that a layout that would have kept it (the restore's
-    /// stamps only when set, before or after the reset's fields) or any other change of this encoding fails here and
-    /// is a decision someone makes, not an accident.
+    /// and the test pins byte for byte what follows `collectedThrough` (the restore's count, the reset's fields and
+    /// the move's two bytes written out; the earlier fields and the restore's entries read from the code), so that a
+    /// layout that would have kept it (the restore's stamps only when set, before or after the reset's fields) or any
+    /// other change of where these meet fails here and is a decision someone makes, not an accident.
     @Test("a restore's entries and the reset's fields are signed apart, alone and together")
     func restoredAndResetFieldsApart() {
         var neither = StateStoreFixtures.state()
