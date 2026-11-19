@@ -36,6 +36,11 @@ public enum VaultError: Error, Equatable, Sendable {
     /// current key is here and its owner undisputed, so a sync carries the work (review of round 14, L2). Only a vault
     /// that will not open here offers the choice (`AccountSyncReport.restoredWorkMayStopWaiting`).
     case restoredWorkCanBeCarried(UUID)
+    /// A restore's move of its earlier device ID's sync state is still pending (`AccountRecord.migration`, Z181), and
+    /// what was asked would write a vault's sync state or chain row under it: started over beneath the waiting move,
+    /// the move read it as begun and never read the chain rows (review of round 19, Z234). Nothing was written. The
+    /// move finishes at a later unlock or sync, or when sharing is configured (`moveAwaitsSharing`, Z229); ask again.
+    case deviceMigrationIncomplete
     /// The Personal vault can be neither deleted nor shared (PRD F2.1).
     case cannotDeletePersonalVault
     /// A vault name must have between 1 and `VaultMetadataCodec.maximumNameLength` characters.

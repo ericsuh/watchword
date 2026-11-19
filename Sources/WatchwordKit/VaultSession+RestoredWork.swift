@@ -394,9 +394,13 @@ extension VaultSession {
     /// state (the carry's and Stop Waiting's narrowing write after their saves is `try?`), and the state was read
     /// before the awaits that follow, so replacing the row could drop what a write since added. No case found makes
     /// the difference observable (Z231): defence in depth.
+    ///
+    /// Not while a move is pending (`account.migration`, review of round 19, Z234): nothing that may write a vault's
+    /// sync state or chain row runs then. The move writes each vault's row itself, from what it records, before the
+    /// state it saves, so the backfill has nothing to add until the next unlock, sync or `configureSharing` after it.
     func backfillRestoredChains(account: AccountRecord, since epoch: UInt64) async {
-        guard sharing.settings != nil, let base = syncSettings?.state, (try? requireKeys(since: epoch)) != nil,
-            let vaults = try? await vaultDirectory(account).keys
+        guard account.migration == nil, sharing.settings != nil, let base = syncSettings?.state,
+            (try? requireKeys(since: epoch)) != nil, let vaults = try? await vaultDirectory(account).keys
         else { return }
         let own = account.deviceID
         for vaultID in vaults.sorted(by: { $0.uuidString < $1.uuidString }) {
@@ -646,12 +650,19 @@ extension VaultSession {
     /// what the earlier device ID wrote there and never published reaches no other device (the notice's action,
     /// `SyncNoticeAction.stopWaitingForRestoredWork`, review of round 13, M3). A vault this account no longer belongs
     /// to, or one deleted, waits for nothing and needs no choice (`restoredWorkReleased`). Needs the vault unlocked.
+    ///
+    /// Refused while a restore's move is pending (`VaultError.deviceMigrationIncomplete`, review of round 19, Z234):
+    /// the state it would start over is the one the move is about to read, and one saved signed for this device's ID
+    /// reads as the move's own, begun, so the move would read no chain row and record nothing for what the IDs before
+    /// the earlier one left (Z225, Z226). No notice offers the choice then (the sync that would may not write), but the
+    /// call is public. Nothing that may write a vault's sync state or chain row runs while a move is pending.
     public func stopWaitingForRestoredWork(in vaultID: UUID) async throws {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let syncState, let base = syncSettings?.state else { throw VaultError.syncNotConfigured }
         await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        guard account.migration == nil else { throw VaultError.deviceMigrationIncomplete }
         // Only for a vault that will not open here (review of round 14, L2).
         guard mayStopWaitingForRestoredWork(in: vaultID, keys: try requireKeys(since: epoch), account: account) else {
             throw VaultError.restoredWorkCanBeCarried(vaultID)
@@ -673,6 +684,10 @@ extension VaultSession {
         for (key, left) in waiting {
             state.restoredUnpublished[key] = RecordStamp(version: Self.dismissedVersion, device: left.device)
         }
+        // Read again after the awaits: a registration as a new device since would have recorded a move (Z234).
+        guard let current = try await store.loadAccount(), current.deviceID == account.deviceID,
+            current.migration == nil
+        else { throw VaultError.deviceMigrationIncomplete }
         _ = try requireKeys(since: epoch)
         try await syncState.saveState(state)
         // The chain row after the save, which may have removed IDs (Z216); one left naming more is harmless.
