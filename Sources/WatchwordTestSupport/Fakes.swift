@@ -201,6 +201,10 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
         held[accountID] = nil
     }
 
+    public func delete(accountID: UUID, deviceID: UUID) {
+        if held[accountID]?.deviceID == deviceID { held[accountID] = nil }
+    }
+
     // MARK: - Test seams
 
     /// Loses the key, as a store restored onto other hardware does (Keychain items never leave a device).

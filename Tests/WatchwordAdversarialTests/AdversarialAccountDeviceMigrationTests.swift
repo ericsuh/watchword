@@ -228,6 +228,43 @@ extension AdversarialAccountTests {
         #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
     }
 
+    /// Threat: none needed but a lock and an unlock while a restore's registration waits on its commit, which then
+    /// fails; the review of round 12 (L1, Z189's residual). The unlock's reconciliation saw the old ID still in the
+    /// account record and registered a second new device, its key replacing the first's in the Keychain; the first's
+    /// failure then deleted whatever key the account held, the second's, and the account named a device whose key was
+    /// gone (`deviceKeyUnreadable` until the next unlock registered a third, and left that one keyless in the registry).
+    /// One registration runs at a time now, and a failed one deletes only the key it made.
+    @Test("a restore's registration interrupted by an unlock leaves no registered device without its key")
+    func registrationDuringRegistration() async throws {
+        let fixture = try await Self.fixture(seed: 18_900)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let keys = FakeDeviceKeyStore(seed: 18_901)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, into: store, deviceKeys: keys)
+        let oldID = try #require(try await store.loadAccount()?.deviceID)
+        let session = restored.session
+        await store.onNextAccountCommit {
+            await session.lock()
+            try? await session.unlock(password: TestVault.password)
+        }
+        try? await session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        let account = try #require(try await store.loadAccount())
+        let held = try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID)
+        let keylessRegistration = account.deviceID != oldID && held == nil
+        #expect(!keylessRegistration, "the account names a device whose key a failed registration deleted")
+        #expect(await keys.created == 1, "a second registration ran while the first waited")
+
+        await session.lock()
+        try await session.unlock(password: TestVault.password)
+        let registered = try #require(try await store.loadAccount())
+        #expect(registered.deviceID != oldID)
+        #expect(try await keys.publicKey(accountID: registered.accountID, deviceID: registered.deviceID) != nil)
+        try await session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
     /// Threat: none needed; the review of round 11 (Z186). A password change reads the account record, derives and signs
     /// across several awaits, and commits the record it read. A move completed during those awaits cleared the record's
     /// migration, and the commit wrote it back: the move ran again after the device had published under its new ID
@@ -265,8 +302,12 @@ actor HookedRecordStore: RecordStore {
     private(set) var hookRan = false
 
     private var accountCommitFails = false
+    private var accountCommitHook: (@Sendable () async -> Void)?
 
     func onNextHeaderListing(_ hook: @escaping @Sendable () async -> Void) { self.hook = hook }
+    /// Runs `hook` inside the next commit that writes the account record, before it is written, and then fails that
+    /// commit: what a registration's commit meets when the session is locked and unlocked again while it waits.
+    func onNextAccountCommit(_ hook: @escaping @Sendable () async -> Void) { accountCommitHook = hook }
     /// The next commit that writes the account record fails, as a database that cannot be written would.
     func failNextAccountCommit() { accountCommitFails = true }
 
@@ -281,6 +322,11 @@ actor HookedRecordStore: RecordStore {
         return await base.records(in: vaultID, kind: kind)
     }
     func commit(_ change: StoreChange) async throws {
+        if let hook = accountCommitHook, change.account != nil {
+            accountCommitHook = nil
+            await hook()
+            throw RecordStoreError.checkpointIncomplete
+        }
         if accountCommitFails, change.account != nil {
             accountCommitFails = false
             throw RecordStoreError.checkpointIncomplete

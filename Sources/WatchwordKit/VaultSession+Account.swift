@@ -852,6 +852,12 @@ extension VaultSession {
         // stay stamped by an ID this installation never publishes again: the move comes first
         // (`reconcileAccountObjects` makes it, and throws if it fails), and registration waits for it (Z181).
         guard !asNewDevice || account.migration == nil else { return }
+        // One registration at a time (review of round 12, L1): one begun while another waits (an unlock or a sync
+        // during its awaits) would make a second device key over the first's, and the first's failure would then
+        // delete it. This one is left to the next unlock or sync.
+        guard !registrationInFlight else { return }
+        registrationInFlight = true
+        defer { registrationInFlight = false }
         let epoch = lockEpoch
         // Before a current key is picked for any row carried over.
         await loadSharedMarkersIfNeeded()
@@ -872,7 +878,8 @@ extension VaultSession {
                 account: account, as: &updated, created: created, view: view, unpublished: unpublished.rows,
                 asNewDevice: asNewDevice, epoch: epoch)
         } catch {
-            if created != nil { try? await deviceKeys.delete(accountID: account.accountID) }
+            // Only the key this registration made: never one made since (review of round 12, L1).
+            if let created { try? await deviceKeys.delete(accountID: account.accountID, deviceID: created.id) }
             throw error
         }
         registryView = nil

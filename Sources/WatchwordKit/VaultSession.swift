@@ -150,6 +150,10 @@ public actor VaultSession: SharesExecutor {
     var lockListeners: [Int: AsyncStream<Void>.Continuation] = [:]
     var nextLockListener = 0
     var syncInFlight = false
+    /// A registration of this installation is between its first await and its end (`registerThisDevice`): another,
+    /// begun by an unlock or a sync meanwhile, would make a second device key over the first and register an ID whose
+    /// key the first's failure then deleted (review of round 12, L1). One at a time.
+    var registrationInFlight = false
     /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
     var registryView: RegistryView?
     /// Registry entries fetched from the transport and found worth nothing (they can never count, or wait on a
