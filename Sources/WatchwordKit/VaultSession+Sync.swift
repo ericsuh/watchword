@@ -270,7 +270,16 @@ extension VaultSession {
                 // carry would rename after the merge (L1). Its replay stays asked for (`needsReconcile`), for the sync
                 // whose carry finishes.
                 guard !uncarried.contains(vaultID) else { continue }
-                await prepareSharedReplay(vaultID)
+                do {
+                    try await prepareSharedReplay(vaultID)
+                } catch {
+                    // A take-out that did not finish: no replay in this sync, which would settle what it had still to
+                    // take out, and no deletion goes out after what it may have put aside (review of round 23, Z262).
+                    // The replay stays asked for (`needsReconcile`), for the next sync.
+                    sharingReports[vaultID, default: SharedVaultSyncReport()].failure = String(describing: error)
+                    restPublished = false
+                    continue
+                }
                 let shared = sharedEngineOptions(
                     vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
                     ownIDCommits: ownIDCommits)

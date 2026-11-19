@@ -163,6 +163,12 @@ public actor VaultSession: SharesExecutor {
     /// once more when it ends (review of round 20, Z241), from the account the store holds then, never the caller's,
     /// which may be older (review of round 21, Z247), so that the caller's attempt is not lost.
     var migrationAskedAgain = false
+    /// The shared vaults whose take-out (`takeOutWhatNoLongerCounts`) began for a judged basis it had still to act on
+    /// and did not finish (it threw: a sync state that could not be read, the store, the quarantine). Until one ends
+    /// normally, no replay settles the vault's basis (`sharedEngineDidRun`): settled, every later take-out returned at
+    /// its first guard, and what it should have taken out, a demoted member's late write merged before the demotion was
+    /// known, stayed current here for good (review of round 23, Z262).
+    var takeOutsOwed: Set<UUID> = []
     /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
     var registryView: RegistryView?
     /// Registry entries fetched from the transport and found worth nothing (they can never count, or wait on a
