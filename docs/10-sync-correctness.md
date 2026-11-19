@@ -608,10 +608,13 @@ itself while a record that verifies names `o` (Z200): the move under way, a veri
 which the move signs and which is filled in from the verified states whenever sharing and the keys are both here (Z216,
 Z222). A move made again, or a second restore, adds to that row and finds the rows it names again where no state
 verifies (Z225, Z226); the rows are read through sharing, so such a move waits until sharing is configured (Z229),
-writing nothing meanwhile (Z234), and a row that cannot be read fails it rather than reading as none (Z236). A row is
-read only where it can decide something (Z239): by the move to add what a vault's entries name, and by the hold only
-for a vault that may be shared whose state is lost or does not verify, so a row that cannot be read holds back only
-what depends on it, and the sync says so (Z240).
+writing nothing meanwhile (Z234), and a row that cannot be read fails it rather than reading as none (Z236), as does a
+failed read of the vault directory or of a state while the chain is read (Z245). A row is read only where it can decide
+something (Z239): by the move where no state verifies and to add what a vault's entries name, and by the hold and Stop
+Waiting only for a vault that may be shared whose state is lost or does not verify (Z248), so a row that cannot be read
+holds back only what depends on it, and the sync says so (Z240, worded for a device never restored too, Z250). A move
+turned away is made again from the record the store holds, keeping an attempt's failure until one makes it (Z247), and
+a sync begun locked writes no state across the unlock that registers a restored device and makes its move (Z249).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

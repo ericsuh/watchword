@@ -715,7 +715,10 @@ its own device, and another device signing in its stream is refused by everyone 
 in the directory — deleted vaults included, so that what a deletion had not seen still arrives — and returns an
 `AccountSyncReport`; `sync()` returns the vaults' reports added up. While locked each engine only downloads. The
 same holds, unlocked, while this device is not registered, has been revoked, or has seen a password change it
-has not been given (§7.8).
+has not been given (§7.8). A sync decides once, before any vault, whether it may write (`mayWrite`), so one begun
+locked only downloads to its end whatever an unlock does meanwhile, and a download saves no sync state: an unlock
+that registers a restored device and makes, or waits for, its move during that sync finds every vault's state as it
+left it (Z249, pinned by `lockedSyncAcrossTheUnlocksRegistration`).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
@@ -964,18 +967,23 @@ earlier ID (a first restore) or for this device's own (a move made again), needs
 to be complete, Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`) and the backfill waits for it (Z234).
 The move is made once at a time, and only while the store still records it (`migrationInFlight`, Z237); a caller turned
 away meanwhile (`configureSharing` while the move under way waits for sharing, an unlock after a lock that stops it) has
-it made once more when the move under way ends, with the keys of then (Z241), and each attempt takes its lock epoch
-before its first await (Z242). A chain row the sharing store cannot read fails the move, to be made again, never read as
-none (Z236), and holds the deletions back; but a row is read only where it can decide something (Z239): by a move only
-to add to it what the vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault
-that may be shared whose state does not verify, or that has none (`RestoredChainRead`), so a sharing store that cannot
-read the rows holds back only what depends on them, and an ordinary restore, or a device never restored, reads none.
-Where one is needed and cannot be read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded, Z240); the
-move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when the vault opens
-here and the row is carried, when a version that holds none of the work replaces the row, when the vault is deleted or
-this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows
-kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open
-(`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
+it made once more when the move under way ends, with the keys of then (Z241), from the account the store holds then,
+never a caller's older one, and an attempt's failure stands until an attempt makes the move (Z247); each attempt takes
+its lock epoch before its first await (Z242). A chain row the sharing store cannot read fails the move, to be made
+again, never read as none (Z236), and holds the deletions back; so does a listing of the vault directory or a vault's
+state that fails while the chain is read (Z245). But a row is read only where it can decide something (Z239): by a move
+only where no state verifies, and to add to it what the vault's entries name, and by the hold, the report, the re-record
+and Stop Waiting only for a vault that may be shared whose state does not verify, or that has none
+(`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248), so a sharing store that cannot read the rows
+holds back only what depends on them, and an ordinary restore reads none, nor does a device never restored while its
+shared vaults' states verify. One whose shared vault's state is lost or damaged reads every shared vault's row, the
+chain being a union across vaults (Z216), and holds while one cannot be read (Z250). Where one is needed and cannot be
+read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded so that it holds on a device never restored,
+Z240, Z250); the move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when
+the vault opens here and the row is carried, when a version that holds none of the work replaces the row, when the vault
+is deleted or this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync
+reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault
+that will not open (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
 `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
 owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;
 later edits of those items reach no member either, and the confirmation says so. Where the bound understates what the
@@ -1747,7 +1755,8 @@ Not solved here, and to be decided with integration:
   `holdsUnpublishedWork`). What releases them is the copy going out, or the person discarding the held-aside copy.
   A row the sync layer knows only by a deletion counts too while it holds an edit of this device's above what it
   published: a move's copy has an ID anyone reading the source vault can derive, and a tombstone for it found in the
-  log before the copy existed made the copy look known (Z148).
+  log before the copy existed made the copy look known (Z148). A listing of the vault's rows that fails holds too,
+  as a state that cannot be read does (Z246): read as none, an unsent edit held nothing back.
   "Held aside" here means what this device's own take-out put aside, which it notes in a signed row of its own
   (`OwnTakenOutRow`, `WWTO`): an entry in the quarantine names the device its writer claims, and counting any entry
   that named this device let a member who can have it hold something aside (a segment signed into the stream named
