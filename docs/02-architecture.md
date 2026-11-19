@@ -1118,13 +1118,26 @@ look for them. Both find those rows the one way (`rowsLeft`: the hold within the
 bound, V63), from the rows read once, before the parked deletions, so that a chain ID's row wins a key both name (V57
 was the same bug, fixed apart and merged into Z225's code). Those rows are read through sharing, so a move that would
 read one while sharing is not configured waits, its record kept and nothing published, and `configureSharing` makes it
-(through `startSyncStatesOver`, as every move), or the next unlock or sync after it (`moveAwaitsSharing`, Z229); a vault
-whose state verifies needs no row, so an ordinary move does not wait. While any move is under way nothing but the move
-saves a vault's state: a sync then only downloads, and its download saves nothing of what it learnt of conflict copies
-(`SyncEngine.download(savingState:)`; the move starts every state over anyway, so the copies are only examined again),
-and Stop Waiting refuses (`deviceMigrationIncomplete`); so does the chain backfill, whose rows the move writes itself. A
-state saved then was one started over for the new ID where none verified, which the move read as one it had begun,
-recording nothing of the earlier IDs' work and none of V49's facts (V60). The hold ends when the vault opens here and
+(through `completeDeviceMigration` and `startSyncStatesOver`, as every move), or the next unlock or sync after it
+(`moveAwaitsSharing`, Z229); so does a move into a shared vault with no state at all, where the rows would be read too
+(Z238). A vault whose state verifies, for the earlier ID (a first restore) or for this device's own (a move made again),
+needs no row, so those moves do not wait (Z235). While a move is pending nothing but the move writes a vault's sync
+state or chain row: a sync then only downloads, and its download saves nothing of what it learnt of conflict copies
+(`SyncEngine.download(savingState:)`; the move starts every state over anyway, so the copies are only examined again);
+the sync's other writes need the move to be complete; Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`,
+read again before its save); and the chain backfill, whose rows the move writes itself, waits for it (Z234, which is
+also V60's). A state saved then was one started over for the new ID where none verified, which the move read as one it
+had begun, recording nothing of the earlier IDs' work and none of V49's facts (V60). The move is made once at a time,
+and only while the store still records it (`migrationInFlight`, Z237); a caller turned away meanwhile
+(`configureSharing` while the move under way waits for sharing, an unlock after a lock that stops it) has it made once
+more when the move under way ends, with the keys of then (Z241), and each attempt takes its lock epoch before its first
+await (Z242). A chain row the sharing store cannot read fails the move, to be made again, never read as none (Z236),
+and holds the deletions back; but a row is read only where it can decide something (Z239): by a move only to add to it
+what the vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault that may be
+shared whose state does not verify, or that has none (`RestoredChainRead`), so a sharing store that cannot read the
+rows holds back only what depends on them, and an ordinary restore, or a device never restored, reads none. Where one
+is needed and cannot be read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded, Z240); the move's
+own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when the vault opens here and
 the row is carried, when a version that holds none of the work replaces the row, when the vault is deleted or this
 account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows kept
 on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open

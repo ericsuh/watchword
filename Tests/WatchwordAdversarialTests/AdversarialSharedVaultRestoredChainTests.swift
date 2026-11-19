@@ -61,6 +61,8 @@ extension AdversarialSharedVaultTests {
         case .afterTheUnlock:
             try await restored.session.unlock(password: TestVault.password)
             #expect(await member.state.value(.restoredChain, vaultID: vaultID) == nil, "the move wrote a row")
+            // The move finishes at the unlock without sharing (Z235): the earlier ID's state verifies.
+            #expect(try await restored.store.loadAccount()?.migration == nil, "the ordinary move waited for sharing")
             await restored.session.configureSharing(settings)
         case .whileLocked:
             try await restored.session.unlock(password: TestVault.password)

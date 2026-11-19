@@ -16,8 +16,17 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case registryUnavailable
     /// A restore onto other hardware has not finished moving this device's sync records to its new identity
     /// (`AccountSyncReport.deviceMigrationIncomplete`, review of round 11, Z185): it receives changes and sends none,
-    /// in any vault, until a sync finishes the move.
+    /// in any vault, until the move is made. Each sync and each unlock tries it again (Z181), and the text says that
+    /// and no more (review of round 20, Z243): not that it finishes by itself, which a failure that lasts (a sharing
+    /// store that cannot read a chain row the move needs, `restoredChainUnreadable`; a registry that cannot be
+    /// evaluated, `registryUnavailable`) makes untrue, and where it lasts another notice says why; nor any step of the
+    /// person's. A move that waits for sharing (`moveAwaitsSharing`, Z229) is tried and waits, in a process without
+    /// sharing; the app configures sharing before its unlock.
     case deviceMigrationIncomplete
+    /// What a restore left can be told here only from a record of this device's earlier identities that the sharing
+    /// store could not read (`AccountSyncReport.restoredChainUnreadable`, review of round 20, Z240): deletions wait,
+    /// and so does everything else if it is still moving its sync records over, for as long as the store fails.
+    case restoredChainUnreadable
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
     case snapshotWithheld(by: [String])
@@ -73,6 +82,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .deviceNotRegistered: return "deviceNotRegistered"
         case .registryUnavailable: return "registryUnavailable"
         case .deviceMigrationIncomplete: return "deviceMigrationIncomplete"
+        case .restoredChainUnreadable: return "restoredChainUnreadable"
         case .snapshotWithheld: return "snapshotWithheld"
         case .snapshotWithheldForReview: return "snapshotWithheldForReview"
         case .keptAside: return "keptAside"
@@ -104,7 +114,13 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
             return "This device cannot check your other devices yet. Nothing they sent has been trusted."
         case .deviceMigrationIncomplete:
             return "This device is still moving its sync records over from before it was restored. It receives "
-                + "changes and sends none until that is done, and tries again at each sync. Nothing has been lost."
+                + "changes and sends none until that is done, and tries again at each sync and each unlock. Nothing "
+                + "has been lost."
+        case .restoredChainUnreadable:
+            return "This device could not read part of its sharing records: the part that says whether changes made "
+                + "on it before it was restored are still to be sent. Until it can, deletions made on this device "
+                + "wait, and so does everything else it sends if it is still moving its sync records over. It tries "
+                + "again at each sync. Nothing has been lost."
         case .snapshotWithheld(let names):
             return "Older devices need updating before this one can tidy the shared storage: "
                 + names.joined(separator: ", ") + "."
@@ -335,6 +351,7 @@ public struct SyncSummary: Hashable, Sendable {
         }
         if report.registryUnavailable { notices.append(.registryUnavailable) }
         if report.deviceMigrationIncomplete { notices.append(.deviceMigrationIncomplete) }
+        if !report.restoredChainUnreadable.isEmpty { notices.append(.restoredChainUnreadable) }
         if !combined.snapshotWithheldBy.isEmpty {
             let named = combined.snapshotWithheldBy.map { id in
                 names[id].flatMap { $0.isEmpty ? nil : $0 } ?? "a device of another member (\(shortIdentifier(id)))"
@@ -387,6 +404,7 @@ public struct SyncSummary: Hashable, Sendable {
             notices.append(.publishingHeldForCarry(named.sorted(), unnamed: held.count - named.count))
         }
         let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
+            .union(report.restoredChainUnreadable)
         if !report.deletionsHeldBack.subtracting(explained).isEmpty {
             notices.append(.deletionsHeldBack)
         }

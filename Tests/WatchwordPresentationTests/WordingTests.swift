@@ -118,7 +118,12 @@ struct WordingTests {
     }
 
     /// Review of round 11 (Z185): the gate that holds every vault while a restore's move is incomplete was silent.
-    @Test("a restore whose move is incomplete says that nothing is sent and nothing is lost")
+    /// Review of round 20 (Z243): round 19's text said Watchword finishes the move by itself, which a failure that
+    /// lasts (a chain row that cannot be read, a registry that cannot be evaluated) makes untrue; it says the move is
+    /// tried again at each sync and each unlock, which holds however the wait ends, a wait for sharing included (it is
+    /// tried, and waits). Stop Waiting refused during a move is read in the open, unlocked app, so its message asks
+    /// nobody to open and unlock it.
+    @Test("a restore whose move is incomplete says that nothing is sent, that it is tried again, and nothing is lost")
     func deviceMigrationIncomplete() {
         var report = AccountSyncReport()
         report.vaults[UUID()] = SyncReport()
@@ -129,6 +134,39 @@ struct WordingTests {
         let text = SyncNotice.deviceMigrationIncomplete.text
         #expect(text.contains("sends none"))
         #expect(text.contains("Nothing has been lost"))
+        #expect(text.contains("tries again at each sync and each unlock"))
+        #expect(!text.contains("by itself"), "a failure that lasts never finishes by itself")
+        #expect(!text.contains("finishes"), "a failure that lasts never finishes by itself")
+        let refused = ErrorWording.message(for: VaultError.deviceMigrationIncomplete)
+        #expect(refused.contains("still moving its sync records"), "Stop Waiting refused during a move says why")
+        #expect(refused.contains("Try again after the next sync"))
+        #expect(!refused.contains("unlock"), "the message is read in the open, unlocked app")
+    }
+
+    /// Review of round 20 (Z240): a chain row of a restore's earlier device IDs that the sharing store cannot read held
+    /// the deletions back, or the move, under the generic notice (something moved has not reached the other devices)
+    /// or none, both untrue. The vaults it holds are explained by a notice of their own.
+    @Test("a restore's record that cannot be read says what waits, and hides the generic notice for its vaults")
+    func restoredChainUnreadable() throws {
+        let vaultID = UUID()
+        var report = AccountSyncReport()
+        report.vaults[vaultID] = SyncReport()
+        #expect(!SyncSummary(report).notices.contains(.restoredChainUnreadable))
+        report.deletionsHeldBack = [vaultID]
+        report.restoredChainUnreadable = [vaultID]
+        let summary = SyncSummary(report)
+        #expect(summary.notices.contains(.restoredChainUnreadable))
+        #expect(!summary.notices.contains(.deletionsHeldBack), "the generic notice hides the reason")
+        let text = SyncNotice.restoredChainUnreadable.text
+        #expect(text.contains("could not read part of its sharing records"))
+        #expect(text.contains("deletions made on this device wait"))
+        #expect(text.contains("tries again at each sync"))
+        #expect(text.contains("Nothing has been lost"))
+        #expect(!text.contains("by itself"))
+
+        // A vault held back for another reason still says so.
+        report.deletionsHeldBack.insert(UUID())
+        #expect(SyncSummary(report).notices.contains(.deletionsHeldBack))
     }
 
     @Test("held-aside and quarantined versions are counted for the person to review (S49)")

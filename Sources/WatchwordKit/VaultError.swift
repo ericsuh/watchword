@@ -36,6 +36,13 @@ public enum VaultError: Error, Equatable, Sendable {
     /// current key is here and its owner undisputed, so a sync carries the work (review of round 14, L2). Only a vault
     /// that will not open here offers the choice (`AccountSyncReport.restoredWorkMayStopWaiting`).
     case restoredWorkCanBeCarried(UUID)
+    /// A restore's move of its earlier device ID's sync state is still pending (`AccountRecord.migration`, Z181), and
+    /// what was asked would write a vault's sync state or chain row under it: started over beneath the waiting move,
+    /// the move read it as begun and never read the chain rows (review of round 19, Z234; `stopWaitingForRestoredWork`,
+    /// which the hygiene branch's V60 refused the same way), or would upload for an ID that is not yet this device's
+    /// (`reuploadAfterStoreReset`, V51). Nothing was written. The move is made again at each unlock and sync, and when
+    /// sharing is configured (`moveAwaitsSharing`, Z229); ask again after it.
+    case deviceMigrationIncomplete
     /// The Personal vault can be neither deleted nor shared (PRD F2.1).
     case cannotDeletePersonalVault
     /// A vault name must have between 1 and `VaultMetadataCodec.maximumNameLength` characters.
@@ -103,10 +110,6 @@ public enum VaultError: Error, Equatable, Sendable {
     /// `reuploadAfterStoreReset` was confirmed for a plan that no longer describes what this device would upload:
     /// something arrived, or was saved, since the person was asked (docs/02-architecture.md §7.10). Ask again.
     case reuploadNotConfirmed
-    /// `reuploadAfterStoreReset` (V51) or `stopWaitingForRestoredWork` (V60) was called while this installation's move
-    /// to a new device ID is not complete (`AccountRecord.migration`, a store restored onto other hardware): sync,
-    /// which makes it again, then ask.
-    case deviceMigrationIncomplete
     /// This device is not registered with the account as it sees the registry (its registration has not been
     /// accepted, or was made with a password since changed), so nothing it uploaded would be read by any device.
     case deviceNotRegistered

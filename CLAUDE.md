@@ -864,12 +864,20 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   or the earlier ID's own, Z226), as the hold finds them (one `rowsLeft`; the move and `recordRestoredWorkLeft` with no
   bound, recording every row holding the work and leaving the bound to the carry, V63; V57 and Z225 were one bug),
   read through sharing: a move that would read one without sharing configured waits, record kept and nothing
-  published, until `configureSharing` (which makes it, through `startSyncStatesOver` like any move) or the next unlock
-  or sync (Z229, `moveAwaitsSharing`); never let it complete without them, and never make an ordinary move wait.
-  While any move is under way nothing but the move saves a vault's state or the chain rows: the sync's download saves
-  none (`download(savingState: false)`), Stop Waiting refuses (`deviceMigrationIncomplete`) and the backfill does
-  nothing (V60: a state started over for the new ID read to the move as one it had begun). A new writer of a vault's
-  state checks `AccountRecord.migration` too.
+  published, until `configureSharing` (which makes it, through `completeDeviceMigration` and `startSyncStatesOver` like
+  any move) or the next unlock or sync (Z229, `moveAwaitsSharing`; a shared vault with no state at all waits too,
+  Z238); never let it complete without them, and never make a move wait whose vaults' states verify, for the earlier
+  ID or this device's own (Z235). While any move is pending nothing but the move saves a vault's state or the chain
+  rows: the sync's download saves none (`download(savingState: false)`, V60), Stop Waiting throws
+  `deviceMigrationIncomplete` and the backfill waits (Z234, the same as V60's: a state started over for the new ID read
+  to the move as one it had begun). A new writer of a vault's state checks `AccountRecord.migration` too. The move runs
+  once at a time and only while the store still records it (`migrationInFlight`, Z237), a caller it turns away has it
+  made once more when it ends (`migrationAskedAgain`, Z241), and each attempt takes its epoch before its first await
+  (Z242); and a chain row that cannot be read throws (Z236): the move is made again, and every other reader fails
+  closed, reported (`restoredChainUnreadable`, Z240). Read a chain row only where it decides something (Z239): the
+  move's keeping write only with IDs to add, and the hold, report, re-record and Stop Waiting only for a vault that may
+  be shared whose state is lost or does not verify (`RestoredChainRead`), so a sharing store that cannot read rows
+  holds back only what depends on them; never add a reader that fails closed everywhere on one row.
   Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
   Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
   cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves

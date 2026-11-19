@@ -72,7 +72,13 @@ extension VaultSession {
         // A move of an earlier device ID's sync state that an unlock could not finish is tried again; until it is
         // complete this device publishes nothing, since the move starts each vault's state over (Z181).
         if keys != nil, record.migration != nil {
-            try? await completeDeviceMigration(account: record)
+            do {
+                try await completeDeviceMigration(account: record)
+            } catch let unreadable as RestoredChainRowUnreadable {
+                // A chain row the move needs and cannot read: said, since it lasts as long as the sharing store fails
+                // (review of round 20, Z240).
+                report.restoredChainUnreadable.insert(unreadable.vaultID)
+            } catch {}
             record = try await loadAccount() ?? record
         }
         report.deviceMigrationIncomplete = record.migration != nil
@@ -328,9 +334,13 @@ extension VaultSession {
             report.deletionsHeldBack.formUnion(report.copiesNobodyReceived.keys)
         }
         if mayWrite, (try? requireKeys(since: keysEpoch)) != nil {
-            (report.restoredWorkWaiting, report.restoredWorkKeptHere, report.restoredWorkMayStopWaiting) =
-                await restoredWorkWaiting(account: record, since: keysEpoch)
+            let restored = await restoredWorkWaiting(account: record, since: keysEpoch)
+            report.restoredWorkWaiting = restored.waiting
+            report.restoredWorkKeptHere = restored.keptHere
+            report.restoredWorkMayStopWaiting = restored.mayStopWaiting
+            report.restoredChainUnreadable.formUnion(restored.chainUnreadable)
             report.deletionsHeldBack.formUnion(report.restoredWorkWaiting.keys)
+            report.deletionsHeldBack.formUnion(restored.chainUnreadable)
             // The vaults whose publishing waits for the carry, and will wait again at the next sync (L4).
             for vaultID in carrying {
                 if await restoredWorkToCarry(in: vaultID) { report.publishingHeldForCarry.insert(vaultID) }
@@ -452,9 +462,10 @@ extension VaultSession {
         if let raw { state = await verifiedSyncState(raw, vaultID: vaultID) }
         let known = state?.known ?? [:]
         // What a restore left here and could not carry yet: perhaps a move's copy, whose original's deletion is
-        // another vault's (review of round 12, M1). Fails closed (review of round 13, L-a).
-        let chain = await restoredChain(account: account)
-        if await holdsRestoredWork(in: vaultID, chain: chain, account: account) { return true }
+        // another vault's (review of round 12, M1). Fails closed (review of round 13, L-a), on a chain row that cannot
+        // be read too (Z236), but only where the chain decides something (review of round 20, Z239).
+        var chain = RestoredChainRead()
+        if await holdsRestoredWork(in: vaultID, chain: &chain, account: account) { return true }
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
         // move's copy published by a build from before this was refused. A value it stamped, never its clock's entry
@@ -1253,6 +1264,12 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
     /// unlock and sync.
     public var deviceMigrationIncomplete = false
+    /// The vaults where what a restore left can be told only from the vault's chain row of earlier device IDs
+    /// (`RestoredChainRow`), and the sharing store could not read it (review of round 20, Z240): a shared vault whose
+    /// sync state does not verify, or a restore's move that needs the row. Each fails closed: such a vault holds every
+    /// vault's deletions back (it is in `deletionsHeldBack`), and a move that needs the row is not made
+    /// (`deviceMigrationIncomplete`), for as long as the store fails. Tried again at each sync.
+    public var restoredChainUnreadable: Set<UUID> = []
 
     public init() {}
 

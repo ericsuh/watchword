@@ -640,7 +640,11 @@ which the move signs and which is filled in from the verified states whenever sh
 Z222). A move made again, or a second restore, adds to that row and finds the rows it names again where no state
 verifies (Z225, Z226; V57 was the same fix), recording every such row holding `o`'s work and leaving the bound to the
 carry, which has the download in hand (V63); the rows are read through sharing, so such a move waits until sharing is
-configured (Z229), and nothing but the move saves a vault's state while it waits (V60).
+configured (Z229), and nothing but the move saves a vault's state or chain row while it waits (Z234, V60: its download
+saves none), and a row that cannot be read fails it rather than reading as none (Z236). A row is read only where it can
+decide something (Z239): by the move to add what a vault's entries name, and by the hold only for a vault that may be
+shared whose state is lost or does not verify, so a row that cannot be read holds back only what depends on it, and the
+sync says so (Z240).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,
