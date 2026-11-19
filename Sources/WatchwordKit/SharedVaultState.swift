@@ -463,10 +463,14 @@ enum SharedKeyProvenance {
 /// there (review of round 16, Z216): the devices that the vault's signed `SyncState.restoredUnpublished` names, kept
 /// in a row of their own (`SharingStateKey.restoredChain`) so that they survive that state being damaged or edited
 /// (A8), which then no longer verifies (Z200). Written by the move of an earlier ID's sync state, from what verifies
-/// there (`AccountRecord.migration` and the earlier ID's signed state), and by each later save of those entries; bound
-/// to the vault and to this device's ID, so that a row of another device of the account, or of the earlier ID itself,
-/// copied here names nothing. Signed by the account, so a row planted or edited in the file (A8) is refused: a
-/// state that does not verify names no earlier ID any more (Z206, Z211 and Z216 were each an ID planted there).
+/// there (`AccountRecord.migration` and the earlier ID's signed state), adding to the row (Z225), by each later save of
+/// those entries, and filled in from the verified states wherever the row lacks an ID they name
+/// (`VaultSession.backfillRestoredChains`, review of round 17, Z222); bound to the vault and to this device's ID, so
+/// that a row of another device of the account, or of the earlier ID itself, copied here names nothing (Z223). The one
+/// reader of another ID's row is the move, which reads the earlier ID's own row, bound to that ID, where no state
+/// verifies: that row names the IDs before it, of this installation too (a second restore, Z226). Signed by the
+/// account, so a row planted or edited in the file (A8) is refused: a state that does not verify names no earlier ID
+/// any more (Z206, Z211 and Z216 were each an ID planted there).
 enum RestoredChainRow {
     static let magic: [UInt8] = Array("WWRC".utf8)
 

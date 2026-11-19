@@ -10,9 +10,94 @@ import WatchwordTestSupport
 
 @testable import WatchwordKit
 
-// The review of round 17 (docs/06-adversarial-review.md Z223, Z224): the chain row of a restore's earlier device IDs
+// The review of round 17 (docs/06-adversarial-review.md Z222 to Z227): the chain row of a restore's earlier device IDs
 // (`RestoredChainRow`, Z216), when it is written and what it refuses. In the suite "shared vaults through the session".
 extension AdversarialSharedVaultTests {
+    /// When sharing becomes configured, relative to the unlock that makes a restore's move (Z222).
+    enum SharingConfigured: String, CaseIterable, Sendable {
+        /// Before the unlock, as every fixture and the Debug app do: the move writes the row (Z216's case).
+        case beforeTheUnlock
+        /// After the unlock, while the session is unlocked.
+        case afterTheUnlock
+        /// While the session is locked after the move, then a password unlock.
+        case whileLocked
+        /// While the session is locked after the move, then a quick unlock.
+        case beforeAQuickUnlock
+        /// Before the unlock, with the row lost after the move (a failed write, or a state from a build from before
+        /// Z216, which wrote none) and a sync before the damage.
+        case rowLostAfterTheMove
+    }
+
+    /// Threat: a damaged sync state file, or one edited by an attacker with the device's files (A8), for a shared vault
+    /// that holds a restore's uncarried copy of a move, as in `restoredWorkSurvivesAnEditedState` (Z200), on a device
+    /// whose sharing was configured after the unlock that made the move (review of round 17, Z222). The chain row was
+    /// written only by the move and later saves of the vault's entries, each only if sharing was configured then; the
+    /// vault held closed, nothing saved its entries again, so no row was ever written. Once the state was damaged the
+    /// chain was empty, the hold failed open, and the original's deletion went out while its copy existed on this
+    /// device only (PRD F7.6). The row is now filled in from each vault's verified state whenever sharing and the keys
+    /// are both here: when sharing is configured, at each unlock, and at each sync.
+    @Test(
+        "a restore's uncarried copy holds deletions back after its state is damaged, whenever sharing was configured",
+        arguments: SharingConfigured.allCases)
+    func restoredChainWhateverSharingWasConfigured(_ order: SharingConfigured) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_000)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+
+        await member.session.lock()
+        await member.contacts.removePin(for: owner.accountID)
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let restored = member.vault.relaunched(seed: 31_001)
+        let settings = SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory)
+        switch order {
+        case .beforeTheUnlock, .rowLostAfterTheMove:
+            await restored.session.configureSharing(settings)
+            try await restored.session.unlock(password: TestVault.password)
+        case .afterTheUnlock:
+            try await restored.session.unlock(password: TestVault.password)
+            #expect(await member.state.value(.restoredChain, vaultID: vaultID) == nil, "the move wrote a row")
+            await restored.session.configureSharing(settings)
+        case .whileLocked:
+            try await restored.session.unlock(password: TestVault.password)
+            await restored.session.lock()
+            await restored.session.configureSharing(settings)
+            #expect(await member.state.value(.restoredChain, vaultID: vaultID) == nil, "a row was signed while locked")
+            try await restored.session.unlock(password: TestVault.password)
+        case .beforeAQuickUnlock:
+            try await restored.session.unlock(password: TestVault.password)
+            try await restored.session.enableQuickUnlock(password: TestVault.password)
+            await restored.session.lock()
+            await restored.session.configureSharing(settings)
+            try await restored.session.quickUnlock()
+        }
+        let account = try #require(try await restored.store.loadAccount())
+        #expect(account.migration == nil, "the move did not finish at the unlock")
+        if order == .rowLostAfterTheMove {
+            #expect(await member.state.value(.restoredChain, vaultID: vaultID) != nil, "the move wrote no row")
+            await member.state.tamper(.restoredChain, vaultID: vaultID, value: nil)
+            let first = try await restored.session.syncAll()
+            #expect(first.deletionsHeldBack.contains(vaultID))
+        }
+        #expect(await member.state.value(.restoredChain, vaultID: vaultID) != nil, "no chain row was written")
+
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await raw.loadState(vaultID: vaultID))
+        #expect(!state.restoredUnpublished.isEmpty, "the move recorded nothing to carry")
+        state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+        await raw.tamper(state)
+
+        let report = try await restored.session.syncAll()
+        #expect(report.deletionsHeldBack.contains(vaultID), "the hold failed open on a state that does not verify")
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+    }
+
     /// Threat: A8, an attacker with the device's files, who copies into this device's sharing store a chain row that
     /// the account genuinely signed for another device of the account (a sibling restored once itself), for the
     /// earlier ID (kept from before this restore, about that ID's own earlier IDs), or for another vault; or a row of
@@ -161,6 +246,109 @@ extension AdversarialSharedVaultTests {
         #expect(report.deletionsHeldBack.contains(closed), "the hold failed open: the chain lost the earlier ID")
         #expect(report.restoredWorkWaiting[closed] == [published.id])
     }
+
+    /// Threat: a damaged sync state file, or one edited by an attacker with the device's files (A8), on a store
+    /// restored onto other hardware twice (review of round 17, Z225 and Z226), whose first restore left the uncarried
+    /// copy of a move in a shared vault held closed. The second restore's move read what the first left only from the
+    /// first restore's signed state: where that state did not verify in the backup (`retried: false`), or where the
+    /// second restore's own first attempt at the move saved its state, failed before it finished and that state was
+    /// then damaged (`retried: true`), the move found only the rows the middle ID left, recorded nothing for the copy,
+    /// and wrote a chain row that no longer named the first ID (`keeping: false`). The state then verified and named
+    /// nothing, the hold ended, and the original's deletion went out while its copy existed on this device only (PRD
+    /// F7.6). The move now adds to the chain row rather than replacing it, and where no state verifies it finds the
+    /// rows of the IDs the vault's chain row names (its own from the failed attempt, or the middle ID's own row) again.
+    @Test(
+        "a store restored twice keeps its first restore's uncarried copy held when the state it was read from is lost",
+        arguments: [false, true])
+    func restoredTwiceAfterADamagedState(retried: Bool) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_200)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+        let middle = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 31_201)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        let recorded = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(recorded.values.contains { $0.device == first }, "the first restore recorded nothing to carry")
+
+        func damage() async throws {
+            var state = try #require(await raw.loadState(vaultID: vaultID))
+            state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+            await raw.tamper(state)
+        }
+        // Restored again, before anything was carried.
+        await middle.session.lock()
+        await middle.forgetDeviceKey(accountID: member.accountID)
+        if !retried { try await damage() }
+        let store = MigrationClearFailingStore(base: middle.store, failing: retried)
+        let second = TestVault(
+            store: store, keychain: middle.keychain, biometrics: middle.biometrics, clock: middle.clock,
+            sync: middle.sync, seed: 31_202, deviceKeys: middle.deviceKeys)
+        await second.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await second.session.unlock(password: TestVault.password)
+        let pending = try await second.store.loadAccount()?.migration
+        if retried {
+            #expect(await store.failed == 1, "the first attempt at the move did not fail: nothing is tested")
+            #expect(pending != nil, "the move finished at its first attempt: nothing is tested")
+            try await damage()
+        } else {
+            #expect(pending == nil, "the move did not finish at the unlock")
+        }
+
+        let report = try await second.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete, "the move was not made again")
+        #expect(report.deletionsHeldBack.contains(vaultID), "the hold ended with the state the first ID was read from")
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
+        let state = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(state[RecordKey(recordID: copy.id, kind: .item)]?.device == first, "the copy was not recorded again")
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+
+        try await second.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        _ = try await second.session.syncAll()
+        _ = try await second.session.syncAll()
+        try await Self.syncAll([owner, other])
+        #expect(try await owner.session.item(id: copy.id).title == copy.title, "the copy never reached the owner")
+        #expect((try? await other.session.item(id: original.id)) == nil, "the original's deletion never went out")
+    }
+}
+
+/// A record store over `base` whose first commit that clears the account's device migration fails, when `failing`:
+/// a move of an earlier device ID's sync state that saved every vault's state and then failed to finish (Z181).
+actor MigrationClearFailingStore: RecordStore {
+    let base: any RecordStore
+    private var failing: Bool
+    private(set) var failed = 0
+
+    init(base: any RecordStore, failing: Bool) {
+        self.base = base
+        self.failing = failing
+    }
+
+    func loadAccount() async throws -> AccountRecord? { try await base.loadAccount() }
+    func record(_ key: RecordKey) async throws -> StoredRecord? { try await base.record(key) }
+
+    func records(in vaultID: UUID, kind: EnvelopeKind) async throws -> [StoredRecord] {
+        try await base.records(in: vaultID, kind: kind)
+    }
+
+    func commit(_ change: StoreChange) async throws {
+        if failing, change.migration == .clear {
+            failing = false
+            failed += 1
+            throw RecordStoreError.checkpointIncomplete
+        }
+        try await base.commit(change)
+    }
+
+    func eraseAll() async throws { try await base.eraseAll() }
 }
 
 /// A sharing state store over `base` that, once armed, refuses every write of one vault's chain row

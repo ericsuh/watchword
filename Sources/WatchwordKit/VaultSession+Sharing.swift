@@ -251,9 +251,16 @@ extension VaultSession {
     // MARK: - Configuration and contacts
 
     /// Turns sharing on for this session. Sharing travels over the sync transport, so sync must be configured too.
-    public func configureSharing(_ settings: SharingSettings) {
+    ///
+    /// On an unlocked session, the chain rows of a restore's earlier device IDs are then filled in from the vaults'
+    /// states (`backfillRestoredChains`, review of round 17, Z222): a move made before sharing was configured wrote
+    /// none, and the hold for what it left would end with the next damage to a state. Locked, the next unlock does it.
+    public func configureSharing(_ settings: SharingSettings) async {
+        let epoch = lockEpoch
         sharing.settings = settings
         sharing.loaded = false
+        guard keys != nil, let account = try? await loadAccount() else { return }
+        await backfillRestoredChains(account: account, since: epoch)
     }
 
     /// This account's public key bundle: what the key directory publishes, and whose fingerprint the person reads

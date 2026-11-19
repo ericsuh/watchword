@@ -507,6 +507,8 @@ public actor VaultSession: SharesExecutor {
         // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
         // Personal one is held closed.
         await loadSharedMarkersIfNeeded(force: true)
+        // The chain rows a restore's move could not write without sharing configured (Z222).
+        if let account = try? await loadAccount() { await backfillRestoredChains(account: account, since: epoch) }
         try? await purgeExpiredTrash()
     }
 
@@ -876,6 +878,7 @@ public actor VaultSession: SharesExecutor {
             // As after a password unlock: sync reports a registry it cannot use.
         }
         await loadSharedMarkersIfNeeded(force: true)
+        if let account = try? await loadAccount() { await backfillRestoredChains(account: account, since: epoch) }
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).

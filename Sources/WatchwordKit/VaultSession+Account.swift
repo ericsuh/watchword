@@ -1067,11 +1067,16 @@ extension VaultSession {
                 // What the old ID left that registration could not carry for want of a vault key, read from the state
                 // this replaces, for a sync to carry once the vault has one (review of round 12, M1).
                 var state = SyncState(vaultID: vaultID)
-                state.restoredUnpublished = try await restoredWork(in: vaultID, leftBy: previous, account: account)
+                state.restoredUnpublished = try await restoredWork(
+                    in: vaultID, leftBy: previous, account: account, since: epoch)
                 // Which earlier IDs those name, in a row of their own, before the state: a state that is later damaged
-                // or edited (A8) verifies no more, and the row keeps the chain (review of round 16, Z216).
+                // or edited (A8) verifies no more, and the row keeps the chain (review of round 16, Z216). Added to
+                // what the row names, never replacing it (review of round 17, Z225): a move made again after the
+                // state an earlier attempt saved stopped verifying would otherwise drop an ID before the previous one
+                // (a store restored twice). Only the carry and Stop Waiting narrow the row.
                 _ = try requireKeys(since: epoch)
-                try await noteRestoredChain(state.restoredUnpublished, in: vaultID, account: account, keeping: false)
+                try await noteRestoredChain(
+                    state.restoredUnpublished, in: vaultID, account: account, keeping: true, since: epoch)
                 _ = try requireKeys(since: epoch)
                 try await syncState.saveState(state)
             }
@@ -1128,8 +1133,15 @@ extension VaultSession {
 
     /// Whether this session signed `migration` for `account`'s current device ID.
     func verifiedMigration(_ migration: DeviceMigration, to account: AccountRecord, keyset: Keyset) throws -> Bool {
-        let message = Self.migrationMessage(from: migration.previousDeviceID, to: account)
-        let signingKey = try keyset.publicKeyBundle().signingKey
+        Self.migrationVerifies(migration, to: account, signingKey: try keyset.publicKeyBundle().signingKey)
+    }
+
+    /// Whether `migration` verifies for `account`'s current device ID under the account's public `signingKey` (the
+    /// keyset's, or the Keychain's copy while locked).
+    static func migrationVerifies(_ migration: DeviceMigration, to account: AccountRecord, signingKey: [UInt8])
+        -> Bool
+    {
+        let message = migrationMessage(from: migration.previousDeviceID, to: account)
         return
             (try? Signatures.verify(
                 migration.authenticator, for: message, domain: .deviceMigration, signingKey: signingKey)) != nil
