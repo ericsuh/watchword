@@ -919,7 +919,11 @@ nothing of the judge, so only what a segment says of its own author's versions i
 itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). Never what a
 downloaded version of a third device claims: nothing has judged it yet, and a member who may write could claim to have
 seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside (Z208). In a
-shared vault the log is whole, so whatever an honest third device saw of the old ID is in the old ID's own segments.
+shared vault the log is whole from the day it was shared, so whatever an honest third device saw of the old ID since
+then is in the old ID's own segments. Not what an owner's device published while the vault was private: those segments
+may have been collected under a snapshot before the vault was shared (Z144), and the old ID's signed state is then the
+only bound; with that state lost or edited (A8) the carry writes the work again as the new ID's, and members hold it
+twice, as conflicts, losing neither (Z218, accepted).
 So registration carries none of a shared vault's items:
 the move records each row the old ID left there, before it empties the old ID's state, in the vault's new signed state
 with the old ID's last published version of the record (`SyncState.restoredUnpublished`), and each of the old ID's
@@ -936,11 +940,14 @@ the carried rows go out at the next sync, and a take-out leaves such rows alone.
 row still holds that work every vault's deletions wait (`holdsRestoredWork`), since one of them may be the source half
 of a move whose copy it is, and the sync names the items (`restoredWorkWaiting`, Z192). The hold fails closed (Z200): a
 state that cannot be read holds, so does one that does not verify while the restore's chain of earlier IDs is known
-(the move under way, every ID an entry of a verified state names, and every ID this account's registry lists, current
-or revoked, that registered before this device did, so that this device's own registration entry descends from its,
-that an entry of an unverified one names, in any vault: `restoredChain`, `earlierRegisteredIDs`, Z206, Z211; a sibling
-registered before this device still reads, its work bounded by its own stream, and only a predecessor link in the
-registry would tell it apart, an owner decision); and in a vault whose state is lost or
+(the move under way, every ID an entry of a verified state names, and every ID a vault's chain row names, in any vault:
+`restoredChain`; never an ID read from a state that does not verify, which A8 can name there, Z206, Z211 and Z216). The
+chain row (`RestoredChainRow`, `SharingStateKey.restoredChain`, signed by the account and bound to the vault and to this
+device's ID) is written by the move, from what verifies there (`AccountRecord.migration` and the earlier ID's signed
+state), before the vault's state, and again by each later save of the entries, so that it outlives the state being
+damaged; a restored device registers from the registry it holds, so the registry cannot tell an earlier ID of this
+installation from a sibling enrolled before the restore, and only the move's own record can (Z216); and in a vault whose
+state is lost or
 does not verify, a row still that ID's, holding its work above what its stream carried, holds as if an entry named it
 (`rowsLeftByEarlierIDs`), and is recorded again in a state this session signs before the logs. The hold ends when the vault opens here and the row is carried, when a version that holds none
 of the work replaces the row, when the vault is deleted or this account's membership of it ends (`restoredWorkReleased`:
@@ -1823,11 +1830,11 @@ the record versions it carried, and the digest of every value it carried that it
 whose stamp names that stream's device (format 2, S36; format 3 since note-line removals, discards and history
 entries are values too, S32 and S43, so an older index is refused and rebuilt by a replay); and the devices a version
 is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
-account (`WWML`, `WWRP`, `WWSI` for the index, `WWVK` for the keys the ledger was seen to hand this account, and
-`WWTO` for what the take-out held aside) or re-checked on load (proposals are records, filtered to this
-account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
-anchors the ledger, and a ledger whose owner's pin is gone is not loaded: the vault is then held closed (below), not
-run as a private one. Pins live behind `VerifiedContactStore`.
+account (`WWML`, `WWRP`, `WWSI` for the index, `WWVK` for the keys the ledger was seen to hand this account,
+`WWTO` for what the take-out held aside, and `WWRC` for a restore's chain of earlier device IDs, §7.7, Z216) or
+re-checked on load (proposals are records, filtered to this account's own), so a planted file can delete trust and
+never add it; the owner's account ID only says which pin anchors the ledger, and a ledger whose owner's pin is gone
+is not loaded: the vault is then held closed (below), not run as a private one. Pins live behind `VerifiedContactStore`.
 In-memory implementations serve tests; `SQLiteSharingStore` (`sharing.sqlite`, both ports) is the production one.
 A vault key received through a grant is stored as a `vaultKeyWrap` row under the keyset whose context says it arrived
 by grant (§7.7), with a directory row when the vault is new on the device and the account's marker naming the chain's
