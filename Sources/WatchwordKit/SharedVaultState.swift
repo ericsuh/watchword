@@ -175,6 +175,16 @@ struct SharedStreamIndex: Sendable, Hashable {
         firstCarrier[device]?.keys.filter { $0.recordID == recordID && $0.kind == kind }.map(\.version).max() ?? 0
     }
 
+    /// The highest version of one record that a segment of `device`'s stream recorded here at or below `sequence`
+    /// carried: what a restore's carry counts of the index (`VaultSession.publishedBound`), with `sequence` the reach
+    /// of a merge here in that stream (`SyncEngine.mergeReach`; a merge review of round 17, V56). The judge records
+    /// every staged segment, a position past one the merge refuses included, and what it carried counts for judging
+    /// (`firstCarrier`), not as merged.
+    func highestVersionCarried(by device: UUID, of recordID: UUID, kind: UInt8, through sequence: UInt64) -> UInt64 {
+        firstCarrier[device]?.filter { $0.key.recordID == recordID && $0.key.kind == kind && $0.value <= sequence }
+            .map(\.key.version).max() ?? 0
+    }
+
     /// Whether this device's stream already carried `value` at or before `sequence`.
     func carries(_ value: ValueKey, device: UUID, atOrBefore sequence: UInt64) -> Bool {
         (valueCarriers[value]?[device] ?? .max) <= sequence

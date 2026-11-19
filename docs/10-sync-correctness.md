@@ -549,10 +549,12 @@ one (group values, conflicts and retained values, the field order, note line IDs
 history writers), becomes `(k, n)`, and the vectors of `o`'s and `n`'s own parts, and the clock, keep `o`'s count up to
 `p'` and give the rest to `n`. Nothing of a third device is touched.
 
-The bound `p'` is the most of three, each a lower bound on what `o` published: `p`, the last version of the record `o`'s
-own signed state recorded; the highest version of the record `o`'s stream carried, as the stream index shows it and
-`o`'s own segments downloaded since the restore carry it (`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`;
-the carry waits for the vault's log to be downloaded, so the bound is the transport's and not the backup's); and what
+The bound `p'` is the most of three, each meant as a lower bound on what `o` published *and what members' merges
+reach*: `p`, the last version of the record `o`'s own signed state recorded; the highest version of the record `o`'s
+stream carried, as the stream index shows it and `o`'s own segments downloaded since the restore carry it
+(`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`; the carry waits for the vault's log to be downloaded, so
+the bound is the transport's and not the backup's), in a vault with a judge only as far as a merge here can take `o`'s
+stream in sequence (`SyncEngine.mergeReach`; Z221, V56); and what
 the item itself, the row, shows a third device `x` (neither `o` nor `n`) saw of `o`: `o`'s count in each of `x`'s
 stamps and discards, each `o` line one of `x`'s lines is anchored after, each `o` line `x` removed (`seenByOthers`).
 Whatever an honest `x` saw, `o` published, and the row's versions are ones the judge admitted (a claim of `x` about
@@ -563,7 +565,14 @@ whole from the day it was shared, so what an honest `x` saw of `o` since then is
 index) or downloaded. Not what `o` published while the vault was private, if `o` is an owner's device: those segments
 may have been collected under a snapshot before sharing (Z144), and only `p` bounds that work; with `o`'s state lost or
 edited (A8), `p` reads as 0 and the carry renames it, so that members hold it twice, as conflicts, and lose neither
-(Z218, accepted). Before Z197 only `p` was used and every vector was renamed:
+(Z218, accepted). Published is not enough: a judge records every segment it is given, but where `o`'s stream holds two
+verifying segments under one number (old hardware still running under `o`, A1 keeping both) every member that sees
+both refuses the name (`conflictingVersions`) and merges the stream no further, and the values only that name carried
+count on no member that did not merge it first, so whatever holds them is held aside there. The stream routes
+therefore stop at the first position the download refused, a merge would refuse, or that is not here yet; a gap so
+renames more of `o`'s work, which members that merged it already hold twice, as conflicts. `p` is not bounded so, and
+a version `o`'s signed state names but only a refused name carried keeps `o`'s stamps (V56, open). Before Z197 only `p`
+was used and every vector was renamed:
 with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
 `(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every
 member's judge failed (2) for it.

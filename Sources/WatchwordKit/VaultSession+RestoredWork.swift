@@ -125,6 +125,11 @@ extension VaultSession {
                 continue
             }
             guard let signingKey = try? resident()?.keys.keyset.publicKeyBundle().signingKey else { return false }
+            guard let reach = await mergeReach(in: vaultID, of: Set(state.restoredUnpublished.values.map(\.device)))
+            else {
+                finished = false
+                continue
+            }
             var remaining: [RecordKey: RecordStamp] = [:]
             for (key, recorded) in state.restoredUnpublished {
                 guard resident() != nil else { return false }
@@ -136,7 +141,7 @@ extension VaultSession {
                     continue
                 }
                 let pulled = staged[vaultID]?[key]?[recorded.device] ?? 0
-                let indexed = publishedBound(recorded, of: key, in: vaultID)
+                let indexed = publishedBound(recorded, of: key, in: vaultID, reach: reach)
                 let left = RecordStamp(version: max(indexed.version, pulled), device: recorded.device)
                 let reattributing = !Self.idsNobodyReceives(account: account, view: view, including: left.device)
                     .contains(left.device)
@@ -258,12 +263,33 @@ extension VaultSession {
 
     /// `left` (an entry of `SyncState.restoredUnpublished`) with its version raised to the highest version of the
     /// record that `left.device`'s own stream carried in `vaultID`, as the stream index shows it (review of round 13,
-    /// M2): whatever that stream carried was published, whatever the earlier ID's state said.
-    func publishedBound(_ left: RecordStamp, of key: RecordKey, in vaultID: UUID) -> RecordStamp {
+    /// M2): whatever that stream carried was published, whatever the earlier ID's state said. Only a segment within
+    /// `reach`, how far a merge here can take that stream in sequence (`mergeReach`; a merge review of round 17, V56):
+    /// the judge records every staged segment, one past a name the merge refuses included (two verifying copies of
+    /// one position, `conflictingVersions`), and the stream is never merged past that name. So the index's route
+    /// bounds the carry as `SyncEngine.stagedEntries` does, and lowers it only: a gap gives duplicates, never a loss.
+    func publishedBound(
+        _ left: RecordStamp, of key: RecordKey, in vaultID: UUID, reach: [UUID: UInt64]
+    ) -> RecordStamp {
         let carried =
             sharing.vaults[vaultID]?.index.highestVersionCarried(
-                by: left.device, of: key.recordID, kind: key.kind.rawValue) ?? 0
+                by: left.device, of: key.recordID, kind: key.kind.rawValue, through: reach[left.device] ?? 0) ?? 0
         return RecordStamp(version: max(left.version, carried), device: left.device)
+    }
+
+    /// How far a merge here can take each of `devices`' streams in `vaultID` in sequence (`SyncEngine.mergeReach`),
+    /// from the vault's state as this session signed it and from the staging area: what `publishedBound` may count of
+    /// the stream index (V56). A state that does not verify reads as none, which only lowers it. `nil` where either
+    /// cannot be read.
+    func mergeReach(in vaultID: UUID, of devices: Set<UUID>) async -> [UUID: UInt64]? {
+        guard let syncState else { return [:] }
+        do {
+            let state = try await syncState.loadState(vaultID: vaultID)
+            let staged = try await syncState.staged(vaultID: vaultID)
+            return SyncEngine.mergeReach(of: devices, state: state, staged: staged)
+        } catch {
+            return nil
+        }
     }
 
     /// Whether `vaultID`'s signed state records anything a restore has still to carry over there: its first pass of a
@@ -366,11 +392,13 @@ extension VaultSession {
         guard !chain.isEmpty, isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) else {
             return [:]
         }
-        guard let rows = try? await store.records(in: vaultID, kind: .item) else { return nil }
+        guard let rows = try? await store.records(in: vaultID, kind: .item),
+            let reach = await mergeReach(in: vaultID, of: chain)
+        else { return nil }
         var left: [RecordKey: RecordStamp] = [:]
         for row in rows where chain.contains(row.deviceID) && recorded[row.key] == nil {
             let entry = RecordStamp(version: 0, device: row.deviceID)
-            let bound = publishedBound(entry, of: row.key, in: vaultID)
+            let bound = publishedBound(entry, of: row.key, in: vaultID, reach: reach)
             if holdsEdit(of: row.deviceID, in: row, above: bound.version) { left[row.key] = entry }
         }
         return left
@@ -462,11 +490,12 @@ extension VaultSession {
     func itemsHoldingRestoredWork(in vaultID: UUID, chain: Set<UUID>, account: AccountRecord) async -> Set<UUID>? {
         guard let restored = await restoredEntries(in: vaultID, chain: chain, account: account) else { return nil }
         guard !restored.isEmpty else { return [] }
+        guard let reach = await mergeReach(in: vaultID, of: Set(restored.values.map(\.device))) else { return nil }
         let keys = keys
         let vaultKey = keys.flatMap { currentVaultKey(vaultID, keys: $0, account: account) }
         var items: Set<UUID> = []
         for (key, recorded) in restored {
-            let left = publishedBound(recorded, of: key, in: vaultID)
+            let left = publishedBound(recorded, of: key, in: vaultID, reach: reach)
             let row: StoredRecord?
             do {
                 row = try await store.record(key)

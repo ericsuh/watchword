@@ -828,7 +828,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   as the new ID's (`ItemMerge.reattributed`; the erased row of a carried deletion too), or every member's judge holds it
   aside (Z191): never carry such work unchanged where the old ID commits, and never rename another device's part
   (Z197). "Published" is the most of the old ID's signed state, its own stream as the index and that stream's
-  downloaded segments show it (`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`, Z198), and what the row
+  downloaded segments show it (`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`, Z198), both only as far
+  as a merge here can take that stream in sequence (`SyncEngine.mergeReach`: never past a name refused for conflict
+  copies, which the judge records past all the same, Z221, V56), and what the row
   (judged versions) shows a third device saw (`seenByOthers`); never what an unmerged version of a third device claims,
   which no judge has looked at (Z208: a member could make the carry drop its entry). So registration carries none of a
   shared vault's items: the move records them in the vault's signed state (`SyncState.restoredUnpublished`), and a

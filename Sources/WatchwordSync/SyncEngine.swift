@@ -605,15 +605,19 @@ public actor SyncEngine {
     /// The entries for `keys` that the staged segments of the streams of `authors` carry in this vault, downloaded and
     /// not merged yet, each entry its segment's author's own. Each segment is opened (`open`: kind, context, both
     /// signatures, AEAD, payload location) and its entries' structure checked (`validate`); a segment that fails gives
-    /// nothing, and so does a retired author's (`SyncKeyring.retiredAuthors`), which no pass reads; in a vault with a
-    /// judge, so do a name with conflict copies and every later segment of its author's stream, which the merge does
-    /// not reach while it refuses that name (`openCopies`, Z221). Nothing else a merge asks is asked here: not the
-    /// shared vault's judge (a segment's standing, write cuts, what a version claims of other devices' work), nor the
-    /// version bounds that quarantine (U5). So what a segment says of its own author's versions is all a caller may
-    /// take from it: a restore's carry, which needs to know, after a `download` and before the pass that merges it,
-    /// what the earlier device ID's own stream carried of those records (docs/10-sync-correctness.md §9; review of
-    /// round 14, L1, and of round 15, Z208: a third device's claim read here had never been judged). Merges nothing;
-    /// throws what the state store threw.
+    /// nothing, and so does a retired author's (`SyncKeyring.retiredAuthors`), which no pass reads. In a vault with a
+    /// judge, only what a merge can apply in sequence counts: each author's run of staged positions from the one after
+    /// its stream's reach in the state (`mergeReach`), stopping at the first position that is not staged (refused at
+    /// the download, as a name with two verifying copies is there, `conflictingVersions`, or not downloaded yet), that
+    /// has conflict copies (refused by the merge, `openCopies`) or that does not open; the merge does not pass it, and
+    /// nothing at or past it counts (a merge review of round 16, Z221; of round 17, V56). That only lowers the carry's
+    /// bound: a gap at carry time renames more of the earlier ID's work as this device's, held twice, never lost.
+    /// Nothing else a merge asks is asked here: not the shared vault's judge (a segment's standing, write cuts, what a
+    /// version claims of other devices' work), nor the version bounds that quarantine (U5). So what a segment says of
+    /// its own author's versions is all a caller may take from it: a restore's carry, which needs to know, after a
+    /// `download` and before the pass that merges it, what the earlier device ID's own stream carried of those records
+    /// (docs/10-sync-correctness.md §9; review of round 14, L1, and of round 15, Z208: a third device's claim read here
+    /// had never been judged). Merges nothing; throws what the state store threw.
     public func stagedEntries(of keys: Set<RecordKey>, authoredBy authors: Set<UUID>) async throws -> [SyncEntry] {
         guard !keys.isEmpty, !authors.isEmpty else { return [] }
         let retired = await keyring.retiredAuthors(vaultID: vaultID)
@@ -621,23 +625,68 @@ public actor SyncEngine {
             $0.location.kind == .segment && authors.contains($0.location.author)
                 && !retired.contains($0.location.author)
         }
-        // In a vault with a judge a name with conflict copies is refused (`openCopies`), and its stream is merged no
-        // further while it is: nothing at or past it counts as carried (a merge review of round 16, Z221).
-        var refusedFrom: [UUID: UInt64] = [:]
-        if judge != nil {
-            for staged in segments where !staged.alternates.isEmpty {
-                let author = staged.location.author
-                refusedFrom[author] = min(refusedFrom[author] ?? .max, staged.location.number)
-            }
-        }
         var entries: [SyncEntry] = []
-        for staged in segments where staged.location.number < refusedFrom[staged.location.author] ?? .max {
+        func carried(by staged: StagedObject) async -> [SyncEntry]? {
             guard let payload = try? await open(staged), (try? validate(payload, at: staged.location)) != nil else {
-                continue
+                return nil
             }
-            entries += payload.entries.filter { keys.contains($0.key) && $0.device == staged.location.author }
+            return payload.entries.filter { keys.contains($0.key) && $0.device == staged.location.author }
+        }
+        guard judge != nil else {
+            for staged in segments {
+                entries += await carried(by: staged) ?? []
+            }
+            return entries
+        }
+        // In a vault with a judge a stream is merged strictly in sequence, a name with conflict copies is refused
+        // (`openCopies`) and one with two verifying copies is never staged (`examine`): only the run from the stream's
+        // reach counts as carried (Z221, V56).
+        let state = try await syncState.loadState(vaultID: vaultID)
+        let byAuthor = Dictionary(grouping: segments, by: \.location.author)
+        for author in byAuthor.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            let positions = Dictionary(
+                byAuthor[author]!.map { ($0.location.number, $0) }, uniquingKeysWith: { first, _ in first })
+            var next = Self.settledReach(of: author, in: state)
+            while next < .max, let staged = positions[next + 1], staged.alternates.isEmpty,
+                let found = await carried(by: staged)
+            {
+                entries += found
+                next += 1
+            }
         }
         return entries
+    }
+
+    /// How far a merge here can take each of `authors`' streams in sequence (a merge review of round 17, V56): from
+    /// what `state` has merged of the stream or a merged snapshot covers of it (`settledReach`), through each next
+    /// position `staged` holds with no conflict copies, up to the first it does not hold (refused at the download, as
+    /// a name with two verifying copies is in a vault with a judge, or not downloaded yet) or holds with copies (which
+    /// a vault with a judge refuses, `openCopies`). A segment is merged strictly in sequence, so nothing of a stream
+    /// past that position is applied here while the state and the staging area stand as they are. Reads nothing of a
+    /// staged row but its place and its count of copies (`stagedEntries` also stops at one that does not open): a row
+    /// planted in the staging area (A8) can raise it, but the bound it sets counts only carriers a signed stream index
+    /// records, so at most what the stream index said before V56; a missing row lowers it. What a restore's carry may
+    /// count of the stream index (`highestVersionCarried(by:of:kind:through:)` in the session), so that the index's
+    /// route bounds the carry as `stagedEntries` does: a shared vault's judge records every staged segment, whatever
+    /// its place in its stream.
+    public static func mergeReach(of authors: Set<UUID>, state: SyncState?, staged: [StagedObject]) -> [UUID: UInt64] {
+        var held: [UUID: [UInt64: Bool]] = [:]
+        for object in staged where object.location.kind == .segment && authors.contains(object.location.author) {
+            held[object.location.author, default: [:]][object.location.number] = object.alternates.isEmpty
+        }
+        var reach: [UUID: UInt64] = [:]
+        for author in authors {
+            var next = settledReach(of: author, in: state)
+            while next < .max, held[author]?[next + 1] == true { next += 1 }
+            reach[author] = next
+        }
+        return reach
+    }
+
+    /// The most of `author`'s stream that `state` has merged or that a merged snapshot covers: a merge goes on from
+    /// the position after it, and passes a refused segment a merged snapshot covers.
+    static func settledReach(of author: UUID, in state: SyncState?) -> UInt64 {
+        max(state?.merged[author] ?? 0, state?.snapshotCoverage[author] ?? 0)
     }
 
     // MARK: - Download
