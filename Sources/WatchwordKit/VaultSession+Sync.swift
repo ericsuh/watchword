@@ -113,7 +113,10 @@ extension VaultSession {
         let engineState = AuthenticatedSyncState(base: syncSettings.state, session: self, writes: stateWrites)
         // Deletions an earlier ID of this installation made, parked while a shared vault holds an edit of that ID that
         // nobody received, go out once none remains; until then they are reported held back (Z167).
-        if mayWrite { report.deletionsHeldBack.formUnion(await releaseParkedDeletions(account: record, view: view)) }
+        if mayWrite {
+            report.deletionsHeldBack.formUnion(
+                await releaseParkedDeletions(account: record, view: view, within: stateWrites))
+        }
         let ownDevices: Set<UUID> = view.map { Set($0.state.devices.keys) } ?? []
         // A device whose ID does not commit to its account publishes nothing in a shared vault, and says so (Z162).
         // A key that could not be read is not one that does not commit: nothing is published there, and it is reported
@@ -962,6 +965,14 @@ extension VaultSession {
 /// since, or this device's ID has changed, or a move has been recorded. The state an engine saves was loaded, and
 /// verified, for the ID and the keys the sync began with: signed after an unlock registered a restored device as new,
 /// it was read by a waiting move as one it had begun, or it replaced the state the move had just saved.
+///
+/// The lock epoch's clause is load-bearing for the other two (review of PR #22's V66, Z255): the check is synchronous
+/// with the signature, but the store's write awaits after it, and it reads the session's cached `account`, which
+/// `registerThisDevice` updates one suspension after its `store.commit`. That leaves the device ID's and the move's
+/// clauses open across those awaits, and they are sound only because every registration of a new device ID outside
+/// `syncAll` is an unlock's, which needs a `lock()` first, and `lock()` moves the epoch; the sync's own registration
+/// comes before this is made. Never drop it as redundant, not even to spare a sync locked and unlocked during its
+/// publish the conflict its next sync reports (docs/06-adversarial-review.md Z255).
 struct SyncStateWrites: Sendable {
     /// This device's ID when the sync began, which its engines were built for.
     let deviceID: UUID

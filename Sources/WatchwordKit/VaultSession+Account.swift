@@ -1322,7 +1322,14 @@ extension VaultSession {
     /// be signed as this device's: it stays parked, is tried again at the next sync, and its vault is returned too, so
     /// that the sync says it waits (review of round 12). Fails closed: with no
     /// registry, or parked deletions that cannot be read, nothing is released.
-    func releaseParkedDeletions(account: AccountRecord, view: RegistryView?) async -> Set<UUID> {
+    ///
+    /// Each is signed only while the sync that releases it is still entitled to write (`writes`,
+    /// `requireEntitlement`, review of PR #22's V66, Z256): checked on the actor, with no suspension between the check
+    /// and the signature, so that a lock, an unlock that registers a new ID and its move, landing during the awaits
+    /// above, leave it parked rather than restamped for an ID the move has already read.
+    func releaseParkedDeletions(account: AccountRecord, view: RegistryView?, within writes: SyncStateWrites? = nil)
+        async -> Set<UUID>
+    {
         guard let syncState, let parked = try? await parkedDeletions(of: account), !parked.isEmpty else { return [] }
         guard let view else { return [account.personalVaultID] }
         let held = await vaultsHoldingEditsNobodyReceived(
@@ -1331,7 +1338,9 @@ extension VaultSession {
         var waiting: Set<UUID> = []
         for deletion in parked {
             do {
-                try await syncState.addPendingDeletion(Self.restamped(deletion, device: account.deviceID))
+                try requireEntitlement(writes)
+                let own = try authenticatePendingDeletion(Self.restamped(deletion, device: account.deviceID))
+                try await syncState.addPendingDeletion(own)
             } catch {
                 // Not signed as this device's (no current key for its vault here, Z185): it waits, and says so
                 // (review of round 12).

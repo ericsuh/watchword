@@ -207,6 +207,7 @@ extension VaultSession {
                         let sealed = try sealItem(
                             ItemMerge.written(carried, as: revision), vaultKey: read.vaultKey, account: account)
                         _ = try requireKeys(since: epoch)
+                        try requireEntitlement(writes)
                         try await store.commit(
                             StoreChange(upserts: [sealed], expectations: [key: .version(row.version)]))
                         highestVersionSeen[vaultID] = max(highestVersionSeen[vaultID] ?? 0, revision.version)
@@ -233,6 +234,9 @@ extension VaultSession {
                             stamp: RecordStamp(
                                 version: deletion.stamp.version + 1, device: deletion.stamp.device, deleted: true),
                             record: record)
+                        // Signed only while the sync is still entitled to write, on the actor with no suspension
+                        // before the signature (Z256).
+                        try requireEntitlement(writes)
                         let signed =
                             deletion.stamp.device == own
                             ? try authenticatePendingDeletion(replacement) : try signedPendingDeletion(replacement)
@@ -257,7 +261,8 @@ extension VaultSession {
             }
             // The chain row after the save, which may have removed IDs (Z216); one left naming more is harmless.
             guard (try? requireKeys(since: epoch)) != nil else { return false }
-            try? await noteRestoredChain(remaining, in: vaultID, account: account, keeping: false, since: epoch)
+            try? await noteRestoredChain(
+                remaining, in: vaultID, account: account, keeping: false, since: epoch, within: writes)
         }
         return finished
     }
@@ -469,7 +474,9 @@ extension VaultSession {
     /// Not while a move is pending (`account.migration`, review of round 19, Z234): nothing that may write a vault's
     /// sync state or chain row runs then. The move writes each vault's row itself, from what it records, before the
     /// state it saves, so the backfill has nothing to add until the next unlock, sync or `configureSharing` after it.
-    func backfillRestoredChains(account: AccountRecord, since epoch: UInt64) async {
+    func backfillRestoredChains(account: AccountRecord, since epoch: UInt64, within writes: SyncStateWrites? = nil)
+        async
+    {
         guard account.migration == nil, sharing.settings != nil, let base = syncSettings?.state,
             (try? requireKeys(since: epoch)) != nil, let vaults = try? await vaultDirectory(account).keys
         else { return }
@@ -487,7 +494,8 @@ extension VaultSession {
             }
             guard (try? requireKeys(since: epoch)) != nil else { return }
             try? await noteRestoredChain(
-                verified.restoredUnpublished, in: vaultID, account: account, keeping: true, since: epoch)
+                verified.restoredUnpublished, in: vaultID, account: account, keeping: true, since: epoch,
+                within: writes)
         }
     }
 
@@ -497,10 +505,11 @@ extension VaultSession {
     /// row never names fewer IDs than the state), or exactly those (written after a save that may remove some), and
     /// no row when that is none. Every ID it names is an earlier ID of this installation: from the move, or read from
     /// a chain that names only those. Throws where the row could not be written; without sharing configured there is
-    /// nothing to write (`restoredChain`). Signed with the keys of `epoch`, read again after the row's read.
+    /// nothing to write (`restoredChain`). Signed with the keys of `epoch`, read again after the row's read, and within
+    /// a sync only while that sync is still entitled to write (`writes`, Z256).
     func noteRestoredChain(
         _ entries: [RecordKey: RecordStamp], in vaultID: UUID, account: AccountRecord, keeping: Bool,
-        since epoch: UInt64
+        since epoch: UInt64, within writes: SyncStateWrites? = nil
     ) async throws {
         guard let settings = sharing.settings else { return }
         var devices = Set(entries.values.filter { !Self.isDismissed($0) }.map(\.device))
@@ -512,6 +521,8 @@ extension VaultSession {
         // A row that cannot be read throws (Z236): written without it, a keeping write would drop what it named.
         if keeping { devices.formUnion(try await restoredChainRow(in: vaultID, account: account) ?? []) }
         let keyset = try requireKeys(since: epoch).keyset
+        // Within a sync, only while it is still entitled to write (`SyncStateWrites`, Z256).
+        try requireEntitlement(writes)
         let row =
             devices.isEmpty
             ? nil
@@ -595,7 +606,7 @@ extension VaultSession {
         async
     {
         guard let syncState = syncState(within: writes), let base = syncSettings?.state else { return }
-        await backfillRestoredChains(account: account, since: epoch)
+        await backfillRestoredChains(account: account, since: epoch, within: writes)
         guard let vaults = try? await vaultDirectory(account).keys else { return }
         var read = RestoredChainRead()
         for vaultID in vaults where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
@@ -614,8 +625,8 @@ extension VaultSession {
             state.restoredUnpublished = left
             // The chain row first, so that it never names fewer IDs than the state (Z216).
             guard (try? requireKeys(since: epoch)) != nil,
-                (try? await noteRestoredChain(left, in: vaultID, account: account, keeping: true, since: epoch))
-                    != nil,
+                (try? await noteRestoredChain(
+                    left, in: vaultID, account: account, keeping: true, since: epoch, within: writes)) != nil,
                 (try? requireKeys(since: epoch)) != nil
             else { return }
             guard (try? await syncState.saveState(state)) != nil, (try? requireKeys(since: epoch)) != nil else {
@@ -624,7 +635,8 @@ extension VaultSession {
             // Then exactly the state's IDs: with the carry and Stop Waiting, the one write that narrows the row (review
             // of round 18, Z232). It drops only IDs with no row left above their bound in the vault, and a row never
             // becomes an earlier ID's again.
-            try? await noteRestoredChain(left, in: vaultID, account: account, keeping: false, since: epoch)
+            try? await noteRestoredChain(
+                left, in: vaultID, account: account, keeping: false, since: epoch, within: writes)
         }
     }
 
