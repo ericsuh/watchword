@@ -2352,12 +2352,12 @@ entries are values too, S32 and S43, so an older index is refused and rebuilt by
 is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
 account (`WWML`, `WWRP`, `WWSI` for the index, `WWVK` for the keys the ledger was seen to hand this account,
 `WWTO` for what the take-out held aside, and `WWRC` for a restore's chain of earlier device IDs, §7.7, Z216) or
-re-checked on load (proposals are records, filtered to this
-account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
-anchors the ledger, and a ledger whose owner's pin is gone is not loaded. **Whether a vault is shared does not come
-from this state** (review finding Z41; V31): a key opened from a grant is
-`arrivedByGrant`, which its wrap under the keyset authenticates (`VaultKey.grantedSchemaVersion` in the wrap's context),
-and the account signs a **shared marker** beside the vault's directory entry (`account/<id>/vault/<vault>/shared/<device>`,
+re-checked on load (proposals are records, filtered to this account's own), so a planted file can delete trust and
+never add it; the owner's account ID only says which pin anchors the ledger, and a ledger whose owner's pin is
+gone is not loaded. **Whether a vault is shared does not come from this state** (review finding Z41; V31): a key
+opened from a grant is `arrivedByGrant`, which its wrap under the keyset authenticates
+(`VaultKey.grantedSchemaVersion` in the wrap's context), and the account signs a **shared marker** beside the
+vault's directory entry (`account/<id>/vault/<vault>/shared/<device>`,
 `AccountObjectLocation.vaultShared`, body `"WWVS1-shared" ‖ vault ‖ owner`, both signatures of a directory object),
 written when the vault is shared or a key is adopted, published, fetched and vouched for like the vault directory's
 other objects, stored at enrolment, and kept as a record-store row (tag `0x03`) that only the account key's signature
