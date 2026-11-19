@@ -868,9 +868,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   any move) or the next unlock or sync (Z229, `moveAwaitsSharing`; a shared vault with no state at all waits too,
   Z238); never let it complete without them, and never make a move wait whose vaults' states verify, for the earlier
   ID or this device's own (Z235). While any move is pending nothing but the move saves a vault's state or the chain
-  rows: the sync's download saves none (`download(savingState: false)`, V60), Stop Waiting throws
-  `deviceMigrationIncomplete` and the backfill waits (Z234, the same as V60's: a state started over for the new ID read
-  to the move as one it had begun). A new writer of a vault's state checks `AccountRecord.migration` too. The move runs
+  rows, and nor does a sync that began before it was recorded: a sync's engines save a state or stash only through a
+  store bound to what the sync began with (`SyncStateWrites`: begun unlocked with no move pending, and at the signature
+  the same lock epoch and device ID and still no move, V66), so a download-only pass saves none (`savingState`, V60);
+  Stop Waiting throws `deviceMigrationIncomplete` and the backfill waits (Z234, the same as V60's: a state started over
+  for the new ID read to the move as one it had begun). A new writer of a vault's state checks `AccountRecord.migration`
+  too, at the save, not only when it starts. The move runs
   once at a time and only while the store still records it (`migrationInFlight`, Z237), a caller it turns away has it
   made once more when it ends (`migrationAskedAgain`, Z241), from the account the store holds then, an attempt's
   failure standing until one makes it (Z247), and each attempt takes its epoch before its first await (Z242); and a
@@ -880,8 +883,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (Z239): the move's keeping write only with IDs to add, and the hold, report, re-record and Stop Waiting only for a
   vault that may be shared whose state is lost or does not verify (`RestoredChainRead`, Z248), so a sharing store that
   cannot read rows holds back only what depends on them; never add a reader that fails closed everywhere on one row. A
-  sync decides `mayWrite` once, before any vault, so a sync begun locked writes nothing but its download's state across
-  the unlock that registers a restored device and makes its move (Z249): keep it.
+  sync decides `mayWrite` once, before any vault, and its state writes are checked again as they are signed, so a sync
+  begun locked writes nothing across the unlock that registers a restored device and makes its move (Z249, V66): keep
+  both.
   Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
   Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
   cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves

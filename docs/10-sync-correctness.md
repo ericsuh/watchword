@@ -641,12 +641,14 @@ Z222). A move made again, or a second restore, adds to that row and finds the ro
 verifies (Z225, Z226; V57 was the same fix), recording every such row holding `o`'s work and leaving the bound to the
 carry, which has the download in hand (V63); the rows are read through sharing, so such a move waits until sharing is
 configured (Z229), and nothing but the move saves a vault's state or chain row while it waits (Z234, V60: its download
-saves none), and a row that cannot be read fails it rather than reading as none (Z236), as does a failed read of the
+saves none), nor does a sync begun before the move was recorded (V66: a sync's state writes are checked again as they
+are signed), and a row that cannot be read fails it rather than reading as none (Z236), as does a failed read of the
 vault directory or of a state while the chain is read (Z245). A row is read only where it can decide something (Z239):
 by the move where no state verifies and to add what a vault's entries name, and by the hold and Stop Waiting only for a
 vault that may be shared whose state is lost or does not verify (Z248), so a row that cannot be read holds back only
 what depends on it, and the sync says so (Z240, worded for a device never restored too, Z250). A move turned away is
-made again from the record the store holds, keeping an attempt's failure until one makes it (Z247).
+made again from the record the store holds, keeping an attempt's failure until one makes it (Z247), and a sync begun
+locked writes no state across the unlock that registers a restored device and makes its move (Z249, V66).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

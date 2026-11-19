@@ -799,6 +799,13 @@ vault state across the unlock that registers a restored device, whether the move
 (`lockedSyncAcrossTheUnlocksRegistration`, Z249): it passes at 131dd94 and fails with a download that saves its state
 (PR #22's shape) or with the per-vault branch reading the keys late. `restoredChainUnreadable` in `WordingTests` checks
 the notice no longer says the device was restored (Z250).
+Merged into this branch, where the download saves what it learnt of conflict copies, Z249's scenario with one listed
+name whose copy cannot be read is `lockedSyncWithAnUnreadCopyAcrossTheUnlocksRegistration` (the review of the sixth
+merge's PoC, both halves; V66): at the merge (8a2cfb8) the download's save, signed for the new ID, replaced the damaged
+state under the waiting move or the state the move had just saved, the copy was not recorded, the hold ended and the
+other device lost the original. `syncStateWritesAreCheckedAtSigning` pins each clause of the check made as a sync's
+state or stash is signed (begun locked, another device ID, a lock and unlock since); with that check disabled it fails,
+and the first test fails only at its probe that nothing may be signed while the move waits.
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

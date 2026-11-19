@@ -836,9 +836,14 @@ in the directory — deleted vaults included, so that what a deletion had not se
 `AccountSyncReport`; `sync()` returns the vaults' reports added up. While locked each engine only downloads. The
 same holds, unlocked, while this device is not registered, has been revoked, or has seen a password change it
 has not been given (§7.8). A sync decides once, before any vault, whether it may write (`mayWrite`), so one begun
-locked only downloads to its end whatever an unlock does meanwhile, and a download saves no sync state: an unlock
-that registers a restored device and makes, or waits for, its move during that sync finds every vault's state as it
-left it (Z249, pinned by `lockedSyncAcrossTheUnlocksRegistration`).
+locked only downloads to its end whatever an unlock does meanwhile. A download remembers what it learnt of conflict
+copies in the vault's state (§7.5), but every state or stash a sync's engines save goes through a store bound to what
+the sync began with (`SyncStateWrites`): none in a sync begun locked or with a restore's move pending, and none once
+the vault has been locked, this device's ID has changed or a move has been recorded since it began, checked on the
+actor as the state is signed (V66). So an unlock that registers a restored device and makes, or waits for, its move
+during that sync finds every vault's state as it left it (Z249, pinned by `lockedSyncAcrossTheUnlocksRegistration`,
+and with a copy left unread, which is what makes the download save here, by
+`lockedSyncWithAnUnreadCopyAcrossTheUnlocksRegistration`).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
@@ -1130,7 +1135,11 @@ state or chain row: a sync then only downloads, and its download saves nothing o
 the sync's other writes need the move to be complete; Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`,
 read again before its save); and the chain backfill, whose rows the move writes itself, waits for it (Z234, which is
 also V60's). A state saved then was one started over for the new ID where none verified, which the move read as one it
-had begun, recording nothing of the earlier IDs' work and none of V49's facts (V60). The move is made once at a time,
+had begun, recording nothing of the earlier IDs' work and none of V49's facts (V60). Nor does a sync that began before
+the move was recorded save a state under it: its engines' state store refuses to sign once the vault has been locked,
+this device's ID has changed or a move has been recorded since the sync began, and a sync begun locked saves none
+(`SyncStateWrites`, V66); V60 decided only at the sync's start, and an unlock during a locked sync registered a restored
+device and recorded, or made, the move while the download was still to save. The move is made once at a time,
 and only while the store still records it (`migrationInFlight`, Z237); a caller turned away meanwhile
 (`configureSharing` while the move under way waits for sharing, an unlock after a lock that stops it) has it made once
 more when the move under way ends, with the keys of then (Z241), from the account the store holds then, never a
