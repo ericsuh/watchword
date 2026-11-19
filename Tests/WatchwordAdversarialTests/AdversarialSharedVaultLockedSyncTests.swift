@@ -257,7 +257,9 @@ extension AdversarialSharedVaultTests {
     /// took out what no longer counts wherever the keys were here, not only in a sync that may write: during the move
     /// it read `restoredUnpublished` from no state that verifies for the new ID, and took the earlier ID's uncarried
     /// copy out into the quarantine, where the move no longer finds it and nothing carries it (PRD F7.6). The take-out
-    /// now waits for a sync that may write, which a pending move is not.
+    /// now waits for a sync that may write, which a pending move is not. Here the take-out's own state read fails too
+    /// (Z258), which alone keeps it from running: the gate is pinned by `pendingMoveOnAChainRowTakesNothingOut`
+    /// (review of round 23, Z263).
     @Test("a sync while a restore's move is pending takes none of the earlier ID's rows out")
     func pendingMoveTakesNothingOut() async throws {
         let household = SharedVaultHousehold()
@@ -300,6 +302,51 @@ extension AdversarialSharedVaultTests {
         #expect(registered != first)
         #expect(try await store.record(key)?.deviceID == registered, "the copy was not carried")
         _ = try await restored.session.syncAll()
+        try await owner.session.sync()
+        #expect((try? await owner.session.item(id: copy.id)) != nil, "the copy never reached the owner")
+    }
+
+    /// Threat: none needed but a sharing store that cannot read a restore's chain row (a busy or damaged database), so
+    /// that the move the restore's registration recorded fails and stays pending (Z240), and a change of the vault's
+    /// membership since the backup; the review of round 23 (Z263). Here the vault's state reads, and does not verify
+    /// for the new ID, so the take-out reads no `restoredUnpublished`: it is kept from judging the earlier ID's
+    /// uncarried copy, which no segment carried, and taking it out into the quarantine, where nothing carries it (PRD
+    /// F7.6), only by waiting for a sync that may write (Z253). `pendingMoveTakesNothingOut` passed without that gate.
+    @Test("a sync while a restore's move waits on a chain row takes none of the earlier ID's rows out")
+    func pendingMoveOnAChainRowTakesNothingOut() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite, .readOnly], seed: 33_410)
+        let member = members[0]
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, members[1]])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+        await member.session.lock()
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+
+        let store = member.vault.store
+        let rows = ChainRowUnreadableSharingStore(base: member.state)
+        await rows.failNextReads(1_000, in: nil)
+        let restored = TestVault(
+            store: store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: member.vault.sync, seed: 33_411, deviceKeys: member.vault.deviceKeys)
+        await restored.session.configureSharing(
+            SharingSettings(state: rows, contacts: member.contacts, directory: household.directory))
+        try? await restored.session.unlock(password: TestVault.password)
+        #expect(try await restored.session.state() == .unlocked, "the unlock did not unlock")
+        #expect(try await store.loadAccount()?.migration != nil, "the move did not stay pending: nothing is tested")
+        #expect(await rows.refused > 0, "no chain row read failed: nothing is tested")
+
+        // The vault's membership changes since the backup, so that the sharing pass judges again.
+        try await owner.session.changeRole(of: members[1].accountID, in: vaultID, to: .readWrite)
+        try await owner.session.sync()
+        let key = RecordKey(recordID: copy.id, kind: .item)
+        _ = try? await restored.session.syncAll()
+        #expect(try await store.record(key)?.deviceID == first, "the earlier ID's uncarried copy was taken out")
+
+        await rows.readAgain()
+        for _ in 0..<2 { _ = try? await restored.session.syncAll() }
         try await owner.session.sync()
         #expect((try? await owner.session.item(id: copy.id)) != nil, "the copy never reached the owner")
     }
