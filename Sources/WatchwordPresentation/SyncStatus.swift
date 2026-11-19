@@ -35,6 +35,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// that has reached nobody else, made under an earlier identity of this device or by a device that is not counted
     /// in shared vaults (`AccountSyncReport.copiesNobodyReceived`, review finding Z171). By vault name and title.
     case copiesReachedNobody([UnreceivedCopy])
+    /// This device's deletions, in every vault, are not going out because these items of a shared vault hold changes
+    /// made on this device before it was restored that it has not sent yet, for want of the vault's key here
+    /// (`AccountSyncReport.restoredWorkWaiting`, review of round 12, M1). By vault name and title.
+    case restoredWorkWaiting([UnreceivedCopy])
 
     public var id: String {
         switch self {
@@ -49,6 +53,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .keptAside: return "keptAside"
         case .deletionsHeldBack: return "deletionsHeldBack"
         case .copiesReachedNobody: return "copiesReachedNobody"
+        case .restoredWorkWaiting: return "restoredWorkWaiting"
         }
     }
 
@@ -92,6 +97,16 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "not count, such as this device before it was restored. Move " + (one ? "it" : "each") + " out of "
                 + "the shared vault from this device, or delete " + (one ? "it" : "each") + ", and the deletions go "
                 + "out."
+        case .restoredWorkWaiting(let copies):
+            let shown = copies.prefix(3).map(\.phrase)
+            let more = copies.count > shown.count ? " and \(copies.count - shown.count) more" : ""
+            let one = copies.count == 1
+            return "Deletions made on this device are waiting, in every vault, because "
+                + shown.joined(separator: ", ") + more + (one ? " holds" : " hold") + " changes made on this device "
+                + "before it was restored, which it can send only once the shared vault opens here. They go out "
+                + "after " + (one ? "it" : "them") + ". If the vault will not open on this device, you can choose to "
+                + "stop waiting, and " + (one ? "its changes stay" : "their changes stay")
+                + " on this device only."
         }
     }
 }
@@ -162,24 +177,33 @@ public struct SyncSummary: Hashable, Sendable {
             for itemID in items { copies.append(UnreceivedCopy(vault: vaultNames[vaultID], title: itemTitles[itemID])) }
         }
         if !copies.isEmpty { notices.append(.copiesReachedNobody(copies.sorted())) }
-        if !report.deletionsHeldBack.subtracting(report.copiesNobodyReceived.keys).isEmpty {
+        var waiting: [UnreceivedCopy] = []
+        for (vaultID, items) in report.restoredWorkWaiting {
+            for itemID in items {
+                waiting.append(UnreceivedCopy(vault: vaultNames[vaultID], title: itemTitles[itemID]))
+            }
+        }
+        if !waiting.isEmpty { notices.append(.restoredWorkWaiting(waiting.sorted())) }
+        let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
+        if !report.deletionsHeldBack.subtracting(explained).isEmpty {
             notices.append(.deletionsHeldBack)
         }
         self.notices = notices
     }
 
     /// The summary with the names `init` needs read from `session`: the vaults' names, and the titles of the items in
-    /// `AccountSyncReport.copiesNobodyReceived`. A name that cannot be read (the session locked, the item gone) is left
+    /// `AccountSyncReport.copiesNobodyReceived` and `restoredWorkWaiting`. A name that cannot be read (the session locked, the item gone) is left
     /// to `init`'s fallback.
     public static func loading(
         _ report: AccountSyncReport, deviceNames names: [UUID: String] = [:], from session: VaultSession
     )
         async -> SyncSummary
     {
-        guard !report.copiesNobodyReceived.isEmpty else { return SyncSummary(report, deviceNames: names) }
+        let named = report.copiesNobodyReceived.values.flatMap { $0 } + report.restoredWorkWaiting.values.flatMap { $0 }
+        guard !named.isEmpty else { return SyncSummary(report, deviceNames: names) }
         let vaults = (try? await session.vaults(includingDeleted: true)) ?? []
         var titles: [UUID: String] = [:]
-        for itemID in report.copiesNobodyReceived.values.flatMap({ $0 }) {
+        for itemID in named {
             titles[itemID] = try? await session.item(id: itemID).title
         }
         return SyncSummary(

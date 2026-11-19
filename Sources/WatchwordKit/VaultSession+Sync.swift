@@ -100,6 +100,9 @@ extension VaultSession {
         ])
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
+        // What a restore could not carry over for want of a vault key, now that the shared vaults' keys are current,
+        // before any log, so that it is published ahead of any deletion (review of round 12, M1).
+        if mayWrite { await carryRestoredWork(account: record, view: view, since: epoch) }
         if !ownIDCommits {
             for vaultID in sharing.vaults.keys {
                 if deviceKeyUnreadable {
@@ -212,6 +215,10 @@ extension VaultSession {
                 account: record, view: view, since: epoch, otherwise: Array(report.vaults.keys))
             report.deletionsHeldBack.formUnion(report.copiesNobodyReceived.keys)
         }
+        if mayWrite, (try? requireKeys(since: epoch)) != nil {
+            report.restoredWorkWaiting = await restoredWorkWaiting(account: record, since: epoch)
+            report.deletionsHeldBack.formUnion(report.restoredWorkWaiting.keys)
+        }
         report.sharing = sharingReports
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
         try? await reconcileHygiene()
@@ -286,6 +293,9 @@ extension VaultSession {
         guard let syncState, let base = syncSettings?.state else { return false }
         let state = try? await syncState.loadState(vaultID: vaultID)
         let known = state?.known ?? [:]
+        // What a restore left here and could not carry yet: perhaps a move's copy, whose original's deletion is
+        // another vault's (review of round 12, M1).
+        if await holdsRestoredWork(in: vaultID, state: state, account: account) { return true }
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
         // move's copy published by a build from before this was refused. A value it stamped, never its clock's entry
@@ -770,12 +780,18 @@ extension VaultSession {
     /// `state` if this session signed it for its vault on this device, or `nil`: a row it did not write is no state.
     /// Checked with the Keychain's copy of the account key while locked, as downloads are.
     func verifiedSyncState(_ state: SyncState, vaultID: UUID) async -> SyncState? {
+        await verifiedSyncState(state, vaultID: vaultID, deviceID: nil)
+    }
+
+    /// `state` if this session signed it for its vault on `deviceID`, this device's by default: the move of an earlier
+    /// device ID's sync state reads what the session signed for that ID (review of round 12, M1).
+    func verifiedSyncState(_ state: SyncState, vaultID: UUID, deviceID: UUID?) async -> SyncState? {
         var record = account
         if record == nil { record = try? await loadAccount() }
         guard state.vaultID == vaultID, let record, let signingKey = await trustedAccountSigningKey(record) else {
             return nil
         }
-        let message = Self.syncStateMessage(state, deviceID: record.deviceID)
+        let message = Self.syncStateMessage(state, deviceID: deviceID ?? record.deviceID)
         guard
             (try? Signatures.verify(state.authenticator, for: message, domain: .syncState, signingKey: signingKey))
                 != nil
@@ -1006,6 +1022,13 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// releases the deletions by moving each item out of the shared vault from this device, which writes it as this
     /// device's, or by deleting it.
     public var copiesNobodyReceived: [UUID: Set<UUID>] = [:]
+    /// Per shared vault, the items holding work an earlier device ID of this installation wrote there and never
+    /// published, which a restore onto other hardware has not carried over yet for want of a current key for the
+    /// vault here (`SyncState.restoredUnpublished`, review of round 12, M1): such an item exists on this device only.
+    /// Each such vault is in `deletionsHeldBack` too. A sync carries them once the vault opens here (its ledger
+    /// verified, or the owner's invitation accepted again), and the deletions go out after them; for a vault that will
+    /// not open, the person can stop waiting (`VaultSession.stopWaitingForRestoredWork(in:)`).
+    public var restoredWorkWaiting: [UUID: Set<UUID>] = [:]
     /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
     /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
     /// unlock and sync.

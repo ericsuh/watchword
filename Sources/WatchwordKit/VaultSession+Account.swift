@@ -888,7 +888,7 @@ extension VaultSession {
     /// registered.
     private func commitRegistration(
         account: AccountRecord, as updated: inout AccountRecord, created: DeviceIdentity?, view: RegistryView,
-        unpublished: [StoredRecord], asNewDevice: Bool, epoch: UInt64
+        unpublished: [UnpublishedRow], asNewDevice: Bool, epoch: UInt64
     ) async throws {
         if let created { updated.deviceID = created.id }
         let now = await clock.now()
@@ -921,7 +921,15 @@ extension VaultSession {
                 change.migration = .set(migration)
             }
             change.account = .update(updated, expectedKeysetVersion: account.keysetVersion)
-            for row in try carriedOver(unpublished, keys: try requireKeys(since: epoch), as: updated) {
+            // The old ID's unpublished work in a shared vault is written again as the new ID's, where the old ID's
+            // published work counts for the vault's members (it commits): otherwise every member's judge holds it
+            // aside, the restored device's own on a replay, for want of a segment of the old ID's stream that carried
+            // it (review of round 12, Z191).
+            let reattributing = !Self.idsNobodyReceives(account: account, view: view, including: account.deviceID)
+                .contains(account.deviceID)
+            for row in try carriedOver(
+                unpublished, keys: try requireKeys(since: epoch), as: updated, reattributing: reattributing)
+            {
                 change.upserts.append(row.row)
                 change.expectations[row.row.key] = .version(row.replacing)
             }
@@ -935,13 +943,17 @@ extension VaultSession {
         }
     }
 
+    /// A row this device wrote that its sync state does not record as published, with the last version of the record
+    /// the state does record it published (0 for none).
+    typealias UnpublishedRow = (row: StoredRecord, published: UInt64)
+
     /// The rows this device wrote that its sync state does not record as published, and its pending deletions
     /// (those that verify), per vault: what a store restored onto other hardware holds that no other device has.
     func unpublishedRows(of account: AccountRecord) async throws -> (
-        rows: [StoredRecord], deletions: [UUID: [RecordKey: PendingDeletion]]
+        rows: [UnpublishedRow], deletions: [UUID: [RecordKey: PendingDeletion]]
     ) {
         guard let syncState else { return ([], [:]) }
-        var rows: [StoredRecord] = []
+        var rows: [UnpublishedRow] = []
         var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
         for vaultID in try await vaultDirectory(account).keys {
             // The state this session signed, or none (Z20): a planted `published` must not keep a row from being
@@ -955,7 +967,8 @@ extension VaultSession {
             for kind in kinds {
                 for row in try await store.records(in: vaultID, kind: kind) where row.deviceID == account.deviceID {
                     if let stamp = published[row.key], stamp >= RecordStamp(row) { continue }
-                    rows.append(row)
+                    let last = published[row.key].flatMap { $0.device == account.deviceID ? $0.version : nil }
+                    rows.append((row, last ?? 0))
                 }
             }
             let pending = try await syncState.pendingDeletions(vaultID: vaultID)
@@ -965,18 +978,26 @@ extension VaultSession {
     }
 
     /// Each row as the version `updated`'s device writes next: the same content, one version up, sealed under the
-    /// vault's current key. A row that does not open is left as it is; it carries nothing this device can read.
-    func carriedOver(_ rows: [StoredRecord], keys: UnlockedKeys, as updated: AccountRecord) throws -> [(
-        row: StoredRecord, replacing: UInt64
-    )] {
+    /// vault's current key. A row that does not open is left as it is; it carries nothing this device can read. One
+    /// whose vault has no current key here is left too, and the move records it for a later sync to carry
+    /// (`SyncState.restoredUnpublished`, review of round 12, M1). With `reattributing`, an item in a vault that may be
+    /// shared has what the old ID wrote above the version it published written as the new ID's
+    /// (`ItemMerge.reattributed`, Z191).
+    func carriedOver(_ rows: [UnpublishedRow], keys: UnlockedKeys, as updated: AccountRecord, reattributing: Bool)
+        throws -> [(row: StoredRecord, replacing: UInt64)]
+    {
         var result: [(row: StoredRecord, replacing: UInt64)] = []
-        for row in rows {
+        for (row, published) in rows {
             guard let vaultKey = currentVaultKey(row.vaultID, keys: keys, account: updated) else { continue }
             let revision = try nextRevision(in: row.vaultID, above: row, account: updated)
             highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, revision.version)
             switch row.kind {
             case .item:
-                guard let item = try? openItem(row, keys: keys) else { continue }
+                guard var item = try? openItem(row, keys: keys) else { continue }
+                if reattributing, isMarkedShared(row.vaultID, keys: keys, personalVaultID: updated.personalVaultID) {
+                    item = ItemMerge.reattributed(
+                        item, origin: Self.origin(row), from: row.deviceID, above: published, to: updated.deviceID)
+                }
                 let written = ItemMerge.written(item, as: revision)
                 result.append((try sealItem(written, vaultKey: vaultKey, account: updated), row.version))
             case .vaultMetadata:
@@ -1021,7 +1042,12 @@ extension VaultSession {
             let view = try await registry(account)
             for vaultID in try await vaultDirectory(account).keys {
                 _ = try requireKeys(since: epoch)
-                try await syncState.saveState(SyncState(vaultID: vaultID))
+                // What the old ID left that registration could not carry for want of a vault key, read from the state
+                // this replaces, for a sync to carry once the vault has one (review of round 12, M1).
+                var state = SyncState(vaultID: vaultID)
+                state.restoredUnpublished = try await restoredWork(in: vaultID, leftBy: previous, account: account)
+                _ = try requireKeys(since: epoch)
+                try await syncState.saveState(state)
             }
             let deletions = try await signedPendingDeletions(stampedBy: previous, account: account)
             let parked = try await signedPendingDeletions(
@@ -1197,7 +1223,8 @@ extension VaultSession {
     /// other deletion back too, Z170); once none remains (the person moved the copy out, or deleted it),
     /// each is recorded again as this device's, as a device move does (`completeDeviceMigration`), and goes out like
     /// any other. One whose vault has no current key here (a move parked it for that, review of round 11, Z185) cannot
-    /// be signed as this device's: it stays parked, and is tried again at the next sync. Fails closed: with no
+    /// be signed as this device's: it stays parked, is tried again at the next sync, and its vault is returned too, so
+    /// that the sync says it waits (review of round 12). Fails closed: with no
     /// registry, or parked deletions that cannot be read, nothing is released.
     func releaseParkedDeletions(account: AccountRecord, view: RegistryView?) async -> Set<UUID> {
         guard let syncState, let parked = try? await parkedDeletions(of: account), !parked.isEmpty else { return [] }
@@ -1205,10 +1232,17 @@ extension VaultSession {
         let held = await vaultsHoldingEditsNobodyReceived(
             of: Self.idsNobodyReceives(account: account, view: view), account: account)
         guard held.isEmpty else { return held }
+        var waiting: Set<UUID> = []
         for deletion in parked {
-            try? await syncState.addPendingDeletion(Self.restamped(deletion, device: account.deviceID))
+            do {
+                try await syncState.addPendingDeletion(Self.restamped(deletion, device: account.deviceID))
+            } catch {
+                // Not signed as this device's (no current key for its vault here, Z185): it waits, and says so
+                // (review of round 12).
+                waiting.insert(deletion.record.vaultID)
+            }
         }
-        return []
+        return waiting
     }
 
     // MARK: - Devices (PRD F10.2; review findings D9, Y5, Y6)

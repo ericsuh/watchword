@@ -64,3 +64,128 @@ extension AdversarialSharedVaultTests {
         #expect((try? await owner.session.item(id: shared.id)) == nil, "the shared vault's deletion was lost")
     }
 }
+
+// The review of round 12 (docs/06-adversarial-review.md Z192, M1; Z191): what a restore carries over from its old
+// device ID in a shared vault. In the suite "shared vaults through the session".
+extension AdversarialSharedVaultTests {
+    /// A member's store, with the shared vault held closed after a restore (the owner's pin lost with it, as in
+    /// `restoreWithASharedVaultHeldClosed`), restored onto other hardware.
+    static func restoredWithVaultClosed(
+        _ member: SharingAccount, household: SharedVaultHousehold, owner: SharingAccount, seed: UInt64
+    ) async throws -> TestVault {
+        await member.session.lock()
+        await member.contacts.removePin(for: owner.accountID)
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let restored = member.vault.relaunched(seed: seed)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+        return restored
+    }
+
+    /// Threat: none needed but a shared vault this device cannot open after a restore (no verified ledger, Z41; the
+    /// owner's pin lost with the restore), in a store restored onto other hardware whose old device moved an item from
+    /// the Personal vault into the shared vault and never published the move. Registration carries over what the old
+    /// ID never published only where the vault has a key, so the copy stayed the old ID's, and nothing carried it
+    /// later; the move's deletion of the original, carried as the new ID's, went out, and the item was gone from the
+    /// account's other device while its copy existed on this device only. Now the move records the copy in the signed
+    /// sync state, every deletion waits while it is uncarried and the sync names it, and once the vault opens the copy
+    /// is carried, published, and only then does the original's deletion go out.
+    @Test("a restore's unpublished move into a shared vault held closed keeps the original until the copy goes out")
+    func restoredMoveIntoAClosedVault() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 19_200)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        #expect((try? await other.session.item(id: original.id)) != nil)
+
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let restored = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 19_201)
+        #expect(try await restored.session.vaults().first { $0.id == vaultID }?.isSharedUnavailable == true)
+
+        let report = try await restored.session.syncAll()
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id], "the sync does not name the uncarried copy")
+        #expect(report.deletionsHeldBack.contains(vaultID))
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+
+        // The vault opens here again (the remedy for a lost pin, Z41): the copy is carried and published, then the
+        // original's deletion goes out.
+        try await restored.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        let opened = try await restored.session.syncAll()
+        #expect(opened.restoredWorkWaiting.isEmpty)
+        _ = try await restored.session.syncAll()
+        try await Self.syncAll([owner, other])
+        #expect(try await owner.session.item(id: copy.id).title == copy.title, "the copy never reached the owner")
+        #expect(try await owner.session.quarantine().isEmpty, "the copy was held aside")
+        #expect((try? await other.session.item(id: original.id)) == nil, "the original's deletion never went out")
+    }
+
+    /// Threat: none needed; the hold of `restoredMoveIntoAClosedVault` for a vault that will not open on this device
+    /// (an owner its devices disagree about, Z59, holds one closed for good in this version). The person can stop
+    /// waiting: the deletions go out, and the copy stays on this device as it was. Nothing else ends that hold.
+    @Test("the person can stop waiting for a restore's work in a vault that will not open, and keeps it here")
+    func stopWaitingForRestoredWork() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 19_220)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let restored = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 19_221)
+        #expect(try await restored.session.syncAll().restoredWorkWaiting[vaultID] == [copy.id])
+
+        try await restored.session.stopWaitingForRestoredWork(in: vaultID)
+        let report = try await restored.session.syncAll()
+        #expect(report.restoredWorkWaiting.isEmpty)
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) == nil, "the deletion still waited")
+        let kept = try await member.vault.store.record(RecordKey(recordID: copy.id, kind: .item))
+        #expect(kept != nil, "the copy was discarded")
+    }
+
+    /// Threat: none needed; review finding Z191. A member edits an item of a shared vault and trashes and deletes
+    /// another, and the store is restored onto other hardware before either is published. Carried over unchanged, the
+    /// edit kept the old ID's stamps and the deletion's summary claimed the old ID's unpublished trash, which no
+    /// segment of the old ID's stream carried: every member's judge held both aside, and the restored device's own on a
+    /// replay. Now what the old ID wrote above what it published is written again as the new ID's: the members end
+    /// with the person's title and without the deleted item, and so does the restored device after a replay.
+    @Test("a restore's unpublished edit and deletion in a shared vault reach the vault's members")
+    func restoredEditAndDeletionReachMembers() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 19_100)
+        let member = members[0]
+        let edited = try await member.session.save(Self.bank(in: vaultID))
+        let deleted = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+
+        var renamed = try await member.session.item(id: edited.id)
+        renamed.title = "Bank, renamed"
+        _ = try await member.session.save(renamed)
+        try await member.session.trash(id: deleted.id)
+        try await member.session.deletePermanently(id: deleted.id)
+        await member.session.lock()
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let restored = member.vault.relaunched(seed: 19_101)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+        _ = try await restored.session.syncAll()
+        _ = try await restored.session.syncAll()
+        try await Self.syncAll([owner])
+        #expect(try await owner.session.item(id: edited.id).title == "Bank, renamed", "the member kept the old title")
+        #expect((try? await owner.session.item(id: deleted.id)) == nil, "the member kept the deleted item")
+        #expect(try await owner.session.quarantine().isEmpty, "the restore's work was held aside")
+
+        _ = try await restored.session.syncAll(reconcile: true)
+        #expect(try await restored.session.item(id: edited.id).title == "Bank, renamed")
+        #expect(try await restored.session.quarantine().isEmpty, "the restored device held its own work aside")
+    }
+}

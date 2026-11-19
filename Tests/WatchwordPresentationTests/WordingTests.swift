@@ -167,6 +167,25 @@ struct WordingTests {
         #expect(fallback.text.contains("Move each out"))
     }
 
+    @Test("deletions held for a restore's work not yet carried name the item and what ends the wait (round 12, M1)")
+    func restoredWorkWaiting() throws {
+        let vaultID = UUID()
+        let item = UUID()
+        var report = AccountSyncReport()
+        report.deletionsHeldBack = [vaultID]
+        report.restoredWorkWaiting = [vaultID: [item]]
+        let summary = SyncSummary(report, vaultNames: [vaultID: "Household"], itemTitles: [item: "Bank"])
+        #expect(!summary.notices.contains(.deletionsHeldBack), "the generic notice hides the reason")
+        let notice = try #require(summary.notices.first { $0.id == "restoredWorkWaiting" })
+        #expect(notice == .restoredWorkWaiting([UnreceivedCopy(vault: "Household", title: "Bank")]))
+        let text = notice.text
+        #expect(text.contains("“Bank” in “Household” holds changes made on this device before it was restored"))
+        #expect(text.contains("once the shared vault opens here"))
+        #expect(text.contains("stop waiting"))
+        let unnamed = SyncSummary(report).notices.first { $0.id == "restoredWorkWaiting" }
+        #expect(unnamed?.text.contains("an item in a shared vault holds") == true)
+    }
+
     @Test("a wrong password and tampering read the same", arguments: [CryptoError.authenticationFailed])
     func authenticationFailed(error: CryptoError) {
         #expect(ErrorWording.message(for: error) == "Incorrect password.")
