@@ -708,15 +708,37 @@ The review of the twenty-first round (Z245 to Z252), in "shared vaults through t
 that fails as a restore's chain is read holds the deletions back where the chain row is the only record of a copy
 (`directoryListingFailingInTheChainHolds`, the review's PoC, failing only the chain's own listing; Z245), and so does an
 item listing that fails as the gate reads this device's own rows (`itemListingFailingInTheGateHolds`, Z246); a move
-turned away by one waiting for sharing is made from the store's record when a caller holding an older one asked last
-(`turnedAwayMoveIsMadeFromTheStoresRecord`), and a move that fails keeps its failure when such a caller asked meanwhile
-(`turnedAwayMoveKeepsTheFailure`, Z247); Stop Waiting reads no chain row for a vault that is not shared or whose state
-verifies, and throws, writing nothing, on a row it needs and cannot read (`stopWaitingReadsTheChainOnlyWhereItDecides`,
-failing with the read unguarded, eager or read as empty; Z248). All five fail at 131dd94. A sync begun locked saves no
-vault state across the unlock that registers a restored device, whether the move waits for sharing or is made there
-(`lockedSyncAcrossTheUnlocksRegistration`, Z249): it passes at 131dd94 and fails with a download that saves its state
-(PR #22's shape) or with the per-vault branch reading the keys late. `restoredChainUnreadable` in `WordingTests` checks
-the notice no longer says the device was restored (Z250).
+turned away by one waiting for sharing is made again even when a caller holding another record asked last
+(`turnedAwayMoveIsMadeFromTheStoresRecord`; that it is the store's record, not the holder's, is pinned since Z259), and
+a move that fails keeps its failure when such a caller asked meanwhile (`turnedAwayMoveKeepsTheFailure`, Z247; it passes
+with the failure dropped, since the rerun throws again, so the kept failure is pinned only since Z259); Stop Waiting
+reads no chain row for a vault that is not shared or whose state verifies, and throws, writing nothing, on a row it
+needs and cannot read (`stopWaitingReadsTheChainOnlyWhereItDecides`, failing with the read unguarded, eager or read as
+empty; Z248). All five fail at 131dd94. A sync begun locked saves no vault state across the unlock that registers a
+restored device, whether the move waits for sharing or is made there (`lockedSyncAcrossTheUnlocksRegistration`, Z249):
+it passes at 131dd94 and fails with a download that saves its state (PR #22's shape) or with the per-vault branch
+reading the keys late. `restoredChainUnreadable` in `WordingTests` checks the notice no longer says the device was
+restored (Z250).
+The review of the twenty-second round, and of PR #22's seventh merge (Z253 to Z261). In "shared vaults through the
+session": a sync begun locked writes nothing as a restored store's earlier ID while the unlock registers it, whether the
+registration is under way at the sync's own registration step or the keys arrive just before the decision
+(`lockedSyncDecidesOnTheAccountAfterItsAwaits`, the review's PoC and a second landing; five issues each at 5b43bc5, two
+each with `mayWrite`'s new clauses removed); a sync during a pending move takes nothing out
+(`pendingMoveTakesNothingOut`); no state is signed while the move waits (in `lockedSyncAcrossTheUnlocksRegistration`);
+`syncStateWritesAreCheckedAtSigning` pins each clause of the signing check; a release of parked deletions, and a chain
+row, are signed only for a sync still entitled to (`releaseIsCheckedAtSigning`, Z256, failing with the release's check
+removed). In "sync with real keys", each layer of `SyncStateWrites` alone (Z257): `lockAndUnlockAcrossAPush` fails with
+the engines' store unbound and with the state's check removed, and records the cost (the next sync's
+`ownStreamConflict`, recovered by the one after); `lockAndUnlockBeforeAStashSave` fails with the stash's check removed.
+One failed state read anywhere in a restored device's sync still carries its work before the vault merges
+(`carryWaitsForAFailedStateRead`, twelve reads, Z254), a vault whose re-record failed merges nothing first
+(`unrecordedVaultWaitsForTheCarry`), and a failed read at the take-out takes nothing out
+(`takeOutWaitsForAFailedStateRead`, ten reads, Z258); each fails with its fix reverted. A move made again keeps an
+unreadable chain row over a later lock (`turnedAwayMoveKeepsTheUnreadableRowOverALock`), keeps a failure when the
+attempt made again waits for sharing (`turnedAwayMoveKeepsAFailureWhenTheNextWaits`, `z247-keep`), and is made from the
+store's record, not the holder's (`turnedAwayMoveIsMadeFromTheStoreNotTheHolder`, `z247-reread`; Z259); a vault state
+that cannot be read as the chain is read holds and is not reported as a chain row (`stateReadFailingInTheChainHolds`,
+`z245-state` and `z245-rowonly`, Z260). Each fails with the part it pins undone.
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

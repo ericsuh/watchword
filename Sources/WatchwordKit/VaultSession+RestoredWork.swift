@@ -88,7 +88,8 @@ extension VaultSession {
     /// state the move saves), so a process that never configures sharing (the AutoFill extension) still makes those
     /// moves, and leaves this one to the app (both checks are pinned, Z235). Nothing replaces the state while it
     /// waits: a download only stages, and nothing that may write a vault's sync state or chain row runs while a move
-    /// is pending (the sync's writes need `mayWrite`, Stop Waiting is refused and the backfill waits, Z234).
+    /// is pending (the sync's writes, its take-out included, need `mayWrite`, Stop Waiting is refused and the backfill
+    /// waits, Z234, Z253).
     func moveAwaitsSharing(from previous: UUID, account: AccountRecord) async throws -> Bool {
         guard sharing.settings == nil, let base = syncSettings?.state else { return false }
         for vaultID in try await vaultDirectory(account).keys

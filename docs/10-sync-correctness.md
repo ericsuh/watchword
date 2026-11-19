@@ -613,8 +613,12 @@ failed read of the vault directory or of a state while the chain is read (Z245).
 something (Z239): by the move where no state verifies and to add what a vault's entries name, and by the hold and Stop
 Waiting only for a vault that may be shared whose state is lost or does not verify (Z248), so a row that cannot be read
 holds back only what depends on it, and the sync says so (Z240, worded for a device never restored too, Z250). A move
-turned away is made again from the record the store holds, keeping an attempt's failure until one makes it (Z247), and
-a sync begun locked writes no state across the unlock that registers a restored device and makes its move (Z249).
+turned away is made again from the record the store holds, keeping an attempt's first failure until one makes it
+(Z247, Z259). A sync begun locked writes nothing across the unlock that registers a restored device and makes its move
+(Z249): it may write only as an ID this installation holds a key for, decided after its last await, with no registration
+under way, and it signs a state only for the ID and the keys it began with (Z253, `SyncStateWrites`). A state that
+cannot be read, or a re-record that fails, makes a vault wait for its carry rather than merge first (Z254), and the
+take-out leaves `o`'s rows alone then too (Z253, Z258).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

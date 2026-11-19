@@ -715,10 +715,21 @@ its own device, and another device signing in its stream is refused by everyone 
 in the directory — deleted vaults included, so that what a deletion had not seen still arrives — and returns an
 `AccountSyncReport`; `sync()` returns the vaults' reports added up. While locked each engine only downloads. The
 same holds, unlocked, while this device is not registered, has been revoked, or has seen a password change it
-has not been given (§7.8). A sync decides once, before any vault, whether it may write (`mayWrite`), so one begun
-locked only downloads to its end whatever an unlock does meanwhile, and a download saves no sync state: an unlock
-that registers a restored device and makes, or waits for, its move during that sync finds every vault's state as it
-left it (Z249, pinned by `lockedSyncAcrossTheUnlocksRegistration`).
+has not been given (§7.8). A sync decides once, before any vault, whether it may write (`mayWrite`), and a download
+saves no sync state. A decision made once is not enough while its inputs are read before awaits (Z253): the account was
+read at the sync's start, and an unlock that installed the keys before the decision, while registering a store restored
+onto other hardware as a new device, left the sync deciding as the earlier ID, still active with no move recorded, and
+writing under it while the unlock made the move. So `mayWrite` also needs a key for the sync's device ID on this
+installation, read as the last await before the decision (a restored store has none for its earlier ID, and never gets
+one back), and no registration under way. And every vault state, stash, released deletion and chain row the sync signs
+is checked, synchronously before its signature, against what the sync began with (`SyncStateWrites`: the device ID, the
+lock epoch, and that it began as a writer; PR #22's V66), so a sync that outlives a lock, an unlock or a new ID saves
+none of what it loaded for the old. The epoch clause carries the other two across the awaits between a check and the
+store's write (Z255). Its cost: a lock and an unlock between a push's create and its save leave the segment published
+and the state unsaved, so the next sync reports its place taken (`ownStreamConflict`) and holds deletions for that sync,
+and the one after recovers (Z257). An unlock that registers a restored device and makes, or waits for, its move during a
+sync begun locked finds every vault's state as it left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands
+the unlock after the decision, `lockedSyncDecidesOnTheAccountAfterItsAwaits` before it).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
@@ -912,8 +923,8 @@ make this device take another device's pending deletions for its own.
 What is carried into a vault that may be shared, from an old ID that commits, has the old ID's work above what it
 published written again as the new ID's (`ItemMerge.reattributed`, docs/10 §9): carried with the old ID's stamps, it
 held values, and a deletion's summary claimed edits, that no segment of the old ID's stream carried, and every member's
-judge held them aside, the restored device's own on a replay (Z191). A carried deletion's erased row is written the
-same way, so its summary claims nothing the old ID did not publish. Only the old ID's own parts (and the new ID's) are
+judge held them aside, the restored device's own on a replay (Z191). A carried deletion's erased row is written the same
+way, so its summary claims nothing the old ID did not publish. Only the old ID's own parts (and the new ID's) are
 renamed: another device's stamps, discards and lines stay byte for byte as its stream carried them (Z197). What counts
 as published is the most of three: the last version of the record the old ID's own signed state recorded, the highest
 version the old ID's own stream carried as the stream index and that stream's downloaded segments show it once the
@@ -926,89 +937,95 @@ shared vault the log is whole from the day it was shared, so whatever an honest 
 then is in the old ID's own segments. Not what an owner's device published while the vault was private: those segments
 may have been collected under a snapshot before the vault was shared (Z144), and the old ID's signed state is then the
 only bound; with that state lost or edited (A8) the carry writes the work again as the new ID's, and members hold it
-twice, as conflicts, losing neither (Z218, accepted).
-So registration carries none of a shared vault's items:
-the move records each row the old ID left there, before it empties the old ID's state, in the vault's new signed state
-with the old ID's last published version of the record (`SyncState.restoredUnpublished`), and each of the old ID's
-deletions there; a sync carries them (`carryRestoredWork`) after it has downloaded that vault's log and before it
-merges anything it downloaded (`SyncEngine.download`, then `stagedEntries` for the bound, then the pass that merges;
-the session test `carryBeforeTheMergeKeepsTheFieldOrder` fails if it merges first, Z210),
-so that the pulled versions are merged into the renamed version as every other device merges them (Z204: renamed after
-the merge, a field order's tie could fall otherwise there than everywhere else); the vault publishes nothing while
-anything is still to carry there, so that no merge of a row still holding the old ID's work goes out, and a carry that
-cannot run or finish merges nothing there in that sync, in any pass, a replay asked for included, which waits for the
-sync whose carry finishes (Z209), the sync naming the vault (`publishingHeldForCarry`, Z207); the carry reads the keys
-again after every suspension, so a lock during it stops it rather than reading zeroised keys (Z212);
-the carried rows go out at the next sync, and a take-out leaves such rows alone. While a recorded
-row still holds that work every vault's deletions wait (`holdsRestoredWork`), since one of them may be the source half
-of a move whose copy it is, and the sync names the items (`restoredWorkWaiting`, Z192). The hold fails closed (Z200): a
-state that cannot be read holds, so does one that does not verify while the restore's chain of earlier IDs is known
-(the move under way, every ID an entry of a verified state names, and every ID a vault's chain row names, in any vault:
-`restoredChain`; never an ID read from a state that does not verify, which A8 can name there, Z206, Z211 and Z216). The
-chain row (`RestoredChainRow`, `SharingStateKey.restoredChain`, signed by the account and bound to the vault and to this
-device's ID) is written by the move, from what verifies there (`AccountRecord.migration` and the earlier ID's signed
-state), before the vault's state, adding to what the row names and never replacing it, so that a move made again narrows
-nothing (Z225); and again by each later save of the entries, so that it outlives the state being damaged. It can be
-signed only with the keys here and kept only with sharing configured, so it is also filled in from each vault's verified
-state, adding what the row lacks, when sharing is configured on an unlocked session, after each unlock and at each sync
-that may write (`backfillRestoredChains`, Z222); a state damaged before any of those since the move is lost with its
-chain, as before Z200. A restored device registers from the registry it holds, so the registry cannot tell an earlier ID
-of this installation from a sibling enrolled before the restore, and only the move's own record can (Z216); the move's
-earlier ID counts only from a migration record this session signed (Z227). In a vault whose state is lost or does not
-verify, a row still that ID's, holding its work above what its stream carried, holds as if an entry named it
+twice, as conflicts, losing neither (Z218, accepted). So registration carries none of a shared vault's items: the move
+records each row the old ID left there, before it empties the old ID's state, in the vault's new signed state with the
+old ID's last published version of the record (`SyncState.restoredUnpublished`), and each of the old ID's deletions
+there; a sync carries them (`carryRestoredWork`) after it has downloaded that vault's log and before it merges anything
+it downloaded (`SyncEngine.download`, then `stagedEntries` for the bound, then the pass that merges; the session test
+`carryBeforeTheMergeKeepsTheFieldOrder` fails if it merges first, Z210), so that the pulled versions are merged into the
+renamed version as every other device merges them (Z204: renamed after the merge, a field order's tie could fall
+otherwise there than everywhere else); the vault publishes nothing while anything is still to carry there, so that no
+merge of a row still holding the old ID's work goes out, and a carry that cannot run or finish merges nothing there in
+that sync, in any pass, a replay asked for included, which waits for the sync whose carry finishes (Z209), the sync
+naming the vault (`publishingHeldForCarry`, Z207); the carry reads the keys again after every suspension, so a lock
+during it stops it rather than reading zeroised keys (Z212); the carried rows go out at the next sync, and a take-out
+leaves such rows alone. While a recorded row still holds that work every vault's deletions wait (`holdsRestoredWork`),
+since one of them may be the source half of a move whose copy it is, and the sync names the items
+(`restoredWorkWaiting`, Z192). The hold fails closed (Z200): a state that cannot be read holds, so does one that does
+not verify while the restore's chain of earlier IDs is known (the move under way, every ID an entry of a verified state
+names, and every ID a vault's chain row names, in any vault: `restoredChain`; never an ID read from a state that does
+not verify, which A8 can name there, Z206, Z211 and Z216). The chain row (`RestoredChainRow`,
+`SharingStateKey.restoredChain`, signed by the account and bound to the vault and to this device's ID) is written by the
+move, from what verifies there (`AccountRecord.migration` and the earlier ID's signed state), before the vault's state,
+adding to what the row names and never replacing it, so that a move made again narrows nothing (Z225); and again by each
+later save of the entries, so that it outlives the state being damaged. It can be signed only with the keys here and
+kept only with sharing configured, so it is also filled in from each vault's verified state, adding what the row lacks,
+when sharing is configured on an unlocked session, after each unlock and at each sync that may write
+(`backfillRestoredChains`, Z222); a state damaged before any of those since the move is lost with its chain, as before
+Z200. A restored device registers from the registry it holds, so the registry cannot tell an earlier ID of this
+installation from a sibling enrolled before the restore, and only the move's own record can (Z216); the move's earlier
+ID counts only from a migration record this session signed (Z227). In a vault whose state is lost or does not verify, a
+row still that ID's, holding its work above what its stream carried, holds as if an entry named it
 (`rowsLeftByEarlierIDs`), and is recorded again in a state this session signs before the logs; the move does the same
 where neither this device's state nor the earlier ID's verifies, for the IDs the vault's chain row names (the row of an
 earlier attempt at the move, or the earlier ID's own, from its own restore; Z225, Z226). Those rows are read through
-sharing, so a move that would read one while sharing is not configured waits, its record kept and nothing published,
-and `configureSharing` makes it, or the next unlock or sync after it (`moveAwaitsSharing`, Z229); so does a move into a
+sharing, so a move that would read one while sharing is not configured waits, its record kept and nothing published, and
+`configureSharing` makes it, or the next unlock or sync after it (`moveAwaitsSharing`, Z229); so does a move into a
 shared vault with no state at all, where the rows would be read too (Z238). A vault whose state verifies, for the
 earlier ID (a first restore) or for this device's own (a move made again), needs no row, so those moves do not wait
 (Z235). While a move is pending nothing that may write a vault's sync state or chain row runs: the sync's writes need it
-to be complete, Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`) and the backfill waits for it (Z234).
-The move is made once at a time, and only while the store still records it (`migrationInFlight`, Z237); a caller turned
-away meanwhile (`configureSharing` while the move under way waits for sharing, an unlock after a lock that stops it) has
-it made once more when the move under way ends, with the keys of then (Z241), from the account the store holds then,
-never a caller's older one, and an attempt's failure stands until an attempt makes the move (Z247); each attempt takes
-its lock epoch before its first await (Z242). A chain row the sharing store cannot read fails the move, to be made
-again, never read as none (Z236), and holds the deletions back; so does a listing of the vault directory or a vault's
-state that fails while the chain is read (Z245). But a row is read only where it can decide something (Z239): by a move
-only where no state verifies, and to add to it what the vault's entries name, and by the hold, the report, the re-record
-and Stop Waiting only for a vault that may be shared whose state does not verify, or that has none
-(`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248), so a sharing store that cannot read the rows
-holds back only what depends on them, and an ordinary restore reads none, nor does a device never restored while its
-shared vaults' states verify. One whose shared vault's state is lost or damaged reads every shared vault's row, the
-chain being a union across vaults (Z216), and holds while one cannot be read (Z250). Where one is needed and cannot be
-read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded so that it holds on a device never restored,
-Z240, Z250); the move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when
-the vault opens here and the row is carried, when a version that holds none of the work replaces the row, when the vault
-is deleted or this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync
-reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault
-that will not open (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
-`SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
-owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;
-later edits of those items reach no member either, and the confirmation says so. Where the bound understates what the
-old ID published (old hardware still running under it that publishes after the carry, or a segment of its stream this
-device does not show) members hold the old ID's copy and the new ID's both, as concurrent values: nothing is lost, but
-what the old ID later replaced or deleted comes back beside it (Z198, recorded). One exception (review finding Z167):
-where a shared vault holds an edit of the old ID that nobody received (the old ID does not commit, Z162, so a copy it
-published there reached nobody), the old ID's pending deletions are not carried over but **parked**: signed by the
-session under an ID derived from the new one that names no device (`parkedDeletionDevice`), which the engine neither
-publishes nor applies, and which no other device's deletion copied into the file can carry; each sync reports the vault
-(`deletionsHeldBack`) and, once no such edit remains (the person moved the copy out from this device, or deleted it),
-records them again as the new ID's (`releaseParkedDeletions`). Carrying the copy over would not do: its values keep the
-old ID's stamps, which every member holds aside. Any future way of moving an installation to a new ID (the in-app
-re-enrolment of Z162) parks the same way. One predicate decides the move, the release and the deletion gate (review
-finding Z170): any row of a shared vault, whichever device's, holding an edit of a device ID of the account's registry
-that does not commit, or of the ID being left (`vaultsHoldingEditsNobodyReceived`). An edit there is a value that ID
-stamped (`ItemMerge.attributedValues`, history entries included), never a clock entry or a stamp's `seen`, which are
-claims a writing member of another account can make about any ID (Z173); a value another account stamped with such an ID
-is held aside by the judge, so only this account's own writes, made here or carried over, count. The move parks again,
-whatever it finds, what the old ID had itself parked, so a second restore (from a backup taken under the restored ID,
-which commits) releases nothing; and while such a row exists no vault's deletions go out at all, the new ID's own
-included, or a deletion made again of an original that came back would go out ahead of its only copy. The sync names the
-copies (`AccountSyncReport.copiesNobodyReceived`, Z171) and the summary says what releases them: moving each out of the
-shared vault from this device, or deleting it. Where this device may not do either (the account only reads the vault, or
-holds no key or ledger for it here) the deletions wait, in every vault, Personal included, until it may.
+to be complete, Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`) and the backfill waits for it (Z234),
+and so does the sharing pass's take-out, which runs only in a sync that may write (Z253): during the move it found no
+restored work in a state that does not verify for the new ID and took the earlier ID's uncarried copy out. The move is
+made once at a time, and only while the store still records it (`migrationInFlight`, Z237); a caller turned away
+meanwhile (`configureSharing` while the move under way waits for sharing, an unlock after a lock that stops it) has it
+made once more when the move under way ends, with the keys of then (Z241), from the account the store holds then, never
+a caller's older one, and an attempt's failure stands until an attempt makes the move (Z247): the first failure, or an
+unreadable chain row over any other (Z259); each attempt takes its lock epoch before its first await (Z242). A chain row
+the sharing store cannot read fails the move, to be made again, never read as none (Z236), and holds the deletions back;
+so does a listing of the vault directory or a vault's state that fails while the chain is read (Z245, a state's failure
+not reported as a row's, Z260). A vault's state that cannot be read when a sync asks whether it has a restore's work to
+carry counts as having some, and a vault whose state does not verify and whose re-record of what a restore left fails
+merges nothing in that sync either: merged first, a row still holding the earlier ID's work becomes the new ID's before
+the carry (Z254). The take-out, which leaves those rows alone, does not run on a state it cannot read (Z258). But a row
+is read only where it can decide something (Z239): by a move only where no state verifies, and to add to it what the
+vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault that may be shared
+whose state does not verify, or that has none (`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248),
+so a sharing store that cannot read the rows holds back only what depends on them, and an ordinary restore reads none,
+nor does a device never restored while its shared vaults' states verify. One whose shared vault's state is lost or
+damaged reads every shared vault's row, the chain being a union across vaults (Z216), and holds while one cannot be read
+(Z250). Where one is needed and cannot be read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded so
+that it holds on a device never restored, Z240, Z250); the move's own notice says only that it is tried again at each
+sync and unlock (Z243). The hold ends when the vault opens here and the row is carried, when a version that holds none
+of the work replaces the row, when the vault is deleted or this account's membership of it ends (`restoredWorkReleased`:
+nothing can carry it there, and the sync reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or
+when the person stops waiting for a vault that will not open (`stopWaitingForRestoredWork`, an action of the waiting
+notice per such vault, `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no
+current key here or its owner is disputed, Z205), which leaves the rows on this device alone and marks them so that
+nothing finds them again; later edits of those items reach no member either, and the confirmation says so. Where the
+bound understates what the old ID published (old hardware still running under it that publishes after the carry, or a
+segment of its stream this device does not show) members hold the old ID's copy and the new ID's both, as concurrent
+values: nothing is lost, but what the old ID later replaced or deleted comes back beside it (Z198, recorded). One
+exception (review finding Z167): where a shared vault holds an edit of the old ID that nobody received (the old ID does
+not commit, Z162, so a copy it published there reached nobody), the old ID's pending deletions are not carried over but
+**parked**: signed by the session under an ID derived from the new one that names no device (`parkedDeletionDevice`),
+which the engine neither publishes nor applies, and which no other device's deletion copied into the file can carry;
+each sync reports the vault (`deletionsHeldBack`) and, once no such edit remains (the person moved the copy out from
+this device, or deleted it), records them again as the new ID's (`releaseParkedDeletions`). Carrying the copy over would
+not do: its values keep the old ID's stamps, which every member holds aside. Any future way of moving an installation to
+a new ID (the in-app re-enrolment of Z162) parks the same way. One predicate decides the move, the release and the
+deletion gate (review finding Z170): any row of a shared vault, whichever device's, holding an edit of a device ID of
+the account's registry that does not commit, or of the ID being left (`vaultsHoldingEditsNobodyReceived`). An edit there
+is a value that ID stamped (`ItemMerge.attributedValues`, history entries included), never a clock entry or a stamp's
+`seen`, which are claims a writing member of another account can make about any ID (Z173); a value another account
+stamped with such an ID is held aside by the judge, so only this account's own writes, made here or carried over, count.
+The move parks again, whatever it finds, what the old ID had itself parked, so a second restore (from a backup taken
+under the restored ID, which commits) releases nothing; and while such a row exists no vault's deletions go out at all,
+the new ID's own included, or a deletion made again of an original that came back would go out ahead of its only copy.
+The sync names the copies (`AccountSyncReport.copiesNobodyReceived`, Z171) and the summary says what releases them:
+moving each out of the shared vault from this device, or deleting it. Where this device may not do either (the account
+only reads the vault, or holds no key or ledger for it here) the deletions wait, in every vault, Personal included,
+until it may.
 
 What a store that replays the account's *entire* earlier state can do: show a new device the account as it was
 (only with the password of that time, so the person has to type an old password for it to work). That device
