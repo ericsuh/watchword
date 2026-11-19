@@ -16,7 +16,13 @@ extension VaultSession {
     /// this device's proposals, the current key; then the other members' device registries, and, if the head
     /// changed since the vault's items were last judged, every local version that no longer counts taken out and
     /// held aside, and the log replayed. While locked only the membership is ingested.
-    func syncSharedVaultsBeforeLogs(account: AccountRecord) async -> [UUID: SharedVaultSyncReport] {
+    ///
+    /// The take-out only for a sync that is `writing` (its `mayWrite`, review of round 22, Z253), not wherever the
+    /// keys are here now: an unlock that lands during a sync begun locked installs them, and with a restore's move
+    /// pending the take-out read `restoredUnpublished` from a state verified for the new ID, found none of the earlier
+    /// ID's, and could take an uncarried row of that ID out into the quarantine, where the move no longer finds it.
+    /// The take-out of a sync that may not write waits for the next that may: the judged head is left as it was.
+    func syncSharedVaultsBeforeLogs(account: AccountRecord, writing: Bool) async -> [UUID: SharedVaultSyncReport] {
         // The markers whether or not sharing is configured: they are what holds a shared vault closed without it.
         await loadSharedMarkersIfNeeded()
         guard sharing.settings != nil, syncSettings != nil else { return [:] }
@@ -58,7 +64,7 @@ extension VaultSession {
         where !isOwnerDisputed(vaultID) {
             do {
                 await forgetStreamsListedTwice(vaultID, account: account)
-                try await takeOutWhatNoLongerCounts(vaultID)
+                if writing { try await takeOutWhatNoLongerCounts(vaultID) }
                 try await saveSharedVault(vaultID)
             } catch {
                 reports[vaultID, default: SharedVaultSyncReport()].failure = String(describing: error)

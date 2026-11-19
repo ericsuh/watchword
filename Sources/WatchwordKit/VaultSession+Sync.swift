@@ -34,7 +34,7 @@ extension VaultSession {
     /// downloads, and neither merges nor publishes.
     @discardableResult
     public func syncAll(reconcile: Bool = false) async throws -> AccountSyncReport {
-        guard let syncSettings, let syncState else { throw VaultError.syncNotConfigured }
+        guard let syncSettings, syncState != nil else { throw VaultError.syncNotConfigured }
         guard var record = try await loadAccount() else { throw VaultError.noAccount }
         guard !syncInFlight else { throw SyncError.syncInProgress }
         syncInFlight = true
@@ -89,9 +89,28 @@ extension VaultSession {
         let changePending = await passwordChangePending(record)
         report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
+        // Only for an ID this installation can sign as, and with no registration under way (review of round 22, Z253):
+        // `record` was read before the awaits above, and an unlock that installs the keys during them may be
+        // registering this restored store as a new device, which turns this sync's own registration away and leaves
+        // `record` naming the earlier ID, still active, with no move recorded. Decided on that, a sync begun locked ran
+        // every writer step under the earlier ID while the unlock committed the new one and made the move, and the
+        // engines' saves, signed for the new ID, lost the move's record of a restore's copy (PRD F7.6). A restored
+        // store holds no key for its earlier ID and never gets one back (`createDevice` makes the new ID's, in the
+        // account's one slot), so it only downloads; a registration as the same ID changes neither the ID nor the
+        // move. Read after the last await before the decision, with the keys and the flag read after it.
+        let ownKeyHeld =
+            (try? await deviceKeys.publicKey(accountID: record.accountID, deviceID: record.deviceID)) != nil
         let mayWrite =
-            keys != nil && standing == .active && !report.awaitingNewPassword && !report.deviceMigrationIncomplete
+            keys != nil && ownKeyHeld && !registrationInFlight && standing == .active && !report.awaitingNewPassword
+            && !report.deviceMigrationIncomplete
         let epoch = lockEpoch
+        // What this sync's engines, its carry and its re-record may save of a vault's state, decided here with
+        // `mayWrite` and checked again as each state or stash is signed (Z253, as PR #22's V66): only while the lock
+        // epoch, the device ID and the absence of a move are still the ones it began with. A state loaded, and
+        // verified, for the ID and the keys of the start and signed after an unlock registered a new ID was read by a
+        // waiting move as one it had begun, or replaced the state the move had just saved.
+        let stateWrites = SyncStateWrites(deviceID: record.deviceID, epoch: epoch, permitted: mayWrite)
+        let engineState = AuthenticatedSyncState(base: syncSettings.state, session: self, writes: stateWrites)
         // Deletions an earlier ID of this installation made, parked while a shared vault holds an edit of that ID that
         // nobody received, go out once none remains; until then they are reported held back (Z167).
         if mayWrite { report.deletionsHeldBack.formUnion(await releaseParkedDeletions(account: record, view: view)) }
@@ -116,9 +135,9 @@ extension VaultSession {
         ])
         // What a restore left that no entry records any more, recorded again before the take-out and any log
         // (review of round 13, L-a).
-        if mayWrite { await recordRestoredWorkLeft(account: record, since: epoch) }
+        if mayWrite { await recordRestoredWorkLeft(account: record, since: epoch, within: stateWrites) }
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
-        var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
+        var sharingReports = await syncSharedVaultsBeforeLogs(account: record, writing: mayWrite)
         if !ownIDCommits {
             for vaultID in sharing.vaults.keys {
                 if deviceKeyUnreadable {
@@ -133,7 +152,7 @@ extension VaultSession {
                 vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
                 ownIDCommits: ownIDCommits)
             return SyncEngine(
-                vaultID: vaultID, deviceID: record.deviceID, store: store, syncState: syncState,
+                vaultID: vaultID, deviceID: stateWrites.deviceID, store: store, syncState: engineState,
                 transport: syncSettings.transport, keyring: adapter, merger: merger,
                 configuration: shared.configuration, judge: shared.judge)
         }
@@ -176,7 +195,8 @@ extension VaultSession {
                         let staged = await stagedBounds(in: vaultID, engine: engine(vaultID), since: epoch)
                     {
                         carried = await carryRestoredWork(
-                            account: record, view: view, since: epoch, in: [vaultID], staged: [vaultID: staged])
+                            account: record, view: view, since: epoch, in: [vaultID], staged: [vaultID: staged],
+                            within: stateWrites)
                     }
                     if carried {
                         let merged = try await engine(vaultID).sync(
@@ -838,7 +858,8 @@ extension VaultSession {
     }
 
     /// The row the state store keeps: `signatureLength u16 ‖ signature ‖ stash`.
-    func signStash(_ stash: [UInt8], vaultID: UUID) throws -> [UInt8] {
+    func signStash(_ stash: [UInt8], vaultID: UUID, within writes: SyncStateWrites? = nil) throws -> [UInt8] {
+        try requireEntitlement(writes)
         let (keys, record) = try syncKeys()
         let signature = try keys.keyset.sign(
             Self.stashMessage(stash, vaultID: vaultID, deviceID: record.deviceID), domain: .syncStash)
@@ -865,6 +886,17 @@ extension VaultSession {
         return stash
     }
 
+    /// Throws `SyncKeyringError.locked`, which an engine takes as "locked meanwhile" and saves nothing for, unless
+    /// `writes` is `nil` or the sync it describes may still save a vault's state: begun as a writer (`mayWrite`), and
+    /// the lock epoch, this device's ID and the absence of a move unchanged since (Z253, as PR #22's V66).
+    /// Synchronous, so nothing lands between this check and the signature that follows it on the actor.
+    func requireEntitlement(_ writes: SyncStateWrites?) throws {
+        guard let writes else { return }
+        guard writes.permitted, writes.epoch == lockEpoch, let account, account.deviceID == writes.deviceID,
+            account.migration == nil
+        else { throw SyncKeyringError.locked }
+    }
+
     // MARK: - The state row (review finding Z20)
 
     /// `"WWSS" ‖ vault ID ‖ device ID ‖ state`: bound to the vault and to this device, under its own domain.
@@ -877,8 +909,10 @@ extension VaultSession {
     }
 
     /// The state with this session's signature over all of it. Throws `SyncKeyringError.locked` while locked: a state
-    /// is saved only by a sync that merged or published, which needs the keys anyway.
-    func signedSyncState(_ state: SyncState) throws -> SyncState {
+    /// is saved only by a sync that merged or published, which needs the keys anyway. With `writes`, also where the
+    /// sync that saves it is no longer entitled to (Z253).
+    func signedSyncState(_ state: SyncState, within writes: SyncStateWrites? = nil) throws -> SyncState {
+        try requireEntitlement(writes)
         let (keys, record) = try syncKeys()
         var signed = state
         signed.authenticator = try keys.keyset.sign(
@@ -921,6 +955,23 @@ extension VaultSession {
     }
 }
 
+/// What one sync may save of a vault's sync state, decided at its start (`syncAll`, with `mayWrite`) and checked again,
+/// on the actor, as each state or stash is signed (`VaultSession.requireEntitlement`; review of round 22, Z253, the
+/// mechanism of PR #22's V66). A sync that does not begin as a writer (locked, or with a restore's move pending, or
+/// for an ID this installation holds no key for) saves none; one that does saves none once the vault has been locked
+/// since, or this device's ID has changed, or a move has been recorded. The state an engine saves was loaded, and
+/// verified, for the ID and the keys the sync began with: signed after an unlock registered a restored device as new,
+/// it was read by a waiting move as one it had begun, or it replaced the state the move had just saved.
+struct SyncStateWrites: Sendable {
+    /// This device's ID when the sync began, which its engines were built for.
+    let deviceID: UUID
+    /// The lock epoch when the sync began.
+    let epoch: UInt64
+    /// Begun as a writer (`mayWrite`): unlocked, registered and active under an ID this installation holds a key for,
+    /// with no registration under way and no move to a new device ID pending.
+    let permitted: Bool
+}
+
 /// The sync state store the session and its engine use. Everything the engine acts on rather than checks again is
 /// signed by the session as it is written and checked as it is read: pending deletions
 /// (`PendingDeletion.authenticator`, review of milestone 3), the stash (N14) and the state row itself (Z20), whose
@@ -930,6 +981,9 @@ extension VaultSession {
 struct AuthenticatedSyncState: SyncStateStore {
     let base: any SyncStateStore
     let session: VaultSession
+    /// For one sync's engines, carry and re-record, what that sync may save of a vault's state and stash (Z253); `nil`
+    /// elsewhere, where each writer checks the lock epoch and the move itself.
+    var writes: SyncStateWrites? = nil
 
     /// The state as this session signed it for this vault on this device, or `nil` for any other row: the engine
     /// then starts from nothing and replays the log, which rebuilds the erasures too.
@@ -940,7 +994,7 @@ struct AuthenticatedSyncState: SyncStateStore {
 
     /// Signs the state with the account key before it is stored; throws `SyncKeyringError.locked` while locked.
     func saveState(_ state: SyncState) async throws {
-        try await base.saveState(try await session.signedSyncState(state))
+        try await base.saveState(try await session.signedSyncState(state, within: writes))
     }
 
     func stage(_ object: StagedObject) async throws {
@@ -1011,7 +1065,7 @@ struct AuthenticatedSyncState: SyncStateStore {
     }
 
     func signedStash(_ bytes: [UInt8], vaultID: UUID) async throws -> [UInt8] {
-        try await session.signStash(bytes, vaultID: vaultID)
+        try await session.signStash(bytes, vaultID: vaultID, within: writes)
     }
 
     func eraseAll() async throws {

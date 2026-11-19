@@ -134,12 +134,14 @@ extension VaultSession {
     /// every step that had something to do did it: one that failed (a row not read, a seal or commit that threw, a
     /// lock) leaves its entry, and the caller then merges nothing into the vault in this sync, so that the entry is
     /// still carried before any merge.
+    ///
+    /// `writes` binds the states it saves to what the sync that runs it began with (`SyncStateWrites`, Z253).
     @discardableResult
     func carryRestoredWork(
         account: AccountRecord, view: RegistryView?, since epoch: UInt64, in vaults: Set<UUID>,
-        staged: [UUID: [RecordKey: [UUID: UInt64]]] = [:]
+        staged: [UUID: [RecordKey: [UUID: UInt64]]] = [:], within writes: SyncStateWrites? = nil
     ) async -> Bool {
-        guard let syncState, let base = syncSettings?.state, let view else { return false }
+        guard let syncState = syncState(within: writes), let base = syncSettings?.state, let view else { return false }
         let own = account.deviceID
         let parked = Self.parkedDeletionDevice(of: own)
         var finished = true
@@ -587,8 +589,12 @@ extension VaultSession {
     ///
     /// The chain only once a vault needs it, its state lost or not verifying (`RestoredChainRead`, review of round 20,
     /// Z239); one that cannot be read records nothing, and the gate holds for that vault.
-    func recordRestoredWorkLeft(account: AccountRecord, since epoch: UInt64) async {
-        guard let syncState, let base = syncSettings?.state else { return }
+    ///
+    /// `writes` binds the states it saves to what the sync that runs it began with (`SyncStateWrites`, Z253).
+    func recordRestoredWorkLeft(account: AccountRecord, since epoch: UInt64, within writes: SyncStateWrites? = nil)
+        async
+    {
+        guard let syncState = syncState(within: writes), let base = syncSettings?.state else { return }
         await backfillRestoredChains(account: account, since: epoch)
         guard let vaults = try? await vaultDirectory(account).keys else { return }
         var read = RestoredChainRead()
