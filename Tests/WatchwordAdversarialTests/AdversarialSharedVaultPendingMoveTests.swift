@@ -168,8 +168,8 @@ extension AdversarialSharedVaultTests {
     }
 }
 
-/// A sharing state store over `base` whose next reads of one vault's chain row (`SharingStateKey.restoredChain`)
-/// throw, as a busy or damaged database would.
+/// A sharing state store over `base` whose next reads of one vault's chain row (`SharingStateKey.restoredChain`), or
+/// of every vault's, throw, as a busy or damaged database would.
 actor ChainRowUnreadableSharingStore: SharingStateStore {
     struct ReadFailed: Error {}
 
@@ -182,7 +182,8 @@ actor ChainRowUnreadableSharingStore: SharingStateStore {
         self.base = base
     }
 
-    func failNextReads(_ count: Int, in vaultID: UUID) {
+    /// The next `count` reads of `vaultID`'s chain row throw, or of any vault's for `nil`.
+    func failNextReads(_ count: Int, in vaultID: UUID?) {
         failing = count
         failingVault = vaultID
     }
@@ -192,7 +193,7 @@ actor ChainRowUnreadableSharingStore: SharingStateStore {
     func sharedVaultIDs() async throws -> [UUID] { await base.sharedVaultIDs() }
 
     func value(_ key: SharingStateKey, vaultID: UUID) async throws -> [UInt8]? {
-        if failing > 0, key == .restoredChain, vaultID == failingVault {
+        if failing > 0, key == .restoredChain, failingVault == nil || vaultID == failingVault {
             failing -= 1
             refused += 1
             throw ReadFailed()

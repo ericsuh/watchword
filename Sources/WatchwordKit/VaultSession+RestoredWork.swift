@@ -351,6 +351,12 @@ extension VaultSession {
     /// Throws where a chain row could not be read (review of round 19, Z236): read as none, a sharing store that
     /// failed once beside a state that does not verify left the chain empty and the hold open. Every caller fails
     /// closed on it: the gate holds, and nothing is recorded or stopped.
+    ///
+    /// The rows only of vaults that may be shared (review of round 20, Z239): only there does a restore record
+    /// anything (`restoredWork`, `recordRestoredWorkLeft`), so only there is a row written, and a row read elsewhere
+    /// (the Personal vault's, which never exists) let a sharing store that kept failing hold every deletion back for
+    /// good. And it is asked only where a judgement needs it (`RestoredChainRead`): a vault that may be shared whose
+    /// state does not verify, or that has none.
     func restoredChain(account: AccountRecord) async throws -> Set<UUID> {
         var chain: Set<UUID> = []
         if let migration = account.migration, let signingKey = await trustedAccountSigningKey(account),
@@ -367,10 +373,40 @@ extension VaultSession {
                     chain.insert(left.device)
                 }
             }
+            guard isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) else { continue }
             chain.formUnion(try await restoredChainRow(in: vaultID, account: account) ?? [])
         }
         chain.remove(account.deviceID)
         return chain
+    }
+
+    /// `restoredChain`, read the first time a judgement asks for it and kept for the rest of the caller's pass, so
+    /// that the chain rows are read only where they can matter (review of round 20, Z239): for a vault that may be
+    /// shared whose state does not verify, or that has none (`restoredEntries`, `recordRestoredWorkLeft`). A state
+    /// that verifies is the record itself, and a vault that is not shared holds nothing a restore left, so neither
+    /// reads a row, and a sharing store that cannot read one holds back only what depends on it.
+    struct RestoredChainRead {
+        /// The chain, once read.
+        fileprivate(set) var chain: Set<UUID>?
+        /// A row could not be read: asked again, the chain stays unread for the rest of the pass.
+        fileprivate(set) var failed = false
+        /// The vaults whose judgement asked for the chain while it could not be read: each fails closed, and the sync
+        /// says so (`AccountSyncReport.restoredChainUnreadable`).
+        fileprivate(set) var unreadableFor: Set<UUID> = []
+    }
+
+    /// The chain `read` holds, read now if it has not been: `nil` (and `vaultID` noted) where a row cannot be read.
+    func restoredChain(_ read: inout RestoredChainRead, for vaultID: UUID, account: AccountRecord) async -> Set<UUID>? {
+        if let chain = read.chain { return chain }
+        if !read.failed {
+            if let chain = try? await restoredChain(account: account) {
+                read.chain = chain
+                return chain
+            }
+            read.failed = true
+        }
+        read.unreadableFor.insert(vaultID)
+        return nil
     }
 
     /// The earlier IDs `vaultID`'s chain row names (`RestoredChainRow`), if it verifies for this device's ID, or for
@@ -444,6 +480,10 @@ extension VaultSession {
         guard let settings = sharing.settings else { return }
         var devices = Set(entries.values.filter { !Self.isDismissed($0) }.map(\.device))
         devices.remove(account.deviceID)
+        // A keeping write that adds nothing could only put back the row it read: it reads none (review of round 20,
+        // Z239), so that a row that cannot be read, of a vault where nothing was left (the Personal vault's, which
+        // never exists), does not fail the move of every ordinary restore for as long as the sharing store fails.
+        if keeping, devices.isEmpty { return }
         // A row that cannot be read throws (Z236): written without it, a keeping write would drop what it named.
         if keeping { devices.formUnion(try await restoredChainRow(in: vaultID, account: account) ?? []) }
         let keyset = try requireKeys(since: epoch).keyset
@@ -489,9 +529,13 @@ extension VaultSession {
 
     /// What a restore left in `vaultID` and has still to carry, as the hold and the report read it: the entries of the
     /// vault's signed state the person has not stopped waiting for, and the rows `rowsLeftByEarlierIDs` finds. `nil`
-    /// fails closed (review of round 13, L-a): the state could not be read, or the store, or, while `chain` names an
+    /// fails closed (review of round 13, L-a): the state could not be read, or the store, or, while the chain names an
     /// earlier ID, the vault (one that may be shared) holds a state that does not verify, which may have held entries.
-    func restoredEntries(in vaultID: UUID, chain: Set<UUID>, account: AccountRecord) async
+    ///
+    /// The chain is asked for (`chain`, read once for the caller's pass) only by a vault that may be shared whose state
+    /// does not verify, or that has none: elsewhere it decides nothing (review of round 20, Z239). One that cannot be
+    /// read fails closed there (Z236).
+    func restoredEntries(in vaultID: UUID, chain: inout RestoredChainRead, account: AccountRecord) async
         -> [RecordKey: RecordStamp]?
     {
         guard let base = syncSettings?.state else { return [:] }
@@ -503,17 +547,11 @@ extension VaultSession {
         }
         var verified: SyncState?
         if let raw { verified = await verifiedSyncState(raw, vaultID: vaultID) }
-        if raw != nil, verified == nil, !chain.isEmpty,
-            isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID)
-        {
-            return nil
-        }
-        let recorded = (verified?.restoredUnpublished ?? [:]).filter { !Self.isDismissed($0.value) }
-        guard verified == nil else { return recorded }
-        guard
-            let left = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account)
-        else { return nil }
-        return left
+        if let verified { return verified.restoredUnpublished.filter { !Self.isDismissed($0.value) } }
+        guard isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) else { return [:] }
+        guard let names = await restoredChain(&chain, for: vaultID, account: account) else { return nil }
+        if raw != nil, !names.isEmpty { return nil }
+        return await rowsLeftByEarlierIDs(in: vaultID, chain: names, recorded: [:], account: account)
     }
 
     /// Records what `rowsLeftByEarlierIDs` finds in each vault whose state is lost or does not verify as entries of a
@@ -523,12 +561,14 @@ extension VaultSession {
     ///
     /// First the chain rows are filled in from the states that verify (`backfillRestoredChains`, Z222), so that the
     /// row of a vault whose state is damaged later still names its earlier IDs.
+    ///
+    /// The chain only once a vault needs it, its state lost or not verifying (`RestoredChainRead`, review of round 20,
+    /// Z239); one that cannot be read records nothing, and the gate holds for that vault.
     func recordRestoredWorkLeft(account: AccountRecord, since epoch: UInt64) async {
         guard let syncState, let base = syncSettings?.state else { return }
         await backfillRestoredChains(account: account, since: epoch)
-        guard let chain = try? await restoredChain(account: account), !chain.isEmpty,
-            let vaults = try? await vaultDirectory(account).keys
-        else { return }
+        guard let vaults = try? await vaultDirectory(account).keys else { return }
+        var read = RestoredChainRead()
         for vaultID in vaults where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
             let raw: SyncState?
             do {
@@ -537,6 +577,7 @@ extension VaultSession {
                 continue
             }
             if let raw, await verifiedSyncState(raw, vaultID: vaultID) != nil { continue }
+            guard let chain = await restoredChain(&read, for: vaultID, account: account), !chain.isEmpty else { return }
             guard let left = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account),
                 !left.isEmpty || raw != nil
             else { continue }
@@ -579,8 +620,10 @@ extension VaultSession {
     /// for want of a current key for the vault here (registration could not carry it, and nothing has since). A row
     /// that does not open under a key this device holds carries nothing it can read, and is not counted. `nil` where
     /// the state or the store could not be read: the gate then holds.
-    func itemsHoldingRestoredWork(in vaultID: UUID, chain: Set<UUID>, account: AccountRecord) async -> Set<UUID>? {
-        guard let restored = await restoredEntries(in: vaultID, chain: chain, account: account) else { return nil }
+    func itemsHoldingRestoredWork(in vaultID: UUID, chain: inout RestoredChainRead, account: AccountRecord) async
+        -> Set<UUID>?
+    {
+        guard let restored = await restoredEntries(in: vaultID, chain: &chain, account: account) else { return nil }
         guard !restored.isEmpty else { return [] }
         let keys = keys
         let vaultKey = keys.flatMap { currentVaultKey(vaultID, keys: $0, account: account) }
@@ -608,9 +651,9 @@ extension VaultSession {
     /// does, no vault's deletions go out, since one of them may be the source half of a move whose copy is that
     /// work, which has reached nobody (review of round 12, M1; Z44). Fails closed (review of round 13, L-a), except
     /// where nothing will carry it (`restoredWorkReleased`, M3).
-    func holdsRestoredWork(in vaultID: UUID, chain: Set<UUID>, account: AccountRecord) async -> Bool {
+    func holdsRestoredWork(in vaultID: UUID, chain: inout RestoredChainRead, account: AccountRecord) async -> Bool {
         if await restoredWorkReleased(vaultID, account: account) { return false }
-        guard let items = await itemsHoldingRestoredWork(in: vaultID, chain: chain, account: account) else {
+        guard let items = await itemsHoldingRestoredWork(in: vaultID, chain: &chain, account: account) else {
             return true
         }
         return !items.isEmpty
@@ -625,14 +668,13 @@ extension VaultSession {
     func restoredWorkWaiting(account: AccountRecord, since epoch: UInt64) async -> (
         waiting: [UUID: Set<UUID>], keptHere: [UUID: Set<UUID>], mayStopWaiting: Set<UUID>
     ) {
-        guard let vaults = try? await vaultDirectory(account).keys,
-            let chain = try? await restoredChain(account: account)
-        else { return ([:], [:], []) }
+        guard let vaults = try? await vaultDirectory(account).keys else { return ([:], [:], []) }
+        var chain = RestoredChainRead()
         var waiting: [UUID: Set<UUID>] = [:]
         var keptHere: [UUID: Set<UUID>] = [:]
         var mayStopWaiting: Set<UUID> = []
         for vaultID in vaults {
-            let items = await itemsHoldingRestoredWork(in: vaultID, chain: chain, account: account)
+            let items = await itemsHoldingRestoredWork(in: vaultID, chain: &chain, account: account)
             let released = await restoredWorkReleased(vaultID, account: account)
             guard let keys = try? requireKeys(since: epoch) else { return ([:], [:], []) }
             guard let items, !items.isEmpty else { continue }
@@ -682,15 +724,17 @@ extension VaultSession {
         guard mayStopWaitingForRestoredWork(in: vaultID, keys: try requireKeys(since: epoch), account: account) else {
             throw VaultError.restoredWorkCanBeCarried(vaultID)
         }
-        let chain = try await restoredChain(account: account)
         let raw = try await base.loadState(vaultID: vaultID)
         var verified: SyncState?
         if let raw { verified = await verifiedSyncState(raw, vaultID: vaultID) }
-        // A state that does not verify is started over, as a sync would start it over (review of round 13, L-a).
+        // A state that does not verify is started over, as a sync would start it over (review of round 13, L-a). The
+        // chain only then, where it decides something (review of round 20, Z239); one that cannot be read throws.
         var state = verified ?? SyncState(vaultID: vaultID)
-        let found =
-            verified != nil
-            ? [:] : await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account) ?? [:]
+        var found: [RecordKey: RecordStamp] = [:]
+        if verified == nil {
+            let chain = try await restoredChain(account: account)
+            found = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account) ?? [:]
+        }
         let waiting = state.restoredUnpublished.filter { !Self.isDismissed($0.value) }.merging(found) { kept, _ in kept
         }
         guard !waiting.isEmpty || (raw != nil && verified == nil) else { return }

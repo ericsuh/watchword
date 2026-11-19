@@ -360,9 +360,10 @@ extension VaultSession {
         if let raw { state = await verifiedSyncState(raw, vaultID: vaultID) }
         let known = state?.known ?? [:]
         // What a restore left here and could not carry yet: perhaps a move's copy, whose original's deletion is
-        // another vault's (review of round 12, M1). Fails closed (review of round 13, L-a).
-        guard let chain = try? await restoredChain(account: account) else { return true }
-        if await holdsRestoredWork(in: vaultID, chain: chain, account: account) { return true }
+        // another vault's (review of round 12, M1). Fails closed (review of round 13, L-a), on a chain row that cannot
+        // be read too (Z236), but only where the chain decides something (review of round 20, Z239).
+        var chain = RestoredChainRead()
+        if await holdsRestoredWork(in: vaultID, chain: &chain, account: account) { return true }
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
         // move's copy published by a build from before this was refused. A value it stamped, never its clock's entry
