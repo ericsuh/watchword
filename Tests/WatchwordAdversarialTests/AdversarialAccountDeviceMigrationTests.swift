@@ -147,6 +147,56 @@ extension AdversarialAccountTests {
         #expect(loaded == SyncState(vaultID: fixture.personal))
     }
 
+    /// Threat: none needed but a sync state file that fails one write at a restore's unlock, and an app relaunched
+    /// before the next; the review of round 11 (I3). The unlock made the move again before it read which vaults are
+    /// shared, and until it has read them every vault but the Personal one is held closed: the deletion of an item of a
+    /// private vault found no key, and (now that such a deletion is parked rather than stopping the move, M1) would
+    /// wait parked for the next sync. The markers are read first, and the deletion is carried as the new ID's.
+    @Test("the move an unlock makes again reads which vaults are shared first, and carries a private vault's deletion")
+    func unlockRetryReadsMarkersFirst() async throws {
+        let fixture = try await Self.fixture(seed: 18_600)
+        let other = try await fixture.enrolled(Self.deviceC)
+        let vaultID = try await fixture.a.session.createVault(name: "Other").id
+        let doomed = try await fixture.a.session.save(
+            Item(vaultID: vaultID, title: "Deleted on A, never synced", scopes: [], fields: []))
+        try await fixture.a.session.trash(id: doomed.id)
+        try await fixture.a.session.sync()
+        try await other.session.sync()
+        try await fixture.a.session.deletePermanently(id: doomed.id)
+
+        let original = try #require(fixture.a.store as? InMemoryRecordStore)
+        let store = InMemoryRecordStore()
+        try await store.commit(
+            StoreChange(
+                account: .create(try #require(await original.loadAccount())), upserts: await original.allRecords))
+        let raw = try #require(fixture.a.sync?.state)
+        let state = InterceptingStateStore()
+        for vault in [fixture.personal, vaultID] {
+            if let saved = try await raw.loadState(vaultID: vault) { await state.saveState(saved) }
+            for deletion in try await raw.pendingDeletions(vaultID: vault).values {
+                try await state.addPendingDeletion(deletion)
+            }
+        }
+        let restored = TestVault(
+            store: store, sync: SyncSettings(state: state, transport: fixture.transport), seed: 18_601,
+            deviceName: "Restored phone", deviceKeys: FakeDeviceKeyStore(seed: 18_601))
+        await state.failNextPendingDeletionWrite()
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.migration != nil, "the interrupted move was not recorded")
+
+        await restored.session.lock()
+        let relaunched = restored.relaunched(seed: 18_602)
+        try await relaunched.session.unlock(password: TestVault.password)
+        let account = try #require(try await store.loadAccount())
+        #expect(account.migration == nil, "the unlock did not finish the move")
+        let pending = try await state.base.pendingDeletions(vaultID: vaultID)
+        let carried = try #require(pending[RecordKey(recordID: doomed.id, kind: .item)])
+        #expect(carried.stamp.device == account.deviceID, "parked for want of the markers, not carried")
+        try await relaunched.session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed.id)) == nil, "the deletion never went out")
+    }
+
     /// Threat: none needed; the review of round 11 (L1). A password change reads the account record, derives and signs
     /// across several awaits, and commits the record it read. A move completed during those awaits cleared the record's
     /// migration, and the commit wrote it back: the move ran again after the device had published under its new ID

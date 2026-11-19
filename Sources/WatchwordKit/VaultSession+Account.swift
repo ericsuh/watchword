@@ -768,8 +768,19 @@ extension VaultSession {
         guard view.state.pendingCredentials.isEmpty, !(await passwordChangePending(account)), epoch == lockEpoch
         else { return }
         // A move of an earlier ID's sync state that did not finish is made first, so that a registration below starts
-        // from a whole state; one that fails again throws, and runs again at the next unlock (Z181).
-        try await completeDeviceMigration(account: account)
+        // from a whole state; one that fails again throws, after the rest, and runs again at the next unlock (Z181).
+        // The markers first: until they are read every vault but the Personal one is held closed, and a deletion
+        // there would be parked for want of a key rather than carried (review of round 11, I3).
+        var moveFailure: (any Error)?
+        if account.migration != nil {
+            await loadSharedMarkersIfNeeded(force: true)
+            guard epoch == lockEpoch else { return }
+            do {
+                try await completeDeviceMigration(account: account)
+            } catch {
+                moveFailure = error
+            }
+        }
         let account = (try await loadAccount()) ?? account
         guard epoch == lockEpoch else { return }
         let ownKey = try await deviceKeys.publicKey(accountID: accountID, deviceID: account.deviceID)
@@ -778,8 +789,10 @@ extension VaultSession {
         } else if view.state.standing(of: account.deviceID) == .unknown {
             try await registerThisDevice(account: account, keys: keys, asNewDevice: false)
         }
-        // Deletions fetched while locked become this device's own now that it can sign.
+        // Deletions fetched while locked become this device's own now that it can sign, whether or not the move
+        // finished (I3): it has nothing to do with them.
         try? await adoptVerifiedDeletions(account: (try? await loadAccount()) ?? account)
+        if let moveFailure { throw moveFailure }
     }
 
     /// For an account created before the device registry existed — no registry entries, no published header, no
