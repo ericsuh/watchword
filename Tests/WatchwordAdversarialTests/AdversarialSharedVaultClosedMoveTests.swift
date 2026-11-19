@@ -6,8 +6,9 @@ import WatchwordModel
 import WatchwordPresentation
 import WatchwordSharing
 import WatchwordStore
-import WatchwordSync
 import WatchwordTestSupport
+
+@testable import WatchwordSync
 
 // The review of round 11 (docs/06-adversarial-review.md Z185; M1): a restore's move of its old device ID's deletions
 // when one of them is in a shared vault this device holds closed. In the suite "shared vaults through the session".
@@ -291,9 +292,9 @@ extension AdversarialSharedVaultTests {
     /// hold read it through `try?`, and a state that does not verify reads as none: the hold saw no entry, the copy
     /// was still the old device ID's, and the original's deletion went out while the copy existed on this device only.
     /// The hold now fails closed on a state it cannot trust, and the sync finds the copy again from the row the old ID
-    /// left (the old ID read from the entries the damaged state still names), records it in a state it signs, and
-    /// names it; once the vault opens, the copy is carried and published first. (An attacker who can edit the file
-    /// can delete the row as well; the hold is for damage, not for them.)
+    /// left (the old ID read from the chain row the move signed, never from the damaged state, Z216), records it in a
+    /// state it signs, and names it; once the vault opens, the copy is carried and published first. (An attacker who
+    /// can edit the file can delete the row as well; the hold is for damage, not for them.)
     @Test("a restore's uncarried copy holds deletions back even after its vault's sync state is damaged")
     func restoredWorkSurvivesAnEditedState() async throws {
         let household = SharedVaultHousehold()
@@ -567,7 +568,8 @@ extension AdversarialSharedVaultTests {
         if inflated {
             // Read as every merge reads it, capped at the version's own number: still all of the old ID's work.
             #expect(
-                ItemMerge.seenByOthers(crafted, origin: revision, of: oldID, besides: UUID()) >= unpublished,
+                ItemMerge.seenByOthers(ItemState(crafted, origin: revision), of: oldID, besides: UUID())
+                    >= unpublished,
                 "the claim covers none of the old ID's unpublished work: nothing is tested")
         }
         try await owner.session.overwriteAsAModifiedClient(crafted)
@@ -606,9 +608,9 @@ extension AdversarialSharedVaultTests {
     /// holding the sibling's published work was recorded as left by an earlier ID with nothing published, and the
     /// carry wrote what no listed segment of the sibling's stream showed again as this device's. With the stream
     /// withheld, that was all of it: every member then held the sibling's values twice, under two stamps, as conflicts
-    /// in every group it wrote. An earlier ID of this installation registered before this device did, and this
-    /// device's registration entry descends from its own: from a state that does not verify, only such an ID is read.
-    /// The sibling, enrolled after this device, is not; and its published work is never renamed.
+    /// in every group it wrote. No ID is read from a state that does not verify now (Z216; Z211's rule, an ID whose
+    /// registration this device's own descends from, kept out this sibling, enrolled after this device, but not one
+    /// enrolled before a restore): the sibling's published work is never renamed.
     @Test(
         "a sibling device named in an edited state as a restore's earlier ID keeps its published work",
         arguments: [false, true])
@@ -665,15 +667,98 @@ extension AdversarialSharedVaultTests {
         #expect(!atOwner.hasConflicts, "the sibling's values came back beside themselves")
         #expect(!(try await sibling.session.item(id: saved.id)).hasConflicts)
     }
+
+    /// Threat: A8, who can edit this device's sync state and sharing state files but not reach the Keychain, and in
+    /// the second case also the sync store (A1), which withholds the sibling's stream from this device (review of
+    /// round 16, Z216: Z211 on a restored device). The member's device has a sibling, enrolled before the member's
+    /// store is restored onto other hardware. The restored device registers a new ID, from the registry it holds,
+    /// which already lists the sibling: so the sibling's registration is an ancestor of the restored device's, and
+    /// Z211's rule read it from a state that does not verify as an earlier ID of this installation. A8 names it there
+    /// and deletes the stream index; with the sibling's stream withheld, the sibling's published item was recorded as
+    /// a restore's unpublished work and written again as the restored device's, so that every member held the
+    /// sibling's values twice. The chain is no longer read from a state that does not verify: it comes from the move's
+    /// own signed record (`RestoredChainRow`) and the states that verify, and names only the IDs this installation
+    /// had.
+    @Test(
+        "a sibling enrolled before a restore, named in an edited state as an earlier ID, keeps its published work",
+        arguments: [false, true])
+    func plantedChainIDOfASiblingEnrolledBeforeARestore(withheld: Bool) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 30_900)
+        let member = members[0]
+        let sibling = try await household.secondDevice(of: member)
+        try await sibling.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await Self.syncAll([owner, member, sibling])
+        let saved = try await sibling.session.save(Self.bank(in: vaultID))
+        var edited = try await sibling.session.item(id: saved.id)
+        edited.title = "Bank, by the sibling"
+        _ = try await sibling.session.save(edited)
+        try await Self.syncAll([sibling, owner, member])
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        let siblingDevice = try #require(await sibling.session.deviceIDForTest())
+        let before = try #require(try await member.vault.store.record(key))
+        #expect(before.deviceID == siblingDevice, "the sibling's row is not the sibling's: nothing is tested")
+
+        // The member's store restored onto other hardware, with nothing left unpublished; the move done.
+        let oldID = try #require(await member.session.deviceIDForTest())
+        let restored = try await Self.restoredOntoOtherHardware(member, household: household, seed: 30_901)
+        _ = try await restored.session.syncAll()
+        _ = try await restored.session.syncAll()
+        let newID = try #require(await restored.session.deviceIDForTest())
+        #expect(newID != oldID, "the restore registered no new ID: nothing is tested")
+
+        let raw = try #require(restored.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await raw.loadState(vaultID: vaultID))
+        state.restoredUnpublished[key] = RecordStamp(version: 0, device: siblingDevice)
+        state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+        await raw.tamper(state)
+        await member.state.tamper(.streamIndex, vaultID: vaultID, value: nil)
+        await restored.session.lock()
+        let view = WithholdingTransport(base: household.transport)
+        if withheld {
+            let stream = SyncObjectLocation.vaultPrefix(vaultID) + "log/\(siblingDevice.uuidString)/"
+            await view.withhold(Set(await household.transport.list(prefix: stream)))
+        }
+        let relaunched = TestVault(
+            store: restored.store, keychain: restored.keychain, biometrics: restored.biometrics,
+            clock: restored.clock, sync: SyncSettings(state: raw, transport: view), seed: 30_902,
+            deviceKeys: restored.deviceKeys)
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+        #expect(try #require(await relaunched.session.deviceIDForTest()) == newID)
+
+        _ = try await relaunched.session.syncAll()
+        _ = try await relaunched.session.syncAll()
+        let after = try await restored.store.record(key)
+        #expect(after?.deviceID != newID, "the sibling's published row was written again as the restored device's")
+        if !withheld { #expect(after?.deviceID == siblingDevice) }
+        let written = try await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(!written.values.contains { $0.device == siblingDevice }, "the sibling was recorded as an earlier ID")
+        for _ in 0..<3 {
+            _ = try await relaunched.session.syncAll()
+            try await Self.syncAll([owner, sibling])
+        }
+        let atOwner = try await owner.session.item(id: saved.id)
+        #expect(atOwner.title == "Bank, by the sibling")
+        #expect(!atOwner.hasConflicts, "the sibling's values came back beside themselves")
+        #expect(!(try await sibling.session.item(id: saved.id)).hasConflicts)
+    }
 }
 
 /// A record store that locks a session from inside the `n`-th read, from now on, of one of `keys` while that session
 /// is unlocked: a lock (the person, or auto-lock) landing at each suspension of a restore's carry in turn. With no
 /// session armed it only counts those reads.
+/// It can also lock that session just after the `n`-th commit, from now on, that writes one of `keys` (review of round
+/// 16, Z217): a lock landing inside the carry's own commit, after the row is written.
 actor CarryLockingStore: RecordStore {
     let base: any RecordStore
     private var target: (session: VaultSession, keys: Set<RecordKey>, skipping: Int)?
+    private var commitTarget: (session: VaultSession, keys: Set<RecordKey>, skipping: Int)?
     private(set) var reads = 0
+    private(set) var commits = 0
     private(set) var locks = 0
     private var counting: Set<RecordKey> = []
     private var failing: Set<RecordKey> = []
@@ -686,6 +771,11 @@ actor CarryLockingStore: RecordStore {
     func count(_ keys: Set<RecordKey>) {
         counting = keys
         reads = 0
+        commits = 0
+    }
+
+    func lock(_ session: VaultSession, onCommitOf keys: Set<RecordKey>, skipping: Int) {
+        commitTarget = (session, keys, skipping)
     }
 
     func lock(_ session: VaultSession, onRead keys: Set<RecordKey>, skipping: Int) {
@@ -725,8 +815,130 @@ actor CarryLockingStore: RecordStore {
             throw RecordStoreError.checkpointIncomplete
         }
         try await base.commit(change)
+        guard
+            change.upserts.contains(where: { counting.contains($0.key) || commitTarget?.keys.contains($0.key) == true })
+        else { return }
+        if change.upserts.contains(where: { counting.contains($0.key) }) { commits += 1 }
+        if let commitTarget, change.upserts.contains(where: { commitTarget.keys.contains($0.key) }),
+            (try? await commitTarget.session.state()) == .unlocked
+        {
+            if commitTarget.skipping == 0 {
+                self.commitTarget = nil
+                locks += 1
+                await commitTarget.session.lock()
+            } else {
+                self.commitTarget = (commitTarget.session, commitTarget.keys, commitTarget.skipping - 1)
+            }
+        }
     }
     func eraseAll() async throws { try await base.eraseAll() }
+}
+
+/// A sync state store that locks a session from inside the `n`-th call, from now on, that reads or records one
+/// vault's pending deletions (`pendingDeletions(vaultID:)`, `addPendingDeletion`) while that session is unlocked: a
+/// lock landing at each of those suspensions of a restore's carry in turn (review of round 16, Z217). With no session
+/// armed it only counts those calls.
+actor CarryLockingSyncState: SyncStateStore {
+    let base: any SyncStateStore
+    let vaultID: UUID
+    private var target: (session: VaultSession, skipping: Int)?
+    private(set) var calls = 0
+    private(set) var locks = 0
+
+    init(base: any SyncStateStore, vaultID: UUID) {
+        self.base = base
+        self.vaultID = vaultID
+    }
+
+    func lock(_ session: VaultSession, onCall skipping: Int) {
+        target = (session, skipping)
+        calls = 0
+    }
+
+    private func suspend(in vault: UUID) async {
+        guard vault == vaultID else { return }
+        calls += 1
+        guard let target, (try? await target.session.state()) == .unlocked else { return }
+        if target.skipping == 0 {
+            self.target = nil
+            locks += 1
+            await target.session.lock()
+        } else {
+            self.target = (target.session, target.skipping - 1)
+        }
+    }
+
+    func loadState(vaultID: UUID) async throws -> SyncState? { try await base.loadState(vaultID: vaultID) }
+    func saveState(_ state: SyncState) async throws { try await base.saveState(state) }
+    func stage(_ object: StagedObject) async throws { try await base.stage(object) }
+    func staged(vaultID: UUID) async throws -> [StagedObject] { try await base.staged(vaultID: vaultID) }
+    func unstage(_ locations: [SyncObjectLocation]) async throws { try await base.unstage(locations) }
+    func prepared(_ deletion: PendingDeletion) async throws -> PendingDeletion { try await base.prepared(deletion) }
+
+    func addPendingDeletion(_ deletion: PendingDeletion) async throws {
+        try await base.addPendingDeletion(deletion)
+        await suspend(in: deletion.record.vaultID)
+    }
+
+    func pendingDeletions(vaultID: UUID) async throws -> [RecordKey: PendingDeletion] {
+        let deletions = try await base.pendingDeletions(vaultID: vaultID)
+        await suspend(in: vaultID)
+        return deletions
+    }
+
+    func removePendingDeletions(_ deletions: [RecordKey: RecordStamp], vaultID: UUID) async throws {
+        try await base.removePendingDeletions(deletions, vaultID: vaultID)
+    }
+
+    func quarantine(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
+        try await base.quarantine(entry, vaultID: vaultID)
+    }
+
+    func quarantined(vaultID: UUID) async throws -> [SyncEntry] { try await base.quarantined(vaultID: vaultID) }
+
+    func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) async throws {
+        try await base.discardQuarantined(entries, vaultID: vaultID)
+    }
+
+    func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) async throws -> Bool {
+        try await base.holdsQuarantined(entry, vaultID: vaultID)
+    }
+
+    func quarantineUsage(vaultID: UUID) async throws -> QuarantineUsage {
+        try await base.quarantineUsage(vaultID: vaultID)
+    }
+
+    func stash(vaultID: UUID) async throws -> [UInt8]? { try await base.stash(vaultID: vaultID) }
+    func saveStash(_ bytes: [UInt8], vaultID: UUID) async throws { try await base.saveStash(bytes, vaultID: vaultID) }
+    func eraseAll() async throws { try await base.eraseAll() }
+}
+
+/// A view of a transport that refuses, as unavailable, every object created under one prefix while `refusing` is set,
+/// and passes everything else through: a device that downloads and merges a vault's log but publishes nothing there.
+actor CreateRefusingTransport: SyncTransport {
+    let base: any SyncTransport
+    private var refusing: String?
+
+    init(base: any SyncTransport) {
+        self.base = base
+    }
+
+    func refuse(under prefix: String?) {
+        refusing = prefix
+    }
+
+    func list(prefix: String) async throws -> [String] { try await base.list(prefix: prefix) }
+
+    func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
+        try await base.fetch(name, maximumLength: maximumLength)
+    }
+
+    func create(_ name: String, contents: [UInt8]) async throws {
+        if let refusing, name.hasPrefix(refusing) { throw SyncTransportError.unavailable }
+        try await base.create(name, contents: contents)
+    }
+
+    func delete(_ name: String) async throws { try await base.delete(name) }
 }
 
 extension AdversarialSharedVaultTests {
@@ -735,6 +947,15 @@ extension AdversarialSharedVaultTests {
     static func restoredEditAndDeletion(seed: UInt64) async throws -> (
         household: SharedVaultHousehold, owner: SharingAccount, restored: TestVault, store: CarryLockingStore,
         edited: UUID, deleted: UUID
+    ) {
+        let run = try await restoredEditAndDeletion(seed: seed, lockingState: false)
+        return (run.household, run.owner, run.restored, run.store, run.edited, run.deleted)
+    }
+
+    /// The same, with the restored device's sync state over `CarryLockingSyncState` when `lockingState`.
+    static func restoredEditAndDeletion(seed: UInt64, lockingState: Bool) async throws -> (
+        household: SharedVaultHousehold, owner: SharingAccount, restored: TestVault, store: CarryLockingStore,
+        state: CarryLockingSyncState?, edited: UUID, deleted: UUID
     ) {
         let household = SharedVaultHousehold()
         let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: seed)
@@ -750,21 +971,84 @@ extension AdversarialSharedVaultTests {
         await member.session.lock()
         await member.vault.forgetDeviceKey(accountID: member.accountID)
         let store = CarryLockingStore(base: member.vault.store)
+        var sync = try #require(member.vault.sync)
+        let state = lockingState ? CarryLockingSyncState(base: sync.state, vaultID: vaultID) : nil
+        if let state { sync.state = state }
         let restored = TestVault(
             store: store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
-            clock: member.vault.clock, sync: member.vault.sync, seed: seed + 1, deviceKeys: member.vault.deviceKeys)
+            clock: member.vault.clock, sync: sync, seed: seed + 1, deviceKeys: member.vault.deviceKeys)
         await restored.session.configureSharing(
             SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
         try await restored.session.unlock(password: TestVault.password)
-        return (household, owner, restored, store, edited.id, deleted.id)
+        return (household, owner, restored, store, state, edited.id, deleted.id)
+    }
+
+    /// A restore whose carry commits a row and then rewrites the pending deletion of the same record (review of round
+    /// 16, Z217): the member renames an item of a shared vault and deletes it while the owner edits another field, and
+    /// syncs over a view that publishes nothing in the vault, so that the owner's edit, which the deletion had not
+    /// seen, is merged and kept after the deletion beside the unpublished tombstone; then the store is restored onto
+    /// other hardware. The carry writes the kept row again as the new ID's (a commit) and then the tombstone's erased
+    /// row (with the keys read again after that commit).
+    static func restoredDeletionBesideAKeptEdit(seed: UInt64) async throws -> (
+        household: SharedVaultHousehold, owner: SharingAccount, restored: TestVault, store: CarryLockingStore,
+        item: UUID
+    ) {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: seed)
+        let member = members[0]
+        let saved = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+        let atOwner = try await owner.session.item(id: saved.id)
+        _ = try await owner.session.save(Self.setting(.username, to: "owner-user", in: atOwner))
+        try await owner.session.sync()
+        var renamed = try await member.session.item(id: saved.id)
+        renamed.title = "Bank, renamed"
+        _ = try await member.session.save(renamed)
+        try await member.session.trash(id: saved.id)
+        try await member.session.deletePermanently(id: saved.id)
+
+        // Synced over a view that publishes nothing in the vault: the owner's edit is merged, nothing goes out.
+        await member.session.lock()
+        let sync = try #require(member.vault.sync)
+        let view = CreateRefusingTransport(base: household.transport)
+        await view.refuse(under: SyncObjectLocation.vaultPrefix(vaultID))
+        let offline = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: SyncSettings(state: sync.state, transport: view), seed: seed + 1,
+            deviceKeys: member.vault.deviceKeys)
+        await offline.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await offline.session.unlock(password: TestVault.password)
+        _ = try? await offline.session.syncAll()
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        #expect(try await member.vault.store.record(key) != nil, "no version was kept after the deletion")
+        #expect(
+            try await sync.state.pendingDeletions(vaultID: vaultID)[key] != nil,
+            "the deletion went out, or is gone: nothing is tested")
+        await offline.session.lock()
+
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let store = CarryLockingStore(base: member.vault.store)
+        let restored = TestVault(
+            store: store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: sync, seed: seed + 2, deviceKeys: member.vault.deviceKeys)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+        return (household, owner, restored, store, saved.id)
     }
 
     /// Threat: none needed but a lock (the person, or auto-lock) during a sync that carries a restore's work (review of
     /// round 15, Z212). The carry took the keys and the vault's key once per vault and used them after its reads and
     /// commits had suspended it: `lock()` zeroises both, and reading a zeroised key traps, so a lock landing there
     /// crashed the app. The lock lands at each read of the carried records in turn: each sync stops, and once unlocked
-    /// again the carry finishes and the members get the edit and the deletion.
-    @Test("a lock at any read of a restore's carry stops the sync and loses nothing")
+    /// again the carry finishes and the members get the edit and the deletion. The same for a lock inside each call
+    /// that reads or records the vault's pending deletions (`CarryLockingSyncState`), the carry's read of them before
+    /// it reads the signing key again among them, and inside the carry's commit of a row whose record also has a
+    /// tombstone to rewrite (`restoredDeletionBesideAKeptEdit`), before the keys are read again for the tombstone's
+    /// erased row (review of round 16, Z217): with either read replaced by keys held from before the suspension, the
+    /// test traps (checked by reverting each).
+    @Test("a lock at any read, deletion read or commit of a restore's carry stops the sync and loses nothing")
     func lockDuringTheCarry() async throws {
         func carried(_ run: (edited: UUID, deleted: UUID)) -> Set<RecordKey> {
             [RecordKey(recordID: run.edited, kind: .item), RecordKey(recordID: run.deleted, kind: .item)]
@@ -790,6 +1074,59 @@ extension AdversarialSharedVaultTests {
             #expect(
                 (try? await run.owner.session.item(id: run.deleted)) == nil,
                 "the deletion never arrived after a lock at read \(skipping)")
+        }
+
+        // Inside each read or record of the vault's pending deletions, the carry's among them.
+        let counted = try await Self.restoredEditAndDeletion(seed: 30_410, lockingState: true)
+        let counter = try #require(counted.state)
+        await counter.lock(counted.restored.session, onCall: .max)
+        _ = try await counted.restored.session.syncAll()
+        let calls = await counter.calls
+        #expect(calls >= 1, "the sync read no pending deletion of the vault: nothing is tested")
+        for skipping in 0..<calls {
+            let run = try await Self.restoredEditAndDeletion(seed: 30_410, lockingState: true)
+            let state = try #require(run.state)
+            await state.lock(run.restored.session, onCall: skipping)
+            _ = try? await run.restored.session.syncAll()
+            #expect(await state.locks == 1, "no lock landed at deletion call \(skipping)")
+            try await run.restored.session.unlock(password: TestVault.password)
+            _ = try await run.restored.session.syncAll()
+            _ = try await run.restored.session.syncAll()
+            try await Self.syncAll([run.owner])
+            #expect(
+                try await run.owner.session.item(id: run.edited).title == "Bank, renamed",
+                "the edit never arrived after a lock at deletion call \(skipping)")
+            #expect(
+                (try? await run.owner.session.item(id: run.deleted)) == nil,
+                "the deletion never arrived after a lock at deletion call \(skipping)")
+        }
+
+        // Inside each commit of the carried record, the carry's among them, before its tombstone is rewritten.
+        let kept = try await Self.restoredDeletionBesideAKeptEdit(seed: 30_420)
+        let keptKey = RecordKey(recordID: kept.item, kind: .item)
+        await kept.store.count([keptKey])
+        _ = try await kept.restored.session.syncAll()
+        let commits = await kept.store.commits
+        #expect(commits >= 1, "the carry committed nothing of the record: nothing is tested")
+        for skipping in 0..<commits {
+            let run = try await Self.restoredDeletionBesideAKeptEdit(seed: 30_420)
+            let key = RecordKey(recordID: run.item, kind: .item)
+            await run.store.lock(run.restored.session, onCommitOf: [key], skipping: skipping)
+            _ = try? await run.restored.session.syncAll()
+            #expect(await run.store.locks == 1, "no lock landed at commit \(skipping)")
+            try await run.restored.session.unlock(password: TestVault.password)
+            for _ in 0..<3 {
+                _ = try await run.restored.session.syncAll()
+                try await Self.syncAll([run.owner])
+            }
+            let here = try await run.restored.session.item(id: run.item)
+            let atOwner = try await run.owner.session.item(id: run.item)
+            #expect(
+                atOwner.fields.contains { $0.kind == .username && $0.value == "owner-user" },
+                "the owner's edit kept after the deletion was lost after a lock at commit \(skipping)")
+            #expect(
+                ItemMerge.sameState(here, atOwner),
+                "the restored device and the owner hold different items after a lock at commit \(skipping)")
         }
     }
 }

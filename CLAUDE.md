@@ -843,12 +843,14 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   of that work, the vault deleted or left (`restoredWorkReleased`, reported as `restoredWorkKeptHere`), or the person
   (`stopWaitingForRestoredWork`, one action per vault, offered and accepted only where the vault has no current key
   here or a disputed owner, Z205; it marks the entries `dismissedVersion`) ends the hold (Z192, Z199). A restore's
-  chain read from a state that does not verify names only IDs this account's registry lists whose registration this
-  device's own registration entry descends from (`earlierRegisteredIDs`, Z206, Z211). Old hardware still running
-  under the old ID that publishes the same work later leaves members both copies, recorded (Z198). A version kept
-  after this device's own pending deletion holds no deletion back (Z202, the same bound as V46's non-publishing one,
-  in `waitsOnlyBehind`), and
-  only pending deletions read through `syncState` (the session's signed ones) count there: never decide on
+  chain of earlier IDs (`restoredChain`) is the move under way, the entries of states that verify, and each vault's
+  chain row (`RestoredChainRow`, `WWRC`, signed, bound to the vault and this device's ID), which the move writes
+  before the vault's state and each later save of the entries rewrites, so it outlives a damaged state (Z200): never
+  read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206, Z211, Z216:
+  a restored device's registration descends from every sibling enrolled before the restore, so the registry cannot
+  tell them apart). Old hardware still running under the old ID that publishes the same work later leaves members both
+  copies, recorded (Z198). A version kept after this device's own pending deletion holds no deletion back (Z202, the
+  same bound as V46's non-publishing one, in `waitsOnlyBehind`), and only pending deletions read through `syncState` (the session's signed ones) count there: never decide on
   `syncSettings.state`'s raw `pendingDeletions` without checking the signature (Z203).
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
   whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's
@@ -1022,9 +1024,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the gap collection left; their tombstones are judged like a segment's (Z21), with nobody exempt, since a
   snapshot's signer chose the device its entry names, and with the pass's segments recorded first (Z34). Do not
   refuse them outright: a stream whose first segments were collected would stop at every replay.
-- Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`, `WWMD`, `WWVK`, `WWTO`) or re-verified on
-  load; the owner's pin anchors a saved ledger, and a device keeps the ledger of a vault it left or was removed from
-  (S26).
+- Local sharing state is signed by the account (`WWML`, `WWRP`, `WWSI`, `WWMD`, `WWVK`, `WWTO`, `WWRC`) or
+  re-verified on load; the owner's pin anchors a saved ledger, and a device keeps the ledger of a vault it left or was
+  removed from (S26).
 
 ### Device registry and account objects (`docs/02-architecture.md` §7.7, §7.8)
 

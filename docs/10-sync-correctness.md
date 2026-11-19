@@ -559,7 +559,11 @@ Whatever an honest `x` saw, `o` published, and the row's versions are ones the j
 `o` counts there only once `o`'s stream has carried it, S46). A downloaded version of `x` that nothing has judged yet
 is no evidence: a member who may write can claim any `seen` vector, and before Z208 such a claim made the carry find
 nothing above `p'` to carry, drop the entry, and leave `o`'s work for every judge to hold aside. A shared vault's log is
-whole, so what an honest `x` saw of `o` is in `o`'s own segments, merged (the index) or downloaded. Before Z197 only `p` was used and every vector was renamed:
+whole from the day it was shared, so what an honest `x` saw of `o` since then is in `o`'s own segments, merged (the
+index) or downloaded. Not what `o` published while the vault was private, if `o` is an owner's device: those segments
+may have been collected under a snapshot before sharing (Z144), and only `p` bounds that work; with `o`'s state lost or
+edited (A8), `p` reads as 0 and the carry renames it, so that members hold it twice, as conflicts, and lose neither
+(Z218, accepted). Before Z197 only `p` was used and every vector was renamed:
 with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
 `(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every
 member's judge failed (2) for it.

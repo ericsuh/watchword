@@ -611,10 +611,10 @@ extension MergeModel {
     /// published: lost, rolled back, saved before a later publish), against `others`, versions other devices stored:
     ///
     /// 1. the carry commutes with merges outside the field order: for every `b` that holds nothing of the earlier ID
-    ///    above `published`, `R(a ⊔ b)` equals `R(a) ⊔ b`, and in the field order too unless `a`'s renamed order and
-    ///    `b`'s tie at one version; where they tie, only `R(a) ⊔ b` is what every device holding `b` holds once it
-    ///    merges the carry, so the carry is made before the merge (`checkCarryOrder`, review of round 14, L1, and of
-    ///    round 15, Z210);
+    ///    above `published`, `R(a ⊔ b)` equals `R(a) ⊔ b`, and in the field order too unless `a`'s renamed order
+    ///    and `b`'s tie at one version; where they tie, only `R(a) ⊔ b` is what every device holding `b` holds once
+    ///    it merges the carry, so the carry is made before the merge (`checkCarryOrder`, review of round 14, L1, and
+    ///    of round 15, Z210);
     /// 2. it is idempotent: `R(R(a)) == R(a)`, for `given` too;
     /// 3. it keeps supersession and coverage: for every pair of stamped parts of `a` and `b`, one contains the other's
     ///    revision exactly when their images do;
@@ -724,12 +724,12 @@ extension MergeModel {
     /// what every device holding `b` holds once it merges the published carry, `b ⊔ R(a)`; the restored device that
     /// carries before it merges (`VaultSession.syncAll`) holds `R(a) ⊔ b`. That the two agree, and that merging `b`
     /// again changes nothing, is the join's commutativity and idempotence: checked, but true of any renaming. The law
-    /// proper is about the other order: renamed after the merge, `R(a ⊔ b)` must equal the reference in every part but
-    /// the field order, and in the order too unless `a`'s renamed order and `b`'s tie at one version (the order is a
-    /// register whose later write wins, two concurrent orders at one version are ordered by device ID, and the new ID
-    /// can rank otherwise against a third device than the earlier ID did). Where they tie it differs, which is why the
-    /// session carries first; the exhaustive exploration asserts that such cases occur (`tiedCarries`), so that the
-    /// model goes on showing that order to be wrong. No model law sees the session's own order:
+    /// proper is about the other order: renamed after the merge, `R(a ⊔ b)` must equal the reference in every part
+    /// but the field order, and in the order too unless `a`'s renamed order and `b`'s tie at one version (the order is
+    /// a register whose later write wins, two concurrent orders at one version are ordered by device ID, and the new
+    /// ID can rank otherwise against a third device than the earlier ID did). Where they tie it differs, which is why
+    /// the session carries first; the exhaustive exploration asserts that such cases occur (`tiedCarries`), so that
+    /// the model goes on showing that order to be wrong. No model law sees the session's own order:
     /// `carryBeforeTheMergeKeepsTheFieldOrder` (the shared-vault adversarial suite) fails if the session merges first.
     /// Returns whether they tied.
     mutating func checkCarryOrder(

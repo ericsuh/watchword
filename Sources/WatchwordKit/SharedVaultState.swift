@@ -432,16 +432,27 @@ enum SignedLocalSet {
         _ bytes: [UInt8], magic: [UInt8], itemLength: Int, account: PublicKeyBundle, vaultID: UUID,
         binding: [UInt8] = []
     ) -> [[UInt8]]? {
+        parse(
+            bytes, magic: magic, itemLength: itemLength, accountID: account.accountID, signingKey: account.signingKey,
+            vaultID: vaultID, binding: binding)
+    }
+
+    /// As `parse(_:magic:itemLength:account:vaultID:binding:)`, with the account's public signing key alone: the
+    /// Keychain's copy (`accountSigningKey`) where the session is locked.
+    static func parse(
+        _ bytes: [UInt8], magic: [UInt8], itemLength: Int, accountID: UUID, signingKey: [UInt8], vaultID: UUID,
+        binding: [UInt8] = []
+    ) -> [[UInt8]]? {
         guard bytes.count > 64 else { return nil }
         let body = Array(bytes[..<(bytes.count - 64)])
         guard
             (try? Signatures.verify(
-                Array(bytes[(bytes.count - 64)...]), for: body, domain: .membership, signingKey: account.signingKey))
+                Array(bytes[(bytes.count - 64)...]), for: body, domain: .membership, signingKey: signingKey))
                 != nil
         else { return nil }
         var reader = SharedReader(body)
         guard reader.read(magic.count) == magic, reader.read(1) == [formatVersion],
-            reader.uuid() == account.accountID, reader.uuid() == vaultID, reader.read(binding.count) == binding,
+            reader.uuid() == accountID, reader.uuid() == vaultID, reader.read(binding.count) == binding,
             let count = reader.uint32(), Int(count) <= maximumItems, Int(count) * itemLength == reader.remaining
         else { return nil }
         var items: [[UInt8]] = []
@@ -474,6 +485,35 @@ enum SharedKeyProvenance {
     static func parse(_ bytes: [UInt8], owner: UUID, account: PublicKeyBundle, vaultID: UUID) -> Set<UUID>? {
         SignedLocalSet.parse(
             bytes, magic: magic, itemLength: 16, account: account, vaultID: vaultID, binding: SharedBytes.bytes(owner)
+        ).map { Set($0.map(VaultSession.uuid)) }
+    }
+}
+
+/// The earlier device IDs of this installation whose work a restore left in a shared vault and has still to carry
+/// there (review of round 16, Z216): the devices that the vault's signed `SyncState.restoredUnpublished` names, kept
+/// in a row of their own (`SharingStateKey.restoredChain`) so that they survive that state being damaged or edited
+/// (A8), which then no longer verifies (Z200). Written by the move of an earlier ID's sync state, from what verifies
+/// there (`AccountRecord.migration` and the earlier ID's signed state), and by each later save of those entries; bound
+/// to the vault and to this device's ID, so that a row of another device of the account, or of the earlier ID itself,
+/// copied here names nothing. Signed by the account, so a row planted or edited in the file (A8) is refused: a
+/// state that does not verify names no earlier ID any more (Z206, Z211 and Z216 were each an ID planted there).
+enum RestoredChainRow {
+    static let magic: [UInt8] = Array("WWRC".utf8)
+
+    static func signed(_ deviceIDs: Set<UUID>, device: UUID, account: UUID, vaultID: UUID, keyset: Keyset) throws
+        -> [UInt8]
+    {
+        try SignedLocalSet.signed(
+            magic: magic, items: deviceIDs.map(SharedBytes.bytes), account: account, vaultID: vaultID,
+            binding: SharedBytes.bytes(device), keyset: keyset)
+    }
+
+    static func parse(_ bytes: [UInt8], device: UUID, account: UUID, signingKey: [UInt8], vaultID: UUID)
+        -> Set<UUID>?
+    {
+        SignedLocalSet.parse(
+            bytes, magic: magic, itemLength: 16, accountID: account, signingKey: signingKey, vaultID: vaultID,
+            binding: SharedBytes.bytes(device)
         ).map { Set($0.map(VaultSession.uuid)) }
     }
 }

@@ -40,6 +40,9 @@ public enum SharingStateKey: String, Sendable, CaseIterable {
     /// The versions this device's own take-out held aside before they were published (`SharedStreamIndex.ownTakenOut`),
     /// signed, in a row of their own so that they survive the index being refused or rebuilt (review finding Z121).
     case ownTakenOut
+    /// The earlier device IDs of this installation whose work a restore has still to carry into the vault
+    /// (`RestoredChainRow`), signed, bound to this device's ID (review of round 16, Z216).
+    case restoredChain
 }
 
 public actor InMemorySharingStateStore: SharingStateStore {

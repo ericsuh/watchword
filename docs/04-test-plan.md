@@ -711,6 +711,13 @@ in an edited state as an earlier ID keeps its published work, with its stream wi
 (`plantedChainIDOfASiblingDevice`, Z211); a lock at each read of a carried record stops the sync without a trap and
 loses nothing (`lockDuringTheCarry`, Z212); and each Stop Waiting action names its vault (`restoredWorkAction`,
 wording, Z215).
+The review of the sixteenth round (Z216 to Z221), in "shared vaults through the session": a sibling device enrolled
+before a restore, named in an edited state of the restored device as an earlier ID, keeps its published work, with its
+stream withheld too, since the chain comes from the move's signed chain row and never from a state that does not verify
+(`plantedChainIDOfASiblingEnrolledBeforeARestore`, Z216; `restoredWorkSurvivesAnEditedState` keeps Z200's hold from
+that row); and the lock test lands a lock inside each read or record of the vault's pending deletions and inside the
+carry's commit of a row whose record also has a tombstone to rewrite (`lockDuringTheCarry`, which traps with either
+re-read replaced by keys held across the suspension, Z217).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

@@ -197,7 +197,9 @@ extension VaultSession {
     /// And what the old ID left that registration could not carry (`restoredWork`, review of round 12, M1), read from
     /// the state each empty one replaces, also before any is emptied, for a sync to carry once the vault has a key and
     /// its log has been pulled (`SyncState.restoredUnpublished`, `carryRestoredWork`). A move made again reads what the
-    /// first attempt recorded in the new ID's state.
+    /// first attempt recorded in the new ID's state. The earlier IDs those entries name are written to each vault's
+    /// chain row (`RestoredChainRow`, review of round 16, Z216) before its state is saved, so that the chain outlives
+    /// a state later damaged or edited (A8).
     func startSyncStatesOver(_ account: AccountRecord, from previous: UUID, since epoch: UInt64) async throws {
         guard let state = syncState else { return }
         let vaults = try await vaultDirectory(account).keys
@@ -218,6 +220,13 @@ extension VaultSession {
             fresh.startedOverByMove = syncedBefore
             fresh.storeResetSuspected = held[vaultID]?.storeResetSuspected ?? false
             fresh.restoredUnpublished = restored[vaultID] ?? [:]
+            // Which earlier IDs those name, in a row of their own, before the state: a state that is later damaged
+            // or edited (A8) verifies no more, and the row keeps the chain (review of round 16, Z216). Written from
+            // what verified (`restoredWork`: the old ID's signed state, or the new ID's in a move made again), keeping
+            // what the row names already: a move made again after a first attempt whose state for the vault no longer
+            // verifies reads less there, and only a later save of the entries narrows the row.
+            try await noteRestoredChain(fresh.restoredUnpublished, in: vaultID, account: account, keeping: true)
+            _ = try requireKeys(since: epoch)
             try await state.saveState(fresh)
         }
     }
