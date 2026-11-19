@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WatchwordEnvelope
 import WatchwordModel
 import WatchwordStore
 import WatchwordSync
@@ -12,9 +13,9 @@ import WatchwordTestSupport
 extension AdversarialAccountTests {
     /// A's store and sync state, a deletion made and never published, restored onto other hardware (no device key)
     /// over `state`: the restored device, not yet unlocked, and the deleted item's ID.
-    static func restoredWithUnpublishedDeletion(_ fixture: Fixture, state: InterceptingStateStore) async throws
-        -> (restored: TestVault, other: TestVault, doomed: UUID)
-    {
+    static func restoredWithUnpublishedDeletion(
+        _ fixture: Fixture, state: InterceptingStateStore, into store: any RecordStore = InMemoryRecordStore()
+    ) async throws -> (restored: TestVault, other: TestVault, doomed: UUID) {
         let other = try await fixture.enrolled(Self.deviceC)
         let doomed = try await fixture.a.session.save(
             Item(vaultID: fixture.personal, title: "Deleted on A, never synced", scopes: [], fields: []))
@@ -25,7 +26,6 @@ extension AdversarialAccountTests {
         try await fixture.a.session.deletePermanently(id: doomed.id)
 
         let original = try #require(fixture.a.store as? InMemoryRecordStore)
-        let store = InMemoryRecordStore()
         try await store.commit(
             StoreChange(
                 account: .create(try #require(await original.loadAccount())), upserts: await original.allRecords))
@@ -119,8 +119,11 @@ extension AdversarialAccountTests {
         let store = try #require(restored.store as? InMemoryRecordStore)
         var account = try #require(await store.loadAccount())
         let otherID = Self.deviceC
-        account.migration = DeviceMigration(previousDeviceID: otherID, authenticator: Array(repeating: 7, count: 64))
-        try await store.commit(StoreChange(account: .update(account, expectedKeysetVersion: account.keysetVersion)))
+        let planted = DeviceMigration(previousDeviceID: otherID, authenticator: Array(repeating: 7, count: 64))
+        account.migration = planted
+        try await store.commit(
+            StoreChange(
+                account: .update(account, expectedKeysetVersion: account.keysetVersion), migration: .set(planted)))
 
         let relaunched = restored.relaunched(seed: 18_121)
         try await relaunched.session.unlock(password: TestVault.password)
@@ -143,4 +146,55 @@ extension AdversarialAccountTests {
         loaded.authenticator = []
         #expect(loaded == SyncState(vaultID: fixture.personal))
     }
+
+    /// Threat: none needed; the review of round 11 (L1). A password change reads the account record, derives and signs
+    /// across several awaits, and commits the record it read. A move completed during those awaits cleared the record's
+    /// migration, and the commit wrote it back: the move ran again after the device had published under its new ID
+    /// (each vault's state started over, the log replayed, rows published again). The store now keeps the migration a
+    /// commit does not name, and the session caches what the store kept.
+    @Test("a password change across a completed move does not bring the move back")
+    func passwordChangeKeepsACompletedMove() async throws {
+        let fixture = try await Self.fixture(seed: 18_500)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let (restored, _, _) = try await Self.restoredWithUnpublishedDeletion(fixture, state: state, into: store)
+        await state.failNextPendingDeletionWrite()
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.migration != nil, "the interrupted move was not recorded")
+
+        let session = restored.session
+        await store.onNextHeaderListing {
+            guard let account = try? await session.loadAccount() else { return }
+            try? await session.completeDeviceMigration(account: account)
+        }
+        try await session.changePassword(current: TestVault.password, new: "a new password for the restored phone")
+        #expect(await store.hookRan)
+        #expect(try await store.loadAccount()?.migration == nil, "the password change wrote the cleared move back")
+        #expect(await session.account?.migration == nil, "the session cached the cleared move")
+        let report = try await session.syncAll()
+        #expect(!report.deviceMigrationIncomplete)
+    }
+}
+
+/// A record store that runs a step once, the next time the account's headers are listed: where a password change
+/// is between reading the account record and committing it.
+actor HookedRecordStore: RecordStore {
+    let base = InMemoryRecordStore()
+    private var hook: (@Sendable () async -> Void)?
+    private(set) var hookRan = false
+
+    func onNextHeaderListing(_ hook: @escaping @Sendable () async -> Void) { self.hook = hook }
+
+    func loadAccount() async throws -> AccountRecord? { await base.loadAccount() }
+    func record(_ key: RecordKey) async throws -> StoredRecord? { await base.record(key) }
+    func records(in vaultID: UUID, kind: EnvelopeKind) async throws -> [StoredRecord] {
+        if kind == .accountHeader, let hook {
+            self.hook = nil
+            await hook()
+            hookRan = true
+        }
+        return await base.records(in: vaultID, kind: kind)
+    }
+    func commit(_ change: StoreChange) async throws { try await base.commit(change) }
+    func eraseAll() async throws { await base.eraseAll() }
 }

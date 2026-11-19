@@ -42,6 +42,20 @@ public enum AccountWrite: Sendable, Hashable {
     case update(AccountRecord, expectedKeysetVersion: UInt64)
 }
 
+/// How a commit changes the account record's `migration` (review of round 11, L1). The account row is written whole, so
+/// a writer that read it before an `await` and writes it back for another reason (a password change) would otherwise
+/// write the migration it read: bring back a move that was cleared meanwhile, which then ran again, or clear one recorded
+/// meanwhile. By default the stored value is kept, whatever the record passed says; only the two writes that mean to
+/// change it say so.
+public enum MigrationWrite: Sendable, Hashable {
+    /// The migration the store holds stays; for `AccountWrite.create`, where there is none, the record's own is written.
+    case keep
+    /// Written: the commit that names a new device ID records the move from the old one (Z181).
+    case set(DeviceMigration)
+    /// Removed: the move is complete, or was not this session's.
+    case clear
+}
+
 /// What a writer read, and so what the store must still hold for its change to apply.
 public enum RecordExpectation: Sendable, Hashable {
     /// No record under the key.
@@ -53,6 +67,9 @@ public enum RecordExpectation: Sendable, Hashable {
 /// One atomic change to the store.
 public struct StoreChange: Sendable, Hashable {
     public var account: AccountWrite?
+    /// What becomes of the account record's `migration`: kept unless the change says otherwise (`MigrationWrite`).
+    /// Anything but `.keep` needs an account in the store or written by this change.
+    public var migration: MigrationWrite
     public var upserts: [StoredRecord]
     public var deletions: [RecordKey]
     /// Deletions that apply only if the record is still at the given version.
@@ -64,10 +81,12 @@ public struct StoreChange: Sendable, Hashable {
     public var expectations: [RecordKey: RecordExpectation]
 
     public init(
-        account: AccountWrite? = nil, upserts: [StoredRecord] = [], deletions: [RecordKey] = [],
-        conditionalDeletions: [RecordKey: UInt64] = [:], expectations: [RecordKey: RecordExpectation] = [:]
+        account: AccountWrite? = nil, migration: MigrationWrite = .keep, upserts: [StoredRecord] = [],
+        deletions: [RecordKey] = [], conditionalDeletions: [RecordKey: UInt64] = [:],
+        expectations: [RecordKey: RecordExpectation] = [:]
     ) {
         self.account = account
+        self.migration = migration
         self.upserts = upserts
         self.deletions = deletions
         self.conditionalDeletions = conditionalDeletions
@@ -109,7 +128,7 @@ extension StoreChange {
                 throw RecordStoreError.accountVersionConflict
             }
         case nil:
-            break
+            if migration != .keep, currentAccount == nil { throw RecordStoreError.accountVersionConflict }
         }
         for (key, expected) in conditionalDeletions where try existingVersion(key) != expected {
             throw RecordStoreError.versionConflict(recordID: key.recordID)
@@ -133,10 +152,26 @@ extension StoreChange {
         }
     }
 
-    var newAccount: AccountRecord? {
+    /// The account record to store once `validate` has passed, `currentAccount` being what the store holds: the one
+    /// this change writes, or the current one where only its migration changes, with the migration `migration` says;
+    /// `nil` where the account row is left as it is.
+    func accountToStore(currentAccount: AccountRecord?) -> AccountRecord? {
+        var record: AccountRecord
         switch account {
-        case .create(let record), .update(let record, _): return record
-        case nil: return nil
+        case .create(let written): record = written
+        case .update(let written, _):
+            record = written
+            record.migration = currentAccount?.migration
+        case nil:
+            guard migration != .keep, let currentAccount else { return nil }
+            record = currentAccount
         }
+        switch migration {
+        case .keep: break
+        case .set(let written): record.migration = written
+        case .clear: record.migration = nil
+        }
+        return record
     }
+
 }

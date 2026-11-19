@@ -877,7 +877,9 @@ extension VaultSession {
         var change = StoreChange(upserts: [Self.registryRow(entry, account: updated)])
         if asNewDevice {
             if syncSettings != nil {
-                updated.migration = try signedMigration(from: account.deviceID, to: updated, keyset: keyset)
+                let migration = try signedMigration(from: account.deviceID, to: updated, keyset: keyset)
+                updated.migration = migration
+                change.migration = .set(migration)
             }
             change.account = .update(updated, expectedKeysetVersion: account.keysetVersion)
             for row in try carriedOver(unpublished.rows, keys: try requireKeys(since: epoch), as: updated) {
@@ -1015,7 +1017,8 @@ extension VaultSession {
         else { return }
         var done = current
         done.migration = nil
-        try await store.commit(StoreChange(account: .update(done, expectedKeysetVersion: current.keysetVersion)))
+        try await store.commit(
+            StoreChange(account: .update(done, expectedKeysetVersion: current.keysetVersion), migration: .clear))
         self.account = done
     }
 

@@ -99,10 +99,46 @@ struct RecordStoreContractTests {
         try await store.commit(StoreChange(account: .create(StoreFixtures.account())))
         var moving = StoreFixtures.account()
         moving.migration = DeviceMigration(previousDeviceID: StoreFixtures.vaultB, authenticator: Array(0..<64))
-        try await store.commit(StoreChange(account: .update(moving, expectedKeysetVersion: 0)))
+        let migration = try #require(moving.migration)
+        try await store.commit(
+            StoreChange(account: .update(moving, expectedKeysetVersion: 0), migration: .set(migration)))
         #expect(try await store.loadAccount() == moving)
-        try await store.commit(StoreChange(account: .update(StoreFixtures.account(), expectedKeysetVersion: 0)))
+        try await store.commit(
+            StoreChange(account: .update(StoreFixtures.account(), expectedKeysetVersion: 0), migration: .clear))
         #expect(try await store.loadAccount()?.migration == nil)
+    }
+
+    /// Review of round 11 (L1): the account row is written whole, and a writer that read it before its awaits (a
+    /// password change) wrote back the migration it read. A commit that does not say what becomes of the migration
+    /// keeps the stored one, whatever the record it writes says: a cleared move does not come back, and a recorded one
+    /// is not cleared.
+    @Test("an account write that does not name the migration keeps the stored one", arguments: StoreKind.allCases)
+    func migrationKeptByOtherWrites(_ kind: StoreKind) async throws {
+        let store = try kind.make()
+        try await store.commit(StoreChange(account: .create(StoreFixtures.account())))
+        let migration = DeviceMigration(previousDeviceID: StoreFixtures.vaultB, authenticator: Array(0..<64))
+        var stale = StoreFixtures.account(keysetVersion: 1)
+        stale.migration = migration
+        try await store.commit(StoreChange(account: .update(stale, expectedKeysetVersion: 0)))
+        let cleared = try await store.loadAccount()
+        #expect(cleared?.keysetVersion == 1)
+        #expect(cleared?.migration == nil, "a stale copy brought a cleared move back")
+
+        try await store.commit(StoreChange(migration: .set(migration)))
+        try await store.commit(
+            StoreChange(account: .update(StoreFixtures.account(keysetVersion: 2), expectedKeysetVersion: 1)))
+        let kept = try await store.loadAccount()
+        #expect(kept?.keysetVersion == 2)
+        #expect(kept?.migration == migration, "a write that did not name the move cleared it")
+    }
+
+    @Test("a migration write needs an account", arguments: StoreKind.allCases)
+    func migrationWriteWithoutAccount(_ kind: StoreKind) async throws {
+        let store = try kind.make()
+        let migration = DeviceMigration(previousDeviceID: StoreFixtures.vaultB, authenticator: Array(0..<64))
+        await #expect(throws: RecordStoreError.accountVersionConflict) {
+            try await store.commit(StoreChange(migration: .set(migration)))
+        }
     }
 
     @Test("creating an account never overwrites an existing one", arguments: StoreKind.allCases)

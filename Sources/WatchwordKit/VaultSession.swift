@@ -346,7 +346,18 @@ public actor VaultSession: SharesExecutor {
         let expected = record.keysetVersion
         record.emergencyKitConfirmedAt = await clock.now()
         try await store.commit(StoreChange(account: .update(record, expectedKeysetVersion: expected)))
-        account = record
+        account = keepingCachedMigration(record)
+    }
+
+    /// `record`, just committed with its migration kept (`MigrationWrite.keep`), as the store now holds it: with the
+    /// migration this session holds now, never the one `record` was read with before its awaits, which a move
+    /// completed meanwhile cleared (review of round 11, L1). The two writes that change the migration cache it as they
+    /// commit (`registerThisDevice`, `completeDeviceMigration`), so the cached copy is the stored one.
+    func keepingCachedMigration(_ record: AccountRecord) -> AccountRecord {
+        guard let cached = account, cached.accountID == record.accountID else { return record }
+        var record = record
+        record.migration = cached.migration
+        return record
     }
 
     /// The Emergency Kit again, for printing a replacement (PRD F5.1). The account password is asked for in the same
@@ -629,6 +640,7 @@ public actor VaultSession: SharesExecutor {
             keyset.zeroise()
             throw error
         }
+        updated = keepingCachedMigration(updated)
         account = updated
         registryView = nil
         return (unlockKey, keyset, updated)
@@ -1251,6 +1263,7 @@ public actor VaultSession: SharesExecutor {
             newUnlockKey.zeroise()
             throw error
         }
+        updated = keepingCachedMigration(updated)
         account = updated
         registryView = nil
         // The new password is committed: from here on, report success whatever happens to the session. Telling the
