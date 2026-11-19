@@ -535,3 +535,171 @@ struct MergeModel {
         return result.item
     }
 }
+
+// MARK: - A restore's carry (`ItemMerge.reattributed`, docs/10-sync-correctness.md §9)
+
+extension MergeModel {
+    /// The new ID of a restored installation of the model's last device: above every device the model makes, as the
+    /// last device is, so that it orders against each of them as the earlier ID did. A tie-break between two
+    /// concurrent field orders at one version goes by device ID, and is the one thing a renaming could change.
+    static let restoredDevice = UUID(uuid: (0xD0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0xFF))
+
+    /// The most of `replicas[index]`'s writes any other copy has seen so far: what its stream can have carried.
+    func seenByOthers(of index: Int) -> UInt64 {
+        let device = replicas[index].device
+        return replicas.indices.filter { $0 != index }.flatMap { replicas[$0].seen }.filter { $0.device == device }
+            .map(\.version).max() ?? 0
+    }
+
+    /// `version` carried over from `device` to the restored ID above `bound`, as the row the restored ID writes.
+    static func carried(_ version: Version, from device: UUID, above bound: UInt64) -> Version {
+        let item = ItemMerge.reattributed(
+            version.item, origin: version.origin, from: device, above: bound, to: restoredDevice)
+        return Version(item: item, origin: Revision(version: item.version, device: restoredDevice))
+    }
+
+    /// A version's stamped parts, by group and revision: every value a register, conflict or retained value holds,
+    /// the field order, and every discard (as a stamp: its resolution and what it had seen).
+    static func stampedParts(_ version: Version) -> [String: [GroupStamp]] {
+        let state = ItemState(version.item, origin: version.origin)
+        var parts: [String: [GroupStamp]] = [:]
+        func add(_ group: ItemGroup, _ stamp: GroupStamp, discard: Bool = false) {
+            let key = "\(discard ? "discard " : "")\(group.rawValue) \(stamp.revision.version)@\(stamp.revision.device)"
+            parts[key, default: []].append(stamp)
+        }
+        for (group, values) in state.registers { for value in values { add(group, value.stamp) } }
+        for value in state.retained {
+            if let group = ItemMerge.group(of: value.value) { add(group, value.stamp) }
+        }
+        add(.fieldOrder, state.order.stamp)
+        for (group, discards) in state.discards {
+            for discard in discards {
+                if let revision = discard.revision {
+                    add(group, GroupStamp(revision: revision, seen: discard.seen), discard: true)
+                }
+            }
+        }
+        return parts
+    }
+
+    /// The key `stampedParts` files a part under once the carry has renamed its revision.
+    static func renamedKey(_ key: String, from device: UUID, above bound: UInt64) -> String {
+        guard let at = key.lastIndex(of: "@"), let space = key[..<at].lastIndex(of: " "),
+            let version = UInt64(key[key.index(after: space)..<at]), key[key.index(after: at)...] == device.uuidString,
+            version > bound
+        else { return key }
+        return String(key[...space]) + "\(version)@\(restoredDevice)"
+    }
+
+    /// What the carry of the earlier ID's copy `a` must satisfy (docs/10 §9), with `published` the most of the
+    /// earlier ID's writes any other copy has seen and `given` a bound at or below it (a state that says too little was
+    /// published: lost, rolled back, saved before a later publish), against `others`, versions other devices stored:
+    ///
+    /// 1. it commutes with merges: `R(a ⊔ b) == R(a) ⊔ b` for every `b` that holds nothing of the earlier ID above
+    ///    `published`;
+    /// 2. it is idempotent: `R(R(a)) == R(a)`, for `given` too;
+    /// 3. it keeps supersession and coverage: for every pair of stamped parts of `a` and `b`, one contains the other's
+    ///    revision exactly when their images do;
+    /// 4. it never rewrites a third device (review of round 13, M1): with `given`, every stamp, discard and line of a
+    ///    device other than the earlier ID and the restored one is unchanged, byte for byte.
+    ///
+    /// Returns whether `a` held anything to rename above `published`, and whether a third device's part had seen the
+    /// earlier ID above `given` (the case M1 broke).
+    mutating func checkReattribution(
+        _ a: Version, of device: UUID, published: UInt64, given: UInt64, others: [Version]
+    ) -> (renamed: Bool, raised: Bool) {
+        let restored = Self.restoredDevice
+        let state = ItemState(a.item, origin: a.origin)
+        if ItemMerge.seenByOthers(state, of: device, besides: restored) > published {
+            fail("the model's published bound is below what another device's part shows")
+        }
+        let carried = Self.carried(a, from: device, above: published)
+        // 2.
+        if Self.carried(carried, from: device, above: published).item != carried.item {
+            fail("a carry is not idempotent")
+        }
+        let low = Self.carried(a, from: device, above: given)
+        if Self.carried(low, from: device, above: given).item != low.item {
+            fail("a carry from a bound read too low is not idempotent")
+        }
+        // 1. and 3.
+        let parts = Self.stampedParts(a)
+        let renamedParts = Self.stampedParts(carried)
+        for b in others {
+            guard (ItemMerge.effectiveClock(b.item, origin: b.origin).entries[device] ?? 0) <= published else {
+                continue
+            }
+            let joined = Self.join(a, b)
+            if Self.carried(joined, from: device, above: published).item != Self.join(carried, b).item {
+                fail("carrying a merge is not merging the carry")
+            }
+            var pairs: [(GroupStamp, GroupStamp)] = []
+            for (key, stamps) in parts {
+                let images = renamedParts[Self.renamedKey(key, from: device, above: published)] ?? []
+                guard images.count == stamps.count, let stamp = stamps.first, let image = images.first else {
+                    fail("a carry lost or doubled a stamped part: \(key)")
+                    continue
+                }
+                pairs.append((stamp, image))
+            }
+            for stamps in Self.stampedParts(b).values { for stamp in stamps { pairs.append((stamp, stamp)) } }
+            for (x, xImage) in pairs {
+                for (y, yImage) in pairs
+                where x.seen.contains(y.revision) != xImage.seen.contains(yImage.revision) {
+                    fail("a carry changed whether a part supersedes or covers another")
+                }
+            }
+        }
+        // 4.
+        let raised = checkThirdDevicesUnchanged(a, of: device, given: given)
+        let renamed = (ItemMerge.effectiveClock(a.item, origin: a.origin).entries[device] ?? 0) > published
+        return (renamed, raised)
+    }
+}
+
+extension MergeModel {
+    /// Law 4 of `checkReattribution`: carried above `given`, every stamp, discard and note line of `a` that a device
+    /// other than the earlier ID and the restored one wrote is unchanged, byte for byte (review of round 13, M1).
+    /// Returns whether one of them had seen the earlier ID above `given`: the case the code before M1 rewrote.
+    mutating func checkThirdDevicesUnchanged(_ a: Version, of device: UUID, given: UInt64) -> Bool {
+        let restored = Self.restoredDevice
+        func third(_ owner: UUID) -> Bool { owner != device && owner != restored }
+        let low = Self.carried(a, from: device, above: given)
+        let parts = Self.stampedParts(a)
+        let lowParts = Self.stampedParts(low)
+        var raised = false
+        for (key, stamps) in parts where stamps.contains(where: { third($0.revision.device) }) {
+            if lowParts[key] != stamps { fail("a carry rewrote another device's part: \(key)") }
+            if stamps.contains(where: { ($0.seen.entries[device] ?? 0) > given }) { raised = true }
+        }
+        let lowLines = Dictionary(
+            ItemState(low.item, origin: low.origin).lines.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for line in ItemState(a.item, origin: a.origin).lines where third(line.id.revision.device) {
+            guard let kept = lowLines[line.id], kept.after == line.after, Self.bytes(kept.text) == Self.bytes(line.text)
+            else {
+                fail("a carry rewrote another device's note line")
+                continue
+            }
+            if let after = line.after, after.revision.device == device, after.revision.version > given { raised = true }
+        }
+        return raised
+    }
+
+    /// The carry of a version `a` the earlier ID `device` stored, against a version `b` another device stored, at the
+    /// least bound both allow (what `b` holds of the earlier ID, and what `a` shows a third device saw of it): it
+    /// commutes with their merge, is idempotent, and, from a bound of 0, rewrites no third device's part. Returns
+    /// whether anything was renamed.
+    mutating func checkCarry(_ a: Version, against b: Version, of device: UUID) -> Bool {
+        let restored = Self.restoredDevice
+        let bound = max(
+            ItemMerge.effectiveClock(b.item, origin: b.origin).entries[device] ?? 0,
+            ItemMerge.seenByOthers(ItemState(a.item, origin: a.origin), of: device, besides: restored))
+        let carried = Self.carried(a, from: device, above: bound)
+        if Self.carried(carried, from: device, above: bound).item != carried.item { fail("a carry is not idempotent") }
+        if Self.carried(Self.join(a, b), from: device, above: bound).item != Self.join(carried, b).item {
+            fail("carrying a merge is not merging the carry")
+        }
+        _ = checkThirdDevicesUnchanged(a, of: device, given: 0)
+        return carried.item != a.item
+    }
+}

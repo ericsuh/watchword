@@ -52,6 +52,12 @@ struct LongRunningItemMergeExhaustiveTests {
         private var states: [ItemState] = []
         private var joins: [[Int]: ItemState] = [:]
         private var checked: Set<[Int]> = []
+        /// Pairs of a version the last device stored and one another device stored, carried (`MergeModel.checkCarry`).
+        private var carriedPairs: Set<[Int]> = []
+        /// How many of those pairs, and in how many the carry renamed something. Not part of `Totals`, whose counts
+        /// of the nightly run were recorded before carries were checked; asserted to be above zero instead.
+        var carries = 0
+        var renamingCarries = 0
 
         init(alphabet: [MergeModel.Operation]) {
             self.alphabet = alphabet
@@ -112,6 +118,18 @@ struct LongRunningItemMergeExhaustiveTests {
                             model.fail("merge is not associative")
                         }
                     }
+                }
+            }
+            // A restore of the last device carries its versions over to a new ID (`ItemMerge.reattributed`): against
+            // each version another device stored, at the least bound the pair allows, the carry is a renaming.
+            let earlier = model.replicas[model.replicas.count - 1].device
+            for (position, x) in versions.enumerated() {
+                for (index, y) in versions.enumerated() where max(position, index) >= known {
+                    guard stored[position].origin.device == earlier, stored[index].origin.device != earlier,
+                        carriedPairs.insert([x, y]).inserted
+                    else { continue }
+                    carries += 1
+                    if model.checkCarry(stored[position], against: stored[index], of: earlier) { renamingCarries += 1 }
                 }
             }
             // Through the public merge, as a device receiving the versions one at a time would: in the order stored,
@@ -209,6 +227,7 @@ struct LongRunningItemMergeExhaustiveTests {
             exploration.failures.isEmpty, "\(exploration.failures.joined(separator: "\n"))",
             sourceLocation: sourceLocation)
         #expect(exploration.totals == expected, sourceLocation: sourceLocation)
+        #expect(exploration.carries > 0 && exploration.renamingCarries > 0, sourceLocation: sourceLocation)
     }
 
     /// Edits of a field, its removal, a reorder, an attribute, a notes line, trash and restore, conflict resolution

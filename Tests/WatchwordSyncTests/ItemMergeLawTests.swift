@@ -82,6 +82,108 @@ struct LongRunningItemMergeLawTests {
         #expect(conflicts > 0 && resolutions > 0 && erased > 0 && kept > 0 && merges > 0)
     }
 
+    /// The laws a restore's carry rests on (`ItemMerge.reattributed`; docs/10-sync-correctness.md §9; review of round
+    /// 13), under the same random histories. The model's last device is the earlier ID; at a random point its copy is
+    /// backed up (`a`), with `published` the most of its writes any other copy had seen by then (what its stream can
+    /// have carried) and `given` a bound drawn at or below it (a state that says too little). Then the history goes
+    /// on, the earlier ID included: old hardware still running, which publishes `a2`, a version that contains `a`.
+    ///
+    /// `checkReattribution` checks, against every version the other devices stored before the backup: the carry
+    /// commutes with merges, is idempotent, keeps supersession and coverage, and (with `given`) never rewrites a third
+    /// device's part (M1). Then, for versions `b` other devices stored after it, `R(a)`, `a2` and `b` merged in every
+    /// order give one item, holding every value `a2 ⊔ b` holds (M2's case: nothing old hardware published is lost
+    /// beside the carry). The field order is the exception, and is left out: it is one register whose latest write
+    /// wins, and the carry's renamed copy of the same write can win over `a2`'s with the same field IDs.
+    ///
+    /// The counts asserted are the cases the laws exist for, so that a change to the model cannot leave them untested:
+    /// a backup holding something to carry (`renamed`), a third device's part that had seen the earlier ID above
+    /// `given` (`raised`, which the code before M1 rewrote), and old hardware that went on to publish a version
+    /// containing the backup (`continued`).
+    @Test(
+        "a restore's carry is a renaming: it commutes with merges and never rewrites another device",
+        arguments: [1, 2, 3, 4])
+    func reattribution(_ run: UInt64) {
+        let seed = TestEnvironment.seed(fallback: 0x4EA7_7EED) &+ run
+        var generator = SeededGenerator(seed: seed)
+        let histories = TestEnvironment.iterations(standard: 60, long: 1_000)
+        var renamed = 0
+        var raised = 0
+        var continued = 0
+        var failures: [String] = []
+        for history in 0..<histories where failures.isEmpty {
+            let devices = Int.random(in: 2...4, using: &generator)
+            let earlier = devices - 1
+            var model = MergeModel(devices: devices)
+            model.context = "seed \(seed), history \(history)"
+            var published: UInt64 = 0
+            func step(_ model: inout MergeModel) {
+                let index = Int.random(in: 0..<devices, using: &generator)
+                if Int.random(in: 0..<100, using: &generator) < 45 {
+                    model.receive(at: index, from: Int.random(in: 0..<devices, using: &generator))
+                } else {
+                    let operation = Self.operations.randomElement(using: &generator)!
+                    model.perform(operation, by: index) { Int.random(in: 0..<$0, using: &generator) }
+                }
+            }
+            for _ in 0..<Int.random(in: 6...36, using: &generator) {
+                step(&model)
+                published = max(published, model.seenByOthers(of: earlier))
+            }
+            let device = model.replicas[earlier].device
+            guard let item = model.replicas[earlier].item, let origin = model.replicas[earlier].origin else { continue }
+            let backup = MergeModel.Version(item: item, origin: origin)
+            let before = model.versions.filter { $0.origin.device != device }
+            // Half the time no state at all (lost with the restore, or one that does not verify, A8): nothing published.
+            let given = Bool.random(using: &generator) ? 0 : UInt64.random(in: 0...published, using: &generator)
+            let found = model.checkReattribution(
+                backup, of: device, published: published, given: given, others: before)
+            if found.renamed { renamed += 1 }
+            if found.raised { raised += 1 }
+
+            // Old hardware goes on under the earlier ID, and the others with it.
+            let stored = model.versions.count
+            for _ in 0..<Int.random(in: 2...20, using: &generator) { step(&model) }
+            guard let later = model.replicas[earlier].item, let laterOrigin = model.replicas[earlier].origin else {
+                failures = model.failures
+                continue
+            }
+            let a2 = MergeModel.Version(item: later, origin: laterOrigin)
+            guard MergeModel.join(a2, backup).item == a2.item else {
+                failures = model.failures
+                continue
+            }
+            continued += 1
+            let carried = MergeModel.carried(backup, from: device, above: published)
+            let after = model.versions[stored...].filter { $0.origin.device != device }
+            for b in after.shuffled(using: &generator).prefix(4) {
+                let orders = [
+                    [carried, a2, b], [carried, b, a2], [a2, carried, b], [a2, b, carried], [b, carried, a2],
+                    [b, a2, carried],
+                ]
+                let results = Set(orders.compactMap(MergeModel.fold))
+                if results.count != 1 { model.fail("the carry, old hardware's version and another's do not converge") }
+                // Every attributed value but the field order's, whose encoding is tagged 2 (`attributedValues`).
+                func values(_ item: Item, _ origin: Revision) -> Set<AttributedValue> {
+                    Set(
+                        ItemMerge.attributedValues(item, origin: origin).filter {
+                            $0.bytes.count < 8 || $0.bytes[7] != 2
+                        })
+                }
+                let joined = MergeModel.join(a2, b)
+                guard let result = results.first else { continue }
+                let lost = values(joined.item, joined.origin).subtracting(
+                    values(result, Revision(version: result.version, device: ItemMerge.zeroDevice)))
+                if !lost.isEmpty {
+                    model.fail("merged with the carry, values old hardware published are gone: \(lost.map(\.revision))")
+                }
+            }
+            failures = model.failures
+        }
+        #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
+        #expect(
+            renamed > 0 && raised > 0 && continued > 0, "renamed \(renamed), raised \(raised), continued \(continued)")
+    }
+
     /// Edits of every kind; the kinds that only matter once something else has happened are drawn more often.
     static let operations: [MergeModel.Operation] =
         MergeModel.Operation.allCases + [.setField, .setField, .setField, .trash, .resolve, .resolve, .delete, .delete]
