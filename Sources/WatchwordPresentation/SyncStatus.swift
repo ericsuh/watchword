@@ -14,6 +14,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case deviceRevoked
     case deviceNotRegistered
     case registryUnavailable
+    /// A restore onto other hardware has not finished moving this device's sync records to its new identity
+    /// (`AccountSyncReport.deviceMigrationIncomplete`, review of round 11, M1): it receives changes and sends none, in
+    /// any vault, until a sync finishes the move.
+    case deviceMigrationIncomplete
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
     case snapshotWithheld(by: [String])
@@ -39,6 +43,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .deviceRevoked: return "deviceRevoked"
         case .deviceNotRegistered: return "deviceNotRegistered"
         case .registryUnavailable: return "registryUnavailable"
+        case .deviceMigrationIncomplete: return "deviceMigrationIncomplete"
         case .snapshotWithheld: return "snapshotWithheld"
         case .snapshotWithheldForReview: return "snapshotWithheldForReview"
         case .keptAside: return "keptAside"
@@ -62,6 +67,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "it is."
         case .registryUnavailable:
             return "This device cannot check your other devices yet. Nothing they sent has been trusted."
+        case .deviceMigrationIncomplete:
+            return "This device is still moving its sync records over from before it was restored. It receives "
+                + "changes and sends none until that is done, and tries again at each sync. Nothing has been lost."
         case .snapshotWithheld(let names):
             return "Older devices need updating before this one can tidy the shared storage: "
                 + names.joined(separator: ", ") + "."
@@ -139,6 +147,7 @@ public struct SyncSummary: Hashable, Sendable {
         case .active, nil: break
         }
         if report.registryUnavailable { notices.append(.registryUnavailable) }
+        if report.deviceMigrationIncomplete { notices.append(.deviceMigrationIncomplete) }
         if !combined.snapshotWithheldBy.isEmpty {
             let named = combined.snapshotWithheldBy.map { id in
                 names[id].flatMap { $0.isEmpty ? nil : $0 } ?? "a device of another member (\(shortIdentifier(id)))"

@@ -117,6 +117,20 @@ struct WordingTests {
         #expect(!summary.headline.contains("when you unlock"))
     }
 
+    /// Review of round 11 (M1): the gate that holds every vault while a restore's move is incomplete was silent.
+    @Test("a restore whose move is incomplete says that nothing is sent and nothing is lost")
+    func deviceMigrationIncomplete() {
+        var report = AccountSyncReport()
+        report.vaults[UUID()] = SyncReport()
+        #expect(!SyncSummary(report).notices.contains(.deviceMigrationIncomplete))
+        report.deviceMigrationIncomplete = true
+        let summary = SyncSummary(report)
+        #expect(summary.notices.contains(.deviceMigrationIncomplete))
+        let text = SyncNotice.deviceMigrationIncomplete.text
+        #expect(text.contains("sends none"))
+        #expect(text.contains("Nothing has been lost"))
+    }
+
     @Test("held-aside and quarantined versions are counted for the person to review (S49)")
     func keptAside() {
         var vault = SyncReport()

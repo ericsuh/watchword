@@ -970,7 +970,10 @@ extension VaultSession {
     /// what the first did not do; or, while a shared vault holds an edit nobody received of the old ID or of any
     /// device ID of the registry that does not commit (`vaultsHoldingEditsNobodyReceived`, Z167, Z170), parked for the
     /// new ID (`parkedDeletionDevice`), which the engine neither publishes nor applies. Those the old ID had parked
-    /// itself are always parked again (Z170): only `releaseParkedDeletions` lets one go. Last, the record is cleared.
+    /// itself are always parked again (Z170): only `releaseParkedDeletions` lets one go. So is any this device cannot
+    /// sign as its own now, for want of a current key for its vault (a shared vault held closed, or a key not held
+    /// here): every deletion is carried, parked or left, and none stops the move (review of round 11, M1). Last, the
+    /// record is cleared.
     /// Until then the sync publishes nothing (`AccountSyncReport.deviceMigrationIncomplete`), so a state started over
     /// again by a second attempt loses nothing this device published.
     ///
@@ -1002,12 +1005,19 @@ extension VaultSession {
             let carried = deletions.map { (deletion: $0, parks: parking) } + parked.map { ($0, true) }
             for (deletion, parks) in carried where deletion.stamp.version < .max - 1 {
                 _ = try requireKeys(since: epoch)
-                if parks {
+                // Signed here, on the actor, as the new ID's; one that cannot be signed now (no current key for its
+                // vault on this device: a shared vault held closed, Z41, Z59, or a key this device does not hold) is
+                // parked instead of failing the move, which would leave the record and stop this device publishing
+                // in every vault for as long as that lasted (review of round 11, M1). Parking needs no vault key, and
+                // `releaseParkedDeletions` records it as this device's once its vault has a key and nothing holds it.
+                let carry = Self.restamped(deletion, device: account.deviceID)
+                let own = parks ? nil : try? authenticatePendingDeletion(carry)
+                if let own {
+                    try await base.addPendingDeletion(own)
+                } else {
                     try await base.addPendingDeletion(
                         try signedPendingDeletion(
                             Self.restamped(deletion, device: Self.parkedDeletionDevice(of: account.deviceID))))
-                } else {
-                    try await syncState.addPendingDeletion(Self.restamped(deletion, device: account.deviceID))
                 }
             }
         }
@@ -1154,7 +1164,9 @@ extension VaultSession {
     /// returns the vaults holding one (the sync reports them in `deletionsHeldBack`, and the deletion gate holds every
     /// other deletion back too, Z170); once none remains (the person moved the copy out, or deleted it),
     /// each is recorded again as this device's, as a device move does (`completeDeviceMigration`), and goes out like
-    /// any other. Fails closed: with no registry, or parked deletions that cannot be read, nothing is released.
+    /// any other. One whose vault has no current key here (a move parked it for that, review of round 11, M1) cannot
+    /// be signed as this device's: it stays parked, and is tried again at the next sync. Fails closed: with no
+    /// registry, or parked deletions that cannot be read, nothing is released.
     func releaseParkedDeletions(account: AccountRecord, view: RegistryView?) async -> Set<UUID> {
         guard let syncState, let parked = try? await parkedDeletions(of: account), !parked.isEmpty else { return [] }
         guard let view else { return [account.personalVaultID] }
