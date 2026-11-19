@@ -49,7 +49,7 @@ extension AdversarialVaultSyncTests {
         try await b.session.trash(id: doomed.id)
         try await b.session.deletePermanently(id: doomed.id)
         let raw = try #require(b.sync?.state as? InMemorySyncStateStore)
-        let before = await raw.loadState(vaultID: personal)
+        let before = Self.unsigned(await raw.loadState(vaultID: personal))
         let pendingBefore = await raw.pendingDeletions(vaultID: personal)
         #expect(!pendingBefore.isEmpty, "no deletion pending: nothing is tested")
 
@@ -60,7 +60,8 @@ extension AdversarialVaultSyncTests {
         }
         let report = try await b.session.syncAll()
         #expect(await hook.ran, "nothing was created in the vault: nothing is tested")
-        #expect(await raw.loadState(vaultID: personal) == before, "the sync saved a state after the lock")
+        #expect(
+            Self.unsigned(await raw.loadState(vaultID: personal)) == before, "the sync saved a state after the lock")
         #expect(await raw.pendingDeletions(vaultID: personal) == pendingBefore, "a pending deletion was lost")
         #expect(report.vaults[personal]?.deferredUntilUnlock == true)
 
@@ -117,7 +118,7 @@ extension AdversarialVaultSyncTests {
         _ = try await HygieneSessionFixture.scanUntilIdle(a.session, clock: a.clock)
         _ = try await a.session.syncAll()
         let stashBefore = await state.stash(vaultID: personal)
-        let stateBefore = await state.loadState(vaultID: personal)
+        let stateBefore = Self.unsigned(await state.loadState(vaultID: personal))
 
         let session = b.session
         await hook.onNextListing(of: SyncObjectLocation.vaultPrefix(personal)) {
@@ -128,12 +129,26 @@ extension AdversarialVaultSyncTests {
         #expect(await hook.ran, "the vault's log was not listed: nothing is tested")
         #expect(report.vaults[personal]?.unknownEntriesKept ?? 0 > 0, "nothing was kept aside: nothing is tested")
         #expect(await state.stash(vaultID: personal) == stashBefore, "the sync saved a stash after the lock")
-        #expect(await state.loadState(vaultID: personal) == stateBefore, "the sync saved a state after the lock")
+        #expect(
+            Self.unsigned(await state.loadState(vaultID: personal)) == stateBefore,
+            "the sync saved a state after the lock")
 
         _ = try await b.session.syncAll()
         let saved = try #require(await state.stash(vaultID: personal), "the next sync saved no stash")
         #expect(saved != stashBefore, "the next sync did not save the stash")
         #expect(try await b.session.item(id: bank.id).title == "Bank", "the item did not arrive")
+    }
+}
+
+extension AdversarialVaultSyncTests {
+    /// A state as it reads without its signature: Ed25519 signing is randomised on CryptoKit and deterministic in
+    /// swift-crypto's BoringSSL, so a state signed again with the same contents (a save before the lock, which these
+    /// tests allow) compares unequal on Apple platforms alone (run 44627086813). What the tests pin is that nothing
+    /// the state says changes after the lock, which the contents show on both.
+    static func unsigned(_ state: SyncState?) -> SyncState? {
+        guard var state else { return nil }
+        state.authenticator = []
+        return state
     }
 }
 
