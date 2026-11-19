@@ -1066,15 +1066,45 @@ extension VaultSession {
     /// cleared the record started each vault's state over after the engine had published there. A move begun while
     /// another is under way returns, leaving the record to the one under way; and the account is read again under the
     /// flag, so one whose record has been cleared, or replaced, since the caller read it does nothing.
+    ///
+    /// A caller turned away is not lost (review of round 20, Z241): it may be the one the move under way was waiting
+    /// for (`configureSharing` while that move, begun without sharing, waits in `moveAwaitsSharing`), or the unlock
+    /// after a lock that the move under way then stops at (`requireKeys(since:)`). So it leaves its account
+    /// (`migrationAskedAgain`), and the move under way, once it has returned or thrown, is made once more from that
+    /// account, with the keys and the epoch of then; a throw is the caller's only when nobody asked meanwhile.
     func completeDeviceMigration(account caller: AccountRecord) async throws {
-        guard caller.migration != nil, syncSettings?.state != nil, syncState != nil, !migrationInFlight else { return }
+        guard caller.migration != nil, syncSettings?.state != nil, syncState != nil else { return }
+        guard !migrationInFlight else {
+            migrationAskedAgain = caller
+            return
+        }
         migrationInFlight = true
         defer { migrationInFlight = false }
+        var next = caller
+        while true {
+            do {
+                try await makeDeviceMigration(account: next)
+            } catch {
+                guard let asked = migrationAskedAgain else { throw error }
+                migrationAskedAgain = nil
+                next = asked
+                continue
+            }
+            guard let asked = migrationAskedAgain else { return }
+            migrationAskedAgain = nil
+            next = asked
+        }
+    }
+
+    /// One attempt at the move (`completeDeviceMigration`), under its flag. The lock epoch is taken first, before any
+    /// await (review of round 20, Z242): taken after the account's read, a lock and an unlock during that read let a
+    /// move begun under the earlier keys go on under the new ones.
+    private func makeDeviceMigration(account caller: AccountRecord) async throws {
+        let epoch = lockEpoch
         guard let account = try await store.loadAccount(), account.deviceID == caller.deviceID,
             let migration = account.migration, migration == caller.migration, let base = syncSettings?.state,
             let syncState
         else { return }
-        let epoch = lockEpoch
         let previous = migration.previousDeviceID
         if try verifiedMigration(migration, to: account, keyset: try requireKeys(since: epoch).keyset) {
             // Not yet where it would read a chain row it cannot: the record stays, the sync publishes nothing, and the

@@ -168,6 +168,85 @@ extension AdversarialSharedVaultTests {
     }
 }
 
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed; the review of round 20 (Z241). A restore's move that would read a chain row without sharing
+    /// configured waits for it (Z229), and `configureSharing` makes it. But a move begun before sharing was configured
+    /// (a sync's) read that sharing was not, and while it was suspended on its next read `configureSharing`'s own move
+    /// was turned away by the one under way (Z237), which then returned waiting: nobody made the move until the next
+    /// sync or unlock, though the docs said `configureSharing` makes it. The move under way is now made once more for
+    /// the caller it turned away.
+    @Test("configuring sharing while a restore's move waits for it, mid-read, still makes the move")
+    func configureSharingDuringAWaitingMoveMakesIt() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 32_140)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+        let middle = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 32_141)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+
+        await middle.session.lock()
+        await middle.forgetDeviceKey(accountID: member.accountID)
+        var damaged = try #require(await raw.loadState(vaultID: vaultID))
+        damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
+        await raw.tamper(damaged)
+        let store = DirectoryListingHookedStore(base: middle.store)
+        let second = TestVault(
+            store: store, keychain: middle.keychain, biometrics: middle.biometrics, clock: middle.clock,
+            sync: middle.sync, seed: 32_142, deviceKeys: middle.deviceKeys)
+        try await second.session.unlock(password: TestVault.password)
+        let waiting = try #require(try await store.loadAccount())
+        #expect(waiting.migration != nil, "the move did not wait for sharing: nothing is tested")
+
+        // The move's first listing of the vault directory, in `moveAwaitsSharing`, after it read that sharing is not
+        // configured: sharing is configured then.
+        let session = second.session
+        let settings = SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory)
+        await store.onNextDirectoryListing { await session.configureSharing(settings) }
+        try await second.session.completeDeviceMigration(account: waiting)
+        #expect(await store.hookRan, "sharing was not configured during the move: nothing is tested")
+        #expect(try await store.loadAccount()?.migration == nil, "configuring sharing did not make the move")
+
+        let state = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(state[RecordKey(recordID: copy.id, kind: .item)]?.device == first, "the copy was not recorded again")
+        let report = try await second.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete)
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+    }
+}
+
+/// A record store over `base` that runs a step once, the next time the account's vault directory is listed.
+actor DirectoryListingHookedStore: RecordStore {
+    let base: any RecordStore
+    private var hook: (@Sendable () async -> Void)?
+    private(set) var hookRan = false
+
+    init(base: any RecordStore) {
+        self.base = base
+    }
+
+    func onNextDirectoryListing(_ hook: @escaping @Sendable () async -> Void) { self.hook = hook }
+
+    func loadAccount() async throws -> AccountRecord? { try await base.loadAccount() }
+    func record(_ key: RecordKey) async throws -> StoredRecord? { try await base.record(key) }
+    func records(in vaultID: UUID, kind: EnvelopeKind) async throws -> [StoredRecord] {
+        if kind == .vaultDirectory, let hook {
+            self.hook = nil
+            await hook()
+            hookRan = true
+        }
+        return try await base.records(in: vaultID, kind: kind)
+    }
+    func commit(_ change: StoreChange) async throws { try await base.commit(change) }
+    func eraseAll() async throws { try await base.eraseAll() }
+}
+
 /// A sharing state store over `base` whose next reads of one vault's chain row (`SharingStateKey.restoredChain`), or
 /// of every vault's, throw, as a busy or damaged database would.
 actor ChainRowUnreadableSharingStore: SharingStateStore {

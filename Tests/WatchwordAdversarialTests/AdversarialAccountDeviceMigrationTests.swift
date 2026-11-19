@@ -386,6 +386,40 @@ extension AdversarialAccountTests {
         try await other.session.sync()
         #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
     }
+
+    /// Threat: none needed; the review of round 20 (Z241, Z242). Since Z237 a caller of the move turned away while
+    /// another was under way returned and was forgotten. Here the session is locked and unlocked again while the
+    /// unlock's move waits on its first save: the new unlock's move is turned away, and the move under way then stops
+    /// at the lock (`requireKeys(since:)`), so nobody made it until the next sync or unlock, and this device sent
+    /// nothing meanwhile. The same holds for `configureSharing` while a move begun without sharing waits for it. The
+    /// move under way is now made once more, under the new keys, for the caller it turned away.
+    @Test("a restore's move turned away while another is under way is made when that one ends")
+    func turnedAwayMoveIsMadeAfterwards() async throws {
+        let fixture = try await Self.fixture(seed: 18_130)
+        let state = InterceptingStateStore()
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(fixture, state: state)
+        let observed = MoveObservation()
+        let session = restored.session
+        let store = restored.store
+        await state.intercept { _ in
+            guard await observed.claim(), let stale = try? await store.loadAccount(), stale.migration != nil else {
+                return
+            }
+            await session.lock()
+            try? await session.unlock(password: TestVault.password)
+            await observed.record(stale: stale, during: nil)
+        }
+        try? await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        await state.intercept(afterSave: nil)
+        #expect(await observed.stale != nil, "no state was saved while the move was pending: nothing is tested")
+        #expect(try await restored.session.state() == .unlocked, "the second unlock did not unlock")
+        #expect(try await restored.store.loadAccount()?.migration == nil, "the turned-away move was not made")
+
+        let report = try await restored.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete)
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
 }
 
 /// A record store that runs a step once, the next time the account's headers are listed (where a password change
