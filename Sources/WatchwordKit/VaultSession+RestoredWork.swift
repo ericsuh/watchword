@@ -225,9 +225,14 @@ extension VaultSession {
     /// ID's own stream (review of round 15, Z208): a third device's version staged here has not been judged, and a
     /// member who may write (A4) could claim in one to have seen the earlier ID's work far beyond what it published,
     /// so that the carry found nothing to carry and dropped the entry, while every member's judge then held that
-    /// claim aside. A shared vault keeps its whole log, so whatever an honest third device saw of the earlier ID is in
-    /// that ID's own segments, merged (the index) or staged (here); `ItemMerge.reattributed` still reads what a third
-    /// device saw from the row, whose versions were judged. `nil` where the state or the stage cannot be read, or
+    /// claim aside. A shared vault keeps its whole log from the day it was shared, so whatever an honest third device
+    /// saw of the earlier ID since then is in that ID's own segments, merged (the index) or staged (here);
+    /// `ItemMerge.reattributed` still reads what a third device saw from the row, whose versions were judged. Not
+    /// what an owner's device published while the vault was private: those segments may have been collected, under
+    /// a snapshot, before it was shared (Z144, Z151), and no own segment shows them (review of round 16, Z218). With
+    /// the earlier ID's signed state, its `published` covers them; without it (lost, or edited, A8, so that each entry
+    /// reads as version 0) the carry writes that work again as this device's, and members hold it twice, as
+    /// conflicts, never losing either (as `restoredWork` says). `nil` where the state or the stage cannot be read, or
     /// while locked: the carry then waits.
     func stagedBounds(in vaultID: UUID, engine: SyncEngine, since epoch: UInt64) async -> [RecordKey: [UUID: UInt64]]? {
         guard let syncState else { return [:] }

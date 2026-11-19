@@ -568,7 +568,8 @@ extension AdversarialSharedVaultTests {
         if inflated {
             // Read as every merge reads it, capped at the version's own number: still all of the old ID's work.
             #expect(
-                ItemMerge.seenByOthers(crafted, origin: revision, of: oldID, besides: UUID()) >= unpublished,
+                ItemMerge.seenByOthers(ItemState(crafted, origin: revision), of: oldID, besides: UUID())
+                    >= unpublished,
                 "the claim covers none of the old ID's unpublished work: nothing is tested")
         }
         try await owner.session.overwriteAsAModifiedClient(crafted)

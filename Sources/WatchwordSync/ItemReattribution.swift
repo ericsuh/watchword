@@ -78,16 +78,13 @@ extension ItemMerge {
         return state.item
     }
 
-    /// `seenByOthers` of `item`, read from a record written as `origin`. Only of a version a judge has admitted: a
-    /// downloaded version nobody has judged may claim anything (review of round 15, Z208), so a restore's carry no
-    /// longer reads one this way; what a third device saw comes from the row (`reattributed`).
-    public static func seenByOthers(_ item: Item, origin: Revision, of device: UUID, besides writer: UUID) -> UInt64 {
-        seenByOthers(ItemState(item, origin: origin), of: device, besides: writer)
-    }
-
     /// The most of `device`'s work on the record that `state` shows a third device (neither `device` nor `besides`)
     /// had seen: its count in each such device's stamps and discards, each line of `device`'s that such a device's
-    /// line is anchored after, and each line of `device`'s that such a device removed. All of it was published.
+    /// line is anchored after, and each line of `device`'s that such a device removed. All of it was published, but
+    /// only in a version a judge has admitted: a downloaded version nobody has judged may claim anything (review of
+    /// round 15, Z208). So it is internal, read by `reattributed` from the row alone; the public overload over an
+    /// `Item`, which no production code called once Z208 removed the carry's use of it, is gone (review of round 16,
+    /// Z219), so that nothing reads it from an unjudged version again.
     static func seenByOthers(_ state: ItemState, of device: UUID, besides writer: UUID) -> UInt64 {
         func third(_ owner: UUID) -> Bool { owner != device && owner != writer }
         var seen: UInt64 = 0

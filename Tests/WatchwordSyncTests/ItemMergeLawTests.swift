@@ -93,8 +93,9 @@ struct LongRunningItemMergeLawTests {
     /// device holding the pulled version holds (L1 and Z210, the restored ID drawn at random); it is idempotent, keeps
     /// supersession and coverage, and (with `given`) never rewrites a third device's part (M1). Then, for versions `b`
     /// other devices stored after it, `R(a)`, `a2` and `b` merged in every order give one item, holding every value
-    /// `a2 ⊔ b` holds (M2's case: nothing old hardware published is lost beside the carry). The field order is the exception, and is left out: it is one register whose latest write
-    /// wins, and the carry's renamed copy of the same write can win over `a2`'s with the same field IDs.
+    /// `a2 ⊔ b` holds (M2's case: nothing old hardware published is lost beside the carry). The field order is the
+    /// exception, and is left out: it is one register whose latest write wins, and the carry's renamed copy of the
+    /// same write can win over `a2`'s with the same field IDs.
     ///
     /// The counts asserted are the cases the laws exist for, so that a change to the model cannot leave them untested:
     /// a backup holding something to carry (`renamed`), a third device's part that had seen the earlier ID above

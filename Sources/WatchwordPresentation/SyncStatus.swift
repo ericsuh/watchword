@@ -15,8 +15,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case deviceNotRegistered
     case registryUnavailable
     /// A restore onto other hardware has not finished moving this device's sync records to its new identity
-    /// (`AccountSyncReport.deviceMigrationIncomplete`, review of round 11, Z185): it receives changes and sends none, in
-    /// any vault, until a sync finishes the move.
+    /// (`AccountSyncReport.deviceMigrationIncomplete`, review of round 11, Z185): it receives changes and sends none,
+    /// in any vault, until a sync finishes the move.
     case deviceMigrationIncomplete
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
@@ -47,7 +47,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case restoredWorkKeptHere([UnreceivedCopy])
     /// Nothing made on this device in these vaults is going out, new edits included, and nothing from others there is
     /// applied, until a restore's carry of what this device held there before it was restored has finished
-    /// (`AccountSyncReport.publishingHeldForCarry`, review of round 14, L4). By vault name, sorted, and how many more whose names could not be read.
+    /// (`AccountSyncReport.publishingHeldForCarry`, review of round 14, L4). By vault name, sorted, and how many more
+    /// whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.
@@ -300,8 +301,8 @@ public struct SyncSummary: Hashable, Sendable {
     }
 
     /// The summary with the names `init` needs read from `session`: the vaults' names, and the titles of the items in
-    /// `AccountSyncReport.copiesNobodyReceived`, `restoredWorkWaiting` and `restoredWorkKeptHere`. A name that cannot be read (the session locked, the item gone) is left
-    /// to `init`'s fallback.
+    /// `AccountSyncReport.copiesNobodyReceived`, `restoredWorkWaiting` and `restoredWorkKeptHere`. A name that cannot
+    /// be read (the session locked, the item gone) is left to `init`'s fallback.
     public static func loading(
         _ report: AccountSyncReport, deviceNames names: [UUID: String] = [:], from session: VaultSession
     )
