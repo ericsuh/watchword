@@ -177,35 +177,51 @@ struct WordingTests {
         let summary = SyncSummary(report, vaultNames: [vaultID: "Household"], itemTitles: [item: "Bank"])
         #expect(!summary.notices.contains(.deletionsHeldBack), "the generic notice hides the reason")
         let notice = try #require(summary.notices.first { $0.id == "restoredWorkWaiting" })
-        #expect(notice == .restoredWorkWaiting([UnreceivedCopy(vault: "Household", title: "Bank")]))
+        #expect(notice == .restoredWorkWaiting([UnreceivedCopy(vault: "Household", title: "Bank")], stopWaiting: []))
         let text = notice.text
         #expect(text.contains("“Bank” in “Household” holds changes made on this device before it was restored"))
-        #expect(text.contains("once the shared vault opens here"))
-        #expect(text.contains("stop waiting"))
+        #expect(text.contains("tries again at each sync"))
+        #expect(!text.contains("stop waiting"), "a vault that opens here offers no choice")
         let unnamed = SyncSummary(report).notices.first { $0.id == "restoredWorkWaiting" }
         #expect(unnamed?.text.contains("an item in a shared vault holds") == true)
     }
 
-    @Test("the restore's wait offers to stop waiting, and says what stays where; work left in a vault left is named")
+    /// Review of round 14, L2: Stop Waiting is a choice per vault, offered only for one that will not open here (no
+    /// current key, or a disputed owner); a vault waiting on the transport, or on a carry that a sync finishes, is
+    /// not offered it, and the confirmation says later edits of those items reach nobody either.
+    @Test("the restore's wait offers to stop waiting per vault that will not open, and says what stays where")
     func restoredWorkAction() throws {
-        let vaultID = UUID()
+        let closed = UUID()
+        let opens = UUID()
         let left = UUID()
         var report = AccountSyncReport()
-        report.deletionsHeldBack = [vaultID]
-        report.restoredWorkWaiting = [vaultID: [UUID()]]
+        report.deletionsHeldBack = [closed, opens]
+        report.restoredWorkWaiting = [closed: [UUID()], opens: [UUID()]]
+        report.restoredWorkMayStopWaiting = [closed]
         report.restoredWorkKeptHere = [left: [UUID()]]
-        let summary = SyncSummary(report, vaultNames: [left: "Old club"])
-        #expect(summary.restoredWorkVaults == [vaultID])
+        let summary = SyncSummary(report, vaultNames: [closed: "Club", opens: "Household", left: "Old club"])
+        #expect(summary.restoredWorkVaults == [closed])
         let waiting = try #require(summary.notices.first { $0.id == "restoredWorkWaiting" })
-        #expect(waiting.action == .stopWaitingForRestoredWork)
-        let action = try #require(waiting.action)
-        #expect(action.title == "Stop Waiting")
-        #expect(action.confirmation.contains("stay on this device only"))
-        #expect(action.confirmation.contains("even if the vault opens here again"))
+        #expect(waiting.actions == [.stopWaitingForRestoredWork(vaultID: closed, vault: "Club")])
+        let action = try #require(waiting.actions.first)
+        #expect(action.title == "Stop Waiting for “Club”")
+        let confirmation = action.confirmation
+        #expect(confirmation.contains("made in “Club” before it was restored stay on this device only"))
+        #expect(confirmation.contains("even if the vault opens here again"))
+        #expect(confirmation.contains("Neither are changes you make to those items on this device afterwards"))
+        #expect(waiting.text.contains("you can choose to stop waiting for it"))
         let kept = try #require(summary.notices.first { $0.id == "restoredWorkKeptHere" })
-        #expect(kept.action == nil)
+        #expect(kept.actions.isEmpty)
         #expect(kept.text.contains("an item in “Old club” holds changes made on this device before it was restored"))
         #expect(kept.text.contains("stay on this device only"))
+
+        // A vault whose name cannot be read is still offered, by a fallback; none is offered where none is closed.
+        let unnamed = SyncSummary(report).notices.first { $0.id == "restoredWorkWaiting" }
+        #expect(unnamed?.actions.map(\.title) == ["Stop Waiting for This Vault"])
+        report.restoredWorkMayStopWaiting = []
+        let none = SyncSummary(report)
+        #expect(none.restoredWorkVaults.isEmpty)
+        #expect(none.notices.allSatisfy { $0.actions.isEmpty })
     }
 
     @Test("vaults whose publishing waits for a restore's carry are named, and nothing is lost (round 14, L4)")
@@ -217,7 +233,7 @@ struct WordingTests {
         let summary = SyncSummary(report, vaultNames: [household: "Household"])
         let notice = try #require(summary.notices.first { $0.id == "publishingHeldForCarry" })
         #expect(notice == .publishingHeldForCarry(["Household"], unnamed: 0))
-        #expect(notice.action == nil)
+        #expect(notice.actions.isEmpty)
         let text = notice.text
         #expect(text.contains("Changes made on this device in “Household” are waiting"))
         #expect(text.contains("carrying over the changes it made there before it was restored"))

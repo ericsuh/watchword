@@ -381,7 +381,7 @@ final class AppModel {
         }
     }
 
-    /// A sync notice's action (`SyncNotice.action`), once the person has confirmed it, then a sync so that its effect
+    /// A sync notice's action (`SyncNotice.actions`), once the person has confirmed it, then a sync so that its effect
     /// shows (review of round 13, M3).
     func perform(_ action: SyncNoticeAction) async {
         guard let session, let summary = lastSync else { return }

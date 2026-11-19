@@ -149,7 +149,8 @@ extension AdversarialSharedVaultTests {
         // Through the notice's action, as the Settings screen offers it (review of round 13, M3).
         let summary = SyncSummary(waiting)
         let notice = try #require(summary.notices.first { $0.id == "restoredWorkWaiting" })
-        let action = try #require(notice.action)
+        #expect(waiting.restoredWorkMayStopWaiting == [vaultID], "a vault that will not open offers no choice")
+        let action = try #require(notice.actions.first)
         #expect(action.confirmation.contains("stay on this device only"))
         try await summary.perform(action, using: restored.session)
         let report = try await restored.session.syncAll()
@@ -360,11 +361,11 @@ extension AdversarialSharedVaultTests {
         #expect(kept != nil, "the copy was discarded")
         let summary = SyncSummary(report)
         #expect(summary.notices.contains { $0.id == "restoredWorkKeptHere" })
-        #expect(summary.notices.allSatisfy { $0.action == nil })
+        #expect(summary.notices.allSatisfy { $0.actions.isEmpty })
     }
 }
 
-// The review of round 14 (docs/06-adversarial-review.md Z207, L3): which device IDs a restore's chain names. In the
+// The review of round 14 (docs/06-adversarial-review.md Z206, L3): which device IDs a restore's chain names. In the
 // suite "shared vaults through the session".
 extension AdversarialSharedVaultTests {
     /// Threat: A8, who can edit this device's sync state and sharing state files but not reach the Keychain. In a
@@ -445,8 +446,8 @@ actor PrefixUnavailableTransport: SyncTransport {
     }
 }
 
-// The review of round 14 (docs/06-adversarial-review.md Z207, L4): a vault whose publishing waits for a restore's
-// carry. In the suite "shared vaults through the session".
+// The review of round 14 (docs/06-adversarial-review.md Z205, Z207; L2, L4): a vault whose publishing waits for a
+// restore's carry, and which vaults offer to stop waiting. In the suite "shared vaults through the session".
 extension AdversarialSharedVaultTests {
     /// Threat: none needed but a shared vault's log out of reach after a restore (the transport failing for it; a
     /// failure in an earlier vault that stops the sync does the same). While a restore has work left to carry in a
@@ -483,6 +484,14 @@ extension AdversarialSharedVaultTests {
         #expect(held.publishingHeldForCarry == [vaultID], "the vault publishing nothing for the carry is not named")
         let summary = SyncSummary(held)
         #expect(summary.notices.contains { $0.id == "publishingHeldForCarry" })
+        // The vault opens here, so the person is not offered to stop waiting for it, and the session refuses it
+        // (review of round 14, L2): stopped, its rows would stay the earlier ID's, and later edits reach nobody.
+        #expect(held.restoredWorkWaiting[vaultID] == [saved.id])
+        #expect(held.restoredWorkMayStopWaiting.isEmpty, "Stop Waiting offered for a vault that opens here")
+        #expect(summary.notices.allSatisfy { $0.actions.isEmpty })
+        await #expect(throws: VaultError.restoredWorkCanBeCarried(vaultID)) {
+            try await restored.session.stopWaitingForRestoredWork(in: vaultID)
+        }
 
         await view.fail(under: nil)
         let carried = try await restored.session.syncAll()

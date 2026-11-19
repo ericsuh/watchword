@@ -241,8 +241,8 @@ extension VaultSession {
             report.deletionsHeldBack.formUnion(report.copiesNobodyReceived.keys)
         }
         if mayWrite, (try? requireKeys(since: epoch)) != nil {
-            (report.restoredWorkWaiting, report.restoredWorkKeptHere) = await restoredWorkWaiting(
-                account: record, since: epoch)
+            (report.restoredWorkWaiting, report.restoredWorkKeptHere, report.restoredWorkMayStopWaiting) =
+                await restoredWorkWaiting(account: record, since: epoch)
             report.deletionsHeldBack.formUnion(report.restoredWorkWaiting.keys)
             // The vaults whose publishing waits for the carry, and will wait again at the next sync (L4).
             for vaultID in carrying {
@@ -1095,6 +1095,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// account is no longer a member of (review of round 13, M3). They hold no deletion back, stay on this device as
     /// they are, and reach no other device.
     public var restoredWorkKeptHere: [UUID: Set<UUID>] = [:]
+    /// The vaults of `restoredWorkWaiting` the person may stop waiting for: those that will not open on this device,
+    /// with no current key here or an owner its devices disagree about (review of round 14, L2). Any other waits only
+    /// on something a sync gets past, and is carried then.
+    public var restoredWorkMayStopWaiting: Set<UUID> = []
     /// The vaults that published nothing in this sync, new edits included, and will publish nothing at the next,
     /// because a restore has still to carry over work there (`SyncState.restoredUnpublished`) and its carry did not
     /// finish: their log could not be pulled (the transport failing for them, or a failure in an earlier vault that

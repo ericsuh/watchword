@@ -377,21 +377,42 @@ extension VaultSession {
     /// (`AccountSyncReport.restoredWorkWaiting`) and those that stay on this device only, their vault deleted or this
     /// account's membership of it ended (`restoredWorkKeptHere`, review of round 13, M3). Read while the keys of
     /// `epoch` are here; a lock meanwhile reports none (as `copiesNobodyReceived`, Z174).
+    ///
+    /// `mayStopWaiting` is the waiting vaults the person may stop waiting for (`mayStopWaitingForRestoredWork`).
     func restoredWorkWaiting(account: AccountRecord, since epoch: UInt64) async -> (
-        waiting: [UUID: Set<UUID>], keptHere: [UUID: Set<UUID>]
+        waiting: [UUID: Set<UUID>], keptHere: [UUID: Set<UUID>], mayStopWaiting: Set<UUID>
     ) {
-        guard let vaults = try? await vaultDirectory(account).keys else { return ([:], [:]) }
+        guard let vaults = try? await vaultDirectory(account).keys else { return ([:], [:], []) }
         let chain = await restoredChain(account: account)
         var waiting: [UUID: Set<UUID>] = [:]
         var keptHere: [UUID: Set<UUID>] = [:]
+        var mayStopWaiting: Set<UUID> = []
         for vaultID in vaults {
             let items = await itemsHoldingRestoredWork(in: vaultID, chain: chain, account: account)
             let released = await restoredWorkReleased(vaultID, account: account)
-            guard (try? requireKeys(since: epoch)) != nil else { return ([:], [:]) }
+            guard let keys = try? requireKeys(since: epoch) else { return ([:], [:], []) }
             guard let items, !items.isEmpty else { continue }
-            if released { keptHere[vaultID] = items } else { waiting[vaultID] = items }
+            if released {
+                keptHere[vaultID] = items
+            } else {
+                waiting[vaultID] = items
+                if mayStopWaitingForRestoredWork(in: vaultID, keys: keys, account: account) {
+                    mayStopWaiting.insert(vaultID)
+                }
+            }
         }
-        return (waiting, keptHere)
+        return (waiting, keptHere, mayStopWaiting)
+    }
+
+    /// Whether the person may stop waiting to carry over what a restore left in `vaultID` (review of round 14, L2):
+    /// only where the vault will not open on this device, with no current key here (no verified ledger, Z41, or a key
+    /// this device does not hold) or an owner its devices disagree about (Z59). A vault that opens here waits only on
+    /// something a sync gets past (the transport, its log not pulled yet, a carry step that failed), and its carry
+    /// writes the work again as this device's; stopped, its rows would stay the earlier ID's, and any later edit of one
+    /// would seal that ID's unpublished values under this device's, which every member's judge holds aside, that
+    /// version and every later one.
+    func mayStopWaitingForRestoredWork(in vaultID: UUID, keys: UnlockedKeys, account: AccountRecord) -> Bool {
+        currentVaultKey(vaultID, keys: keys, account: account) == nil || isOwnerDisputed(vaultID)
     }
 
     /// Stops waiting to carry over what a restore left in `vaultID` (`AccountSyncReport.restoredWorkWaiting`), so
@@ -404,7 +425,12 @@ extension VaultSession {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let syncState, let base = syncSettings?.state else { throw VaultError.syncNotConfigured }
+        await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        // Only for a vault that will not open here (review of round 14, L2).
+        guard mayStopWaitingForRestoredWork(in: vaultID, keys: try requireKeys(since: epoch), account: account) else {
+            throw VaultError.restoredWorkCanBeCarried(vaultID)
+        }
         let chain = await restoredChain(account: account)
         let raw = try await base.loadState(vaultID: vaultID)
         var verified: SyncState?
