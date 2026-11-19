@@ -260,7 +260,10 @@ Fifteen shipped modules, dependency-ordered, plus test support:
   file mover, Z80), `ScreenPrivacy` and `RevealedSecrets` (when revealed secrets are hidden again, F5.7, Z95), and the
   wording (`ErrorWording`, `SyncSummary`, `InterchangeWording`, `SharingCodes`). Depends on
   `WatchwordKit` and the modules whose types it shows; `WatchwordPresentationTests` drives it over real sessions on
-  Linux. It decides nothing about security: every refusal stays in `VaultSession`, and the model words it.
+  Linux. It decides nothing about security: every refusal stays in `VaultSession`, and the model words it. What must
+  go with the keys and is stored after an await (a sync's summary) is stored only if no lock came between, by the
+  session's own count (`VaultSession.lockCount`, moved in `lock()` itself; `LockSignal.mark`, `unchanged(since:in:)`),
+  never by the signal's generation alone, which moves only when its watch runs (Z188).
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `FakeDeviceKeyStore`, `TestVault`, whose
   `enrolledDevice` enrols a real second device over the transport; `RegistryFixture` for hand-built registry
@@ -808,8 +811,36 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the old ID's sync state is recorded, signed (`AccountRecord.migration`, `SignatureDomain.deviceMigration`), in the
   commit that names the new ID, and `completeDeviceMigration` makes it again at each unlock and sync until it is
   complete (Z181): never do any of it under `try?` after that commit, never publish while it is incomplete
-  (`deviceMigrationIncomplete`; `reuploadAfterStoreReset` refuses then too, V51), never let it forget that the
-  installation had synced or that an upload was unfinished (`startSyncStatesOver`, V49), never register a further ID over it, and act on no record the session did not sign.
+  (`deviceMigrationIncomplete`, worded in the summary; `reuploadAfterStoreReset` refuses then too, V51), never let it
+  forget that the installation had synced or that an upload was unfinished (`startSyncStatesOver`, V49), never register
+  a further ID over it, and act on no record the session did not sign. Nothing may make the move fail for good: a deletion it cannot sign as the new ID's (no current
+  key for its vault) is parked, never thrown (Z185). The migration changes only through `StoreChange.migration`
+  (`.set` at registration, `.clear` by the move); every other account write keeps the stored value, and the session
+  reads it back with `keepingStoredMigration` (Z186, Z196). A registration that fails before its commit deletes the key
+  it made, and only that key (`delete(accountID:deviceID:)`), and registrations never overlap
+  (`registrationInFlight`, Z189, Z193); under the flag a registration reads the account again and commits only over the
+  device ID it read (`StoreChange.expectedDeviceID`), and a sync registers a restored device an unlock did not (Z201).
+  What a restore carries into a vault that may be shared has the old ID's work above what it published written again
+  as the new ID's (`ItemMerge.reattributed`; the erased row of a carried deletion too), or every member's judge holds it
+  aside (Z191): never carry such work unchanged where the old ID commits, and never rename another device's part
+  (Z197). "Published" is the most of the old ID's signed state, its stream as the index and the downloaded segments
+  show it (`publishedBound`, `SyncEngine.stagedEntries`, Z198), and what the item or a downloaded version shows a third
+  device saw (`seenByOthers`). So registration carries none of a shared vault's items: the move records them in the
+  vault's signed state (`SyncState.restoredUnpublished`), and a sync carries them (`carryRestoredWork`) after it has
+  downloaded that vault's log and before it merges anything downloaded: never rename after the merge, where a field
+  order's tie falls by device ID (Z204); a carry that cannot run or finish merges nothing there in that sync. The vault
+  publishes nothing while anything is left to carry there (named, `publishingHeldForCarry`, Z207), and a take-out
+  leaves those rows alone. Until then they hold
+  every vault's deletions (`holdsRestoredWork`, failing closed on a state it cannot read or trust, and derived from the
+  rows where the state is lost or does not verify, `rowsLeftByEarlierIDs`, Z200) and are named in `restoredWorkWaiting`; only carrying them, a version that
+  holds none of that work, the vault deleted or left (`restoredWorkReleased`, reported as `restoredWorkKeptHere`), or
+  the person (`stopWaitingForRestoredWork`, one action per vault, offered and accepted only where the vault has no
+  current key here or a disputed owner, Z205; it marks the entries `dismissedVersion`) ends the hold (Z192, Z199). A
+  restore's chain read from a state that does not verify names only IDs this account's registry lists (Z206). Old hardware still running under the old ID that publishes the same work later leaves members both
+  copies, recorded (Z198). A version kept after this device's own pending deletion holds no deletion back (Z202, V46's
+  non-publishing bound with what it published added, in `waitsOnlyBehind`), and
+  only pending deletions read through `syncState` (the session's signed ones) count there: never decide on
+  `syncSettings.state`'s raw `pendingDeletions` without checking the signature (Z203).
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
   whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's
   deletions go out, the new ID's own included (Z170); `copiesNobodyReceived` names those items for the summary (Z171). Every engine pass in

@@ -61,6 +61,8 @@ struct EncodedState: Codable {
     /// Absent in a row written before review findings Z147 and Z149.
     var quarantineCrowded: UInt64?
     var collectedThrough: UInt64?
+    /// Absent in a row written before the review of round 12, and wherever it is empty.
+    var restoredUnpublished: [Stamp]?
     /// Absent in a row written before the state was signed (review finding Z20): such a row does not verify.
     var authenticator: Data?
 
@@ -105,6 +107,7 @@ struct EncodedState: Codable {
         quarantineDropped = state.quarantineDropped.map(\.uuidString).sorted()
         quarantineCrowded = state.quarantineCrowded
         collectedThrough = state.collectedThrough
+        restoredUnpublished = state.restoredUnpublished.isEmpty ? nil : stamps(state.restoredUnpublished)
         authenticator = Data(state.authenticator)
     }
 
@@ -174,6 +177,10 @@ struct EncodedState: Codable {
         }
         state.quarantineCrowded = quarantineCrowded
         state.collectedThrough = collectedThrough ?? 0
+        for stamp in restoredUnpublished ?? [] {
+            guard let (key, value) = stamp.decoded else { return nil }
+            state.restoredUnpublished[key] = value
+        }
         state.authenticator = authenticator.map { Array($0) } ?? []
         return state
     }

@@ -193,14 +193,22 @@ extension VaultSession {
     /// `storeResetSuspected`, so that an upload after a reset that stopped part-way before the backup still asks
     /// (SR21); the engine keeps it in such a state until this device hands on (`SyncState.startedOverByMove`, set
     /// here with the first fact and cleared by that hand-on alone, V52). Both can only make a sync stop and ask.
+    ///
+    /// And what the old ID left that registration could not carry (`restoredWork`, review of round 12, M1), read from
+    /// the state each empty one replaces, also before any is emptied, for a sync to carry once the vault has a key and
+    /// its log has been pulled (`SyncState.restoredUnpublished`, `carryRestoredWork`). A move made again reads what the
+    /// first attempt recorded in the new ID's state.
     func startSyncStatesOver(_ account: AccountRecord, from previous: UUID, since epoch: UInt64) async throws {
         guard let state = syncState else { return }
         let vaults = try await vaultDirectory(account).keys
         var held: [UUID: SyncState] = [:]
+        var restored: [UUID: [RecordKey: RecordStamp]] = [:]
         for vaultID in vaults {
             if let earlier = try await movedSyncState(vaultID: vaultID, from: previous, account: account) {
                 held[vaultID] = earlier
             }
+            _ = try requireKeys(since: epoch)
+            restored[vaultID] = try await restoredWork(in: vaultID, leftBy: previous, account: account)
         }
         let syncedBefore = try await hasSyncedBefore(account) || held.values.contains(where: Self.recordsSyncing)
         for vaultID in vaults {
@@ -209,6 +217,7 @@ extension VaultSession {
             fresh.syncedBefore = syncedBefore
             fresh.startedOverByMove = syncedBefore
             fresh.storeResetSuspected = held[vaultID]?.storeResetSuspected ?? false
+            fresh.restoredUnpublished = restored[vaultID] ?? [:]
             try await state.saveState(fresh)
         }
     }

@@ -44,13 +44,14 @@ extension SyncState {
         writer.append(stashGeneration)
         // Fields added after the state was first signed (review findings Z33, Z38, then Z147 and Z149, then the
         // conflict copies and the reset of docs/02-architecture.md §7.5 and §7.10, then the device move's
-        // `syncedBefore`, V49, and `startedOverByMove`, V52), written only when one is set, so a row saved before them
-        // still verifies; their length tells the forms apart.
+        // `syncedBefore`, V49, and `startedOverByMove`, V52, and a restore's `restoredUnpublished`, review of round 12),
+        // written only when one is set, so a row saved before them still verifies; their length tells the forms apart.
         let copiesAndReset =
             !examinedCopies.isEmpty || !unreadCopies.isEmpty || !unreadCopiesExamined.isEmpty || handOnOwed
             || ownUnlistedThrough != nil || handedOn != nil || highestOwnSnapshot > 0 || storeResetSuspected
             || syncedBefore || startedOverByMove
-        let later = quarantineCrowded != nil || collectedThrough > 0 || copiesAndReset
+        let restored = !restoredUnpublished.isEmpty
+        let later = quarantineCrowded != nil || collectedThrough > 0 || copiesAndReset || restored
         if retryUnfinished || !quarantineDropped.isEmpty || later {
             writer.append(retryUnfinished)
             writer.append(UInt64(quarantineDropped.count))
@@ -61,6 +62,11 @@ extension SyncState {
             writer.append(quarantineCrowded ?? 0)
             writer.append(collectedThrough)
         }
+        // The restore's stamps (fixed-width entries behind their count), and whenever the reset's fields follow, even
+        // empty: the two branches each added a field here (merge of PR #22 and PR #23), so a state with one and a state
+        // with the other must not end in the same bytes. Read with the count, nothing follows (the restore's alone) or
+        // the reset's fields do.
+        if restored || copiesAndReset { writer.append(stamps: restoredUnpublished) }
         if copiesAndReset {
             for counts in [examinedCopies, unreadCopies] {
                 writer.append(UInt64(counts.count))

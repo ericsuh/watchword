@@ -160,6 +160,49 @@ struct DevicesModelTests {
         locks.stop()
     }
 
+    /// Review of round 11 (Z188): the generation moved only when the lock signal's watch ran on the main actor, so a
+    /// sync whose continuation the main actor ran first found it unchanged and stored a summary made across the lock.
+    /// The session's own count moves in `lock()` itself: here no signal tells the model of the lock at all, and the
+    /// summary is dropped all the same.
+    @Test("a summary made across a lock is dropped before anything has told the model of the lock")
+    func unheardLockLeavesNoSummary() async throws {
+        let store = LockingStore()
+        let sync = SyncSettings(state: InMemorySyncStateStore(), transport: InMemorySyncTransport())
+        let vault = TestVault(store: store, sync: sync, seed: 186)
+        try await vault.createAccount()
+        let warm = DevicesModel(context: ScreenContext(session: vault.session))
+        await warm.syncNow()
+        await warm.syncNow()
+        #expect(warm.sync != nil)
+        await store.resetCount()
+        _ = try await vault.session.syncAll()
+        _ = try await vault.session.devices()
+        let beforeStanding = await store.reads
+        await store.arm(atRead: beforeStanding + 1, vault.session, until: { true })
+        let model = DevicesModel(context: ScreenContext(session: vault.session))
+        await model.syncNow()
+        let state = try await vault.session.state()
+        #expect(state == .locked)
+        #expect(model.sync == nil, "a summary made across the lock was stored")
+    }
+
+    /// The mark the Settings summary takes before its sync (`AppModel.syncNow`, not built here; review of round 11,
+    /// Z188): a lock of the session counts from `lock()` itself, before the signal's watch has run, and so does a fire.
+    @Test("a lock signal's mark sees a lock before the signal does, and a fire")
+    func lockSignalMark() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let signal = LockSignal()
+        let first = await signal.mark(vault.session)
+        #expect(await signal.unchanged(since: first, in: vault.session))
+        await vault.session.lock()
+        #expect(signal.generation == 0)
+        #expect(!(await signal.unchanged(since: first, in: vault.session)))
+        let second = await signal.mark(vault.session)
+        signal.fire()
+        #expect(!(await signal.unchanged(since: second, in: vault.session)))
+    }
+
     /// What the Settings summary notes before its sync (`AppModel.syncNow`, not built here; Z183): every lock of the
     /// session, and every lock the app reports itself, moves it.
     @Test("the lock signal's generation moves with every lock")

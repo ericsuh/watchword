@@ -78,6 +78,7 @@ enum StateStoreFixtures {
         state.quarantineDropped = [SyncFixtures.deviceB]
         state.quarantineCrowded = 17
         state.collectedThrough = 2
+        state.restoredUnpublished = [record(4).key: RecordStamp(version: 2, device: SyncFixtures.deviceB)]
         state.authenticator = [0xA1, 0xA2, 0xA3]
         return state
     }
@@ -145,6 +146,13 @@ struct SyncStateAuthenticationTests {
                 $0.syncedBefore = true
                 $0.startedOverByMove = true
             },
+            changed("restoredUnpublished") {
+                $0.restoredUnpublished[other] = RecordStamp(version: 0, device: SyncFixtures.deviceB)
+            },
+            changed("restoredUnpublished, a stamp") {
+                $0.restoredUnpublished[StateStoreFixtures.record(4).key]?.version = 3
+            },
+            changed("restoredUnpublished, emptied") { $0.restoredUnpublished = [:] },
         ]
     }
 
@@ -160,7 +168,7 @@ struct SyncStateAuthenticationTests {
         #expect(resigned.authenticatedBytes == signed)
         // A field added to the state must be added to `authenticatedBytes` and to `variants`: this count is the
         // reminder.
-        #expect(Mirror(reflecting: base).children.count == 28)
+        #expect(Mirror(reflecting: base).children.count == 29)
         #expect(Set(Self.variants.map(\.1.authenticatedBytes)).count == Self.variants.count)
     }
 
@@ -173,6 +181,7 @@ struct SyncStateAuthenticationTests {
         state.quarantineDropped = []
         state.quarantineCrowded = nil
         state.collectedThrough = 0
+        state.restoredUnpublished = [:]
         let before = state.authenticatedBytes
         state.retryUnfinished = true
         #expect(state.authenticatedBytes.count == before.count + 1 + 8)
@@ -182,6 +191,11 @@ struct SyncStateAuthenticationTests {
         state.collectedThrough = 4
         #expect(state.authenticatedBytes.count == withRetry.count + 1 + 8 + 8)
         #expect(Array(state.authenticatedBytes.prefix(withRetry.count)) == withRetry)
+        // And the review of round 12's: a row saved before it still verifies.
+        let withCollected = state.authenticatedBytes
+        state.restoredUnpublished = [StateStoreFixtures.record(5).key: RecordStamp(version: 1, device: UUID())]
+        #expect(state.authenticatedBytes.count == withCollected.count + 8 + (16 + 1) + (8 + 16 + 1))
+        #expect(Array(state.authenticatedBytes.prefix(withCollected.count)) == withCollected)
     }
 
     /// A device move's `syncedBefore` (V49) is written only when set, after the reset's fields, so a row saved before
@@ -199,6 +213,35 @@ struct SyncStateAuthenticationTests {
         state.startedOverByMove = true
         #expect(state.authenticatedBytes.count == withFact.count + 1)
         #expect(Array(state.authenticatedBytes.prefix(withFact.count)) == withFact)
+    }
+
+    /// The two branches merged here each added fields after `collectedThrough`: a restore's `restoredUnpublished`
+    /// (review of round 12) and the conflict copies and the reset's (§7.5, §7.10, V49, V52). Where the reset's are
+    /// written the restore's count is too, even at zero, so a state with either and a state with both are signed
+    /// apart, and a row saved with the restore's alone still verifies.
+    @Test("a restore's entries and the reset's fields are signed apart, alone and together")
+    func restoredAndResetFieldsApart() {
+        var neither = StateStoreFixtures.state()
+        neither.restoredUnpublished = [:]
+        var restored = neither
+        restored.restoredUnpublished = [StateStoreFixtures.record(5).key: RecordStamp(version: 1, device: UUID())]
+        var reset = neither
+        reset.storeResetSuspected = true
+        var both = restored
+        both.storeResetSuspected = true
+        var moved = both
+        moved.syncedBefore = true
+        moved.startedOverByMove = true
+        let forms = [neither, restored, reset, both, moved].map(\.authenticatedBytes)
+        #expect(Set(forms).count == forms.count)
+        // The restore's alone: its entries right after the earlier fields, nothing after them.
+        #expect(
+            Array(restored.authenticatedBytes.prefix(neither.authenticatedBytes.count)) == neither.authenticatedBytes)
+        // The reset's alone carry an empty count of the restore's entries ahead of them.
+        #expect(reset.authenticatedBytes.count > neither.authenticatedBytes.count + 8)
+        // Both: the restore's entries, then the reset's fields.
+        let entries = 8 + (16 + 1) + (8 + 16 + 1)
+        #expect(both.authenticatedBytes.count == reset.authenticatedBytes.count + entries - 8)
     }
 
     @Test("what is signed does not depend on the order a dictionary happens to iterate in")

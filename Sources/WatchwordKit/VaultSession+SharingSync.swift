@@ -1612,9 +1612,17 @@ extension VaultSession {
         }
         // What this device wrote and has not published, as its signed sync state has it (Z20).
         let ownDevice = account?.deviceID
-        let published = (try? await syncState?.loadState(vaultID: vaultID))?.published ?? [:]
+        let state = try? await syncState?.loadState(vaultID: vaultID)
+        let published = state?.published ?? [:]
+        // What a restore left under an earlier device ID of this installation and has still to carry over
+        // (`SyncState.restoredUnpublished`): this installation's own work, which no segment carried because nobody
+        // published it yet, and which the carry writes as this device's (review of round 13, M2). Taken out, it would
+        // sit in the quarantine where nothing carries it.
+        let restored = state?.restoredUnpublished ?? [:]
         for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
-            for row in try await store.records(in: vaultID, kind: kind) where !(try await judgeAdmits(row)) {
+            for row in try await store.records(in: vaultID, kind: kind) where restored[row.key]?.device != row.deviceID
+            {
+                guard !(try await judgeAdmits(row)) else { continue }
                 // An item of this device's own that nobody else has is remembered as such, signed, in a row that
                 // outlives the index: a deletion in another vault may be waiting for it (Z44, Z54, Z121).
                 if kind == .item, row.deviceID == ownDevice,

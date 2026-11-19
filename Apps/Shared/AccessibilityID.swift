@@ -21,6 +21,7 @@ enum AccessibilityID {
         static let export = "settings.export"
         static let restore = "settings.restore"
         static let syncNotice = "settings.syncNotice"
+        static let syncNoticeAction = "settings.syncNoticeAction"
     }
 
     enum Vaults {

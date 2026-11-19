@@ -151,6 +151,10 @@ public actor VaultSession: SharesExecutor {
     var lockListeners: [Int: AsyncStream<Void>.Continuation] = [:]
     var nextLockListener = 0
     var syncInFlight = false
+    /// A registration of this installation is between its first await and its end (`registerThisDevice`): another,
+    /// begun by an unlock or a sync meanwhile, would make a second device key over the first and register an ID whose
+    /// key the first's failure then deleted (review of round 12, L1). One at a time.
+    var registrationInFlight = false
     /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
     var registryView: RegistryView?
     /// Registry entries fetched from the transport and found worth nothing (they can never count, or wait on a
@@ -361,7 +365,23 @@ public actor VaultSession: SharesExecutor {
         let expected = record.keysetVersion
         record.emergencyKitConfirmedAt = await clock.now()
         try await store.commit(StoreChange(account: .update(record, expectedKeysetVersion: expected)))
-        account = record
+        account = await keepingStoredMigration(record)
+    }
+
+    /// `record`, just committed with its migration kept (`MigrationWrite.keep`), as the store now holds it: with the
+    /// migration the store holds now, read again after the commit, never the one `record` was read with before its
+    /// awaits, which a move completed meanwhile cleared (review of round 11, Z186). Where the store cannot be read, the
+    /// migration this session caches: the two writes that change it cache it as they commit (`registerThisDevice`,
+    /// `completeDeviceMigration`), so that copy is the stored one but for a write outside this session (review of
+    /// round 12).
+    func keepingStoredMigration(_ record: AccountRecord) async -> AccountRecord {
+        var record = record
+        if let stored = try? await store.loadAccount(), stored.accountID == record.accountID {
+            record.migration = stored.migration
+        } else if let cached = account, cached.accountID == record.accountID {
+            record.migration = cached.migration
+        }
+        return record
     }
 
     /// The Emergency Kit again, for printing a replacement (PRD F5.1). The account password is asked for in the same
@@ -644,6 +664,7 @@ public actor VaultSession: SharesExecutor {
             keyset.zeroise()
             throw error
         }
+        updated = await keepingStoredMigration(updated)
         account = updated
         registryView = nil
         return (unlockKey, keyset, updated)
@@ -977,6 +998,11 @@ public actor VaultSession: SharesExecutor {
 
     // MARK: - Lock (PRD F5.5)
 
+    /// How many times the session has locked: moved inside `lock()` itself, before anyone listening to `lockEvents()`
+    /// hears of it, so work outside the session that must not keep what it made across a lock compares it after its
+    /// awaits (review of round 11, Z188; `LockSignal.Mark`).
+    public var lockCount: UInt64 { lockEpoch }
+
     /// Zeroises every key. Safe to call at any time, including while another operation is in flight: that
     /// operation then fails with `locked` or `lockedDuringUnlock`.
     public func lock() {
@@ -1270,6 +1296,7 @@ public actor VaultSession: SharesExecutor {
             newUnlockKey.zeroise()
             throw error
         }
+        updated = await keepingStoredMigration(updated)
         account = updated
         registryView = nil
         // The new password is committed: from here on, report success whatever happens to the session. Telling the

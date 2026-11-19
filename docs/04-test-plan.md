@@ -659,7 +659,51 @@ it is complete, and a move record the session did not sign moves nothing (`inter
 `migrationRoundTrip`, store contract); a failed registration leaves no device key behind
 (`parkedDeletionsUnreadableAtRegistration`, Z182); a lock after the sync but before its summary is stored leaves none
 (`lockBeforeSummaryLeavesNone`, `lockSignalGeneration`, "Screen models: devices", Z183); the empty state the move saves
-verifies (`migratedStateIsSigned`, Z184).
+verifies (`migratedStateIsSigned`, Z184). The review of the eleventh round (Z185 to Z190): a restore's deletion in a
+shared vault held closed is parked, the move completes and the device publishes in its other vaults, and the parked
+deletion goes out once the vault opens (`restoreWithASharedVaultHeldClosed`, "shared vaults through the session", Z185;
+`deviceMigrationIncomplete`, wording); an account write that does not name the migration keeps it, and a password
+change across a completed move does not bring it back (`migrationKeptByOtherWrites`, `migrationWriteWithoutAccount`,
+store contract; `passwordChangeKeepsACompletedMove`, Z186); a version 1 database opens as version 2 with its rows
+(`upgradeFromVersion1`, "SQLite record store", Mac only, Z187); a summary made across a lock nobody has announced yet
+is dropped (`unheardLockLeavesNoSummary`, `lockSignalMark`, Z188); a registration that fails before its commit leaves
+no device key (`failedRegistrationLeavesNoKey`, Z189); the unlock's retry of the move carries a private vault's
+deletion (`unlockRetryReadsMarkersFirst`, Z190). The review of the twelfth round (Z191 to Z196): a restore's
+unpublished edit and deletion in a shared vault reach the vault's members, and stay on the restored device through a
+replay (`restoredEditAndDeletionReachMembers`, "shared vaults through the session", Z191; `ItemReattributionTests`,
+"Item reattribution"); a restore's unpublished move into a shared vault held closed keeps the original until the
+copy is carried and published, naming it meanwhile, and the person can stop waiting for a vault that will not open
+(`restoredMoveIntoAClosedVault`, `stopWaitingForRestoredWork`, Z192; `restoredWorkWaiting`, wording;
+`everyFieldIsCovered`, `laterFieldsOnlyWhenSet`, "Sync state authentication"); a registration interrupted by an unlock
+leaves no registered device without its key (`registrationDuringRegistration`, "account enrolment and device
+registry", Z193); a deletion parked for want of a key is reported held back (`restoreWithASharedVaultHeldClosed`,
+Z194). The review of the thirteenth round (Z197 to Z202): a restore's carry never rewrites another device's stamps and
+keeps what another device saw of the old ID as that ID's (`neverRewritesAnotherDevice`, `linesRaiseTheBound`, "Item
+reattribution", Z197), and its laws hold under random and every small history (`reattribution` in
+`LongRunningItemMergeLawTests`: commutes with merges, idempotent, keeps supersession and coverage, never rewrites a
+third device from a bound read too low, and with old hardware going on, the carry, its later version and any other
+converge in every order and hold every value; `LongRunningItemMergeExhaustiveTests`, each pair of a last-device
+version and another's); a restore from a backup older than the device's last publish, with its state or with it
+edited, brings back nothing it replaced (`restoreFromALaggingBackup`, Z198); the person stops the wait through the
+notice's action, and work left in a vault the account was removed from is kept here and holds nothing back
+(`stopWaitingForRestoredWork`, `restoredWorkInAVaultLeft`, "shared vaults through the session"; `restoredWorkAction`,
+wording, Z199); the hold survives a damaged state (`restoredWorkSurvivesAnEditedState`, Z200); a registration from a
+stale account record does not register over the one that finished, and a refused one happens at the next sync
+(`registrationFromAStaleAccount`, `registrationAtTheNextSync`, "account enrolment and device registry";
+`updateNamesTheDevice`, store contract, Z201); and a version kept after a device's own deletion in a vault deleted
+elsewhere holds nothing back (`keptAfterOwnDeletionInADeletedVault`, "Vault session: vaults across devices", Z202).
+The review of the fourteenth round (Z203 to Z207): a pending deletion planted in the state file for a move's copy does
+not open Z148's gate (`plantedPendingDeletionForAMovesCopy`, "sync with real keys", Z203); the carry renames the backup
+before anything pulled is merged into it, and the law tests draw the restored ID at random (`reattribution`), the
+exhaustive exploration below and above every device, which "two devices, every history from a fresh item" must meet
+as a field order's tie (Z204); Stop Waiting is one action per vault that will not open here, refused for one that opens
+(`restoredWorkAction`, wording; `publishingHeldForTheCarryIsNamed`, `stopWaitingForRestoredWork`, Z205); an ID planted
+in an unverified state as a restore's earlier ID is not another account's device (`plantedChainIDOfAnotherAccount`,
+Z206); and a vault whose publishing waits for the carry is named until the carry is done
+(`publishingHeldForTheCarryIsNamed`, "shared vaults through the session"; `publishingHeldForCarry`, wording, Z207).
+`LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
+in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
+the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

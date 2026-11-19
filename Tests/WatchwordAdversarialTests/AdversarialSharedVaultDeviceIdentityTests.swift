@@ -356,4 +356,8 @@ actor UnreadableDeviceKeyStore: DeviceKeyStore {
     func delete(accountID: UUID) async throws {
         await base.delete(accountID: accountID)
     }
+
+    func delete(accountID: UUID, deviceID: UUID) async throws {
+        await base.delete(accountID: accountID, deviceID: deviceID)
+    }
 }

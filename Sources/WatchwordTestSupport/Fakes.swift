@@ -162,6 +162,9 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
     private var held: [UUID: (deviceID: UUID, key: SoftwareDeviceKey)] = [:]
     private var generator: SeededGenerator
     public private(set) var signatures = 0
+    /// How many keys have been made, by either `create`: with `isEmpty` and `publicKey`, whether a failure left one
+    /// behind (review of round 11, Z189).
+    public private(set) var created = 0
 
     public init(seed: UInt64 = 1) {
         generator = SeededGenerator(seed: seed)
@@ -172,18 +175,32 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
         let publicKey = try key.publicKey()
         let deviceID = DeviceIdentifier.derive(accountID: accountID, key: publicKey)
         held[accountID] = (deviceID, key)
+        created += 1
         return DeviceIdentity(id: deviceID, key: publicKey)
     }
 
     public func create(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey {
         let key = SoftwareDeviceKey.generate(using: &generator)
         held[accountID] = (deviceID, key)
+        created += 1
         return try key.publicKey()
     }
 
-    public func publicKey(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey? {
+    public func publicKey(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey? {
+        if let hook = lookupHook, hook.deviceID == deviceID {
+            lookupHook = nil
+            await hook.run()
+        }
         guard let entry = held[accountID], entry.deviceID == deviceID else { return nil }
         return try entry.key.publicKey()
+    }
+
+    private var lookupHook: (deviceID: UUID, run: @Sendable () async -> Void)?
+
+    /// Runs `hook` inside the next lookup of `deviceID`'s key, before it answers: what a caller that read the account
+    /// and then asks for its key meets when something else runs while it waits (review of round 13, L-b).
+    public func onNextLookup(of deviceID: UUID, _ hook: @escaping @Sendable () async -> Void) {
+        lookupHook = (deviceID, hook)
     }
 
     public func sign(_ prepared: [UInt8], accountID: UUID, deviceID: UUID) throws -> [UInt8] {
@@ -194,6 +211,10 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
 
     public func delete(accountID: UUID) {
         held[accountID] = nil
+    }
+
+    public func delete(accountID: UUID, deviceID: UUID) {
+        if held[accountID]?.deviceID == deviceID { held[accountID] = nil }
     }
 
     // MARK: - Test seams

@@ -32,6 +32,10 @@ public enum VaultError: Error, Equatable, Sendable {
     /// The vault was deleted, here or on another device. Nothing new is saved into it; what it still holds can be
     /// moved to another vault or deleted.
     case vaultDeleted(UUID)
+    /// The person asked to stop waiting to carry over what a restore left in a vault that opens on this device: its
+    /// current key is here and its owner undisputed, so a sync carries the work (review of round 14, L2). Only a vault
+    /// that will not open here offers the choice (`AccountSyncReport.restoredWorkMayStopWaiting`).
+    case restoredWorkCanBeCarried(UUID)
     /// The Personal vault can be neither deleted nor shared (PRD F2.1).
     case cannotDeletePersonalVault
     /// A vault name must have between 1 and `VaultMetadataCodec.maximumNameLength` characters.

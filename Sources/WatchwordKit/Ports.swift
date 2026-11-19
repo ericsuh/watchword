@@ -137,6 +137,10 @@ public protocol DeviceKeyStore: Sendable {
     func sign(_ prepared: [UInt8], accountID: UUID, deviceID: UUID) async throws -> [UInt8]
     /// Destroys the key; succeeds if there is none.
     func delete(accountID: UUID) async throws
+    /// Destroys the key if it is the one held for `deviceID`, and leaves one held for any other device alone; succeeds
+    /// if there is none. What a registration that fails deletes: the key it made, never one made since (review of
+    /// round 12, L1).
+    func delete(accountID: UUID, deviceID: UUID) async throws
 }
 
 /// The software `DeviceKeyStore`: an Ed25519 seed in the Keychain item `deviceSigningKey`, device-only like the
@@ -192,6 +196,15 @@ public actor KeychainDeviceKeyStore: DeviceKeyStore {
     }
 
     public func delete(accountID: UUID) async throws {
+        try await keychain.delete(.deviceSigningKey(accountID: accountID))
+    }
+
+    /// Reads the item and deletes it only if it holds `deviceID`'s key. Not atomic against another `create` on this
+    /// store between the two (the actor is re-entrant across the Keychain's awaits); the session registers one
+    /// device at a time (`VaultSession.registrationInFlight`), which is what keeps one from landing there.
+    public func delete(accountID: UUID, deviceID: UUID) async throws {
+        guard let key = try await key(accountID: accountID, deviceID: deviceID) else { return }
+        key.zeroise()
         try await keychain.delete(.deviceSigningKey(accountID: accountID))
     }
 

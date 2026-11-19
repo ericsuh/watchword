@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WatchwordEnvelope
 import WatchwordModel
 import WatchwordStore
 import WatchwordSync
@@ -12,9 +13,10 @@ import WatchwordTestSupport
 extension AdversarialAccountTests {
     /// A's store and sync state, a deletion made and never published, restored onto other hardware (no device key)
     /// over `state`: the restored device, not yet unlocked, and the deleted item's ID.
-    static func restoredWithUnpublishedDeletion(_ fixture: Fixture, state: InterceptingStateStore) async throws
-        -> (restored: TestVault, other: TestVault, doomed: UUID)
-    {
+    static func restoredWithUnpublishedDeletion(
+        _ fixture: Fixture, state: InterceptingStateStore, into store: any RecordStore = InMemoryRecordStore(),
+        deviceKeys: FakeDeviceKeyStore = FakeDeviceKeyStore(seed: 181)
+    ) async throws -> (restored: TestVault, other: TestVault, doomed: UUID) {
         let other = try await fixture.enrolled(Self.deviceC)
         let doomed = try await fixture.a.session.save(
             Item(vaultID: fixture.personal, title: "Deleted on A, never synced", scopes: [], fields: []))
@@ -25,7 +27,6 @@ extension AdversarialAccountTests {
         try await fixture.a.session.deletePermanently(id: doomed.id)
 
         let original = try #require(fixture.a.store as? InMemoryRecordStore)
-        let store = InMemoryRecordStore()
         try await store.commit(
             StoreChange(
                 account: .create(try #require(await original.loadAccount())), upserts: await original.allRecords))
@@ -36,7 +37,7 @@ extension AdversarialAccountTests {
         }
         let restored = TestVault(
             store: store, sync: SyncSettings(state: state, transport: fixture.transport), seed: 181,
-            deviceName: "Restored phone", deviceKeys: FakeDeviceKeyStore(seed: 181))
+            deviceName: "Restored phone", deviceKeys: deviceKeys)
         return (restored, other, doomed.id)
     }
 
@@ -119,8 +120,11 @@ extension AdversarialAccountTests {
         let store = try #require(restored.store as? InMemoryRecordStore)
         var account = try #require(await store.loadAccount())
         let otherID = Self.deviceC
-        account.migration = DeviceMigration(previousDeviceID: otherID, authenticator: Array(repeating: 7, count: 64))
-        try await store.commit(StoreChange(account: .update(account, expectedKeysetVersion: account.keysetVersion)))
+        let planted = DeviceMigration(previousDeviceID: otherID, authenticator: Array(repeating: 7, count: 64))
+        account.migration = planted
+        try await store.commit(
+            StoreChange(
+                account: .update(account, expectedKeysetVersion: account.keysetVersion), migration: .set(planted)))
 
         let relaunched = restored.relaunched(seed: 18_121)
         try await relaunched.session.unlock(password: TestVault.password)
@@ -148,4 +152,247 @@ extension AdversarialAccountTests {
         expected.startedOverByMove = true
         #expect(loaded == expected)
     }
+
+    /// Threat: none needed but a sync state file that fails one write at a restore's unlock, and an app relaunched
+    /// before the next; the review of round 11 (Z190). The unlock made the move again before it read which vaults are
+    /// shared, and until it has read them every vault but the Personal one is held closed: the deletion of an item of a
+    /// private vault found no key, and (now that such a deletion is parked rather than stopping the move, M1) would
+    /// wait parked for the next sync. The markers are read first, and the deletion is carried as the new ID's.
+    @Test("the move an unlock makes again reads which vaults are shared first, and carries a private vault's deletion")
+    func unlockRetryReadsMarkersFirst() async throws {
+        let fixture = try await Self.fixture(seed: 18_600)
+        let other = try await fixture.enrolled(Self.deviceC)
+        let vaultID = try await fixture.a.session.createVault(name: "Other").id
+        let doomed = try await fixture.a.session.save(
+            Item(vaultID: vaultID, title: "Deleted on A, never synced", scopes: [], fields: []))
+        try await fixture.a.session.trash(id: doomed.id)
+        try await fixture.a.session.sync()
+        try await other.session.sync()
+        try await fixture.a.session.deletePermanently(id: doomed.id)
+
+        let original = try #require(fixture.a.store as? InMemoryRecordStore)
+        let store = InMemoryRecordStore()
+        try await store.commit(
+            StoreChange(
+                account: .create(try #require(await original.loadAccount())), upserts: await original.allRecords))
+        let raw = try #require(fixture.a.sync?.state)
+        let state = InterceptingStateStore()
+        for vault in [fixture.personal, vaultID] {
+            if let saved = try await raw.loadState(vaultID: vault) { await state.saveState(saved) }
+            for deletion in try await raw.pendingDeletions(vaultID: vault).values {
+                try await state.addPendingDeletion(deletion)
+            }
+        }
+        let restored = TestVault(
+            store: store, sync: SyncSettings(state: state, transport: fixture.transport), seed: 18_601,
+            deviceName: "Restored phone", deviceKeys: FakeDeviceKeyStore(seed: 18_601))
+        await state.failNextPendingDeletionWrite()
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.migration != nil, "the interrupted move was not recorded")
+
+        await restored.session.lock()
+        let relaunched = restored.relaunched(seed: 18_602)
+        try await relaunched.session.unlock(password: TestVault.password)
+        let account = try #require(try await store.loadAccount())
+        #expect(account.migration == nil, "the unlock did not finish the move")
+        let pending = try await state.base.pendingDeletions(vaultID: vaultID)
+        let carried = try #require(pending[RecordKey(recordID: doomed.id, kind: .item)])
+        #expect(carried.stamp.device == account.deviceID, "parked for want of the markers, not carried")
+        try await relaunched.session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed.id)) == nil, "the deletion never went out")
+    }
+
+    /// Threat: none needed but a database that refuses one write (full, or busy past its timeout) while a restore
+    /// registers its new device ID; the review of round 11 (Z189, Z182's residual). The new device's key is made before
+    /// the label is sealed for its ID and the registry entry signed with it, and a failure after it and before the
+    /// commit left the key in the Keychain under an ID nothing registered, one per failed attempt. It is deleted again.
+    @Test("a restore's registration that fails before its commit leaves no device key behind")
+    func failedRegistrationLeavesNoKey() async throws {
+        let fixture = try await Self.fixture(seed: 18_700)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let keys = FakeDeviceKeyStore(seed: 18_701)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, into: store, deviceKeys: keys)
+        let oldID = try #require(try await store.loadAccount()?.deviceID)
+        await store.failNextAccountCommit()
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.deviceID == oldID, "registered although the commit failed")
+        #expect(await keys.created == 1)
+        #expect(await keys.isEmpty(), "the failed registration left its key behind")
+
+        await restored.session.lock()
+        try await restored.session.unlock(password: TestVault.password)
+        let account = try #require(try await store.loadAccount())
+        #expect(account.deviceID != oldID, "the next unlock did not register")
+        #expect(await keys.created == 2)
+        #expect(try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID) != nil)
+        try await restored.session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
+    /// Threat: none needed but a lock and an unlock while a restore's registration waits on its commit, which then
+    /// fails; the review of round 12 (L1, Z189's residual). The unlock's reconciliation saw the old ID still in the
+    /// account record and registered a second new device, its key replacing the first's in the Keychain; the first's
+    /// failure then deleted whatever key the account held, the second's, and the account named a device whose key was
+    /// gone (`deviceKeyUnreadable` until the next unlock registered a third, and left that one keyless in the registry).
+    /// One registration runs at a time now, and a failed one deletes only the key it made.
+    @Test("a restore's registration interrupted by an unlock leaves no registered device without its key")
+    func registrationDuringRegistration() async throws {
+        let fixture = try await Self.fixture(seed: 18_900)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let keys = FakeDeviceKeyStore(seed: 18_901)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, into: store, deviceKeys: keys)
+        let oldID = try #require(try await store.loadAccount()?.deviceID)
+        let session = restored.session
+        await store.onNextAccountCommit {
+            await session.lock()
+            try? await session.unlock(password: TestVault.password)
+        }
+        try? await session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        let account = try #require(try await store.loadAccount())
+        let held = try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID)
+        let keylessRegistration = account.deviceID != oldID && held == nil
+        #expect(!keylessRegistration, "the account names a device whose key a failed registration deleted")
+        #expect(await keys.created == 1, "a second registration ran while the first waited")
+
+        await session.lock()
+        try await session.unlock(password: TestVault.password)
+        let registered = try #require(try await store.loadAccount())
+        #expect(registered.deviceID != oldID)
+        #expect(try await keys.publicKey(accountID: registered.accountID, deviceID: registered.deviceID) != nil)
+        try await session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
+    /// Threat: none needed but a lock and an unlock while a restore's unlock, having read the account record, waits on
+    /// the Keychain for its device key; the review of round 13 (L-b). The second unlock registered the new device and
+    /// finished before the first went on, which then registered again from the record it had read: still the old ID,
+    /// no move recorded, no key. Its new key replaced the first's in the Keychain's one slot, and its commit, which
+    /// named only the keyset version, replaced the registered device: the registry listed a device whose key was
+    /// gone. A registration reads the account again under its flag now, and its commit names the device ID it
+    /// replaces.
+    @Test("a restore's registration that read the account before another finished does not register over it")
+    func registrationFromAStaleAccount() async throws {
+        let fixture = try await Self.fixture(seed: 19_300)
+        let state = InterceptingStateStore()
+        let keys = FakeDeviceKeyStore(seed: 19_301)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, deviceKeys: keys)
+        let oldID = try #require(try await restored.store.loadAccount()?.deviceID)
+        let session = restored.session
+        let secretKey = fixture.kit.secretKey
+        await keys.onNextLookup(of: oldID) {
+            await session.lock()
+            try? await session.unlock(password: TestVault.password, secretKey: secretKey)
+        }
+        try? await session.unlock(password: TestVault.password, secretKey: secretKey)
+        let account = try #require(try await restored.store.loadAccount())
+        #expect(account.deviceID != oldID)
+        #expect(await keys.created == 1, "a registration from a stale account made a second key")
+        #expect(try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID) != nil)
+        try await session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
+    /// Threat: none needed; the review of round 13 (L-b). A restore whose registration does not happen at its unlock
+    /// (one already under way, which then failed) waited for the next unlock: the sync never registered it, and the
+    /// device published nothing. A sync now registers it, as an unlock would.
+    @Test("a restore's registration that did not happen at its unlock happens at the next sync")
+    func registrationAtTheNextSync() async throws {
+        let fixture = try await Self.fixture(seed: 19_310)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let keys = FakeDeviceKeyStore(seed: 19_311)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, into: store, deviceKeys: keys)
+        let oldID = try #require(try await store.loadAccount()?.deviceID)
+        await store.failNextAccountCommit()
+        try? await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.deviceID == oldID, "the registration was not refused")
+
+        try await restored.session.sync()
+        let account = try #require(try await store.loadAccount())
+        #expect(account.deviceID != oldID, "the sync did not register the restored device")
+        #expect(try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID) != nil)
+        try await restored.session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
+    /// Threat: none needed; the review of round 11 (Z186). A password change reads the account record, derives and signs
+    /// across several awaits, and commits the record it read. A move completed during those awaits cleared the record's
+    /// migration, and the commit wrote it back: the move ran again after the device had published under its new ID
+    /// (each vault's state started over, the log replayed, rows published again). The store now keeps the migration a
+    /// commit does not name, and the session caches what the store kept.
+    @Test("a password change across a completed move does not bring the move back")
+    func passwordChangeKeepsACompletedMove() async throws {
+        let fixture = try await Self.fixture(seed: 18_500)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let (restored, _, _) = try await Self.restoredWithUnpublishedDeletion(fixture, state: state, into: store)
+        await state.failNextPendingDeletionWrite()
+        try await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.migration != nil, "the interrupted move was not recorded")
+
+        let session = restored.session
+        await store.onNextHeaderListing {
+            guard let account = try? await session.loadAccount() else { return }
+            try? await session.completeDeviceMigration(account: account)
+        }
+        try await session.changePassword(current: TestVault.password, new: "a new password for the restored phone")
+        #expect(await store.hookRan)
+        #expect(try await store.loadAccount()?.migration == nil, "the password change wrote the cleared move back")
+        #expect(await session.account?.migration == nil, "the session cached the cleared move")
+        let report = try await session.syncAll()
+        #expect(!report.deviceMigrationIncomplete)
+    }
+}
+
+/// A record store that runs a step once, the next time the account's headers are listed (where a password change
+/// is between reading the account record and committing it), and that can fail the next commit of the account record.
+actor HookedRecordStore: RecordStore {
+    let base = InMemoryRecordStore()
+    private var hook: (@Sendable () async -> Void)?
+    private(set) var hookRan = false
+
+    private var accountCommitFails = false
+    private var accountCommitHook: (@Sendable () async -> Void)?
+
+    func onNextHeaderListing(_ hook: @escaping @Sendable () async -> Void) { self.hook = hook }
+    /// Runs `hook` inside the next commit that writes the account record, before it is written, and then fails that
+    /// commit: what a registration's commit meets when the session is locked and unlocked again while it waits.
+    func onNextAccountCommit(_ hook: @escaping @Sendable () async -> Void) { accountCommitHook = hook }
+    /// The next commit that writes the account record fails, as a database that cannot be written would.
+    func failNextAccountCommit() { accountCommitFails = true }
+
+    func loadAccount() async throws -> AccountRecord? { await base.loadAccount() }
+    func record(_ key: RecordKey) async throws -> StoredRecord? { await base.record(key) }
+    func records(in vaultID: UUID, kind: EnvelopeKind) async throws -> [StoredRecord] {
+        if kind == .accountHeader, let hook {
+            self.hook = nil
+            await hook()
+            hookRan = true
+        }
+        return await base.records(in: vaultID, kind: kind)
+    }
+    func commit(_ change: StoreChange) async throws {
+        if let hook = accountCommitHook, change.account != nil {
+            accountCommitHook = nil
+            await hook()
+            throw RecordStoreError.checkpointIncomplete
+        }
+        if accountCommitFails, change.account != nil {
+            accountCommitFails = false
+            throw RecordStoreError.checkpointIncomplete
+        }
+        try await base.commit(change)
+    }
+    func eraseAll() async throws { await base.eraseAll() }
 }

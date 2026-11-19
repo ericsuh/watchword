@@ -81,6 +81,9 @@ final class AppModel {
             breachChecksAvailable = false
             phase = .unavailable(message)
         }
+        // Every lock of the session clears the last sync's summary, not only the app's own lock paths (review of
+        // round 11, Z188).
+        lockSignal.register(self)
     }
 
     var personalVaultID: UUID?
@@ -364,17 +367,26 @@ final class AppModel {
         lastSync = nil
         // `didLock` clears the summary (Z176), and a lock that lands during the awaits below has done so already: a
         // summary made across a lock is dropped, never stored after it (review of round 10, Z183).
-        let generation = lockSignal.generation
+        // With the session's own count, which moves in `lock()` itself (review of round 11, Z188).
+        let mark = await lockSignal.mark(session)
         await perform {
             let report = try await session.syncAll()
             let devices = (try? await session.devices()) ?? []
             let names = Dictionary(
                 devices.map { ($0.id, DeviceRow.reference($0)) }, uniquingKeysWith: { first, _ in first })
             let summary = await SyncSummary.loading(report, deviceNames: names, from: session)
-            guard generation == self.lockSignal.generation else { return }
+            guard await self.lockSignal.unchanged(since: mark, in: session) else { return }
             self.lastSync = summary
             if self.phase == .unlocked { try await self.reload() }
         }
+    }
+
+    /// A sync notice's action (`SyncNotice.actions`), once the person has confirmed it, then a sync so that its effect
+    /// shows (review of round 13, M3).
+    func perform(_ action: SyncNoticeAction) async {
+        guard let session, let summary = lastSync else { return }
+        await perform { try await summary.perform(action, using: session) }
+        await syncNow()
     }
 
     /// The person's choice between conflicting values (PRD F7.6); the values not chosen are discarded.
@@ -545,5 +557,12 @@ final class AppModel {
             didLock(.requested)
         }
         errorMessage = ErrorWording.message(for: error)
+    }
+}
+
+extension AppModel: LockSensitive {
+    /// The last sync's summary names items and vaults by title (Z171): whatever locked the session, it goes (Z176).
+    func dropOnLock() {
+        lastSync = nil
     }
 }

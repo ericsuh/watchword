@@ -63,4 +63,61 @@ extension AdversarialVaultSyncTests {
         try await f.b.session.sync()
         #expect((try? await f.b.session.item(id: original.id)) == nil, "the original's deletion never went out")
     }
+
+    /// Threat: A8, who can edit the sync state's file, together with the tombstone of `plantedTombstoneForAMovesCopy`
+    /// (an insider device's snapshot here; in a shared vault a writing member's, A4, or the owner's). The Z148 gate
+    /// bounds a row's own edits by the higher of what this device published and its own pending deletion of the
+    /// record (Z202). It read the pending deletions from the raw store, so a row planted for the move's copy, stamped
+    /// by this device far above its edits and signed by nobody, raised the bound over the copy's edits, and the
+    /// original's deletion went out while the copy existed on this device alone. Only a deletion the session signed
+    /// counts there now (review of round 14, M1; Z203).
+    @Test("a planted pending deletion of a move's copy does not let its original's deletion go out")
+    func plantedPendingDeletionForAMovesCopy() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        let destination = try await f.a.session.createVault(name: "Other").id
+        try await f.a.session.sync()
+        try await f.b.session.sync()
+        let original = try await f.a.session.save(
+            Item(
+                vaultID: f.vaultID, title: "To move", scopes: [ServiceScope(host: "example.org")],
+                fields: [Field(kind: .password, label: "Password", value: "moved")]))
+        try await f.a.session.sync()
+        let row = try #require(try await f.a.store.record(RecordKey(recordID: original.id, kind: .item)))
+        let copyID = VaultSession.movedItemID(of: row, to: destination)
+        let copyKey = RecordKey(recordID: copyID, kind: .item)
+        let deviceA = try #require(try await f.a.store.loadAccount()?.deviceID)
+
+        let summary = try ItemErasure(seen: VersionVector([deviceA: 5000]), row: 5000, device: deviceA, date: nil)
+            .summary()
+        let tombstone = SyncEntry.tombstone(
+            copyKey, stamp: RecordStamp(version: 5001, device: deviceA, deleted: true), erasure: summary)
+        let location = SyncObjectLocation.snapshot(vaultID: destination, author: Self.deviceB, lamport: 9000)
+        let payload = SyncPayload(
+            kind: .snapshot, vaultID: destination, author: Self.deviceB, number: 9000, vector: [:],
+            entries: [tombstone])
+        let envelope = try await f.b.session.syncSeal(payload.encoded(), at: location)
+        let signature = try await f.b.session.syncSign(envelope, at: location)
+        await f.transport.tamper(
+            location.name, contents: SignedObject(signature: signature, envelope: envelope).serialized())
+        try await f.a.session.sync()
+        let known = try await f.a.session.syncState?.loadState(vaultID: destination)?.known
+        #expect(known?[copyKey]?.deleted == true, "the tombstone was not met: nothing is tested")
+
+        _ = try await f.a.session.move(itemID: original.id, to: destination)
+        let copy = try #require(try await f.a.store.record(copyKey))
+        let raw = try #require(f.a.sync?.state)
+        let planted = PendingDeletion(
+            stamp: RecordStamp(version: 1 << 40, device: deviceA, deleted: true), record: copy,
+            authenticator: [UInt8](repeating: 0x5A, count: 64))
+        try await raw.addPendingDeletion(planted)
+        let stored = try await raw.pendingDeletions(vaultID: destination)
+        #expect(stored[copyKey] != nil, "the row was not planted: nothing is tested")
+        let checked = try await f.a.session.syncState?.pendingDeletions(vaultID: destination)
+        #expect(checked?[copyKey] == nil, "the planted row verifies")
+
+        let account = try #require(try await f.a.store.loadAccount())
+        let holds = await f.a.session.holdsUnpublishedWork(in: destination, account: account)
+        #expect(holds, "a planted pending deletion let the original's deletion go out ahead of its copy")
+    }
 }

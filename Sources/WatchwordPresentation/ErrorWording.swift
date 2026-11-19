@@ -101,6 +101,9 @@ public enum ErrorWording {
             return "The Personal vault cannot be deleted or shared."
         case .vaultDeleted:
             return "That vault was deleted. Move what it still holds to another vault."
+        case .restoredWorkCanBeCarried:
+            return "That vault opens on this device, so the changes made there before this device was restored go "
+                + "out at a sync. Sync, then try again if it still waits."
         case .vaultDeletionNotConfirmed:
             return "Something arrived in the vault since you were asked. Review it and try again."
         case .itemHasUnresolvedValues:

@@ -76,13 +76,23 @@ extension VaultSession {
             record = try await loadAccount() ?? record
         }
         report.deviceMigrationIncomplete = record.migration != nil
-        // A device whose registration no longer counts registers again, now that it has seen why.
+        // A device whose registration no longer counts registers again, now that it has seen why. A store restored
+        // onto other hardware whose registration did not happen at the unlock (one was already under way then, or it
+        // failed) registers as a new device here, as the next unlock would (review of round 13, L-b).
         if let keys, let view = try? await registry(record), view.state.pendingCredentials.isEmpty,
-            view.state.standing(of: record.deviceID) == .unknown
+            !(await passwordChangePending(record))
         {
-            try? await registerThisDevice(account: record, keys: keys, asNewDevice: false)
-            record = try await loadAccount() ?? record
+            if record.migration == nil,
+                (try? await deviceKeys.publicKey(accountID: record.accountID, deviceID: record.deviceID)) == .some(nil)
+            {
+                try? await registerThisDevice(account: record, keys: keys, asNewDevice: true)
+                record = try await loadAccount() ?? record
+            } else if view.state.standing(of: record.deviceID) == .unknown {
+                try? await registerThisDevice(account: record, keys: keys, asNewDevice: false)
+                record = try await loadAccount() ?? record
+            }
         }
+        report.deviceMigrationIncomplete = record.migration != nil
 
         let view = try? await registry(record)
         let standing = view?.state.standing(of: record.deviceID)
@@ -118,6 +128,9 @@ extension VaultSession {
             .vaultMetadata: VaultMetadataMerger(sealer: adapter),
             .scanStatus: ScanStatusMerger(sealer: adapter),
         ])
+        // What a restore left that no entry records any more, recorded again before the take-out and any log
+        // (review of round 13, L-a).
+        if mayWrite { await recordRestoredWorkLeft(account: record, since: keysEpoch) }
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         // Not at a store that was reset: the pass publishes this device's proposals, and nothing is published there
         // before the person has answered (§7.10).
@@ -158,6 +171,9 @@ extension VaultSession {
         // The first failure that stops a sync stops this one: the vaults after it merge what they hold and do not ask
         // the transport again (a throttled store asked once per vault would only throttle longer).
         var stopped = report.transportFailure ?? sharingReports.values.lazy.compactMap(\.transportFailure).first
+        // The vaults holding what a restore has still to carry over: they publish nothing in this sync, and carry it
+        // after their log (review of round 13, M2).
+        var carrying: Set<UUID> = []
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
             var ranPublishing = false
@@ -166,14 +182,45 @@ extension VaultSession {
                 ownIDCommits: ownIDCommits)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 let requests = sharedReplayRequests(vaultID)
-                vaultReport = try await engine(vaultID).sync(
-                    reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
-                    transportStopped: stopped, handingOn: reuploadAnswered(epoch))
-                ranPublishing = shared.publishing
+                var reconciled = reconcile || shared.reconcile
+                if await restoredWorkToCarry(in: vaultID) {
+                    // What a restore left, carried once the vault's log has been pulled since it, so that what the
+                    // earlier device ID published is known (review of round 13, M2), and before anything pulled is
+                    // merged into it, so that the pulled versions are merged into the renamed version as every other
+                    // device merges them (review of round 14, L1); and before a replay (whose take-out leaves these
+                    // rows alone, `takeOutWhatNoLongerCounts`). The bound is the stream index and what the downloaded
+                    // segments carry (`stagedBounds`). Published at the next sync; meanwhile the hold below keeps
+                    // every deletion back. A carry that cannot run, or does not finish, merges nothing into the vault
+                    // in this sync: what was downloaded stays staged for the next.
+                    carrying.insert(vaultID)
+                    let pulled = try await engine(vaultID).download(transportStopped: stopped)
+                    var carried = false
+                    if stopped == nil, !pulled.transportUnavailable, pulled.transportFailure == nil,
+                        let staged = await stagedBounds(
+                            in: vaultID, engine: engine(vaultID), account: record, since: keysEpoch)
+                    {
+                        carried = await carryRestoredWork(
+                            account: record, view: view, since: keysEpoch, in: [vaultID], staged: [vaultID: staged])
+                    }
+                    if carried {
+                        let merged = try await engine(vaultID).sync(
+                            reconcile: reconciled, deferringDeletions: true, publishing: false,
+                            transportStopped: stopped)
+                        vaultReport = Self.report(pulled, followedBy: merged)
+                    } else {
+                        vaultReport = pulled
+                        reconciled = false
+                    }
+                } else {
+                    vaultReport = try await engine(vaultID).sync(
+                        reconcile: reconciled, deferringDeletions: true, publishing: shared.publishing,
+                        transportStopped: stopped, handingOn: reuploadAnswered(epoch))
+                    ranPublishing = shared.publishing
+                }
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 await sharedEngineDidRun(
-                    vaultID, reconciled: (reconcile || shared.reconcile) && !vaultReport.replayPostponed,
-                    judgedAgainst: shared.head, report: vaultReport, requestsBefore: requests)
+                    vaultID, reconciled: reconciled && !vaultReport.replayPostponed, judgedAgainst: shared.head,
+                    report: vaultReport, requestsBefore: requests)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
@@ -219,7 +266,8 @@ extension VaultSession {
                     ownIDCommits: ownIDCommits)
                 let requests = sharedReplayRequests(vaultID)
                 let second = try await engine(vaultID).sync(
-                    reconcile: true, deferringDeletions: true, publishing: shared.publishing)
+                    reconcile: true, deferringDeletions: true,
+                    publishing: shared.publishing && !carrying.contains(vaultID))
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 await sharedEngineDidRun(
                     vaultID, reconciled: !second.replayPostponed, judgedAgainst: shared.head, report: second,
@@ -231,7 +279,8 @@ extension VaultSession {
                     restPublished = false
                 }
                 if restPublished,
-                    await holdsUnpublishedWork(in: vaultID, account: record, publishing: shared.publishing)
+                    await holdsUnpublishedWork(
+                        in: vaultID, account: record, publishing: shared.publishing && !carrying.contains(vaultID))
                 {
                     restPublished = false
                     report.deletionsHeldBack.insert(vaultID)
@@ -254,6 +303,15 @@ extension VaultSession {
             report.copiesNobodyReceived = await copiesNobodyReceived(
                 account: record, view: view, since: keysEpoch, otherwise: Array(report.vaults.keys))
             report.deletionsHeldBack.formUnion(report.copiesNobodyReceived.keys)
+        }
+        if mayWrite, (try? requireKeys(since: keysEpoch)) != nil {
+            (report.restoredWorkWaiting, report.restoredWorkKeptHere, report.restoredWorkMayStopWaiting) =
+                await restoredWorkWaiting(account: record, since: keysEpoch)
+            report.deletionsHeldBack.formUnion(report.restoredWorkWaiting.keys)
+            // The vaults whose publishing waits for the carry, and will wait again at the next sync (L4).
+            for vaultID in carrying {
+                if await restoredWorkToCarry(in: vaultID) { report.publishingHeldForCarry.insert(vaultID) }
+            }
         }
         report.sharing = sharingReports
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
@@ -331,15 +389,19 @@ extension VaultSession {
     ///
     /// Where this sync publishes the vault (`publishing`), always: both go out in its deferred pass. Counted, the
     /// deletion waited for the row and the row for the deletion, for good (V44, found by the long vault simulation).
-    /// Anywhere else only a version that holds nothing of this device's the deletion had not seen: its clock's entry
-    /// for this device is at most the deleted version's, or the tombstone's own revision, which a version kept after
-    /// the deletion carries as the deletion's write (`ItemMerge.settle`). A kept version restored from the trash and
-    /// edited holds an edit the deletion never saw, and in a vault this sync does not publish it holds every other
-    /// vault's deletions back like any unpublished edit (review of the first merge, L2; V46). One that does not open
-    /// here waits for nothing but counts.
-    func waitsOnlyBehind(_ deletion: PendingDeletion, row: StoredRecord, account: AccountRecord, publishing: Bool)
-        -> Bool
-    {
+    /// Anywhere else only a version that holds nothing of this device's that neither the deletion nor what it published
+    /// had seen: its clock's entry for this device is at most the highest of the deleted version's, the tombstone's own
+    /// revision, which a version kept after the deletion carries as the deletion's write (`ItemMerge.settle`), and the
+    /// version of the record this device published (`published`). That is Z202's bound (`clock[own] ≤ max(published,
+    /// d)`, found by the restore step of the vault simulation, review of round 13: holding the deletion for such a
+    /// version held both for good once another device's tombstone of the record had arrived) and V46's in one. A kept
+    /// version restored from the trash and edited holds an edit the deletion never saw, and in a vault this sync does
+    /// not publish it holds every other vault's deletions back like any unpublished edit (review of the first merge,
+    /// L2; V46). One that does not open here waits for nothing but counts.
+    func waitsOnlyBehind(
+        _ deletion: PendingDeletion, row: StoredRecord, published: RecordStamp?, account: AccountRecord,
+        publishing: Bool
+    ) -> Bool {
         if publishing { return true }
         guard let keys, let deleted = try? openItem(deletion.record, keys: keys),
             let held = try? openItem(row, keys: keys)
@@ -347,16 +409,29 @@ extension VaultSession {
         let device = account.deviceID
         var seen = ItemMerge.effectiveClock(deleted, origin: Self.origin(deletion.record)).entries[device] ?? 0
         if deletion.stamp.device == device { seen = max(seen, deletion.stamp.version) }
+        seen = max(seen, published?.version ?? 0)
         return (ItemMerge.effectiveClock(held, origin: Self.origin(row)).entries[device] ?? 0) <= seen
     }
 
-    /// `publishing`: this sync publishes the vault (its engine ran unlocked and may write there), so that a version
-    /// waiting only behind this device's own deletion of its record goes out with it (`waitsOnlyBehind`).
+    /// `publishing`: this sync publishes the vault (its engine ran unlocked, may write there, and is carrying nothing
+    /// a restore left there, Z204), so that a version waiting only behind this device's own deletion of its record
+    /// goes out with it (`waitsOnlyBehind`).
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord, publishing: Bool = false) async -> Bool {
-        guard let syncState, let base = syncSettings?.state else { return false }
-        let state = try? await syncState.loadState(vaultID: vaultID)
+        guard let base = syncSettings?.state else { return false }
+        // The state this session signed (Z20). One that cannot be read holds (review of round 13, L-a).
+        let raw: SyncState?
+        do {
+            raw = try await base.loadState(vaultID: vaultID)
+        } catch {
+            return true
+        }
+        var state: SyncState?
+        if let raw { state = await verifiedSyncState(raw, vaultID: vaultID) }
         let known = state?.known ?? [:]
-        let pending = (try? await syncState.pendingDeletions(vaultID: vaultID)) ?? [:]
+        // What a restore left here and could not carry yet: perhaps a move's copy, whose original's deletion is
+        // another vault's (review of round 12, M1). Fails closed (review of round 13, L-a).
+        let chain = await restoredChain(account: account)
+        if await holdsRestoredWork(in: vaultID, chain: chain, account: account) { return true }
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
         // move's copy published by a build from before this was refused. A value it stamped, never its clock's entry
@@ -376,6 +451,20 @@ extension VaultSession {
             else { return true }
             if !items.isEmpty { return true }
         }
+        // This device's own pending deletions here, which a row may wait only behind (`waitsOnlyBehind`, V44, V46,
+        // Z202). Only those the session signed (`AuthenticatedSyncState`, review of round 14, M1; Z203): a row planted
+        // in the file (A8) for a move's copy, stamped by this device far above its edits, would otherwise raise the
+        // bound over them, and the original's deletion would go out while the copy exists here alone. One that cannot
+        // be read, or checked (locked), holds.
+        let pending: [RecordKey: PendingDeletion]
+        do {
+            guard let syncState else { return true }
+            pending = try await syncState.pendingDeletions(vaultID: vaultID).filter {
+                $0.value.stamp.device == account.deviceID
+            }
+        } catch {
+            return true
+        }
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
             if receivedNowhere, holdsValue(ofAny: [account.deviceID], in: row) { return true }
             guard let stamp = known[row.key] else { return true }
@@ -385,12 +474,14 @@ extension VaultSession {
             // ahead of it (review finding Z148). Such a row holds the deletions back while it holds an edit of this
             // device's above what it published, as `unsharedWorkCount` measures it: a version a merge kept after a
             // deletion holds none, and holds nothing back.
-            // Not a row that waits only behind this device's own pending deletion of the same record
-            // (`waitsOnlyBehind`, V44, V46): the outbox sends it right behind the tombstone in the vault's deferred
-            // pass, and counted, the deletion waited for the row and the row for the deletion, for good.
-            if stamp.deleted, holdsUnpublishedEdit(row, published: state?.published[row.key], account: account),
-                !(pending[row.key].map { waitsOnlyBehind($0, row: row, account: account, publishing: publishing) }
-                    ?? false)
+            // Nor a row that waits only behind this device's own pending deletion of the same record
+            // (`waitsOnlyBehind`, V44, V46, Z202): the outbox sends it right behind the tombstone in the vault's
+            // deferred pass, and counted, the deletion waited for the row and the row for the deletion, for good.
+            let published = state?.published[row.key]
+            if stamp.deleted, holdsUnpublishedEdit(row, published: published, account: account),
+                !(pending[row.key].map {
+                    waitsOnlyBehind($0, row: row, published: published, account: account, publishing: publishing)
+                } ?? false)
             {
                 return true
             }
@@ -860,12 +951,18 @@ extension VaultSession {
     /// `state` if this session signed it for its vault on this device, or `nil`: a row it did not write is no state.
     /// Checked with the Keychain's copy of the account key while locked, as downloads are.
     func verifiedSyncState(_ state: SyncState, vaultID: UUID) async -> SyncState? {
+        await verifiedSyncState(state, vaultID: vaultID, deviceID: nil)
+    }
+
+    /// `state` if this session signed it for its vault on `deviceID`, this device's by default: the move of an earlier
+    /// device ID's sync state reads what the session signed for that ID (review of round 12, M1).
+    func verifiedSyncState(_ state: SyncState, vaultID: UUID, deviceID: UUID?) async -> SyncState? {
         var record = account
         if record == nil { record = try? await loadAccount() }
         guard state.vaultID == vaultID, let record, let signingKey = await trustedAccountSigningKey(record) else {
             return nil
         }
-        let message = Self.syncStateMessage(state, deviceID: record.deviceID)
+        let message = Self.syncStateMessage(state, deviceID: deviceID ?? record.deviceID)
         guard
             (try? Signatures.verify(state.authenticator, for: message, domain: .syncState, signingKey: signingKey))
                 != nil
@@ -1096,6 +1193,29 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// releases the deletions by moving each item out of the shared vault from this device, which writes it as this
     /// device's, or by deleting it.
     public var copiesNobodyReceived: [UUID: Set<UUID>] = [:]
+    /// Per shared vault, the items holding work an earlier device ID of this installation wrote there and never
+    /// published, which a restore onto other hardware has not carried over yet for want of a current key for the
+    /// vault here (`SyncState.restoredUnpublished`, review of round 12, M1): such an item exists on this device only.
+    /// Each such vault is in `deletionsHeldBack` too. A sync carries them once the vault opens here (its ledger
+    /// verified, or the owner's invitation accepted again), and the deletions go out after them; for a vault that will
+    /// not open, the person can stop waiting (`VaultSession.stopWaitingForRestoredWork(in:)`, the notice's action).
+    public var restoredWorkWaiting: [UUID: Set<UUID>] = [:]
+    /// Per shared vault, items holding such work in a vault that waits for nothing any more: deleted, or one this
+    /// account is no longer a member of (review of round 13, M3). They hold no deletion back, stay on this device as
+    /// they are, and reach no other device.
+    public var restoredWorkKeptHere: [UUID: Set<UUID>] = [:]
+    /// The vaults of `restoredWorkWaiting` the person may stop waiting for: those that will not open on this device,
+    /// with no current key here or an owner its devices disagree about (review of round 14, L2). Any other waits only
+    /// on something a sync gets past, and is carried then.
+    public var restoredWorkMayStopWaiting: Set<UUID> = []
+    /// The vaults that published nothing in this sync, new edits included, and will publish nothing at the next,
+    /// because a restore has still to carry over work there (`SyncState.restoredUnpublished`) and its carry did not
+    /// finish: their log could not be pulled (the transport failing for them, or a failure in an earlier vault that
+    /// stopped the sync), or a step of the carry failed (review of round 14, L4). The carry runs only after a vault's
+    /// log is pulled, and while anything is left to carry the vault publishes nothing, so that no merge of a row still
+    /// holding an earlier ID's work goes out ahead of it; nor does it merge what it pulled, which waits, staged, for
+    /// the carry (L1). A carry that finishes in this sync is not named: the vault publishes at the next.
+    public var publishingHeldForCarry: Set<UUID> = []
     /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
     /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
     /// unlock and sync.

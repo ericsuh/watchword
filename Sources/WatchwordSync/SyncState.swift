@@ -152,6 +152,16 @@ public struct SyncState: Sendable, Hashable {
     /// device holds as any state's does, and a later suspicion ends as anywhere else, when the store stands for
     /// everything again, whoever uploaded it (review of V49 to V51, V52). Kept by a replay.
     public var startedOverByMove = false
+    /// Records of this vault holding work an earlier device ID of this installation wrote and never published, which
+    /// a store restored onto other hardware has not yet carried over as this device's (review of round 12, M1 and
+    /// Z191): a row the restore could not carry for want of a current key for the vault, or a deletion it parked for
+    /// that reason. Each with that ID and the last version of the record it published (`RecordStamp`, its device that
+    /// ID, version 0 if it published none): what the carry writes again as this device's is the work above that
+    /// version (`ItemMerge.reattributed`), so that no member's judge holds it aside. Recorded by the move of the
+    /// earlier ID's sync state, before it empties that state (`VaultSession.completeDeviceMigration`), and kept across
+    /// a replay; the session's deletion gate holds every vault's deletions while a row it names is still the earlier
+    /// ID's.
+    public var restoredUnpublished: [RecordKey: RecordStamp] = [:]
     /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
     /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
     /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the

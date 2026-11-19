@@ -25,7 +25,7 @@ public actor InMemoryRecordStore: RecordStore {
 
     public func commit(_ change: StoreChange) throws {
         try change.validate(currentAccount: account) { rows[$0]?.version }
-        if let newAccount = change.newAccount {
+        if let newAccount = change.accountToStore(currentAccount: account) {
             account = newAccount
         }
         for key in change.allDeletions {
