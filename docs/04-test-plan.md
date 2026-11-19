@@ -581,7 +581,7 @@ of the vault publishes on (`emptiedStoreDoesNotHold`), and `claimEndsWithItsSign
 missing (Z145). The quarantine: a version refused for a crowded digest is not offered again at every sync, only once
 something has left the quarantine (`crowdedDigestDoesNotReplayEverySync`, Z147), and the two state fields that carry
 this and the collected floor are signed only when set (`SyncStateAuthenticationTests`). The deletion gate: a move's copy
-known only by a planted tombstone still holds its original's deletion back (`plantedTombstoneForAMovesCopy`, Z148).
+known only by a planted tombstone still holds its original's deletion back (`plantedTombstoneForAMovesCopy`, Z148). A version kept after this device's own deletion holds nothing back; restored and edited it holds the others back where its vault is not published, and goes out behind its tombstone where it is (`keptVersionBehindOwnDeletion`, V44, V46).
 Collection: a name planted below what a device collected does not stop it collecting
 (`plantedNameBelowTheCollectedRun`, Z149).
 The review of the fourth round (`06-adversarial-review.md` Z150 to Z156; `AdversarialSharedVaultEngineRound4Tests.swift`

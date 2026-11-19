@@ -792,9 +792,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   until that row loads, the rule before Z54 holds, and a quarantine that cannot be read holds deletions back. A row the
   sync state knows only by a deletion counts while it holds an edit of this device's above what it published (a
   tombstone for a move's derivable copy ID can be in the log before the copy, Z148): never let a stamp in `known`
-  alone release the gate. The one exception is a row this device's own pending deletion of the same record is queued
-  with (a version kept after the deletion, which goes out right behind the tombstone): counted, the deletion and the
-  row waited for each other for good (V44). In a shared vault, every row of a device whose ID does not commit that holds an edit of its
+  alone release the gate. The one exception is a row that waits only behind this device's own pending deletion of the same
+  record (`waitsOnlyBehind`: the outbox sends it right behind the tombstone): counted, the deletion and the row waited
+  for each other for good (V44). Only where the sync publishes the vault, or for a row holding nothing of this
+  device's the deletion had not seen (V46). In a shared vault, every row of a device whose ID does not commit that holds an edit of its
   own counts, whatever its state says: nothing it published there reached anyone (Z162). Moving an installation to a
   new device ID (a restore onto other hardware, and any re-enrolment) parks the old ID's pending deletions, stamped
   for the new ID (`parkedDeletionDevice`, an ID naming no device), while a shared vault holds an edit nobody received

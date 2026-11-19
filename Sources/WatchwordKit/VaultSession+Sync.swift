@@ -160,6 +160,7 @@ extension VaultSession {
         var stopped = report.transportFailure ?? sharingReports.values.lazy.compactMap(\.transportFailure).first
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
+            var ranPublishing = false
             let shared = sharedEngineOptions(
                 vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
                 ownIDCommits: ownIDCommits)
@@ -168,6 +169,7 @@ extension VaultSession {
                 vaultReport = try await engine(vaultID).sync(
                     reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
                     transportStopped: stopped, handingOn: reuploadAnswered(epoch))
+                ranPublishing = shared.publishing
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 await sharedEngineDidRun(
                     vaultID, reconciled: (reconcile || shared.reconcile) && !vaultReport.replayPostponed,
@@ -194,7 +196,9 @@ extension VaultSession {
             // account may not write there now, or it is shared with no ledger here), or the copy was taken out and
             // held aside before it went out. While any vault holds an item that exists nowhere else, no vault's
             // deletions go out (Z44).
-            if restPublished, mayWrite, await holdsUnpublishedWork(in: vaultID, account: record) {
+            if restPublished, mayWrite,
+                await holdsUnpublishedWork(in: vaultID, account: record, publishing: ranPublishing)
+            {
                 restPublished = false
                 report.deletionsHeldBack.insert(vaultID)
             }
@@ -226,7 +230,9 @@ extension VaultSession {
                 {
                     restPublished = false
                 }
-                if restPublished, await holdsUnpublishedWork(in: vaultID, account: record) {
+                if restPublished,
+                    await holdsUnpublishedWork(in: vaultID, account: record, publishing: shared.publishing)
+                {
                     restPublished = false
                     report.deletionsHeldBack.insert(vaultID)
                 }
@@ -319,7 +325,34 @@ extension VaultSession {
         }
     }
 
-    func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
+    /// Whether `row`, which holds an edit of this device's above what it published, waits only behind `deletion`, this
+    /// device's own pending deletion of the same record, so that it is no work existing nowhere else: the outbox sends
+    /// a version written after a deletion right behind its tombstone, and holds both while deletions are deferred.
+    ///
+    /// Where this sync publishes the vault (`publishing`), always: both go out in its deferred pass. Counted, the
+    /// deletion waited for the row and the row for the deletion, for good (V44, found by the long vault simulation).
+    /// Anywhere else only a version that holds nothing of this device's the deletion had not seen: its clock's entry
+    /// for this device is at most the deleted version's, or the tombstone's own revision, which a version kept after
+    /// the deletion carries as the deletion's write (`ItemMerge.settle`). A kept version restored from the trash and
+    /// edited holds an edit the deletion never saw, and in a vault this sync does not publish it holds every other
+    /// vault's deletions back like any unpublished edit (review of the first merge, L2; V46). One that does not open
+    /// here waits for nothing but counts.
+    func waitsOnlyBehind(_ deletion: PendingDeletion, row: StoredRecord, account: AccountRecord, publishing: Bool)
+        -> Bool
+    {
+        if publishing { return true }
+        guard let keys, let deleted = try? openItem(deletion.record, keys: keys),
+            let held = try? openItem(row, keys: keys)
+        else { return false }
+        let device = account.deviceID
+        var seen = ItemMerge.effectiveClock(deleted, origin: Self.origin(deletion.record)).entries[device] ?? 0
+        if deletion.stamp.device == device { seen = max(seen, deletion.stamp.version) }
+        return (ItemMerge.effectiveClock(held, origin: Self.origin(row)).entries[device] ?? 0) <= seen
+    }
+
+    /// `publishing`: this sync publishes the vault (its engine ran unlocked and may write there), so that a version
+    /// waiting only behind this device's own deletion of its record goes out with it (`waitsOnlyBehind`).
+    func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord, publishing: Bool = false) async -> Bool {
         guard let syncState, let base = syncSettings?.state else { return false }
         let state = try? await syncState.loadState(vaultID: vaultID)
         let known = state?.known ?? [:]
@@ -352,12 +385,12 @@ extension VaultSession {
             // ahead of it (review finding Z148). Such a row holds the deletions back while it holds an edit of this
             // device's above what it published, as `unsharedWorkCount` measures it: a version a merge kept after a
             // deletion holds none, and holds nothing back.
-            // Not a row this device's own pending deletion of the same record is queued with: that row is a version
-            // kept after the deletion (an edit it had not seen), which goes out right behind its tombstone in the
-            // vault's deferred pass. Counted, the deletion waited for the row and the row for the deletion, for good
-            // (found by the long vault simulation after the merge with the branch that made Z148; V38).
-            if stamp.deleted, pending[row.key] == nil,
-                holdsUnpublishedEdit(row, published: state?.published[row.key], account: account)
+            // Not a row that waits only behind this device's own pending deletion of the same record
+            // (`waitsOnlyBehind`, V44, V46): the outbox sends it right behind the tombstone in the vault's deferred
+            // pass, and counted, the deletion waited for the row and the row for the deletion, for good.
+            if stamp.deleted, holdsUnpublishedEdit(row, published: state?.published[row.key], account: account),
+                !(pending[row.key].map { waitsOnlyBehind($0, row: row, account: account, publishing: publishing) }
+                    ?? false)
             {
                 return true
             }

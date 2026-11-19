@@ -2128,7 +2128,12 @@ Not solved here, and to be decided with integration:
   `holdsUnpublishedWork`). What releases them is the copy going out, or the person discarding the held-aside copy.
   A row the sync layer knows only by a deletion counts too while it holds an edit of this device's above what it
   published: a move's copy has an ID anyone reading the source vault can derive, and a tombstone for it found in the
-  log before the copy existed made the copy look known (Z148).
+  log before the copy existed made the copy look known (Z148). Not a row that waits only behind this device's own
+  pending deletion of the same record (a version kept after that deletion, which the outbox sends right behind its
+  tombstone): counted, the two waited for each other for good (V44). That holds where the sync publishes the vault,
+  where both go out in its deferred pass; anywhere else only for a version holding nothing of this device's that the
+  deletion had not seen, so a kept version restored and edited in a vault that is not published holds the others back
+  like any unpublished edit (V46).
   "Held aside" here means what this device's own take-out put aside, which it notes in a signed row of its own
   (`OwnTakenOutRow`, `WWTO`): an entry in the quarantine names the device its writer claims, and counting any entry
   that named this device let a member who can have it hold something aside (a segment signed into the stream named
