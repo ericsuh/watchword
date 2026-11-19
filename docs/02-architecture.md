@@ -1311,7 +1311,9 @@ that has something to add, because the person on another device may have deleted
    CloudKit creates a zone nobody marked). The move asks `hasSyncedBefore` of the old ID's states first and saves each
    empty state with the signed fact `SyncState.syncedBefore` (and the old state's `storeResetSuspected`, and the
    one-shot `SyncState.startedOverByMove` of the third sign, V52); a move made again finds the fact in the states a
-   first attempt emptied. `hasSyncedBefore` also answers yes for any item or
+   first attempt emptied. (The old state is believed if the session signed it, however old: an A8 rollback of that
+   row to an older genuine one drops a carried `storeResetSuspected`, the class of rollback signed local state does
+   not detect, V53.) `hasSyncedBefore` also answers yes for any item or
    description in the account's vaults that another device ID wrote, which only a merged log brings: a check that
    can only ask. It also asks where a move left a row of the earlier ID behind (one that did not open, or a vault's
    description where the old state was none), and the person's yes then uploads it.
