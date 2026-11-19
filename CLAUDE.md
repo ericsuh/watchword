@@ -751,8 +751,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   registration carries none of a shared vault's items: the move records them in the vault's signed state
   (`SyncState.restoredUnpublished`), a sync carries them (`carryRestoredWork`) right after that vault's first pass,
   which publishes nothing while anything is left to carry there, and a take-out leaves them alone. Until then they hold
-  every vault's deletions (`holdsRestoredWork`, failing closed on a state it cannot read or trust and derived from the
-  rows too, `rowsLeftByEarlierIDs`, Z200) and are named in `restoredWorkWaiting`; only carrying them, a version that
+  every vault's deletions (`holdsRestoredWork`, failing closed on a state it cannot read or trust, and derived from the
+  rows where the state is lost or does not verify, `rowsLeftByEarlierIDs`, Z200) and are named in `restoredWorkWaiting`; only carrying them, a version that
   holds none of that work, the vault deleted or left (`restoredWorkReleased`, reported as `restoredWorkKeptHere`), or
   the person (`stopWaitingForRestoredWork`, the notice's action; it marks the entries `dismissedVersion`) ends the hold
   (Z192, Z199). Old hardware still running under the old ID that publishes the same work later leaves members both

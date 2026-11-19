@@ -583,7 +583,8 @@ A row is carried only by a sync, after the vault's first pass of it, which publi
 still to carry, so that no merge of a row still holding `o`'s work goes out first; until then
 `SyncState.restoredUnpublished` records it, with `p`, a take-out leaves it alone, and it holds every deletion back
 (`holdsRestoredWork`), so a source half never goes out ahead of a copy that is still only `o`'s. The hold fails closed
-on a state it cannot read or trust, and finds such a row again from the row itself while any record names `o` (Z200).
+on a state it cannot read or trust, and, where the state is lost or does not verify, finds such a row again from the row
+itself while any record names `o` (Z200).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

@@ -212,9 +212,12 @@ extension VaultSession {
 
     /// The rows of `vaultID`, if it may be shared, that an earlier ID of `chain` left and that `recorded` (the vault's
     /// signed entries) does not name: still that ID's row, holding its work above what its stream carried here
-    /// (`publishedBound`), each with version 0 for an entry. What the hold derives when an entry is gone: its state
-    /// lost, edited (A8) or started over by a sync that could not read it (review of round 13, L-a). A row that does
-    /// not open here counts. `nil` where the store could not be read.
+    /// (`publishedBound`), each with version 0 for an entry. What the hold derives where the vault's state that would
+    /// name them is gone: lost, or one that does not verify (damaged, or edited, A8), which a sync would start over
+    /// (review of round 13, L-a). Asked only then: a state that verifies is the move's record, made from what the
+    /// earlier ID's own state said it published, and a row of a vault held closed, whose stream this device cannot
+    /// read, would otherwise count whether that ID published it or not. A row that does not open here counts. `nil`
+    /// where the store could not be read.
     func rowsLeftByEarlierIDs(
         in vaultID: UUID, chain: Set<UUID>, recorded: [RecordKey: RecordStamp], account: AccountRecord
     ) async -> [RecordKey: RecordStamp]? {
@@ -252,31 +255,35 @@ extension VaultSession {
         {
             return nil
         }
-        let recorded = verified?.restoredUnpublished ?? [:]
+        let recorded = (verified?.restoredUnpublished ?? [:]).filter { !Self.isDismissed($0.value) }
+        guard verified == nil else { return recorded }
         guard
-            let left = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: recorded, account: account)
+            let left = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account)
         else { return nil }
-        return recorded.filter { !Self.isDismissed($0.value) }.merging(left) { kept, _ in kept }
+        return left
     }
 
-    /// Records what `rowsLeftByEarlierIDs` finds in each vault as entries of its signed state, before any log of a
-    /// sync, so that the take-out leaves those rows alone and the carry writes them (review of round 13, L-a). A
-    /// state of a vault that may be shared that does not verify is started over while the chain names an earlier ID,
-    /// as the engine would start it over, with those entries in it.
+    /// Records what `rowsLeftByEarlierIDs` finds in each vault whose state is lost or does not verify as entries of a
+    /// state this session signs, before any log of a sync, so that the take-out leaves those rows alone and the carry
+    /// writes them (review of round 13, L-a): a state of a vault that may be shared that does not verify is started
+    /// over while the chain names an earlier ID, as the engine would start it over, with those entries in it.
     func recordRestoredWorkLeft(account: AccountRecord, since epoch: UInt64) async {
         guard let syncState, let base = syncSettings?.state else { return }
         let chain = await restoredChain(account: account)
         guard !chain.isEmpty, let vaults = try? await vaultDirectory(account).keys else { return }
         for vaultID in vaults where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
-            guard let raw = try? await base.loadState(vaultID: vaultID) else { continue }
-            let verified = await verifiedSyncState(raw, vaultID: vaultID)
-            guard
-                let left = await rowsLeftByEarlierIDs(
-                    in: vaultID, chain: chain, recorded: verified?.restoredUnpublished ?? [:], account: account),
-                !left.isEmpty || verified == nil
+            let raw: SyncState?
+            do {
+                raw = try await base.loadState(vaultID: vaultID)
+            } catch {
+                continue
+            }
+            if let raw, await verifiedSyncState(raw, vaultID: vaultID) != nil { continue }
+            guard let left = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account),
+                !left.isEmpty || raw != nil
             else { continue }
-            var state = verified ?? SyncState(vaultID: vaultID)
-            state.restoredUnpublished.merge(left) { kept, _ in kept }
+            var state = SyncState(vaultID: vaultID)
+            state.restoredUnpublished = left
             guard (try? requireKeys(since: epoch)) != nil else { return }
             try? await syncState.saveState(state)
         }
@@ -379,8 +386,8 @@ extension VaultSession {
         // A state that does not verify is started over, as a sync would start it over (review of round 13, L-a).
         var state = verified ?? SyncState(vaultID: vaultID)
         let found =
-            await rowsLeftByEarlierIDs(
-                in: vaultID, chain: chain, recorded: state.restoredUnpublished, account: account) ?? [:]
+            verified != nil
+            ? [:] : await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account) ?? [:]
         let waiting = state.restoredUnpublished.filter { !Self.isDismissed($0.value) }.merging(found) { kept, _ in kept
         }
         guard !waiting.isEmpty || (raw != nil && verified == nil) else { return }

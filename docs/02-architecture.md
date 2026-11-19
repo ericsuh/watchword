@@ -922,9 +922,9 @@ ID's work goes out; the carried rows go out at the next sync, and a take-out lea
 row still holds that work every vault's deletions wait (`holdsRestoredWork`), since one of them may be the source half
 of a move whose copy it is, and the sync names the items (`restoredWorkWaiting`, Z192). The hold fails closed (Z200): a
 state that cannot be read holds, so does one that does not verify while the restore's chain of earlier IDs is known
-(the move under way, and every ID an entry names, in any vault: `restoredChain`), and a row still that ID's, holding its
-work above what its stream carried, holds whether or not an entry names it (`rowsLeftByEarlierIDs`), and is recorded
-again before the logs. The hold ends when the vault opens here and the row is carried, when a version that holds none
+(the move under way, and every ID an entry names, in any vault: `restoredChain`); and in a vault whose state is lost or
+does not verify, a row still that ID's, holding its work above what its stream carried, holds as if an entry named it
+(`rowsLeftByEarlierIDs`), and is recorded again in a state this session signs before the logs. The hold ends when the vault opens here and the row is carried, when a version that holds none
 of the work replaces the row, when the vault is deleted or this account's membership of it ends (`restoredWorkReleased`:
 nothing can carry it there, and the sync reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or
 when the person stops waiting for a vault that will not open (`stopWaitingForRestoredWork`, the action of the waiting
