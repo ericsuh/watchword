@@ -443,6 +443,7 @@ public actor SyncEngine {
             state.handedOn = kept.handedOn
             state.highestOwnSnapshot = kept.highestOwnSnapshot
             state.syncedBefore = kept.syncedBefore
+            state.startedOverByMove = kept.startedOverByMove
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
             // so those are kept across it.
             var replayed = SyncStash()
@@ -481,8 +482,11 @@ public actor SyncEngine {
                 // The store stands for everything again (another device uploaded it, or this one did): no question.
                 // Except in a state a device move started over that has not handed on since (V49): it holds no
                 // record of what it merged, so nothing lacking says nothing, and only its own hand-on ends the
-                // question. Where the log is kept whole (a shared vault) nothing is handed on, and the rule is as it was.
-                let unknowable = state.syncedBefore && state.handedOn == nil && configuration.maintainsLog
+                // question. That is a one-shot bit the hand-on clears (`startedOverByMove`, V52), never "no hand-on
+                // held now": the hand-on is collected once superseded, and every later suspicion would then have
+                // needed the person's yes however much another device uploaded. Where the log is kept whole (a
+                // shared vault) nothing is handed on, and the rule is as it was.
+                let unknowable = state.startedOverByMove && configuration.maintainsLog
                 if lacking.isEmpty, !unknowable { state.storeResetSuspected = false }
                 report.storeLacksObjects = state.storeResetSuspected
                 // A shared vault writes no snapshot, so it has nothing to hand on with (§7.10): said whether or not
@@ -2231,6 +2235,8 @@ public actor SyncEngine {
                 // It holds everything this device had merged, whatever it could claim to cover.
                 state.handedOn = HandedOn(snapshot: location, holding: state.merged)
                 state.storeResetSuspected = false
+                // Everything the device holds is in a snapshot now, so `merged` stands for it (V52).
+                state.startedOverByMove = false
                 report.storeLacksObjects = false
             }
             report.snapshotsWritten += 1

@@ -434,7 +434,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (`syncAccountObjects`, `hasSyncedBefore`: reported as `storeReset`, and nothing is published, the account's objects
   and new edits included; an item or description another device ID wrote counts as having synced, and a device move
   keeps the fact in each state it starts over, signed, as `SyncState.syncedBefore`, with the old state's
-  `storeResetSuspected`, which in such a state only the device's own hand-on ends, V49); and the engine's own (`SyncState.storeResetSuspected`: an object of its own missing at a
+  `storeResetSuspected`, which in such a state only the device's own hand-on ends, V49: a one-shot signed bit,
+  `SyncState.startedOverByMove`, that the hand-on clears, never "no hand-on held", which collection undoes, V52); and the engine's own (`SyncState.storeResetSuspected`: an object of its own missing at a
   listing *before* merging, and something merged that nothing listed stands for; sticky until the store stands for
   everything again). While suspected and unanswered the engine writes no snapshot, elected or owed, and collects
   nothing. **A replay never begins without a listing or while a reset is suspected** (`replayPostponed`): it would

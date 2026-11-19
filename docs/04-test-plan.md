@@ -1429,7 +1429,9 @@ other does, and reported as not required on Linux, where they cannot compile.
   into a store the person emptied it asks and publishes nothing, then hands on everything on the yes,
   `restoredIntoEmptiedStoreAsks`; a never-synced installation restored publishes, `neverSyncedRestorePublishes`; an
   upload stopped part-way before the backup still asks after the move, `interruptedUploadAsksAfterMove`; and the upload
-  is refused while the move is incomplete, V51, `reuploadRefusedDuringMove`) and "account enrolment and device registry"
+  is refused while the move is incomplete, V51, `reuploadRefusedDuringMove`; once the moved installation has handed
+  on and that snapshot was collected, a later reset another device answers ends here without asking, V52,
+  `movedThenHandedOnAsksOnlyOnce`) and "account enrolment and device registry"
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
   revoked device cannot answer and stays revoked; a password change survives). `LongRunningSyncSimulationTests`
   resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone

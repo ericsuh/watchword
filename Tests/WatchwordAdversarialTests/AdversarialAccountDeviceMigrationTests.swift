@@ -141,9 +141,11 @@ extension AdversarialAccountTests {
         let syncState = try #require(await restored.session.syncState)
         var loaded = try #require(try await syncState.loadState(vaultID: fixture.personal))
         loaded.authenticator = []
-        // Empty, but for the installation's fact that it had synced before (V49).
+        // Empty, but for the installation's fact that it had synced before (V49), and that this state has not handed
+        // on since the move (V52).
         var expected = SyncState(vaultID: fixture.personal)
         expected.syncedBefore = true
+        expected.startedOverByMove = true
         #expect(loaded == expected)
     }
 }

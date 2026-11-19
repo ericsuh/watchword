@@ -53,6 +53,8 @@ struct EncodedState: Codable {
     var highestOwnSnapshot: UInt64?
     /// Absent in a row written before a device move recorded having synced (V49).
     var syncedBefore: Bool?
+    /// Absent in a row written before a device move's question could end (V52).
+    var startedOverByMove: Bool?
     /// Absent in a row written before review findings Z33 and Z38.
     var retryUnfinished: Bool?
     var quarantineDropped: [String]?
@@ -98,6 +100,7 @@ struct EncodedState: Codable {
         storeResetSuspected = state.storeResetSuspected
         highestOwnSnapshot = state.highestOwnSnapshot
         syncedBefore = state.syncedBefore ? true : nil
+        startedOverByMove = state.startedOverByMove ? true : nil
         retryUnfinished = state.retryUnfinished
         quarantineDropped = state.quarantineDropped.map(\.uuidString).sorted()
         quarantineCrowded = state.quarantineCrowded
@@ -163,6 +166,7 @@ struct EncodedState: Codable {
         state.storeResetSuspected = storeResetSuspected ?? false
         state.highestOwnSnapshot = highestOwnSnapshot ?? 0
         state.syncedBefore = syncedBefore ?? false
+        state.startedOverByMove = startedOverByMove ?? false
         state.retryUnfinished = retryUnfinished ?? false
         for device in quarantineDropped ?? [] {
             guard let id = UUID(uuidString: device) else { return nil }

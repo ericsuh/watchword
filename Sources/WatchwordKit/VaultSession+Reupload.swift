@@ -191,7 +191,8 @@ extension VaultSession {
     /// emptied), so that a store the person emptied is not filled again unasked from a restore onto other hardware
     /// (§7.10); a move made again after a first attempt emptied some states finds the fact in them. And each vault's
     /// `storeResetSuspected`, so that an upload after a reset that stopped part-way before the backup still asks
-    /// (SR21); the engine keeps it in such a state until this device hands on. Both can only make a sync stop and ask.
+    /// (SR21); the engine keeps it in such a state until this device hands on (`SyncState.startedOverByMove`, set
+    /// here with the first fact and cleared by that hand-on alone, V52). Both can only make a sync stop and ask.
     func startSyncStatesOver(_ account: AccountRecord, from previous: UUID, since epoch: UInt64) async throws {
         guard let state = syncState else { return }
         let vaults = try await vaultDirectory(account).keys
@@ -206,6 +207,7 @@ extension VaultSession {
             _ = try requireKeys(since: epoch)
             var fresh = SyncState(vaultID: vaultID)
             fresh.syncedBefore = syncedBefore
+            fresh.startedOverByMove = syncedBefore
             fresh.storeResetSuspected = held[vaultID]?.storeResetSuspected ?? false
             try await state.saveState(fresh)
         }

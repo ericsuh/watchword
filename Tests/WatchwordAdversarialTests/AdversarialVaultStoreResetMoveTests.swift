@@ -133,6 +133,68 @@ extension AdversarialVaultSyncTests {
         #expect(try await c.session.items().items.map(\.title) == ["Bank"])
     }
 
+    /// The vault's sync state as the session signed it.
+    static func signedState(_ device: TestVault, vaultID: UUID) async throws -> SyncState {
+        let syncState = try #require(await device.session.syncState)
+        return try #require(try await syncState.loadState(vaultID: vaultID))
+    }
+
+    /// Threat: none; liveness (the review of V49 to V51, V52). A restored installation that handed everything on
+    /// after its move kept asking for the rest of its life: the engine read "started over and not handed on since" as
+    /// "no hand-on held now", and the hand-on is collected once another device's snapshot supersedes it. Every later
+    /// suspected reset then needed the person's yes on this device, even after another device had uploaded
+    /// everything again. The question the move raised ends with the move's own hand-on (`startedOverByMove`), and a
+    /// later reset ends here as anywhere: once the store stands for everything this device holds.
+    @Test("a moved installation's later reset ends without asking once another device uploads everything again")
+    func movedThenHandedOnAsksOnlyOnce() async throws {
+        let store = ResettableSyncTransport()
+        let a = TestVault.syncing(over: store)
+        try await a.createAccount()
+        let b = try await a.enrolledDevice(deviceID: Self.deviceB, over: store)
+        try await b.session.unlock(password: TestVault.password)
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Bank", in: vaultID))
+        _ = try await b.session.save(Self.login("Post", in: vaultID))
+        for _ in 0..<3 {
+            for device in [a, b] { try await device.session.sync() }
+        }
+
+        // The store emptied, B restored onto other hardware: B asks, and on the yes hands on.
+        await store.base.removeEverything()
+        try await Self.restoreOntoOtherHardware(b)
+        #expect(try await b.session.syncAll().storeNeedsReupload)
+        let handed = try await b.session.reuploadAfterStoreReset(confirming: try await b.session.reuploadPlan())
+        #expect(handed.vaults[vaultID]?.snapshotsWritten == 1)
+        #expect(try await Self.signedState(b, vaultID: vaultID).startedOverByMove == false)
+        // A, whose own objects are gone too, is asked and answers; then both sync until B's hand-on is superseded by
+        // a snapshot of A's and collected.
+        #expect(try await a.session.syncAll().storeNeedsReupload)
+        _ = try await a.session.reuploadAfterStoreReset(confirming: try await a.session.reuploadPlan())
+        for _ in 0..<4 {
+            for device in [a, b] { _ = try await device.session.syncAll() }
+        }
+        #expect(try await Self.signedState(b, vaultID: vaultID).handedOn == nil, "B's hand-on was not collected")
+        #expect(try await b.session.syncAll().storeNeedsReupload == false)
+
+        // A later reset. A says yes and uploads everything again, B's work included.
+        await store.reset()
+        #expect(try await b.session.syncAll().storeNeedsReupload)
+        #expect(try await a.session.syncAll().storeNeedsReupload)
+        let again = try await a.session.reuploadAfterStoreReset(confirming: try await a.session.reuploadPlan())
+        #expect(again.vaults[vaultID]?.snapshotsWritten == 1)
+
+        // B is not asked again: the store stands for everything it holds.
+        let after = try await b.session.syncAll()
+        #expect(!after.storeNeedsReupload)
+        #expect(try await Self.signedState(b, vaultID: vaultID).storeResetSuspected == false)
+        _ = try await b.session.save(Self.login("Later", in: vaultID))
+        #expect(try await b.session.syncAll().storeNeedsReupload == false)
+        let c = try await a.enrolledDevice(deviceID: Self.deviceC, over: store)
+        try await c.session.unlock(password: TestVault.password)
+        try await c.session.sync()
+        #expect(Set(try await c.session.items().items.map(\.title)) == ["Bank", "Post", "Later"])
+    }
+
     /// Threat: none needed but a sync state file that fails one write while a restore moves the old device ID's state
     /// (Z181). While the move is incomplete the sync publishes nothing; an upload after a reset begun then would start
     /// the store again and leave it empty, and the move, made afterwards, would start the states over beneath it. The

@@ -139,6 +139,12 @@ struct SyncStateAuthenticationTests {
             changed("storeResetSuspected") { $0.storeResetSuspected = true },
             // The device move's fact (V49).
             changed("syncedBefore") { $0.syncedBefore = true },
+            // Its one-shot companion (V52), alone and with the fact it is set with.
+            changed("startedOverByMove") { $0.startedOverByMove = true },
+            changed("startedOverByMove, with syncedBefore") {
+                $0.syncedBefore = true
+                $0.startedOverByMove = true
+            },
         ]
     }
 
@@ -154,7 +160,7 @@ struct SyncStateAuthenticationTests {
         #expect(resigned.authenticatedBytes == signed)
         // A field added to the state must be added to `authenticatedBytes` and to `variants`: this count is the
         // reminder.
-        #expect(Mirror(reflecting: base).children.count == 27)
+        #expect(Mirror(reflecting: base).children.count == 28)
         #expect(Set(Self.variants.map(\.1.authenticatedBytes)).count == Self.variants.count)
     }
 
@@ -188,6 +194,11 @@ struct SyncStateAuthenticationTests {
         state.syncedBefore = true
         #expect(state.authenticatedBytes.count == before.count + 1)
         #expect(Array(state.authenticatedBytes.prefix(before.count)) == before)
+        // `startedOverByMove` (V52) likewise, after it: a row saved with the fact alone still verifies.
+        let withFact = state.authenticatedBytes
+        state.startedOverByMove = true
+        #expect(state.authenticatedBytes.count == withFact.count + 1)
+        #expect(Array(state.authenticatedBytes.prefix(withFact.count)) == withFact)
     }
 
     @Test("what is signed does not depend on the order a dictionary happens to iterate in")
@@ -216,6 +227,7 @@ struct SyncStateEncodingTests {
         let bytes = try JSONEncoder().encode(EncodedState(state))
         #expect(try JSONDecoder().decode(EncodedState.self, from: bytes).state == state)
         state.syncedBefore = true
+        state.startedOverByMove = true
         state.storeResetSuspected = true
         let moved = try JSONEncoder().encode(EncodedState(state))
         #expect(try JSONDecoder().decode(EncodedState.self, from: moved).state == state)

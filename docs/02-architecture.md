@@ -1309,8 +1309,9 @@ that has something to add, because the person on another device may have deleted
    for its new device ID (`completeDeviceMigration`, Z181), which before V49 read as new, so a restore into a store
    the person had emptied filled it again unasked (the `SyncStoreMarker` is device-local and outside the backup, and
    CloudKit creates a zone nobody marked). The move asks `hasSyncedBefore` of the old ID's states first and saves each
-   empty state with the signed fact `SyncState.syncedBefore` (and the old state's `storeResetSuspected`); a move made
-   again finds the fact in the states a first attempt emptied. `hasSyncedBefore` also answers yes for any item or
+   empty state with the signed fact `SyncState.syncedBefore` (and the old state's `storeResetSuspected`, and the
+   one-shot `SyncState.startedOverByMove` of the third sign, V52); a move made again finds the fact in the states a
+   first attempt emptied. `hasSyncedBefore` also answers yes for any item or
    description in the account's vaults that another device ID wrote, which only a merged log brings: a check that
    can only ask. It also asks where a move left a row of the earlier ID behind (one that did not open, or a vault's
    description where the old state was none), and the person's yes then uploads it.
@@ -1327,10 +1328,21 @@ that has something to add, because the person on another device may have deleted
    later self collected) and the second alone is not either (a provider that lags can show a snapshot's replacement
    late). The suspicion is remembered until everything the device has merged is listed or stood for again, because
    what another device uploads can stand for this device's own stream, and so hide the first half, while this device
-   still holds more of a third stream than the store does. In a state a device move started over (`syncedBefore`)
-   and not handed on since, finding nothing lacking says nothing (the state has no record of what was merged, the
-   local store holds it all), so there the suspicion ends only with this device's hand-on, which writes the snapshot
-   of everything (V49); in a shared vault, which hands nothing on, the rule is unchanged.
+   still holds more of a third stream than the store does. In a state a device move started over and not handed on
+   since, finding nothing lacking says nothing (the state has no record of what was merged, the local store holds it
+   all), so there the suspicion ends only with this device's hand-on, which writes the snapshot of everything (V49).
+   "Not handed on since" is a signed one-shot bit, `SyncState.startedOverByMove`, set by the move with
+   `syncedBefore` and cleared by that hand-on alone (V52), never "no hand-on snapshot held now": the hand-on is
+   collected once another snapshot supersedes it, and every later suspicion would then have needed the person's yes
+   on this device for good, however much another device uploaded. Once cleared, the state's `merged` stands for what
+   the device holds, and a later suspicion ends as in any state. The bit is not cleared by another device's snapshot
+   covering everything merged: coverage counts stream positions, and the rows a move carried over (the old ID's
+   unpublished edits, merges sealed under it) are at no position of any stream, so only a snapshot of the rows
+   themselves stands for them. So a move into an intact store keeps the bit until its first hand-on (the first later
+   reset asks this device once), and a hand-on that cannot be written (`ReuploadRefusal.tooLarge`, a Lamport time
+   past `maximumVersion`, sixteen names taken) leaves the question standing, and with it no snapshot, no collection
+   and no replay: it fails safe, losing and uploading nothing. In a shared vault, which hands nothing on, the rule is
+   unchanged.
 
 `AccountSyncReport.storeNeedsReupload` is any of the three (the third only for a vault that can be uploaded again).
 

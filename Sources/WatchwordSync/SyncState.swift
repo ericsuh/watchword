@@ -142,9 +142,16 @@ public struct SyncState: Sendable, Hashable {
     /// hardware, `VaultSession.completeDeviceMigration`) after the installation had published or merged a log: the
     /// state holds no record of what it merged, and the device's local store holds all of it (review of the second
     /// merge, V49). It tells a store that was emptied from a new one where the rest of the state no longer can
-    /// (§7.10), and a reset suspected in such a state is not ended by finding nothing lacking, since the state cannot
-    /// say what the store should stand for: only handing everything on ends it. Never cleared; kept by a replay.
+    /// (§7.10), for as long as the installation lives (`VaultSession.hasSyncedBefore`). Never cleared; kept by a
+    /// replay. What the engine asks while a reset is suspected is `startedOverByMove`, which ends.
     public var syncedBefore = false
+    /// This state was started over by a device move after the installation had synced (`syncedBefore` set with it),
+    /// and has not handed everything on since: its `merged` says nothing of what the device's local store holds, so a
+    /// reset suspected in it is not ended by finding nothing lacking, only by its own hand-on, which clears this
+    /// (`SyncEngine`'s `writeSnapshotIfElected`). One-shot: once cleared, the state's `merged` stands for what the
+    /// device holds as any state's does, and a later suspicion ends as anywhere else, when the store stands for
+    /// everything again, whoever uploaded it (review of V49 to V51, V52). Kept by a replay.
+    public var startedOverByMove = false
     /// Proof that this device's session saved this state (`authenticatedBytes`, review finding Z20): `erasures` become
     /// signed tombstones, `merged` signed coverage and acknowledgements, and the state store is a file an attacker can
     /// edit (A8). Set by the store wrapper that saves it (`VaultSession`, `SignatureDomain.syncState`, bound to the

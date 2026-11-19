@@ -44,12 +44,12 @@ extension SyncState {
         writer.append(stashGeneration)
         // Fields added after the state was first signed (review findings Z33, Z38, then Z147 and Z149, then the
         // conflict copies and the reset of docs/02-architecture.md §7.5 and §7.10, then the device move's
-        // `syncedBefore`, V49), written only when one is set, so a row saved before them still verifies; their length
-        // tells the forms apart.
+        // `syncedBefore`, V49, and `startedOverByMove`, V52), written only when one is set, so a row saved before them
+        // still verifies; their length tells the forms apart.
         let copiesAndReset =
             !examinedCopies.isEmpty || !unreadCopies.isEmpty || !unreadCopiesExamined.isEmpty || handOnOwed
             || ownUnlistedThrough != nil || handedOn != nil || highestOwnSnapshot > 0 || storeResetSuspected
-            || syncedBefore
+            || syncedBefore || startedOverByMove
         let later = quarantineCrowded != nil || collectedThrough > 0 || copiesAndReset
         if retryUnfinished || !quarantineDropped.isEmpty || later {
             writer.append(retryUnfinished)
@@ -84,8 +84,11 @@ extension SyncState {
             }
             writer.append(highestOwnSnapshot)
             writer.append(storeResetSuspected)
-            // Added after the reset's fields (V49), and written only when set, as they are.
-            if syncedBefore { writer.append(syncedBefore) }
+            // Added after the reset's fields (V49, V52), and written only when set, as they are. `syncedBefore` is
+            // written whenever `startedOverByMove` is, so that a state with one of the two and a state with the other
+            // differ (lengths one and two).
+            if syncedBefore || startedOverByMove { writer.append(syncedBefore) }
+            if startedOverByMove { writer.append(startedOverByMove) }
         }
         return writer.bytes
     }
