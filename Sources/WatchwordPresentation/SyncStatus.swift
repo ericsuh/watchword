@@ -30,6 +30,14 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// restored whose shared vault's state is lost or damaged asks for the record too, and "before it was restored"
     /// was untrue there.
     case restoredChainUnreadable
+    /// Unlocked, this sync downloaded and applied and sent nothing, because this device could not read its own key
+    /// from the Keychain (`AccountSyncReport.ownDeviceKeyWait`, `.unreadable`; review of round 23, Z264): the Keychain
+    /// can be closed while the device itself is locked. Read again at each sync.
+    case deviceKeyUnreadable
+    /// Unlocked, this sync downloaded and applied and sent nothing, because this device has still to register under a
+    /// key of its own (`AccountSyncReport.ownDeviceKeyWait`, `.registering`; Z264), as a store restored onto other
+    /// hardware does before its registration as a new device, which each sync and each unlock make.
+    case deviceRegistering
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
     case snapshotWithheld(by: [String])
@@ -78,6 +86,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .registryUnavailable: return "registryUnavailable"
         case .deviceMigrationIncomplete: return "deviceMigrationIncomplete"
         case .restoredChainUnreadable: return "restoredChainUnreadable"
+        case .deviceKeyUnreadable: return "deviceKeyUnreadable"
+        case .deviceRegistering: return "deviceRegistering"
         case .snapshotWithheld: return "snapshotWithheld"
         case .snapshotWithheldForReview: return "snapshotWithheldForReview"
         case .keptAside: return "keptAside"
@@ -113,6 +123,14 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "changes from before a restore of this device are still to be sent. Until it can, deletions made on "
                 + "this device wait, and so does everything else it sends if it is still moving its sync records "
                 + "over. It tries again at each sync. Nothing has been lost."
+        case .deviceKeyUnreadable:
+            return "This device could not read its own key from the Keychain, which can happen while the device is "
+                + "locked. Changes were downloaded, and none were applied or sent. It tries again at each sync. "
+                + "Nothing has been lost."
+        case .deviceRegistering:
+            return "This device is still registering with your account, for example after being restored onto new "
+                + "hardware. Until it has, changes are downloaded, and none are applied or sent. It tries again at "
+                + "each sync and each unlock. Nothing has been lost."
         case .snapshotWithheld(let names):
             return "Older devices need updating before this one can tidy the shared storage: "
                 + names.joined(separator: ", ") + "."
@@ -254,7 +272,7 @@ public struct SyncSummary: Hashable, Sendable {
         itemTitles: [UUID: String] = [:]
     ) {
         let combined = report.combined
-        headline = SyncSummary.describe(combined)
+        headline = SyncSummary.describe(combined, ownDeviceKeyWait: report.ownDeviceKeyWait)
         var notices: [SyncNotice] = []
         if combined.requiresNewerVersion || report.sharing.values.contains(where: \.requiresNewerVersion) {
             notices.append(.updateRequired)
@@ -268,6 +286,11 @@ public struct SyncSummary: Hashable, Sendable {
         if report.registryUnavailable { notices.append(.registryUnavailable) }
         if report.deviceMigrationIncomplete { notices.append(.deviceMigrationIncomplete) }
         if !report.restoredChainUnreadable.isEmpty { notices.append(.restoredChainUnreadable) }
+        switch report.ownDeviceKeyWait {
+        case .unreadable: notices.append(.deviceKeyUnreadable)
+        case .registering: notices.append(.deviceRegistering)
+        case nil: break
+        }
         if !combined.snapshotWithheldBy.isEmpty {
             let named = combined.snapshotWithheldBy.map { id in
                 names[id].flatMap { $0.isEmpty ? nil : $0 } ?? "a device of another member (\(shortIdentifier(id)))"
@@ -357,13 +380,22 @@ public struct SyncSummary: Hashable, Sendable {
     }
 
     /// The one line about a sync's outcome. The words "received" and "sent" are what the UI tests wait for.
-    public static func describe(_ report: SyncReport) -> String {
+    /// `ownDeviceKeyWait` is the account's (`AccountSyncReport.ownDeviceKeyWait`): where it says why an unlocked sync
+    /// only downloaded, the line says that, not "when you unlock" (review of round 23, Z264).
+    public static func describe(_ report: SyncReport, ownDeviceKeyWait: OwnDeviceKeyWait? = nil) -> String {
         if report.transportUnavailable { return "Sync storage could not be reached. Nothing was sent." }
         if !report.rejected.isEmpty, report.rejected.allSatisfy({ $0.reason == .keyring(.trustedKeyUnavailable) }) {
             return "Changes will be downloaded and checked after you unlock."
         }
         if report.deferredUntilUnlock && !report.awaitingNewPassword && !report.deviceRevoked {
-            return "Changes were downloaded and will be applied when you unlock."
+            switch ownDeviceKeyWait {
+            case .unreadable:
+                return "Changes were downloaded and will be applied once this device can read its own key."
+            case .registering:
+                return "Changes were downloaded and will be applied once this device has finished registering."
+            case nil:
+                return "Changes were downloaded and will be applied when you unlock."
+            }
         }
         var parts: [String] = []
         if report.applied > 0 { parts.append("\(report.applied) change(s) received") }

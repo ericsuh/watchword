@@ -258,7 +258,9 @@ extension AdversarialSharedVaultTests {
     /// Threat: none needed; the review of round 7. A Keychain read of the device key that fails for a moment (the
     /// device locked, the keychain daemon busy) read as a device whose ID does not commit, and the refusal advised
     /// setting the device up again. It is now its own refusal (`deviceKeyUnreadable`), still fail-closed: nothing is
-    /// written, shared or published in the vault while the key cannot be read, and the next attempt succeeds.
+    /// written, shared or published in the vault while the key cannot be read, and the next attempt succeeds. The
+    /// sync's report says the key could not be read (`ownDeviceKeyWait`, review of round 23, Z264), and the sync makes
+    /// no device key, a read that throws being no "no key" (Z265).
     @Test("a device key that cannot be read for a moment refuses as a retry, not as a device that does not commit")
     func unreadableDeviceKey() async throws {
         let transport = InMemorySyncTransport()
@@ -282,13 +284,19 @@ extension AdversarialSharedVaultTests {
         await #expect(throws: SharedVaultError.deviceKeyUnreadable) {
             _ = try await vault.session.save(Self.bank(in: vaultID))
         }
+        let made = await keys.created
+        let device = await vault.session.deviceIDForTest()
         let report = try await vault.session.syncAll()
         #expect(report.sharing[vaultID]?.deviceKeyUnreadable == true)
         #expect(report.sharing[vaultID]?.deviceIDDoesNotCommit == false)
+        #expect(report.ownDeviceKeyWait == .unreadable, "an unlocked sync that could not read the key was not said so")
+        #expect(await keys.created == made, "a read that threw was taken for no key, and a device key was made")
+        #expect(await vault.session.deviceIDForTest() == device)
         await keys.setUnreadable(false)
         let saved = try await vault.session.save(Self.bank(in: vaultID))
         let later = try await vault.session.syncAll()
         #expect(later.sharing[vaultID]?.deviceKeyUnreadable == false)
+        #expect(later.ownDeviceKeyWait == nil)
         #expect(try await vault.session.item(id: saved.id).vaultID == vaultID)
     }
 
@@ -336,12 +344,17 @@ actor UnreadableDeviceKeyStore: DeviceKeyStore {
         unreadable = value
     }
 
+    /// How many device keys were made through this store.
+    private(set) var created = 0
+
     func createDevice(accountID: UUID) async throws -> DeviceIdentity {
-        try await base.createDevice(accountID: accountID)
+        created += 1
+        return try await base.createDevice(accountID: accountID)
     }
 
     func create(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey {
-        try await base.create(accountID: accountID, deviceID: deviceID)
+        created += 1
+        return try await base.create(accountID: accountID, deviceID: deviceID)
     }
 
     func publicKey(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey? {

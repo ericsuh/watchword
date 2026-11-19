@@ -186,6 +186,8 @@ extension AdversarialSharedVaultTests {
         #expect(locked.vaults[personal]?.deferredUntilUnlock == true, "the sync begun locked wrote as the earlier ID")
         #expect(locked.vaults[vaultID]?.fetched ?? 0 > 0, "the locked sync downloaded nothing: nothing is tested")
         #expect(locked.vaults[vaultID]?.applied == 0, "the sync begun locked merged into rows the carry has to write")
+        // Unlocked by the time it decided, it says why it only downloaded, not "when you unlock" (Z264).
+        #expect(locked.ownDeviceKeyWait == .registering, "the download-only sync was not reported as registering")
         let addedKey = RecordKey(recordID: added.id, kind: .item)
         #expect(try await member.vault.store.record(addedKey) == nil, "the sync begun locked merged what it downloaded")
         let registered = try #require(await session.deviceIDForTest())

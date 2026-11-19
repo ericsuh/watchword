@@ -70,9 +70,7 @@ extension VaultSession {
         if let keys, let view = try? await registry(record), view.state.pendingCredentials.isEmpty,
             !(await passwordChangePending(record))
         {
-            if record.migration == nil,
-                (try? await deviceKeys.publicKey(accountID: record.accountID, deviceID: record.deviceID)) == .some(nil)
-            {
+            if record.migration == nil, await ownDeviceKey(of: record) == .absent {
                 try? await registerThisDevice(account: record, keys: keys, asNewDevice: true)
                 record = try await loadAccount() ?? record
             } else if view.state.standing(of: record.deviceID) == .unknown {
@@ -98,12 +96,20 @@ extension VaultSession {
         // store holds no key for its earlier ID and never gets one back (`createDevice` makes the new ID's, in the
         // account's one slot), so it only downloads; a registration as the same ID changes neither the ID nor the
         // move. Read after the last await before the decision, with the keys and the flag read after it.
-        let ownKeyHeld =
-            (try? await deviceKeys.publicKey(accountID: record.accountID, deviceID: record.deviceID)) != nil
+        let ownKey = await ownDeviceKey(of: record)
         let mayWrite =
-            keys != nil && ownKeyHeld && !registrationInFlight && standing == .active && !report.awaitingNewPassword
-            && !report.deviceMigrationIncomplete
+            keys != nil && ownKey == .held && !registrationInFlight && standing == .active
+            && !report.awaitingNewPassword && !report.deviceMigrationIncomplete
         let epoch = lockEpoch
+        // Unlocked, and download-only for this device's own key alone: said as such, never "when you unlock" to a
+        // person whose vault is open (review of round 23, Z264).
+        if keys != nil, standing == .active, !report.awaitingNewPassword, !report.deviceMigrationIncomplete {
+            switch ownKey {
+            case .unreadable: report.ownDeviceKeyWait = .unreadable
+            case .absent: report.ownDeviceKeyWait = .registering
+            case .held: if registrationInFlight { report.ownDeviceKeyWait = .registering }
+            }
+        }
         // What this sync's engines, its carry and its re-record may save of a vault's state, decided here with
         // `mayWrite` and checked again as each state or stash is signed (Z253, as PR #22's V66): only while the lock
         // epoch, the device ID and the absence of a move are still the ones it began with. A state loaded, and
@@ -1188,6 +1194,42 @@ public enum QuarantineReason: Sendable, Hashable {
 }
 
 /// What one sync of the account did: the account's own objects, and each vault's log.
+/// What the Keychain answered for this device's own key under the account's device ID (`DeviceKeyStore.publicKey`).
+enum OwnDeviceKey: Equatable {
+    case held
+    /// It answered that it holds none: a store restored onto other hardware, before it registers as a new device.
+    case absent
+    /// The read threw (a device whose own lock keeps the Keychain closed, a damaged item): a failure to retry, never
+    /// "no key" (review of round 23, Z265).
+    case unreadable
+}
+
+extension VaultSession {
+    /// This device's own key for `record`'s device ID, as the Keychain answers now, a read that throws kept apart from
+    /// one that finds no key (review of round 23, Z265): only `absent` registers this installation as a new device,
+    /// and anything but `held` makes a sync download only (Z253).
+    func ownDeviceKey(of record: AccountRecord) async -> OwnDeviceKey {
+        do {
+            return try await deviceKeys.publicKey(accountID: record.accountID, deviceID: record.deviceID) == nil
+                ? .absent : .held
+        } catch {
+            return .unreadable
+        }
+    }
+}
+
+/// Why a sync begun unlocked only downloaded, where this device's own key was the one reason
+/// (`AccountSyncReport.ownDeviceKeyWait`, review of round 23, Z264).
+public enum OwnDeviceKeyWait: Hashable, Sendable {
+    /// The Keychain could not be read for this device's key (`SystemKeychainStore`'s items open only while the device
+    /// itself is unlocked, so a sync in the background can find it closed). Read again at the next sync.
+    case unreadable
+    /// The Keychain holds no key for the device ID the account names (a store restored onto other hardware that has
+    /// not registered as a new device yet), or a registration of this installation was under way. A sync and an unlock
+    /// each register it.
+    case registering
+}
+
 public struct AccountSyncReport: Sendable, Equatable {
     public var account = AccountObjectsReport()
     /// One report per vault, deleted vaults included.
@@ -1253,6 +1295,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// `deletionsHeldBack`), and a move that needs the row is not made (`deviceMigrationIncomplete`), for as long as
     /// the store fails. Tried again at each sync.
     public var restoredChainUnreadable: Set<UUID> = []
+    /// The session was unlocked, and this sync only downloaded, applying and sending nothing, because of this device's
+    /// own key alone (review of round 23, Z264): its standing active, no new password awaited, no move pending. `nil`
+    /// otherwise, locked included, where "when you unlock" is what is true.
+    public var ownDeviceKeyWait: OwnDeviceKeyWait?
 
     public init() {}
 
