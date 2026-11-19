@@ -199,7 +199,7 @@ extension AdversarialSharedVaultTests {
     }
 }
 
-// The review of round 13 (docs/06-adversarial-review.md Z197, M2): what a restore's carry counts as published. In the
+// The review of round 13 (docs/06-adversarial-review.md Z198, M2): what a restore's carry counts as published. In the
 // suite "shared vaults through the session".
 extension AdversarialSharedVaultTests {
     /// The member's store as it was when `backup` was taken, restored onto other hardware: the item's row, the
@@ -281,7 +281,7 @@ extension AdversarialSharedVaultTests {
     }
 }
 
-// The review of round 13 (docs/06-adversarial-review.md Z198, Z199; L-a, M3): what holds deletions back for a restore's
+// The review of round 13 (docs/06-adversarial-review.md Z199, Z200; M3, L-a): what holds deletions back for a restore's
 // work, and what ends that hold. In the suite "shared vaults through the session".
 extension AdversarialSharedVaultTests {
     /// Threat: a damaged sync state file, or one edited by an attacker with the device's files (A8), for a shared vault

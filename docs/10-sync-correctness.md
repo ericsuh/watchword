@@ -524,39 +524,66 @@ Empty lists are not encoded, so lines that are shown and entries from old record
 index of an earlier format filed none of these values, so it is refused on load and rebuilt by a replay
 (`SharedStreamIndex` format 3).
 
-**A restore's carried work (review of round 12, Z191, Z192).** A store restored onto other hardware writes under a new
-device ID `n`, and what its old ID `o` wrote and never published must be published by `n` (the engine publishes only
-its own device's rows). Carried with `o`'s stamps, those values were carried by no segment of `o`'s stream, so (2)
-failed for them, and `o`'s clock count above what it published failed (3): every judge held the carried version
-aside, and with it, through the gate, the source half of a move. So the carry writes the item again under
-`ItemMerge.reattributed(o, above: p, to: n)`, where `p` is the last version of the record `o` published (from `o`'s own
-signed sync state, read before the move replaces it): every revision `(k, o)` with `k > p`, wherever the item names
+**A restore's carried work (review of round 12, Z191, Z192; review of round 13, Z197, Z198).** A store restored onto
+other hardware writes under a new device ID `n`, and what its old ID `o` wrote and never published must be published by
+`n` (the engine publishes only its own device's rows). Carried with `o`'s stamps, those values were carried by no
+segment of `o`'s stream, so (2) failed for them, and `o`'s clock count above what it published failed (3): every judge
+held the carried version aside, and with it, through the gate, the source half of a move. So the carry writes the item
+again under `ItemMerge.reattributed(o, above: p, to: n)`: every revision `(k, o)` with `k > p'`, wherever the item names
 one (group values, conflicts and retained values, the field order, note line IDs, anchors and removals, discards,
-history writers), becomes `(k, n)`, and every version vector keeps `o`'s count up to `p` and gives the rest to `n`.
+history writers), becomes `(k, n)`, and the vectors of `o`'s and `n`'s own parts, and the clock, keep `o`'s count up to
+`p'` and give the rest to `n`. Nothing of a third device is touched.
 
-- *It is a renaming, so the merge is unchanged.* `n` never wrote the record before, so the renamed revisions are new;
-  they are distinct from each other because their versions are; and `contains` is preserved, since a vector that held
-  `o: c > p` now holds `n: c`, which contains exactly the renamed `(k, n)` with `k ≤ c`. Supersession, coverage by a
-  discard and by an erasure, and line order among the renamed lines are as before. No other device holds anything of
-  `o` above `p` (that is what unpublished means), so a join with any version another device holds is the join it
-  was, renamed; nothing is dropped and nothing is invented.
-- *`J` holds for it.* Every value still attributed to `o` has a revision at or below `p`, and its bytes are unchanged
-  (its stamp's `seen` held no count of `o` above its own revision, which is at most `p`), so it is in version `p`, which
-  `o`'s stream carried; every other device's value is unchanged too (it was written having seen at most what `o`
-  published), and was carried by its own writer's stream as before; every renamed value is `n`'s and is carried by the
-  segment that carries the carried version (2); and the clock names `o` at most at `p`, which `o`'s stream carried, and
-  `n`, the version's own author (3). A carried deletion's erased row is renamed the same way, so its summary claims
-  of `o` only what `o` published, and settling it on a member erases that member's copy where it is covered, as the
-  deletion did here.
-- *Where it can be wrong.* `p` comes from a signed state; with none (lost with the restore, or edited, A8) it is 0, and
-  `o`'s published values are written again as `n`'s: members then hold both, as concurrent values the person
-  resolves, never fewer. If the old hardware is still running under `o` and publishes the same work later, it arrives
-  beside `n`'s copy the same way. It is done only where `o` commits: a non-committing ID's published work counts
-  nowhere anyway, and Z167's parking and hold stay in charge of it.
+The bound `p'` is the most of three, each a lower bound on what `o` published: `p`, the last version of the record `o`'s
+own signed state recorded; the highest version of the record `o`'s stream carried, as the stream index shows it once
+the vault's log has been pulled since the restore (`publishedBound`; the carry waits for that pull, so the index is the
+transport's and not the backup's); and what the item itself shows a third device `x` (neither `o` nor `n`) saw of `o`:
+`o`'s count in each of `x`'s stamps and discards, each `o` line one of `x`'s lines is anchored after, each `o` line `x`
+removed (`seenByOthers`). Whatever `x` saw, `o` published. Before Z197 only `p` was used and every vector was renamed:
+with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
+`(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every
+member's judge failed (2) for it.
 
-A row that cannot be sealed again at registration, for want of the vault's key here, keeps `o`'s stamps until a sync
-carries it (`SyncState.restoredUnpublished` records it, with `p`); until then it holds every deletion back
-(`holdsRestoredWork`), so a source half never goes out ahead of a copy that is still only `o`'s.
+- *It is a renaming, so the merge is unchanged.* Within the item, no part of a third device names a revision of `o`
+  above `p'`, by the choice of `p'`, so no third part changes. `n` never wrote those versions of the record, so the
+  renamed revisions are new; they are distinct from each other because their versions are; and `contains` is
+  preserved, since a vector that held `o: c > p'` now holds `n: c`, which contains exactly the renamed `(k, n)` with
+  `k ≤ c`, and a vector that held `o: c ≤ p'` contains no renamed revision before or after. Supersession, coverage by a
+  discard and by an erasure, and line order among the renamed lines are as before. Let `b` be any version another
+  device holds that holds nothing of `o` above `p'`: then `R(a ⊔ b) = R(a) ⊔ b`, `R` is idempotent, and for every pair
+  of parts of `a` and `b`, one supersedes or covers the other exactly when their images do. The one exception is a
+  tie-break: two concurrent field orders at the same version are ordered by device ID, and `n` may order otherwise
+  against a third device than `o` did. The field order is an arrangement, both orders hold the same fields, and every
+  device sees the same renamed one, so nothing is lost and devices still converge.
+- *`J` holds for it.* Every value still attributed to `o` has a revision at or below `p'`, and its bytes are unchanged
+  (its stamp's `seen` held no count of `o` above its own revision), so it is in a version of `o`'s stream; every third
+  device's value is unchanged, byte for byte, and was carried by its own writer's stream as before; every renamed
+  value is `n`'s and is carried by the segment that carries the carried version (2); and the clock names `o` at most at
+  `p'`, which `o`'s stream carried (where `p'` came from a third device's part and the index here does not show it,
+  the version waits for `o`'s stream, as any honest claim does), and `n`, the version's own author (3). A carried
+  deletion's erased row is renamed the same way, so its summary claims of `o` only what `o` published.
+- *Where it can be wrong: two installations of `o`'s history.* The renaming is sound exactly while nobody but this
+  installation holds `o`'s work above `p'`. That fails in two ways. Old hardware still running under `o` that publishes
+  that work after the carry (or before it, in a segment this device's index does not show and no third part of the
+  item names: not yet listed, or sealed under a key not held here) holds `(k, o)` where members now also hold `(k, n)`
+  for the same value. Members then hold both, as concurrent values: what `o` later wrote supersedes `(k, o)` and not
+  `(k, n)`, so a value `o` replaced comes back beside its replacement, a field `o` removed comes back as a conflict, an
+  item `o` then deleted permanently comes back kept after the deletion (in the trash, never purged), and note lines
+  appear twice. Nothing is lost (F7.6), but the person's later discards are undone there (F7.7) and must be made again.
+  Before Z198 a lost or edited state, or a lagging backup, reached this case for everything `o` had published since;
+  with the stream index it does only for what `o` publishes after the pull, which a restore that proceeds while the
+  old hardware still runs cannot avoid without coordinating with it. The laws are checked under random histories
+  (`LongRunningItemMergeLawTests`: for `b` with nothing of `o` above `p'`, the four laws above; with a bound drawn
+  below `p'`, every third part unchanged; and with old hardware going on to publish `a2 ⊒ a`, `R(a)`, `a2` and any
+  other version merged in every order give one item holding every value `a2 ⊔ b` holds), and against every small
+  history (`LongRunningItemMergeExhaustiveTests`). It is done only where `o` commits: a non-committing ID's published
+  work counts nowhere anyway, and Z167's parking and hold stay in charge of it.
+
+A row is carried only by a sync, after the vault's first pass of it, which publishes nothing there while something is
+still to carry, so that no merge of a row still holding `o`'s work goes out first; until then
+`SyncState.restoredUnpublished` records it, with `p`, a take-out leaves it alone, and it holds every deletion back
+(`holdsRestoredWork`), so a source half never goes out ahead of a copy that is still only `o`'s. The hold fails closed
+on a state it cannot read or trust, and finds such a row again from the row itself while any record names `o` (Z200).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

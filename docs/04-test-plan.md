@@ -622,7 +622,24 @@ copy is carried and published, naming it meanwhile, and the person can stop wait
 `everyFieldIsCovered`, `laterFieldsOnlyWhenSet`, "Sync state authentication"); a registration interrupted by an unlock
 leaves no registered device without its key (`registrationDuringRegistration`, "account enrolment and device
 registry", Z193); a deletion parked for want of a key is reported held back (`restoreWithASharedVaultHeldClosed`,
-Z194).
+Z194). The review of the thirteenth round (Z197 to Z202): a restore's carry never rewrites another device's stamps and
+keeps what another device saw of the old ID as that ID's (`neverRewritesAnotherDevice`, `linesRaiseTheBound`, "Item
+reattribution", Z197), and its laws hold under random and every small history (`reattribution` in
+`LongRunningItemMergeLawTests`: commutes with merges, idempotent, keeps supersession and coverage, never rewrites a
+third device from a bound read too low, and with old hardware going on, the carry, its later version and any other
+converge in every order and hold every value; `LongRunningItemMergeExhaustiveTests`, each pair of a last-device
+version and another's); a restore from a backup older than the device's last publish, with its state or with it
+edited, brings back nothing it replaced (`restoreFromALaggingBackup`, Z198); the person stops the wait through the
+notice's action, and work left in a vault the account was removed from is kept here and holds nothing back
+(`stopWaitingForRestoredWork`, `restoredWorkInAVaultLeft`, "shared vaults through the session"; `restoredWorkAction`,
+wording, Z199); the hold survives a damaged state (`restoredWorkSurvivesAnEditedState`, Z200); a registration from a
+stale account record does not register over the one that finished, and a refused one happens at the next sync
+(`registrationFromAStaleAccount`, `registrationAtTheNextSync`, "account enrolment and device registry";
+`updateNamesTheDevice`, store contract, Z201); and a version kept after a device's own deletion in a vault deleted
+elsewhere holds nothing back (`keptAfterOwnDeletionInADeletedVault`, "Vault session: vaults across devices", Z202).
+`LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
+in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
+the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

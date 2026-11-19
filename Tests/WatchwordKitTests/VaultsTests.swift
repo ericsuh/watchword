@@ -645,7 +645,7 @@ struct VaultsSyncTests {
         try await fleet.expectConverged()
     }
 
-    /// Review of round 13 (Z200), found by the restore step of the vault simulation: old hardware still running. A
+    /// Review of round 13 (Z202), found by the restore step of the vault simulation: old hardware still running. A
     /// saves an item and, before publishing it, is backed up; restored onto other hardware, the backup carries the
     /// item over and publishes it under its new ID, and trashes it there. A, offline all along, deletes the item; C
     /// deletes its vault. When A comes back it keeps the item in the trash, for the restored device's trash its

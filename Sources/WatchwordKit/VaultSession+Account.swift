@@ -943,7 +943,8 @@ extension VaultSession {
             // The old ID's unpublished work in a shared vault is written again as the new ID's, where the old ID's
             // published work counts for the vault's members (it commits): otherwise every member's judge holds it
             // aside, the restored device's own on a replay, for want of a segment of the old ID's stream that carried
-            // it (review of round 12, Z191).
+            // it (review of round 12, Z191). Not here: a sync does it once the vault's log is pulled (Z198), and the
+            // move records those rows for it.
             let reattributing = !Self.idsNobodyReceives(account: account, view: view, including: account.deviceID)
                 .contains(account.deviceID)
             for row in try carriedOver(

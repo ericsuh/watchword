@@ -4,12 +4,13 @@ import WatchwordStore
 import WatchwordSync
 
 // What a store restored onto other hardware has still to carry over from an earlier device ID of this installation
-// (review of round 12, M1 and Z191; docs/02-architecture.md §7.7). Registration carries what it can: a row in a vault
-// with no current key here (a shared vault before its ledger is verified, which at an unlock before any sync is every
-// shared vault, or one held closed) it cannot seal again. The move of the earlier ID's sync state records those rows,
-// and the deletions it parked, in each vault's signed state (`SyncState.restoredUnpublished`) with the last version of
-// each record that ID published; a sync carries them once the vault has a key, and until then every vault's
-// deletions are held back and the sync names the items (`AccountSyncReport.restoredWorkWaiting`).
+// (review of round 12, M1 and Z191; review of round 13; docs/02-architecture.md §7.7). Registration carries no item of
+// a vault that may be shared where the earlier ID commits (what it published is known only once a sync has pulled the
+// vault's log, Z198), nor a row in a vault with no current key here. The move of the earlier ID's sync state records
+// those rows, and the deletions it parked, in each vault's signed state (`SyncState.restoredUnpublished`) with the last
+// version of each record that ID's state says it published; a sync carries them once the vault has a key and its log
+// has been pulled, and until then every vault's deletions are held back and the sync names the items
+// (`AccountSyncReport.restoredWorkWaiting`), unless the vault waits for nothing any more (Z199).
 extension VaultSession {
     /// The records of `vaultID` holding work `previous` wrote and never published, each with the last version of it
     /// that ID published (version 0 for none): its rows that registration left (`row.deviceID` still that ID) and its

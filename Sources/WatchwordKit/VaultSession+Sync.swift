@@ -371,7 +371,7 @@ extension VaultSession {
             // deletion holds none, and holds nothing back. Nor does what a deletion of this device's own wrote into a
             // version kept after it (its erasure's revision, at most the deletion's stamp): that version goes out only
             // after its deletion, and holding the deletion for it held both for good once another device's tombstone
-            // of the record had arrived (review of round 13, found by the restore step of the vault simulation; Z200).
+            // of the record had arrived (review of round 13, found by the restore step of the vault simulation; Z202).
             let published = state?.published[row.key]
             let ownDeletion = ownDeletions[row.key].map {
                 RecordStamp(version: $0.stamp.version, device: account.deviceID)
