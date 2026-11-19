@@ -25,7 +25,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case deviceMigrationIncomplete
     /// What a restore left can be told here only from a record of this device's earlier identities that the sharing
     /// store could not read (`AccountSyncReport.restoredChainUnreadable`, review of round 20, Z240): deletions wait,
-    /// and so does everything else if it is still moving its sync records over, for as long as the store fails.
+    /// and so does everything else if it is still moving its sync records over, for as long as the store fails. The
+    /// text says only that a restore's leftovers cannot be ruled out (review of round 21, Z250): a device never
+    /// restored whose shared vault's state is lost or damaged asks for the record too, and "before it was restored"
+    /// was untrue there.
     case restoredChainUnreadable
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
@@ -106,10 +109,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "changes and sends none until that is done, and tries again at each sync and each unlock. Nothing "
                 + "has been lost."
         case .restoredChainUnreadable:
-            return "This device could not read part of its sharing records: the part that says whether changes made "
-                + "on it before it was restored are still to be sent. Until it can, deletions made on this device "
-                + "wait, and so does everything else it sends if it is still moving its sync records over. It tries "
-                + "again at each sync. Nothing has been lost."
+            return "This device could not read part of its sharing records, and without it cannot rule out that "
+                + "changes from before a restore of this device are still to be sent. Until it can, deletions made on "
+                + "this device wait, and so does everything else it sends if it is still moving its sync records "
+                + "over. It tries again at each sync. Nothing has been lost."
         case .snapshotWithheld(let names):
             return "Older devices need updating before this one can tidy the shared storage: "
                 + names.joined(separator: ", ") + "."

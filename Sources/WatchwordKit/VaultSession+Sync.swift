@@ -1160,9 +1160,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     public var deviceMigrationIncomplete = false
     /// The vaults where what a restore left can be told only from the vault's chain row of earlier device IDs
     /// (`RestoredChainRow`), and the sharing store could not read it (review of round 20, Z240): a shared vault whose
-    /// sync state does not verify, or a restore's move that needs the row. Each fails closed: such a vault holds every
-    /// vault's deletions back (it is in `deletionsHeldBack`), and a move that needs the row is not made
-    /// (`deviceMigrationIncomplete`), for as long as the store fails. Tried again at each sync.
+    /// sync state does not verify or that has none (on any device, restored or not: review of round 21, Z250), or a
+    /// restore's move that needs the row. Each fails closed: such a vault holds every vault's deletions back (it is in
+    /// `deletionsHeldBack`), and a move that needs the row is not made (`deviceMigrationIncomplete`), for as long as
+    /// the store fails. Tried again at each sync.
     public var restoredChainUnreadable: Set<UUID> = []
 
     public init() {}
