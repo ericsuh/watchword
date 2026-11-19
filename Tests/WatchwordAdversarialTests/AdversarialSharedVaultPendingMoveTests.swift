@@ -68,4 +68,53 @@ extension AdversarialSharedVaultTests {
         try await other.session.sync()
         #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
     }
+
+    /// Threat: none needed; the review of round 19 (Z235). A restore onto other hardware whose shared vault's state
+    /// verifies, for the earlier ID (a first restore) or for this device's own ID (a move made again after an attempt
+    /// that saved every state and failed to clear its record, Z181), needs no chain row, so its move is made without
+    /// sharing configured: in a process given sync and not sharing (the AutoFill extension), a wait there would hold
+    /// back everything this device publishes, in every vault, until the app ran. No test pinned either check that
+    /// lets it go ahead (`moveAwaitsSharing`): with either removed, every suite passed. It still records the copy, and
+    /// the hold keeps the original on the account's other device.
+    @Test(
+        "an ordinary restore's move finishes without sharing, at its first attempt and when made again",
+        arguments: [false, true])
+    func ordinaryMoveFinishesWithoutSharing(retried: Bool) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_910)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+
+        await member.session.lock()
+        await member.contacts.removePin(for: owner.accountID)
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let store = MigrationClearFailingStore(base: member.vault.store, failing: retried)
+        let restored = TestVault(
+            store: store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: member.vault.sync, seed: 31_911, deviceKeys: member.vault.deviceKeys)
+        try await restored.session.unlock(password: TestVault.password)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        if retried {
+            #expect(await store.failed == 1, "the first attempt at the move did not fail: nothing is tested")
+            #expect(try await restored.store.loadAccount()?.migration != nil, "the first attempt finished")
+            let begun = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+            #expect(!begun.isEmpty, "the first attempt saved no state of this device's: nothing is tested")
+            let report = try await restored.session.syncAll()
+            #expect(!report.deviceMigrationIncomplete, "a move whose own state verifies waited for sharing")
+        }
+        #expect(try await restored.store.loadAccount()?.migration == nil, "the ordinary move waited for sharing")
+
+        let state = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(state[RecordKey(recordID: copy.id, kind: .item)]?.device == first, "the move recorded nothing")
+        let report = try await restored.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete)
+        #expect(report.deletionsHeldBack.contains(vaultID), "the hold ended without sharing")
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+    }
 }
