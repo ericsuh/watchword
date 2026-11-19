@@ -204,16 +204,34 @@ extension VaultSession {
     /// ever to hold more back and to carry what a row shows is that ID's unpublished work (`rowsLeftByEarlierIDs`),
     /// never to discard: an ID planted there can at worst hold deletions back, and have this device write again as its
     /// own a row of that ID's whose work no segment of its stream carried here.
+    ///
+    /// From a state that does not verify, only an ID this account's registry lists as one of its own devices, current
+    /// or revoked (review of round 14, L3): an earlier ID of this installation was registered under this account. Any
+    /// other ID planted there, with the stream index's entry for it gone, named another account's device in a shared
+    /// vault, whose rows the take-out then left alone and the carry wrote again as this device's, laundering writes
+    /// every member's judge would hold aside. With the registry unreadable here such an ID still counts for the hold
+    /// (`listedOwnIDs` is `nil`), and `recordRestoredWorkLeft` records nothing until it can be read.
     func restoredChain(account: AccountRecord) async -> Set<UUID> {
         var chain: Set<UUID> = []
         if let previous = account.migration?.previousDeviceID { chain.insert(previous) }
         guard let base = syncSettings?.state, let vaults = try? await vaultDirectory(account).keys else { return chain }
+        let listed = await listedOwnIDs(account)
         for vaultID in vaults {
             guard let raw = try? await base.loadState(vaultID: vaultID) else { continue }
-            for left in raw.restoredUnpublished.values where !Self.isDismissed(left) { chain.insert(left.device) }
+            let verified = await verifiedSyncState(raw, vaultID: vaultID) != nil
+            for left in raw.restoredUnpublished.values
+            where !Self.isDismissed(left) && (verified || listed?.contains(left.device) ?? true) {
+                chain.insert(left.device)
+            }
         }
         chain.remove(account.deviceID)
         return chain
+    }
+
+    /// Every device ID this account's registry lists, current or revoked; `nil` where the registry cannot be read.
+    func listedOwnIDs(_ account: AccountRecord) async -> Set<UUID>? {
+        guard let view = try? await registry(account) else { return nil }
+        return Set(view.state.devices.keys).union(view.state.revoked.keys)
     }
 
     /// The rows of `vaultID`, if it may be shared, that an earlier ID of `chain` left and that `recorded` (the vault's
@@ -275,6 +293,8 @@ extension VaultSession {
     /// over while the chain names an earlier ID, as the engine would start it over, with those entries in it.
     func recordRestoredWorkLeft(account: AccountRecord, since epoch: UInt64) async {
         guard let syncState, let base = syncSettings?.state else { return }
+        // Only with the registry read, so that the chain holds no ID planted in a state that does not verify (L3).
+        guard await listedOwnIDs(account) != nil else { return }
         let chain = await restoredChain(account: account)
         guard !chain.isEmpty, let vaults = try? await vaultDirectory(account).keys else { return }
         for vaultID in vaults where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {

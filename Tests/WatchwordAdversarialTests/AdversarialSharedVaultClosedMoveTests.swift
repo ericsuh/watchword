@@ -363,3 +363,45 @@ extension AdversarialSharedVaultTests {
         #expect(summary.notices.allSatisfy { $0.action == nil })
     }
 }
+
+// The review of round 14 (docs/06-adversarial-review.md Z207, L3): which device IDs a restore's chain names. In the
+// suite "shared vaults through the session".
+extension AdversarialSharedVaultTests {
+    /// Threat: A8, who can edit this device's sync state and sharing state files but not reach the Keychain. In a
+    /// shared vault's state, which then no longer verifies, A8 names the owner's device (another account's) as an
+    /// earlier ID of this installation, and deletes the stream index, so that nothing reads as published by it. The
+    /// restore's chain was read from that state whatever ID it named: the take-out left the owner's rows alone as a
+    /// restore's, and the carry wrote them again as this device's own, laundering another account's writes through
+    /// this device's stream. Only an ID this account's registry lists as its own is read from such a state now.
+    @Test("an ID planted in an edited state as a restore's earlier ID must be one of this account's devices")
+    func plantedChainIDOfAnotherAccount() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 20_100)
+        let member = members[0]
+        let saved = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, member])
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        let ownerDevice = try #require(try await owner.vault.store.loadAccount()?.deviceID)
+        let before = try #require(try await member.vault.store.record(key))
+        #expect(before.deviceID == ownerDevice, "the owner's row is not the owner's: nothing is tested")
+
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await raw.loadState(vaultID: vaultID))
+        state.restoredUnpublished[key] = RecordStamp(version: 0, device: ownerDevice)
+        state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+        await raw.tamper(state)
+        await member.state.tamper(.streamIndex, vaultID: vaultID, value: nil)
+        await member.session.lock()
+        let relaunched = member.vault.relaunched(seed: 20_101)
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+
+        _ = try await relaunched.session.syncAll()
+        _ = try await relaunched.session.syncAll()
+        let after = try #require(try await member.vault.store.record(key))
+        #expect(after.deviceID == ownerDevice, "the owner's row was written again as this device's")
+        let written = try await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(written.isEmpty, "the planted ID was recorded as a restore's earlier ID")
+    }
+}
