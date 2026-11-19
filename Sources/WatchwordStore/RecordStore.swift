@@ -79,11 +79,15 @@ public struct StoreChange: Sendable, Hashable {
     /// between (the person saving the same item while sync merges it) is not silently overwritten by a version that
     /// happens to be higher (docs/02-architecture.md §7.1).
     public var expectations: [RecordKey: RecordExpectation]
+    /// The device ID the stored account record must still name for the change to apply (`accountVersionConflict`
+    /// otherwise): a registration that read the record before an `await` names the ID it replaces, so that one finished
+    /// meanwhile under another new ID is not replaced in its turn (review of round 13, L-b).
+    public var expectedDeviceID: UUID?
 
     public init(
         account: AccountWrite? = nil, migration: MigrationWrite = .keep, upserts: [StoredRecord] = [],
         deletions: [RecordKey] = [], conditionalDeletions: [RecordKey: UInt64] = [:],
-        expectations: [RecordKey: RecordExpectation] = [:]
+        expectations: [RecordKey: RecordExpectation] = [:], expectedDeviceID: UUID? = nil
     ) {
         self.account = account
         self.migration = migration
@@ -91,6 +95,7 @@ public struct StoreChange: Sendable, Hashable {
         self.deletions = deletions
         self.conditionalDeletions = conditionalDeletions
         self.expectations = expectations
+        self.expectedDeviceID = expectedDeviceID
     }
 
     /// Every key this change deletes.
@@ -129,6 +134,9 @@ extension StoreChange {
             }
         case nil:
             if migration != .keep, currentAccount == nil { throw RecordStoreError.accountVersionConflict }
+        }
+        if let expectedDeviceID, currentAccount?.deviceID != expectedDeviceID {
+            throw RecordStoreError.accountVersionConflict
         }
         for (key, expected) in conditionalDeletions where try existingVersion(key) != expected {
             throw RecordStoreError.versionConflict(recordID: key.recordID)

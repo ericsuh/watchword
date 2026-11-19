@@ -265,6 +265,62 @@ extension AdversarialAccountTests {
         #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
     }
 
+    /// Threat: none needed but a lock and an unlock while a restore's unlock, having read the account record, waits on
+    /// the Keychain for its device key; the review of round 13 (L-b). The second unlock registered the new device and
+    /// finished before the first went on, which then registered again from the record it had read: still the old ID,
+    /// no move recorded, no key. Its new key replaced the first's in the Keychain's one slot, and its commit, which
+    /// named only the keyset version, replaced the registered device: the registry listed a device whose key was
+    /// gone. A registration reads the account again under its flag now, and its commit names the device ID it
+    /// replaces.
+    @Test("a restore's registration that read the account before another finished does not register over it")
+    func registrationFromAStaleAccount() async throws {
+        let fixture = try await Self.fixture(seed: 19_300)
+        let state = InterceptingStateStore()
+        let keys = FakeDeviceKeyStore(seed: 19_301)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, deviceKeys: keys)
+        let oldID = try #require(try await restored.store.loadAccount()?.deviceID)
+        let session = restored.session
+        let secretKey = fixture.kit.secretKey
+        await keys.onNextLookup(of: oldID) {
+            await session.lock()
+            try? await session.unlock(password: TestVault.password, secretKey: secretKey)
+        }
+        try? await session.unlock(password: TestVault.password, secretKey: secretKey)
+        let account = try #require(try await restored.store.loadAccount())
+        #expect(account.deviceID != oldID)
+        #expect(await keys.created == 1, "a registration from a stale account made a second key")
+        #expect(try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID) != nil)
+        try await session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
+    /// Threat: none needed; the review of round 13 (L-b). A restore whose registration does not happen at its unlock
+    /// (one already under way, which then failed) waited for the next unlock: the sync never registered it, and the
+    /// device published nothing. A sync now registers it, as an unlock would.
+    @Test("a restore's registration that did not happen at its unlock happens at the next sync")
+    func registrationAtTheNextSync() async throws {
+        let fixture = try await Self.fixture(seed: 19_310)
+        let state = InterceptingStateStore()
+        let store = HookedRecordStore()
+        let keys = FakeDeviceKeyStore(seed: 19_311)
+        let (restored, other, doomed) = try await Self.restoredWithUnpublishedDeletion(
+            fixture, state: state, into: store, deviceKeys: keys)
+        let oldID = try #require(try await store.loadAccount()?.deviceID)
+        await store.failNextAccountCommit()
+        try? await restored.session.unlock(password: TestVault.password, secretKey: fixture.kit.secretKey)
+        #expect(try await store.loadAccount()?.deviceID == oldID, "the registration was not refused")
+
+        try await restored.session.sync()
+        let account = try #require(try await store.loadAccount())
+        #expect(account.deviceID != oldID, "the sync did not register the restored device")
+        #expect(try await keys.publicKey(accountID: account.accountID, deviceID: account.deviceID) != nil)
+        try await restored.session.sync()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
+    }
+
     /// Threat: none needed; the review of round 11 (Z186). A password change reads the account record, derives and signs
     /// across several awaits, and commits the record it read. A move completed during those awaits cleared the record's
     /// migration, and the commit wrote it back: the move ran again after the device had published under its new ID

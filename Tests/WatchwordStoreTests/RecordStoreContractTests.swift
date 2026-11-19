@@ -165,6 +165,26 @@ struct RecordStoreContractTests {
         #expect(try await store.loadAccount()?.keysetVersion == 1)
     }
 
+    /// Review of round 13, L-b: a registration names the device ID it replaces, so that one that finished meanwhile
+    /// under another new ID is not replaced in its turn.
+    @Test(
+        "a change that names the device ID the account must hold applies only while it does",
+        arguments: StoreKind.allCases)
+    func updateNamesTheDevice(_ kind: StoreKind) async throws {
+        let store = try kind.make()
+        try await store.commit(StoreChange(account: .create(StoreFixtures.account())))
+        var moved = StoreFixtures.account()
+        moved.deviceID = StoreFixtures.vaultB
+        await #expect(throws: RecordStoreError.accountVersionConflict) {
+            try await store.commit(
+                StoreChange(account: .update(moved, expectedKeysetVersion: 0), expectedDeviceID: StoreFixtures.vaultB))
+        }
+        #expect(try await store.loadAccount()?.deviceID == StoreFixtures.device)
+        try await store.commit(
+            StoreChange(account: .update(moved, expectedKeysetVersion: 0), expectedDeviceID: StoreFixtures.device))
+        #expect(try await store.loadAccount()?.deviceID == StoreFixtures.vaultB)
+    }
+
     @Test("updating a missing account is a conflict", arguments: StoreKind.allCases)
     func updateWithoutAccount(_ kind: StoreKind) async throws {
         let store = try kind.make()

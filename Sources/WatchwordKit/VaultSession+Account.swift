@@ -859,6 +859,17 @@ extension VaultSession {
         registrationInFlight = true
         defer { registrationInFlight = false }
         let epoch = lockEpoch
+        // What the caller read may be stale (review of round 13, L-b): another registration can have finished since,
+        // under another new ID, and a second key made now would replace its key in the Keychain's one slot. So the
+        // account is read again here, under the flag, and this one goes ahead only if it still names the ID the caller
+        // saw, with no move recorded and, for a new device, still no key of its own; otherwise it is left to the next
+        // unlock or sync, which sees the account as it is.
+        guard let current = try await store.loadAccount(), current.deviceID == account.deviceID,
+            !asNewDevice || current.migration == nil
+        else { return }
+        let ownKey = try await deviceKeys.publicKey(accountID: current.accountID, deviceID: current.deviceID)
+        guard asNewDevice == (ownKey == nil), epoch == lockEpoch else { return }
+        let account = current
         // Before a current key is picked for any row carried over.
         await loadSharedMarkersIfNeeded()
         let view = try await registry(account)
@@ -928,6 +939,7 @@ extension VaultSession {
                 change.migration = .set(migration)
             }
             change.account = .update(updated, expectedKeysetVersion: account.keysetVersion)
+            change.expectedDeviceID = account.deviceID
             // The old ID's unpublished work in a shared vault is written again as the new ID's, where the old ID's
             // published work counts for the vault's members (it commits): otherwise every member's judge holds it
             // aside, the restored device's own on a replay, for want of a segment of the old ID's stream that carried
@@ -1095,7 +1107,9 @@ extension VaultSession {
         var done = current
         done.migration = nil
         try await store.commit(
-            StoreChange(account: .update(done, expectedKeysetVersion: current.keysetVersion), migration: .clear))
+            StoreChange(
+                account: .update(done, expectedKeysetVersion: current.keysetVersion), migration: .clear,
+                expectedDeviceID: current.deviceID))
         self.account = done
     }
 

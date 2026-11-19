@@ -58,13 +58,23 @@ extension VaultSession {
             record = try await loadAccount() ?? record
         }
         report.deviceMigrationIncomplete = record.migration != nil
-        // A device whose registration no longer counts registers again, now that it has seen why.
+        // A device whose registration no longer counts registers again, now that it has seen why. A store restored
+        // onto other hardware whose registration did not happen at the unlock (one was already under way then, or it
+        // failed) registers as a new device here, as the next unlock would (review of round 13, L-b).
         if let keys, let view = try? await registry(record), view.state.pendingCredentials.isEmpty,
-            view.state.standing(of: record.deviceID) == .unknown
+            !(await passwordChangePending(record))
         {
-            try? await registerThisDevice(account: record, keys: keys, asNewDevice: false)
-            record = try await loadAccount() ?? record
+            if record.migration == nil,
+                (try? await deviceKeys.publicKey(accountID: record.accountID, deviceID: record.deviceID)) == .some(nil)
+            {
+                try? await registerThisDevice(account: record, keys: keys, asNewDevice: true)
+                record = try await loadAccount() ?? record
+            } else if view.state.standing(of: record.deviceID) == .unknown {
+                try? await registerThisDevice(account: record, keys: keys, asNewDevice: false)
+                record = try await loadAccount() ?? record
+            }
         }
+        report.deviceMigrationIncomplete = record.migration != nil
 
         let view = try? await registry(record)
         let standing = view?.state.standing(of: record.deviceID)

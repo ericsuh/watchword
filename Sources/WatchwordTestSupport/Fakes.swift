@@ -186,9 +186,21 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
         return try key.publicKey()
     }
 
-    public func publicKey(accountID: UUID, deviceID: UUID) throws -> DevicePublicKey? {
+    public func publicKey(accountID: UUID, deviceID: UUID) async throws -> DevicePublicKey? {
+        if let hook = lookupHook, hook.deviceID == deviceID {
+            lookupHook = nil
+            await hook.run()
+        }
         guard let entry = held[accountID], entry.deviceID == deviceID else { return nil }
         return try entry.key.publicKey()
+    }
+
+    private var lookupHook: (deviceID: UUID, run: @Sendable () async -> Void)?
+
+    /// Runs `hook` inside the next lookup of `deviceID`'s key, before it answers: what a caller that read the account
+    /// and then asks for its key meets when something else runs while it waits (review of round 13, L-b).
+    public func onNextLookup(of deviceID: UUID, _ hook: @escaping @Sendable () async -> Void) {
+        lookupHook = (deviceID, hook)
     }
 
     public func sign(_ prepared: [UInt8], accountID: UUID, deviceID: UUID) throws -> [UInt8] {
