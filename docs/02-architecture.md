@@ -726,12 +726,19 @@ it for good. Now the transport says what it holds and the engine decides, as for
   sync. **Not in a vault with a judge** (V59): there one copy of a fork fetched alone was staged and merged, though
   every member that examined the name refuses it, so members could merge different objects at one position. Such a
   vault leaves the name unfetched (`SyncReport.copiesLeftUnfetched`) and its stream waits there for a sync with the
-  budget to examine it whole. Names at the next position of their stream are examined before other flagged names
-  (snapshots, later positions), so a genuine name a stream waits on is passed over only while 16 or more other streams
-  hold copies at their next positions, which an honest household's forks do not reach and A1's junk under authors of
-  its own does: a liveness residual held as R17 is (A1 can withhold the object outright), with nothing merged from
-  the name meanwhile. So a flood of copies costs a bounded number of reads and signature checks per sync, stalls no
-  stream whose current file is genuine (outside a vault with a judge), and cannot stop this device publishing:
+  budget to examine it whole. Nor does it stage a name it examined and could not read whole, one copy verifying (V61):
+  a copy listed and not readable yet (an iCloud conflict version not downloaded, or A1's `.N 2.wwe.icloud`, R21), or
+  one past `maximumCopiesPerObject`. Staged alone it was merged, and every member that read the other copy refuses
+  the name, V59's harm by another door. It is refused for now (`objectUnreadable`, which the sync summary counts as a
+  refused object), its stream waits, and every sync examines it again, the iCloud adapter asking for the version,
+  until one reads it whole; a copy that never becomes readable stops the stream as a withheld object does (R17).
+  Flagged names come after the rest, those at the next position of their stream first, then the others (snapshots,
+  later positions), each group by name (V64: it was the order of a set and a dictionary, different in every
+  process), so a genuine name a stream waits on is passed over only while 16 or more other streams, ahead of it by
+  name, hold copies at their next positions, which an honest household's forks do not reach and A1's junk under
+  authors of its own does: a liveness residual held as R17 is (A1 can withhold the object outright), with nothing
+  merged from the name meanwhile. So a flood of copies costs a bounded number of reads and signature checks per sync,
+  stalls no stream whose current file is genuine (outside a vault with a judge), and cannot stop this device publishing:
   rejections are per object. What the bound gives up is a genuine copy hidden behind more than 15 planted ones, or a
   count that A1 keeps equal while swapping copies; A1 can delete that copy outright, so this is withholding (Y7), not a
   new capability. Copies of the account's own objects, and of the sharing objects, are not examined: those are named by
@@ -1044,23 +1051,31 @@ nothing of the judge, so only what a segment says of its own author's versions i
 itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). Both stream
 routes stop before a name a merge here does not pass for its copies (`SyncEngine.mergeReach(of:stoppedAt:)`): one this
 sync's download refused (two verifying copies of one name, `conflictingVersions`, which is never staged, so every
-download examines it again and refuses it again) or left unfetched for want of the sync's bound of copies (V59), and one
-staged with conflict copies (which the merge refuses); never at or past it, unless the vault's state or a staged
-snapshot covers it, as the merge then passes it. The judge records every staged segment, a later position of a refused
-stream included, and the stream is never merged past the refused name (Z221, V56). A position merely not here (not
-downloaded yet, an iCloud placeholder, unreadable for now, collected) stops nothing: the move starts every vault's
+download examines it again and refuses it again), and one staged with conflict copies (which the merge refuses); never
+at or past it, unless the vault's state or a staged snapshot covers it, as the merge then passes it. A name the
+download left unfetched for want of its bound of copies (V59, `SyncReport.copyWaits`) is undecided, a stop if it is a
+fork and none if it is not: taken for a stop, A1 made one by planting a junk copy beside a genuine name and spending
+the bound, and the carry renamed what the old ID had published (V62). Where one would bound the carry, the carry
+waits for the next sync, whose bound refills (a delay only, however long A1 keeps spending it); the hold and the
+records a lost state makes count it as a stop, which only holds or records more. A name refused for a copy not read
+whole (V61) is a position not here for now, as below. The judge records every staged segment, a later position of a
+refused stream included, and the stream is never merged past the refused name (Z221, V56). A position merely not here
+(not downloaded yet, an iCloud placeholder, unreadable for now, collected) stops nothing: the move starts every vault's
 state over, so a reach that stopped there was the staged run from position 1, and at the first sync after a restore a
 placeholder of the old ID's first segment renamed everything it had published, which every member then held twice
-(V58, bringing back Z198). The names are the latest download's in the session (`downloadCopyStops`), so the carry, the
-hold and the records a move or a lost state makes (V57) bound alike; the move, which has no download in hand, stops
-only at a name staged with copies. The reach is applied in every vault the restore names, judge or not: where there
-is none a name with copies is merged, not refused, and the bound is only lower than what the merge takes, renaming
-more and losing nothing. Work that only segments at or past the refused name carried is renamed as the new ID's, and
-members that merged the name before the fork hold it twice, as conflicts, losing neither. Never what a
-downloaded version of a third device claims: nothing has judged it yet, and a member who may write could claim to have
-seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside (Z208). In a
-shared vault the log is whole from the day it was shared, so whatever an honest third device saw of the old ID since
-then is in the old ID's own segments. Not what an owner's device published while the vault was private: those
+(V58, bringing back Z198). The names are the latest download's in the session (`downloadCopyStops`,
+`downloadCopyWaits`), so the carry and the hold bound alike. The move, and the records a lost state makes before any
+download of the sync (V57, Z225), apply no bound: with no download in hand, and with stops that are this session's
+memory, empty after a relaunch, their bound was the pre-V56 one at best, and a row whose work only segments past a
+refused fork carried went unrecorded. They record every row of an earlier ID holding its work, and the
+carry, with the download in hand, drops what that ID published (V63). The reach is applied in every vault the restore
+names, judge or not: where there is none a name with copies is merged, not refused, and the bound is only lower than
+what the merge takes, renaming more and losing nothing. Work that only segments at or past the refused name carried is
+renamed as the new ID's, and members that merged the name before the fork hold it twice, as conflicts, losing neither.
+Never what a downloaded version of a third device claims: nothing has judged it yet, and a member who may write could
+claim to have seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside
+(Z208). In a shared vault the log is whole from the day it was shared, so whatever an honest third device saw of the old
+ID since then is in the old ID's own segments. Not what an owner's device published while the vault was private: those
 segments may have been collected under a snapshot before the vault was shared (Z144), and the old ID's signed state is
 then the only bound; with that state lost or edited (A8) the carry writes the work again as the new ID's, and members
 hold it twice, as conflicts, losing neither (Z218, accepted). The old ID's signed state is believed as it stands: a
@@ -1099,15 +1114,20 @@ verify, a row still that ID's, holding its work above what its stream carried, h
 where neither this device's state nor the earlier ID's verifies, for the IDs the vault's chain row names (the row of an
 earlier attempt at the move, or the earlier ID's own, from its own restore; Z225, Z226): a second restore's inherited
 entries are named by no other record then, and the state the move saves verifies, so the hold would read it and never
-look for them. Both find those rows the one way (`rowsLeft`, within the reach of V58), from the rows read once, before
-the parked deletions, so that a chain ID's row wins a key both name (V57 was the same bug, fixed apart and merged into
-Z225's code). Those rows are read through sharing, so a move that would read one while sharing is not configured waits,
-its record kept and nothing published, and `configureSharing` makes it (through `startSyncStatesOver`, as every move),
-or the next unlock or sync after it (`moveAwaitsSharing`, Z229); a vault whose state verifies needs no row, so an
-ordinary move does not wait. The hold ends when the vault opens here and the row is
-carried, when a version that holds none of the work replaces the row, when the vault is deleted or this account's
-membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows kept on this
-device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open
+look for them. Both find those rows the one way (`rowsLeft`: the hold within the reach of V58, the records with no
+bound, V63), from the rows read once, before the parked deletions, so that a chain ID's row wins a key both name (V57
+was the same bug, fixed apart and merged into Z225's code). Those rows are read through sharing, so a move that would
+read one while sharing is not configured waits, its record kept and nothing published, and `configureSharing` makes it
+(through `startSyncStatesOver`, as every move), or the next unlock or sync after it (`moveAwaitsSharing`, Z229); a vault
+whose state verifies needs no row, so an ordinary move does not wait. While any move is under way nothing but the move
+saves a vault's state: a sync then only downloads, and its download saves nothing of what it learnt of conflict copies
+(`SyncEngine.download(savingState:)`; the move starts every state over anyway, so the copies are only examined again),
+and Stop Waiting refuses (`deviceMigrationIncomplete`); so does the chain backfill, whose rows the move writes itself. A
+state saved then was one started over for the new ID where none verified, which the move read as one it had begun,
+recording nothing of the earlier IDs' work and none of V49's facts (V60). The hold ends when the vault opens here and
+the row is carried, when a version that holds none of the work replaces the row, when the vault is deleted or this
+account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows kept
+on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open
 (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
 `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
 owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;

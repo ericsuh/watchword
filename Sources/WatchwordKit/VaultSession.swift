@@ -153,6 +153,10 @@ public actor VaultSession: SharesExecutor {
     /// V58). Remembered only for that: a download makes them again, and a name not remembered (none downloaded in
     /// this session yet) stops nothing, as a position not downloaded yet does not. Names of objects, no secret.
     var downloadCopyStops: [UUID: Set<SyncObjectLocation>] = [:]
+    /// Per vault, the names that same download left unfetched for want of its bound of copies (`SyncReport.copyWaits`,
+    /// a merge review of the hygiene branch, V62): a stop for the hold and the records (which then hold or record
+    /// more), and, where one would bound a restore's carry, a reason for the carry to wait for the next sync.
+    var downloadCopyWaits: [UUID: Set<SyncObjectLocation>] = [:]
     /// Whoever asked to be told of every lock (`lockEvents()`), by a number of their own.
     var lockListeners: [Int: AsyncStream<Void>.Continuation] = [:]
     var nextLockListener = 0

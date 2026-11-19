@@ -570,14 +570,16 @@ verifying segments under one number (old hardware still running under `o`, A1 ke
 both refuses the name (`conflictingVersions`) and merges the stream no further, and the values only that name carried
 count on no member that did not merge it first, so whatever holds them is held aside there. The stream routes
 therefore stop before the first name, above what the state or a staged snapshot covers, that the sync's download
-refused for two verifying copies or left unfetched for them, or that is staged with copies (a merge refuses it); such
-a name is never staged in a vault with a judge, so every download refuses it again and nothing signed need remember
-it. A position merely not here yet (an iCloud placeholder, an object unreadable for now, segments collected before
-sharing) stops nothing: the move starts the state over, so stopping there bounded the routes by the staged run from
-position 1 and, at the first sync after a restore that met a gap, renamed what `o` had published, which every member
-then held twice (V58). `p` is not bounded so, and a version `o`'s signed state names but only a refused name carried
-keeps `o`'s stamps (V56, open; the same per-sync refusals could bound it, with no new field). Before Z197 only `p`
-was used and every vector was renamed:
+refused for two verifying copies, or that is staged with copies (a merge refuses it); such a name is never staged in a
+vault with a judge, so every download refuses it again and nothing signed need remember it. A name the download left
+unfetched for want of its bound of copies may be either: where one would bound the carry, the carry waits for a sync
+that examines it whole (V62: taken for a stop, A1 made one with a junk copy beside a genuine name), and the hold
+counts it as a stop. A position merely not here yet (an iCloud placeholder, an object unreadable for now, segments
+collected before sharing) stops nothing: the move starts the state over, so stopping there bounded the routes by the
+staged run from position 1 and, at the first sync after a restore that met a gap, renamed what `o` had published, which
+every member then held twice (V58). `p` is not bounded so, and a version `o`'s signed state names but only a refused
+name carried keeps `o`'s stamps (V56, open; the same per-sync refusals could bound it, with no new field). Before Z197
+only `p` was used and every vector was renamed:
 with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
 `(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every
 member's judge failed (2) for it.
@@ -636,8 +638,9 @@ on a state it cannot read or trust, and, where the state is lost or does not ver
 itself while a record that verifies names `o` (Z200): the move under way, a verified state, or the vault's chain row,
 which the move signs and which is filled in from the verified states whenever sharing and the keys are both here (Z216,
 Z222). A move made again, or a second restore, adds to that row and finds the rows it names again where no state
-verifies (Z225, Z226; V57 was the same fix), bounded by the same reach as the hold (V58); the rows are read through
-sharing, so such a move waits until sharing is configured (Z229).
+verifies (Z225, Z226; V57 was the same fix), recording every such row holding `o`'s work and leaving the bound to the
+carry, which has the download in hand (V63); the rows are read through sharing, so such a move waits until sharing is
+configured (Z229), and nothing but the move saves a vault's state while it waits (V60).
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

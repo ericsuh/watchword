@@ -734,6 +734,15 @@ copies ahead of a forked name do not get one copy of it merged in a judged vault
 leaves the name unfetched, counts nothing past it, and refuses it at the next sync with budget
 (`spentBudgetLeavesAForkUnfetched`, V59). Each fails at the commit before its fix, or, where it names what that
 commit lacks, with the fix reverted (`refusedForkCountsNothingAfterIt` and the V58 and V59 tests).
+The review of the fifth merge into this branch (V60 to V65): in "shared vaults through the session", a sync while a
+restore's move waits for sharing leaves the vault's state for the move, and Stop Waiting is refused then
+(`downloadWhileTheMoveWaitsLeavesTheState`, V60), and a junk copy beside the earlier ID's first segment with the bound
+of copies spent makes the carry wait rather than rename (`spentBoundAtTheFirstCarryRenamesNothing`, V62); in "sync
+log", a judged vault does not merge a forked name whose other copy is listed and unread
+(`unreadCopyOfAForkIsNotMerged`, V61), a junk copy beside a genuine name with the bound spent makes no stop
+(`junkCopyBesideAGenuineNameMakesNoStop`, V62), and names with copies a stream waits on are examined in name order
+(`junkAheadByNameSpendsTheBoundInOneOrder`, V64). Each fails at 121589c (the last unless the hash order happens to fall
+right in both of its cases, about 16 runs in 289), and with its fix reverted.
 The review of the seventeenth round (Z222 to Z228), in "shared vaults through the session": a restore's uncarried copy
 holds deletions back after its vault's state is damaged however sharing came to be configured, before the unlock that
 made the move, after it, while locked before a password or a quick unlock, and with the chain row lost after the move

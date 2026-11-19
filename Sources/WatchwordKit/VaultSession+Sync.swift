@@ -246,7 +246,11 @@ extension VaultSession {
                     restPublished = false
                 }
             } else {
-                vaultReport = try await engine(vaultID).download(transportStopped: stopped)
+                // While a move to a new device ID is under way the download saves no state: where none verifies for
+                // the new ID it would save one started over, and the move would read it as begun, recording nothing of
+                // the earlier IDs' work (V60). The move starts every state over anyway.
+                vaultReport = try await engine(vaultID).download(
+                    transportStopped: stopped, savingState: record.migration == nil)
                 noteCopyStops(vaultReport, in: vaultID)
                 vaultReport.deferredUntilUnlock = true
             }
@@ -534,15 +538,16 @@ extension VaultSession {
         return !kept.isEmpty
     }
 
-    /// One vault's report for two engine runs in one sync: counts added up, state as the second left it.
     /// Remembers what `report`'s download found a vault with a judge does not merge past for their copies
-    /// (`downloadCopyStops`, V58), where it listed the vault: a download that could not list leaves what the last one
-    /// found.
+    /// (`downloadCopyStops`, V58) and what it left unfetched for want of its bound of copies (`downloadCopyWaits`,
+    /// V62), where it listed the vault: a download that could not list leaves what the last one found.
     func noteCopyStops(_ report: SyncReport, in vaultID: UUID) {
         guard !report.transportUnavailable, report.transportFailure == nil else { return }
         downloadCopyStops[vaultID] = report.copyStops
+        downloadCopyWaits[vaultID] = report.copyWaits
     }
 
+    /// One vault's report for two engine runs in one sync: counts added up, state as the second left it.
     static func report(_ first: SyncReport, followedBy second: SyncReport) -> SyncReport {
         var total = second
         total.fetched += first.fetched

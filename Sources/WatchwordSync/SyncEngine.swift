@@ -226,7 +226,8 @@ public struct SyncReport: Sendable, Equatable {
     /// Names listed with copies that a vault with a judge left unfetched in this sync, its bound of copies spent
     /// (`maximumCopiesPerSync`; counted in `copiesNotExamined` too): never fetched as the current file alone, which
     /// such a vault would then merge though it refuses a fork (§7.5, "Conflict copies"; a merge review of round 17,
-    /// V59). Their streams wait at them for a sync with the budget to examine them whole.
+    /// V59). Their streams wait at them for a sync with the budget to examine them whole, and a restore's carry waits
+    /// for that sync where one would bound it (`copyWaits`, V62).
     public var copiesLeftUnfetched: [String] = []
     /// Names under which more than one copy verified, all of which were merged: a device signed different bytes under
     /// one name (its state was rolled back and it wrote again before seeing what it had published).
@@ -253,11 +254,12 @@ public struct SyncReport: Sendable, Equatable {
 
     /// The names a vault with a judge does not merge past for their copies, as this sync's download found them: those
     /// it refused for two verifying copies (`conflictingVersions`; a name with copies is never staged there, so every
-    /// download examines it again and refuses it again) and those it left unfetched (`copiesLeftUnfetched`). What a
-    /// restore's carry stops at (`SyncEngine.mergeReach(of:stoppedAt:)`; a merge review of round 17, V58): a position
-    /// that is merely not downloaded yet is not one.
+    /// download examines it again and refuses it again). What a restore's carry stops at
+    /// (`SyncEngine.mergeReach(of:stoppedAt:)`; a merge review of round 17, V58): a position that is merely not
+    /// downloaded yet is not one, nor a name left unfetched for want of the sync's bound of copies (`copyWaits`),
+    /// which A1 could otherwise make one by planting a junk copy beside a genuine name and spending the bound (V62).
     public var copyStops: Set<SyncObjectLocation> {
-        var stops = Set(copiesLeftUnfetched.compactMap(SyncObjectLocation.init(name:)))
+        var stops: Set<SyncObjectLocation> = []
         for rejection in rejected {
             if case .transport(.conflictingVersions(let name)) = rejection.reason,
                 let location = SyncObjectLocation(name: name)
@@ -266,6 +268,15 @@ public struct SyncReport: Sendable, Equatable {
             }
         }
         return stops
+    }
+
+    /// The names a vault with a judge left unfetched in this sync for want of its bound of copies
+    /// (`copiesLeftUnfetched`): undecided, a stop if they are forks and none if they are not. A restore's carry waits
+    /// while one of them would bound what it counts of an earlier ID's stream (a merge review of the hygiene branch,
+    /// V62): the bound refills at the next sync, which examines them whole. Everything else that bounds a restore
+    /// (the hold, the records a lost state makes) counts them as stops, which only holds or records more.
+    public var copyWaits: Set<SyncObjectLocation> {
+        Set(copiesLeftUnfetched.compactMap(SyncObjectLocation.init(name:)))
     }
 
     /// Records that the transport could not be used, and why. The first reason in a sync is kept.
@@ -589,7 +600,15 @@ public actor SyncEngine {
 
     /// Downloads and signature-checks new objects only. Needs no keys (§7.4). With `transportStopped`, does nothing
     /// but report it (see `sync`).
-    public func download(transportStopped: SyncTransportError? = nil) async throws -> SyncReport {
+    ///
+    /// What it learns of conflict copies is saved in the vault's state unless `savingState` is off: a session whose
+    /// move to a new device ID is under way (`AccountRecord.migration`) passes `false`, since the state it would save
+    /// is one started over for the new ID wherever no state verifies for it, which the move then read as a move begun
+    /// and recorded nothing of the earlier IDs' work (a merge review of the hygiene branch, V60). The move starts every
+    /// state over, examined copies included, so nothing is lost but a second look at the copies.
+    public func download(transportStopped: SyncTransportError? = nil, savingState: Bool = true) async throws
+        -> SyncReport
+    {
         guard !running else { throw SyncError.syncInProgress }
         running = true
         defer { running = false }
@@ -611,8 +630,9 @@ public actor SyncEngine {
         // Which copies were looked at and found to be junk is remembered, so they are not read again, and which could
         // not be read, so they wait behind the rest and take turns (R17, R19): where the state can be saved, which a
         // session that signs it (Z20) cannot do while locked.
-        if state.examinedCopies != examined || state.unreadCopies != unread
-            || state.unreadCopiesExamined != unreadExamined
+        if savingState,
+            state.examinedCopies != examined || state.unreadCopies != unread
+                || state.unreadCopiesExamined != unreadExamined
         {
             do {
                 try await syncState.saveState(state)
@@ -629,11 +649,12 @@ public actor SyncEngine {
     /// signatures, AEAD, payload location) and its entries' structure checked (`validate`); a segment that fails gives
     /// nothing, and so does a retired author's (`SyncKeyring.retiredAuthors`), which no pass reads. In a vault with a
     /// judge, only a segment within its stream's reach (`mergeReach(of:stoppedAt:)`) counts: nothing at or past a name
-    /// the merge does not pass for its copies, one that this sync's download refused for two verifying copies or left
-    /// unfetched (`stops`, `SyncReport.copyStops`), or one staged with copies (a merge review of round 16, Z221; of
-    /// round 17, V56 and V58). A position that is merely not here (not downloaded yet, unreadable, collected) stops
-    /// nothing: the merge waits there for a while, never for good, and counting only the run up to it renamed published
-    /// work as this device's at the first sync after every restore whose earlier ID's stream had a gap (V58). Nothing
+    /// the merge does not pass for its copies, one that this sync's download refused for two verifying copies
+    /// (`stops`, `SyncReport.copyStops`, to which a caller adds the names it left unfetched, `copyWaits`, to count
+    /// less), or one staged with copies (a merge review of round 16, Z221; of round 17, V56 and V58; V62). A position
+    /// that is merely not here (not downloaded yet, unreadable, collected) stops nothing: the merge waits there for a
+    /// while, never for good, and counting only the run up to it renamed published work as this device's at the first
+    /// sync after every restore whose earlier ID's stream had a gap (V58). Nothing
     /// else a merge asks is asked here: not the shared vault's judge (a segment's standing, write cuts, what a version
     /// claims of other devices' work), nor the version bounds that quarantine (U5). So what a segment says of its own
     /// author's versions is all a caller may take from it: a restore's carry, which needs to know, after a `download`
@@ -669,9 +690,10 @@ public actor SyncEngine {
     /// How far a merge here can take each of `authors`' streams in sequence before a name it does not pass for its
     /// copies (a merge review of round 17, V56 and V58): the position before the lowest such name above what the
     /// stream has settled here (`settledReach`) or a staged snapshot covers of it, or `UInt64.max` where there is none.
-    /// Such a name is one this sync's download refused for two verifying copies or left unfetched for want of budget
-    /// (`stops`, `SyncReport.copyStops`: a name with copies is never staged in a vault with a judge, so every download
-    /// examines it again and refuses it again, and no signed field needs to remember it), or one staged with copies
+    /// Such a name is one this sync's download refused for two verifying copies (`stops`, `SyncReport.copyStops`: a
+    /// name with copies is never staged in a vault with a judge, so every download examines it again and refuses it
+    /// again, and no signed field needs to remember it; a caller may add those left unfetched for want of budget,
+    /// `copyWaits`, which may or may not be forks, to count less, V62), or one staged with copies
     /// (which such a vault refuses at the merge, `openCopies`). The merge passes a refused position a snapshot covers,
     /// so a staged one's coverage counts as the merge would take it, opened here (`openCopies`); one that does not
     /// open covers nothing. A position merely not staged (not downloaded yet, an iCloud placeholder; unreadable for
@@ -864,21 +886,25 @@ public actor SyncEngine {
         let allowance = max(0, configuration.maximumCopiesPerSync)
         var budget = allowance - allowance / 2
         let isOwn = { (location: SyncObjectLocation) in location.kind == .segment && location.author == self.deviceID }
-        // Of the names with copies, which alone spend the bound, first those at the next position of their stream,
-        // which the merge waits on, then the rest (snapshots, later positions), each group in the order it was in. So
-        // in a vault with a judge, where a name with copies is never fetched alone (below), what a stream waits on is
-        // examined in every sync unless the next positions of other streams spend the bound first. Each costs at
-        // most `maximumCopiesPerObject`, so that takes 16 streams (by default) holding copies at their next position,
-        // which an honest household's forks do not reach and A1's junk under authors of its own does (a merge review
-        // of round 17, V59; held, as R17: the store can stop any stream by withholding its object, and nothing is
-        // merged from such a name, so only liveness is at stake).
+        // The names with copies, which alone spend the bound, after the rest: first those at the next position of
+        // their stream, which the merge waits on, then the others (snapshots, later positions), each group by name, so
+        // that every sync and every device takes them in one order (a merge review of the hygiene branch, V64: it was
+        // the order of a set and a dictionary, which differs from process to process). So in a vault with a judge,
+        // where a name with copies is never fetched alone (below), what a stream waits on is examined in every sync
+        // unless the next positions of other streams, ahead of it by name, spend the bound first. Each costs at most
+        // `maximumCopiesPerObject`, so that takes 16 streams (by default) holding copies at their next position, which
+        // an honest household's forks do not reach and A1's junk under authors of its own does (a merge review of
+        // round 17, V59; held, as R17: the store can stop any stream by withholding its object, and nothing is merged
+        // from such a name, so only liveness is at stake).
         let settled = state
         let waitedOn = { (location: SyncObjectLocation) in
             location.kind == .segment && location.number == Self.settledReach(of: location.author, in: settled) &+ 1
         }
-        wanted =
-            wanted.filter { listing.copies[$0] == nil || waitedOn($0) }
-            + wanted.filter { listing.copies[$0] != nil && !waitedOn($0) }
+        let flagged = wanted.filter { listing.copies[$0] != nil }.sorted { $0.name < $1.name }
+        let unflagged = wanted.filter { listing.copies[$0] == nil }
+        let waitedOnFirst = flagged.filter(waitedOn)
+        let flaggedRest = flagged.filter { !waitedOn($0) }
+        wanted = unflagged + waitedOnFirst + flaggedRest
         for location in wanted where !alreadyStaged.contains(location) {
             var decided = false
             do {
@@ -1143,6 +1169,17 @@ public actor SyncEngine {
             if conclusive, whole { state.examinedCopies[location] = count }
             report.rejected.append(SyncRejection(name: name, reason: Self.reason(failure)))
             return
+        }
+        if !late, judge != nil, !whole || found.omitted > 0 {
+            // One copy verified, and the name was not read whole: a copy listed and not readable yet (an iCloud
+            // conflict version not downloaded, or A1's `.N 2.wwe.icloud`, R21), or one past `maximumCopiesPerObject`.
+            // Staged alone it was merged, and a member that read every copy refuses the name for good: members merged
+            // different objects at one position, or one merged what the rest refuse, which a write cut's chain assumes
+            // never happens (a merge review of the hygiene branch, V61; V59's harm by another door). Refused for now,
+            // its stream waits here, and the sync says so (`rejected`, `waiting`); every sync examines the name again,
+            // asking the provider for the copy, until one reads it whole. A copy that never becomes readable stops the
+            // stream as a withheld object does (R17), shown to the person as a refused object at each sync.
+            throw SyncTransportError.objectUnreadable(name)
         }
         if late, judge != nil {
             // One verifying copy at a position already merged and judged: nothing to apply.

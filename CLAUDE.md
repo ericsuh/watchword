@@ -464,7 +464,10 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `merged`. A device whose own stream forked owes a snapshot (`SyncState.handOnOwed`) and collects nothing before it
   is written. What was examined is remembered by count (`SyncState.examinedCopies`), and a name is examined whole or
   not at all (`maximumCopiesPerObject`, `maximumCopiesPerSync`): check the sync's bound before a name, never inside.
-  With the bound spent, a vault with a judge never fetches a name with copies alone (`copiesLeftUnfetched`, V59).
+  A vault with a judge never stages a name with copies it has not examined whole: with the bound spent it leaves it
+  unfetched (`copiesLeftUnfetched`, V59), and with a copy unread or past `maximumCopiesPerObject` it refuses it for
+  now (`objectUnreadable`, V61); the stream waits either way. Flagged names are examined by name, those a stream
+  waits on first (V64).
 - Download needs no keys and checks signatures before staging; merge re-verifies staged objects and checks kind,
   context, AEAD, then payload, in that order. A stream is merged strictly in sequence: never skip a gap.
 - A segment carries only its author's versions, and each record envelope's own context must match its entry
@@ -831,9 +834,11 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   (Z197). "Published" is the most of the old ID's signed state, its own stream as the index and that stream's
   downloaded segments show it (`publishedBound`, `SyncEngine.stagedEntries`, Z198), both only as far
   as a merge here can take that stream (`SyncEngine.mergeReach(of:stoppedAt:)`: never at or past a name the latest
-  download refused or left for conflict copies, `SyncReport.copyStops`, or one staged with copies, which the judge
+  download refused for conflict copies, `SyncReport.copyStops`, or one staged with copies, which the judge
   records past all the same, Z221, V56; but past a position merely not downloaded, unreadable or collected, which
-  stopping at renamed published work after every restore that met a gap, V58), and what the row
+  stopping at renamed published work after every restore that met a gap, V58; a name left unfetched for the bound of
+  copies, `copyWaits`, makes the carry wait where it would bound it, and is a stop for the hold, never for the carry,
+  which A1 could otherwise make with one junk copy, V62), and what the row
   (judged versions) shows a third device saw (`seenByOthers`); never what an unmerged version of a third device claims,
   which no judge has looked at (Z208: a member could make the carry drop its entry). So registration carries none of a
   shared vault's items: the move records them in the vault's signed state (`SyncState.restoredUnpublished`), and a
@@ -856,10 +861,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   a new way for sharing to become configured calls it too; it verifies only states whose raw form names an earlier ID
   (Z230). Only the carry, Stop Waiting and `recordRestoredWorkLeft`'s write after a started-over state's save narrow
   the row (Z232). Where no state verifies, the move finds the rows of the IDs the chain row names (this device's row,
-  or the earlier ID's own, Z226), as the hold finds them (one `rowsLeft`, within the same reach, V58; V57 and Z225 were
-  one bug), read through sharing: a move that would read one without sharing configured waits, record kept and nothing
+  or the earlier ID's own, Z226), as the hold finds them (one `rowsLeft`; the move and `recordRestoredWorkLeft` with no
+  bound, recording every row holding the work and leaving the bound to the carry, V63; V57 and Z225 were one bug),
+  read through sharing: a move that would read one without sharing configured waits, record kept and nothing
   published, until `configureSharing` (which makes it, through `startSyncStatesOver` like any move) or the next unlock
   or sync (Z229, `moveAwaitsSharing`); never let it complete without them, and never make an ordinary move wait.
+  While any move is under way nothing but the move saves a vault's state or the chain rows: the sync's download saves
+  none (`download(savingState: false)`), Stop Waiting refuses (`deviceMigrationIncomplete`) and the backfill does
+  nothing (V60: a state started over for the new ID read to the move as one it had begun). A new writer of a vault's
+  state checks `AccountRecord.migration` too.
   Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
   Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
   cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves
