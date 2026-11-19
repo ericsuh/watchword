@@ -1025,13 +1025,18 @@ extension VaultSession {
             if !accounts.isEmpty { relied.insert(value.device) }
             // A stream that will never carry it here: a revoked device's, which is not read again, or one whose first
             // segments were collected before the vault was shared (review finding Z144). Believed of an account that
-            // may write, in a version that otherwise counts, and never waited for.
+            // may write, and for a description one that may also name the vault (§T, V48), in a version that
+            // otherwise counts, and never waited for.
             if !accounts.isEmpty,
                 Self.neverCarriesHere(
                     value.device, accounts: accounts, claimed: revisions[value] ?? .max, of: originKey, in: vault,
                     retired: retired)
             {
-                if Self.allMayWrite(accounts, in: vault.ledger) { continue }
+                if Self.neverCarriedValueCounts(
+                    accounts, isDescription: isDescription, sealedUnder: record.keyID, in: vault.ledger)
+                {
+                    continue
+                }
                 admitted = false
                 continue
             }
@@ -1355,6 +1360,19 @@ extension VaultSession {
     /// Whether every one of `accounts` may write now.
     static func allMayWrite(_ accounts: [UUID], in ledger: MembershipLedger) -> Bool {
         accounts.allSatisfy { ledger.writeStanding(of: $0) == .mayWrite }
+    }
+
+    /// Whether a value of a device whose stream will never carry it here (`neverCarriesHere`) is believed: every one of
+    /// `accounts` may write now, and for a vault's description every one may also have named the vault in a version
+    /// sealed under `keyID` (`descriptionMayBeVouched`), as `judgeAdmits` asks of every other route a description takes
+    /// (§T; review of the first merge, I2; V48). The review found no route by which a description that the other
+    /// routes would refuse reaches this one; asked here too, the rule is one rule wherever a description comes from.
+    static func neverCarriedValueCounts(
+        _ accounts: [UUID], isDescription: Bool, sealedUnder keyID: UUID, in ledger: MembershipLedger
+    ) -> Bool {
+        guard allMayWrite(accounts, in: ledger) else { return false }
+        return !isDescription
+            || accounts.allSatisfy { descriptionMayBeVouched(of: $0, sealedUnder: keyID, in: ledger) }
     }
 
     /// The devices revoked from their own account, in this account's registry or in a member's as `vaultID`'s chain
