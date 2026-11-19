@@ -352,6 +352,12 @@ final class ScreenshotTourTests: XCTestCase {
         app.element(AccessibilityID.Export.count).click()
         Screens.capture(
             "export-report", in: app, showing: "A plaintext export's report, shown before the file is saved")
+        // The backup from a fresh export screen, as `ImportExportTests.testBackUpAndRestore` makes it: on iOS, the
+        // archive row tapped on the form a plaintext export's report had left scrolled to its foot was twice not
+        // chosen (CI run 44453049227), and the passphrase rows exist only once it is.
+        app.closeScreen()
+        app.openScreen(AccessibilityID.Settings.export)
+        XCTAssertTrue(app.element(AccessibilityID.Export.warning).appears(within: 10))
         app.chooseExportKind("archive")
         app.enter(OnboardingAndUnlockTests.password, into: AccessibilityID.Export.password)
         app.enter("garden shed padlock", into: AccessibilityID.Export.passphrase)
