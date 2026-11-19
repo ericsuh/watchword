@@ -44,9 +44,15 @@ extension VaultSession {
             if let stamp = published[row.key], stamp >= RecordStamp(row) { continue }
             if restored[row.key] == nil { restored[row.key] = left(row.key) }
         }
+        // Only deletions the account key signed (review of round 14, M1): one planted in the file (A8) would add an
+        // entry for a row of another device's, and the carry would write that row's work of the earlier ID as this
+        // device's.
         let parked = Self.parkedDeletionDevice(of: previous)
+        let signingKey = try requireKeys().keyset.publicKeyBundle().signingKey
         for (key, deletion) in try await base.pendingDeletions(vaultID: vaultID)
-        where key.kind == .item && (deletion.stamp.device == previous || deletion.stamp.device == parked) {
+        where key.kind == .item && (deletion.stamp.device == previous || deletion.stamp.device == parked)
+            && Self.isSigned(deletion, as: key, in: vaultID, signingKey: signingKey)
+        {
             if restored[key] == nil { restored[key] = left(key) }
         }
         return restored

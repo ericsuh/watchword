@@ -351,10 +351,15 @@ extension VaultSession {
             if !items.isEmpty { return true }
         }
         // This device's own pending deletions here: a version kept after one of them holds its erasure's write
-        // (the trash it records), which goes out with the deletion and is no edit of its own to wait for.
+        // (the trash it records), which goes out with the deletion and is no edit of its own to wait for. Only those
+        // the session signed (`AuthenticatedSyncState`, review of round 14, M1): a row planted in the file (A8) for a
+        // move's copy, stamped by this device far above its edits, would otherwise raise the bound over them, and
+        // the original's deletion would go out while the copy exists here alone. One that cannot be read, or checked
+        // (locked), holds.
         let ownDeletions: [RecordKey: PendingDeletion]
         do {
-            ownDeletions = try await base.pendingDeletions(vaultID: vaultID).filter {
+            guard let syncState else { return true }
+            ownDeletions = try await syncState.pendingDeletions(vaultID: vaultID).filter {
                 $0.value.stamp.device == account.deviceID
             }
         } catch {
