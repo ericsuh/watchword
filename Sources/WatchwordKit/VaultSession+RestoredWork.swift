@@ -1,4 +1,5 @@
 import Foundation
+import WatchwordCrypto
 import WatchwordModel
 import WatchwordStore
 import WatchwordSync
@@ -69,11 +70,13 @@ extension VaultSession {
     /// none of that work, or no longer in the store, or unreadable under the vault's key.
     ///
     /// What counts as published of the earlier ID's work is the most of three (review of round 13, M2): the version
-    /// its own signed state recorded (`left.version`), the highest version of the record that ID's stream carried as
-    /// the stream index shows it (`publishedBound`), and what the item shows a third device saw of it
-    /// (`ItemMerge.reattributed`). A backup older than the earlier ID's last publish, or a state lost with the
-    /// restore, so renames none of what that ID published: renamed, it would have come back beside itself, its
-    /// superseded values as conflicts and an item it deleted as one kept after the deletion.
+    /// its own signed state recorded (`left.version`), the highest version of the record that ID's own stream carried,
+    /// as the stream index and the staged segments of that stream show it (`publishedBound`, `staged`), and what the
+    /// row, whose versions were judged, shows a third device saw of it (`ItemMerge.reattributed`); never what an
+    /// unmerged, unjudged version of a third device claims (review of round 15, Z208). A backup older than the earlier
+    /// ID's last publish, or a state lost with the restore, so renames none of what that ID published: renamed, it
+    /// would have come back beside itself, its superseded values as conflicts and an item it deleted as one kept after
+    /// the deletion.
     ///
     /// Run by `syncAll` for the vaults in `vaults`: those whose log this sync has pulled, after it, so that the stream
     /// index is the transport's and not the backup's; their pass published nothing, so that no merge of the rows
@@ -81,7 +84,7 @@ extension VaultSession {
     /// ahead of any deletion. A step that fails keeps its entry for the next sync; meanwhile the deletion gate holds
     /// every deletion back while a row it names holds that work (`holdsRestoredWork`).
     ///
-    /// `staged` is what the vault's staged segments, downloaded and not merged yet, carry of each record
+    /// `staged` is what the earlier IDs' own staged segments, downloaded and not merged yet, carry of each record
     /// (`stagedBounds`): the carry runs after the download and before the pass that merges it, so that it renames the
     /// backup's version and the pulled versions are merged into the renamed one, as every other device merges them
     /// (review of round 14, L1: renamed after the merge, a field order that had won a tie by the earlier ID's place
@@ -108,17 +111,23 @@ extension VaultSession {
                 continue
             }
             guard var state = loaded, !state.restoredUnpublished.isEmpty else { continue }
-            guard let keys = try? requireKeys(since: epoch),
-                let vaultKey = currentVaultKey(vaultID, keys: keys, account: account),
-                let deletions = try? await base.pendingDeletions(vaultID: vaultID),
-                let signingKey = try? keys.keyset.publicKeyBundle().signingKey
-            else {
+            // The keys of `epoch` and the vault's current key, read again after every suspension and never kept across
+            // one (review of round 15, Z212): `lock()` zeroises them, and reading a zeroised key traps, so a lock that
+            // lands during the carry must find it stopping, not crashing. `nil` once locked.
+            func resident() -> (keys: UnlockedKeys, vaultKey: VaultKey)? {
+                guard let keys = try? requireKeys(since: epoch),
+                    let vaultKey = currentVaultKey(vaultID, keys: keys, account: account)
+                else { return nil }
+                return (keys, vaultKey)
+            }
+            guard resident() != nil, let deletions = try? await base.pendingDeletions(vaultID: vaultID) else {
                 finished = false
                 continue
             }
+            guard let signingKey = try? resident()?.keys.keyset.publicKeyBundle().signingKey else { return false }
             var remaining: [RecordKey: RecordStamp] = [:]
             for (key, recorded) in state.restoredUnpublished {
-                guard (try? requireKeys(since: epoch)) != nil else { return false }
+                guard resident() != nil else { return false }
                 if Self.isDismissed(recorded) {
                     // Kept while the row is still the earlier ID's (`dismissedVersion`).
                     if let row = try? await store.record(key), row.deviceID == recorded.device {
@@ -140,8 +149,9 @@ extension VaultSession {
                     finished = false
                     continue
                 }
+                guard let read = resident() else { return false }
                 var keep = false
-                if let row, row.vaultID == vaultID, let item = try? openItem(row, keys: keys),
+                if let row, row.vaultID == vaultID, let item = try? openItem(row, keys: read.keys),
                     reattributing ? Self.holds(item, row: row, workOf: left) : row.deviceID == left.device
                 {
                     let carried =
@@ -151,7 +161,7 @@ extension VaultSession {
                     do {
                         let revision = try nextRevision(in: vaultID, above: row, account: account)
                         let sealed = try sealItem(
-                            ItemMerge.written(carried, as: revision), vaultKey: vaultKey, account: account)
+                            ItemMerge.written(carried, as: revision), vaultKey: read.vaultKey, account: account)
                         _ = try requireKeys(since: epoch)
                         try await store.commit(
                             StoreChange(upserts: [sealed], expectations: [key: .version(row.version)]))
@@ -160,10 +170,12 @@ extension VaultSession {
                         keep = true
                     }
                 }
+                // After the commit's suspension, the keys again.
+                guard let erasing = resident() else { return false }
                 if reattributing, let deletion = deletions[key], deletion.stamp.version < .max - 1,
                     deletion.stamp.device == own || deletion.stamp.device == parked,
                     Self.isSigned(deletion, as: key, in: vaultID, signingKey: signingKey),
-                    let erased = try? openItem(deletion.record, keys: keys),
+                    let erased = try? openItem(deletion.record, keys: erasing.keys),
                     Self.holds(erased, row: deletion.record, workOf: left)
                 {
                     do {
@@ -172,7 +184,7 @@ extension VaultSession {
                             to: own)
                         let record = try sealItem(
                             ItemMerge.written(rewritten, as: Revision(version: deletion.record.version, device: own)),
-                            vaultKey: vaultKey, account: account)
+                            vaultKey: erasing.vaultKey, account: account)
                         let replacement = PendingDeletion(
                             stamp: RecordStamp(
                                 version: deletion.stamp.version + 1, device: deletion.stamp.device, deleted: true),
@@ -204,14 +216,16 @@ extension VaultSession {
 
     /// What the staged segments of `vaultID`'s log, downloaded and not merged yet, show each earlier ID published of
     /// the records a restore has still to carry there (`SyncState.restoredUnpublished`), per record and earlier ID:
-    /// the highest version of the record that ID's own stream carried, and the most of that ID's work a third device's
-    /// version shows it had seen (`ItemMerge.seenByOthers`; whatever a third device saw, that ID published). What the
-    /// stream index shows once those segments are merged, and what the merged item would show, read before the merge
-    /// (review of round 14, L1). A version that does not open here shows nothing. `nil` where the state or the stage
-    /// cannot be read, or while locked: the carry then waits.
-    func stagedBounds(in vaultID: UUID, engine: SyncEngine, account: AccountRecord, since epoch: UInt64) async
-        -> [RecordKey: [UUID: UInt64]]?
-    {
+    /// the highest version of the record that ID's own stream carried (`SyncEngine.stagedEntries`), which is what the
+    /// stream index shows once those segments are merged, read before the merge (review of round 14, L1). Only that
+    /// ID's own stream (review of round 15, Z208): a third device's version staged here has not been judged, and a
+    /// member who may write (A4) could claim in one to have seen the earlier ID's work far beyond what it published,
+    /// so that the carry found nothing to carry and dropped the entry, while every member's judge then held that
+    /// claim aside. A shared vault keeps its whole log, so whatever an honest third device saw of the earlier ID is in
+    /// that ID's own segments, merged (the index) or staged (here); `ItemMerge.reattributed` still reads what a third
+    /// device saw from the row, whose versions were judged. `nil` where the state or the stage cannot be read, or
+    /// while locked: the carry then waits.
+    func stagedBounds(in vaultID: UUID, engine: SyncEngine, since epoch: UInt64) async -> [RecordKey: [UUID: UInt64]]? {
         guard let syncState else { return [:] }
         let state: SyncState?
         do {
@@ -221,20 +235,14 @@ extension VaultSession {
         }
         let restored = (state?.restoredUnpublished ?? [:]).filter { !Self.isDismissed($0.value) }
         guard !restored.isEmpty else { return [:] }
-        guard let entries = try? await engine.stagedEntries(of: Set(restored.keys)),
-            let keys = try? requireKeys(since: epoch)
+        let earlier = Set(restored.values.map(\.device))
+        guard let entries = try? await engine.stagedEntries(of: Set(restored.keys), authoredBy: earlier),
+            (try? requireKeys(since: epoch)) != nil
         else { return nil }
         var bounds: [RecordKey: [UUID: UInt64]] = [:]
-        for entry in entries {
-            guard let earlier = restored[entry.key]?.device else { continue }
-            var seen = entry.device == earlier ? entry.version : 0
-            if entry.device != earlier, entry.device != account.deviceID, entry.kind == .item,
-                let row = entry.record(in: vaultID), let item = try? openItem(row, keys: keys)
-            {
-                seen = ItemMerge.seenByOthers(
-                    item, origin: Self.origin(row), of: earlier, besides: account.deviceID)
-            }
-            bounds[entry.key, default: [:]][earlier] = max(bounds[entry.key]?[earlier] ?? 0, seen)
+        for entry in entries where restored[entry.key]?.device == entry.device {
+            bounds[entry.key, default: [:]][entry.device] = max(
+                bounds[entry.key]?[entry.device] ?? 0, entry.version)
         }
         return bounds
     }
@@ -277,16 +285,22 @@ extension VaultSession {
     /// own a row of that ID's whose work no segment of its stream carried here.
     ///
     /// From a state that does not verify, only an ID this account's registry lists as one of its own devices, current
-    /// or revoked (review of round 14, L3): an earlier ID of this installation was registered under this account. Any
-    /// other ID planted there, with the stream index's entry for it gone, named another account's device in a shared
-    /// vault, whose rows the take-out then left alone and the carry wrote again as this device's, laundering writes
-    /// every member's judge would hold aside. With the registry unreadable here such an ID still counts for the hold
-    /// (`listedOwnIDs` is `nil`), and `recordRestoredWorkLeft` records nothing until it can be read.
+    /// or revoked (review of round 14, L3), and registered before this one (`earlierRegisteredIDs`, review of round
+    /// 15, Z211): an earlier ID of this installation was registered under this account, and this device's own
+    /// registration was made from the registry the restored store held, which listed it. Any other ID planted there,
+    /// with the stream index's entry for it gone, named another account's device in a shared vault, whose rows the
+    /// take-out then left alone and the carry wrote again as this device's, laundering writes every member's judge
+    /// would hold aside (L3); or a sibling device of this account enrolled since, whose published work the carry
+    /// wrote again as this device's wherever the transport withheld its stream, so that every member held it twice
+    /// (Z211). A sibling registered before this device still reads, and its work is then bounded by what its own
+    /// stream carried (`publishedBound`, `stagedBounds`); only a predecessor link in the registry would tell it apart
+    /// (an owner decision). With the registry unreadable here, or this device not in it yet, such an ID still counts
+    /// for the hold (`earlierRegisteredIDs` is `nil`), and `recordRestoredWorkLeft` records nothing until it can tell.
     func restoredChain(account: AccountRecord) async -> Set<UUID> {
         var chain: Set<UUID> = []
         if let previous = account.migration?.previousDeviceID { chain.insert(previous) }
         guard let base = syncSettings?.state, let vaults = try? await vaultDirectory(account).keys else { return chain }
-        let listed = await listedOwnIDs(account)
+        let listed = await earlierRegisteredIDs(account)
         for vaultID in vaults {
             guard let raw = try? await base.loadState(vaultID: vaultID) else { continue }
             let verified = await verifiedSyncState(raw, vaultID: vaultID) != nil
@@ -299,10 +313,21 @@ extension VaultSession {
         return chain
     }
 
-    /// Every device ID this account's registry lists, current or revoked; `nil` where the registry cannot be read.
-    func listedOwnIDs(_ account: AccountRecord) async -> Set<UUID>? {
-        guard let view = try? await registry(account) else { return nil }
-        return Set(view.state.devices.keys).union(view.state.revoked.keys)
+    /// Every device ID this account's registry lists, current or revoked, whose registration entry this device's own
+    /// registration entry descends from (its `parents`, link by link): the only IDs that can be earlier IDs of this
+    /// installation (review of round 15, Z211). `nil` where the registry cannot be read or does not list this device.
+    func earlierRegisteredIDs(_ account: AccountRecord) async -> Set<UUID>? {
+        guard let view = try? await registry(account),
+            let own = (view.state.devices[account.deviceID] ?? view.state.revoked[account.deviceID])?.entry
+        else { return nil }
+        var ancestors: Set<ObjectDigest> = []
+        var queue = view.entries[own]?.parents ?? []
+        while let next = queue.popLast() {
+            guard ancestors.insert(next).inserted, let entry = view.entries[next] else { continue }
+            queue += entry.parents
+        }
+        let listed = Array(view.state.devices.values) + Array(view.state.revoked.values)
+        return Set(listed.filter { $0.id != account.deviceID && ancestors.contains($0.entry) }.map(\.id))
     }
 
     /// The rows of `vaultID`, if it may be shared, that an earlier ID of `chain` left and that `recorded` (the vault's
@@ -364,8 +389,8 @@ extension VaultSession {
     /// over while the chain names an earlier ID, as the engine would start it over, with those entries in it.
     func recordRestoredWorkLeft(account: AccountRecord, since epoch: UInt64) async {
         guard let syncState, let base = syncSettings?.state else { return }
-        // Only with the registry read, so that the chain holds no ID planted in a state that does not verify (L3).
-        guard await listedOwnIDs(account) != nil else { return }
+        // Only with the registry read, so that the chain holds no ID planted in a state that does not verify (L3, Z211).
+        guard await earlierRegisteredIDs(account) != nil else { return }
         let chain = await restoredChain(account: account)
         guard !chain.isEmpty, let vaults = try? await vaultDirectory(account).keys else { return }
         for vaultID in vaults where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {

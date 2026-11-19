@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WatchwordEnvelope
 import WatchwordKit
 import WatchwordModel
 import WatchwordPresentation
@@ -499,5 +500,423 @@ extension AdversarialSharedVaultTests {
         _ = try await restored.session.syncAll()
         try await Self.syncAll([owner])
         #expect(try await owner.session.item(id: saved.id).title == "Bank, first", "the carried edit never went out")
+    }
+}
+
+// The review of round 15 (docs/06-adversarial-review.md Z208 to Z212): what a restore's carry counts as published
+// before the pulled versions are merged, and when it may merge. In the suite "shared vaults through the session".
+extension AdversarialSharedVaultTests {
+    /// The member's store restored onto other hardware before its last edit went out: the device key lost, the store
+    /// and sync state kept, over `transport`.
+    static func restoredOntoOtherHardware(
+        _ member: SharingAccount, household: SharedVaultHousehold, transport: (any SyncTransport)? = nil,
+        seed: UInt64
+    ) async throws -> TestVault {
+        await member.session.lock()
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let state = try #require(member.vault.sync?.state)
+        let restored = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: SyncSettings(state: state, transport: transport ?? household.transport),
+            seed: seed, deviceKeys: member.vault.deviceKeys)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+        return restored
+    }
+
+    /// Threat: A4, a current member who may write the shared vault, with a modified client. A member's device edits an
+    /// item and is restored from a backup before the edit goes out. Before that device's first sync, A4 edits another
+    /// field of the item and claims, in the value's `seen` vector and the item's clock, to have seen the earlier device
+    /// ID's work far beyond what its stream published. The carry read what the downloaded segments showed a third
+    /// device had seen of the earlier ID as published, though no judge had looked at them: it then found nothing of
+    /// the earlier ID's to carry, dropped the signed entry, and left the row the earlier ID's. The edit never reached
+    /// the members (every member's judge holds it aside, Z191), every later edit of the item on the device was held
+    /// aside with it, and nothing held deletions back for it. Only the earlier ID's own stream bounds the carry now:
+    /// the claim is held aside by the judge when merged, and the edit, and the one after it, reach the vault's owner.
+    /// The control (no claim) is the same scenario.
+    @Test(
+        "a member's claim to have seen a restore's earlier ID's work does not stop the carry",
+        arguments: [false, true])
+    func inflatedClaimInAStagedSegment(inflated: Bool) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 30_200)
+        let member = members[0]
+        let saved = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+        var first = try await member.session.item(id: saved.id)
+        first.title = "Bank, first"
+        let unpublished = try await member.session.save(first).version
+        let oldID = try #require(await member.session.deviceIDForTest())
+        let restored = try await Self.restoredOntoOtherHardware(member, household: household, seed: 30_201)
+
+        // The owner's modified client edits another field, claiming to have seen the old ID far ahead.
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        let ownerDevice = try #require(await owner.session.deviceIDForTest())
+        var previous = try await owner.session.item(id: saved.id)
+        let stored = try #require(await owner.session.storedRowForTest(key))
+        let revision = Revision(version: stored.version + 1, device: ownerDevice)
+        if inflated { previous.clock.record(Revision(version: 1 << 30, device: oldID)) }
+        var edited = previous
+        edited.fields[0].value = "owner-user"
+        var crafted = ItemMerge.stamped(edited, previous: previous, revision: revision)
+        if inflated {
+            crafted.revisions[.field(edited.fields[0].id)]?.seen.record(Revision(version: 1 << 30, device: oldID))
+        }
+        crafted.version = stored.version + 1
+        if inflated {
+            // Read as every merge reads it, capped at the version's own number: still all of the old ID's work.
+            #expect(
+                ItemMerge.seenByOthers(crafted, origin: revision, of: oldID, besides: UUID()) >= unpublished,
+                "the claim covers none of the old ID's unpublished work: nothing is tested")
+        }
+        try await owner.session.overwriteAsAModifiedClient(crafted)
+        try await owner.session.sync()
+
+        _ = try await restored.session.syncAll()
+        let row = try #require(try await member.vault.store.record(key))
+        #expect(row.deviceID != oldID, "the carry left the row the earlier ID's")
+        for _ in 0..<3 {
+            _ = try await restored.session.syncAll()
+            try await owner.session.sync()
+        }
+        #expect(
+            Self.titles(try await owner.session.item(id: saved.id)).contains("Bank, first"),
+            "the restored edit never reached the owner")
+
+        var later = try await restored.session.item(id: saved.id)
+        later.title = "Bank, second"
+        _ = try await restored.session.save(later)
+        for _ in 0..<3 {
+            _ = try await restored.session.syncAll()
+            try await owner.session.sync()
+        }
+        #expect(
+            Self.titles(try await owner.session.item(id: saved.id)).contains("Bank, second"),
+            "a later edit never reached the owner")
+    }
+}
+
+extension AdversarialSharedVaultTests {
+    /// Threat: A8, who can edit this device's sync state and sharing state files but not reach the Keychain (review of
+    /// round 15, Z211, a variant of Z206), and in the second case also the sync store (A1), which withholds the
+    /// sibling's stream from this device. In a shared vault's state, which then no longer verifies, A8 names a sibling
+    /// device of the same account, current and still writing, as an earlier ID of this installation, and deletes the
+    /// stream index. The chain was read from that state for any current or revoked device of the account: every row
+    /// holding the sibling's published work was recorded as left by an earlier ID with nothing published, and the
+    /// carry wrote what no listed segment of the sibling's stream showed again as this device's. With the stream
+    /// withheld, that was all of it: every member then held the sibling's values twice, under two stamps, as conflicts
+    /// in every group it wrote. An earlier ID of this installation registered before this device did, and this
+    /// device's registration entry descends from its own: from a state that does not verify, only such an ID is read.
+    /// The sibling, enrolled after this device, is not; and its published work is never renamed.
+    @Test(
+        "a sibling device named in an edited state as a restore's earlier ID keeps its published work",
+        arguments: [false, true])
+    func plantedChainIDOfASiblingDevice(withheld: Bool) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 30_300)
+        let member = members[0]
+        let sibling = try await household.secondDevice(of: member)
+        try await sibling.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        try await Self.syncAll([owner, member, sibling])
+        let saved = try await sibling.session.save(Self.bank(in: vaultID))
+        var edited = try await sibling.session.item(id: saved.id)
+        edited.title = "Bank, by the sibling"
+        _ = try await sibling.session.save(edited)
+        try await Self.syncAll([sibling, owner, member])
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        let siblingDevice = try #require(await sibling.session.deviceIDForTest())
+        let before = try #require(try await member.vault.store.record(key))
+        #expect(before.deviceID == siblingDevice, "the sibling's row is not the sibling's: nothing is tested")
+
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await raw.loadState(vaultID: vaultID))
+        state.restoredUnpublished[key] = RecordStamp(version: 0, device: siblingDevice)
+        state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+        await raw.tamper(state)
+        await member.state.tamper(.streamIndex, vaultID: vaultID, value: nil)
+        await member.session.lock()
+        let view = WithholdingTransport(base: household.transport)
+        if withheld {
+            let stream = SyncObjectLocation.vaultPrefix(vaultID) + "log/\(siblingDevice.uuidString)/"
+            await view.withhold(Set(await household.transport.list(prefix: stream)))
+        }
+        let relaunched = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: SyncSettings(state: raw, transport: view), seed: 30_301,
+            deviceKeys: member.vault.deviceKeys)
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+
+        _ = try await relaunched.session.syncAll()
+        _ = try await relaunched.session.syncAll()
+        // With the stream withheld, the judge finds no segment that carried the sibling's work and holds the row
+        // aside until it does (S36): absent, or the sibling's, but never this device's.
+        let memberDevice = try #require(await relaunched.session.deviceIDForTest())
+        let after = try await member.vault.store.record(key)
+        #expect(after?.deviceID != memberDevice, "the sibling's published row was written again as this device's")
+        if !withheld { #expect(after?.deviceID == siblingDevice) }
+        try await Self.syncAll([owner, sibling])
+        let atOwner = try await owner.session.item(id: saved.id)
+        #expect(atOwner.title == "Bank, by the sibling")
+        #expect(!atOwner.hasConflicts, "the sibling's values came back beside themselves")
+        #expect(!(try await sibling.session.item(id: saved.id)).hasConflicts)
+    }
+}
+
+/// A record store that locks a session from inside the `n`-th read, from now on, of one of `keys` while that session
+/// is unlocked: a lock (the person, or auto-lock) landing at each suspension of a restore's carry in turn. With no
+/// session armed it only counts those reads.
+actor CarryLockingStore: RecordStore {
+    let base: any RecordStore
+    private var target: (session: VaultSession, keys: Set<RecordKey>, skipping: Int)?
+    private(set) var reads = 0
+    private(set) var locks = 0
+    private var counting: Set<RecordKey> = []
+    private var failing: Set<RecordKey> = []
+    private(set) var failed = 0
+
+    init(base: any RecordStore) {
+        self.base = base
+    }
+
+    func count(_ keys: Set<RecordKey>) {
+        counting = keys
+        reads = 0
+    }
+
+    func lock(_ session: VaultSession, onRead keys: Set<RecordKey>, skipping: Int) {
+        target = (session, keys, skipping)
+    }
+
+    func loadAccount() async throws -> AccountRecord? { try await base.loadAccount() }
+
+    func record(_ key: RecordKey) async throws -> StoredRecord? {
+        if counting.contains(key) { reads += 1 }
+        if let target, target.keys.contains(key), (try? await target.session.state()) == .unlocked {
+            if target.skipping == 0 {
+                self.target = nil
+                locks += 1
+                await target.session.lock()
+            } else {
+                self.target = (target.session, target.keys, target.skipping - 1)
+            }
+        }
+        return try await base.record(key)
+    }
+
+    func records(in vaultID: UUID, kind: EnvelopeKind) async throws -> [StoredRecord] {
+        try await base.records(in: vaultID, kind: kind)
+    }
+
+    /// The next commit that writes one of `keys` fails, as a database that cannot be written would; the one after
+    /// succeeds.
+    func failNextCommit(upserting keys: Set<RecordKey>) {
+        failing = keys
+    }
+
+    func commit(_ change: StoreChange) async throws {
+        if change.upserts.contains(where: { failing.contains($0.key) }) {
+            failing = []
+            failed += 1
+            throw RecordStoreError.checkpointIncomplete
+        }
+        try await base.commit(change)
+    }
+    func eraseAll() async throws { try await base.eraseAll() }
+}
+
+extension AdversarialSharedVaultTests {
+    /// The restore of `restoredEditAndDeletionReachMembers` over `CarryLockingStore`: an item renamed, another trashed
+    /// and deleted, neither published, then the store restored onto other hardware.
+    static func restoredEditAndDeletion(seed: UInt64) async throws -> (
+        household: SharedVaultHousehold, owner: SharingAccount, restored: TestVault, store: CarryLockingStore,
+        edited: UUID, deleted: UUID
+    ) {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: seed)
+        let member = members[0]
+        let edited = try await member.session.save(Self.bank(in: vaultID))
+        let deleted = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+        var renamed = try await member.session.item(id: edited.id)
+        renamed.title = "Bank, renamed"
+        _ = try await member.session.save(renamed)
+        try await member.session.trash(id: deleted.id)
+        try await member.session.deletePermanently(id: deleted.id)
+        await member.session.lock()
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let store = CarryLockingStore(base: member.vault.store)
+        let restored = TestVault(
+            store: store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: member.vault.sync, seed: seed + 1, deviceKeys: member.vault.deviceKeys)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+        return (household, owner, restored, store, edited.id, deleted.id)
+    }
+
+    /// Threat: none needed but a lock (the person, or auto-lock) during a sync that carries a restore's work (review of
+    /// round 15, Z212). The carry took the keys and the vault's key once per vault and used them after its reads and
+    /// commits had suspended it: `lock()` zeroises both, and reading a zeroised key traps, so a lock landing there
+    /// crashed the app. The lock lands at each read of the carried records in turn: each sync stops, and once unlocked
+    /// again the carry finishes and the members get the edit and the deletion.
+    @Test("a lock at any read of a restore's carry stops the sync and loses nothing")
+    func lockDuringTheCarry() async throws {
+        func carried(_ run: (edited: UUID, deleted: UUID)) -> Set<RecordKey> {
+            [RecordKey(recordID: run.edited, kind: .item), RecordKey(recordID: run.deleted, kind: .item)]
+        }
+        let dry = try await Self.restoredEditAndDeletion(seed: 30_400)
+        await dry.store.count(carried((dry.edited, dry.deleted)))
+        _ = try await dry.restored.session.syncAll()
+        let reads = await dry.store.reads
+        #expect(reads >= 2, "the carry read neither record: nothing is tested")
+
+        for skipping in 0..<reads {
+            let run = try await Self.restoredEditAndDeletion(seed: 30_400)
+            await run.store.lock(run.restored.session, onRead: carried((run.edited, run.deleted)), skipping: skipping)
+            _ = try? await run.restored.session.syncAll()
+            #expect(await run.store.locks == 1, "no lock landed at read \(skipping)")
+            try await run.restored.session.unlock(password: TestVault.password)
+            _ = try await run.restored.session.syncAll()
+            _ = try await run.restored.session.syncAll()
+            try await Self.syncAll([run.owner])
+            #expect(
+                try await run.owner.session.item(id: run.edited).title == "Bank, renamed",
+                "the edit never arrived after a lock at read \(skipping)")
+            #expect(
+                (try? await run.owner.session.item(id: run.deleted)) == nil,
+                "the deletion never arrived after a lock at read \(skipping)")
+        }
+    }
+}
+
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed but a carry step that fails while the transport works (a commit the database refuses, a
+    /// store read that fails), in a shared vault whose log a replay is asked for (review of round 15, Z209; here the
+    /// stream index was lost with the restore, so it is rebuilt by one). The first pass of the sync merged nothing
+    /// into the vault, but the replay pass merged what it had pulled into the rows still holding the earlier ID's
+    /// work, and the next carry renamed them after that merge: L1's field order tie again. Nothing is merged into a
+    /// vault whose carry has not finished, in any pass; the next sync carries, then merges, and the person's edit and
+    /// the owner's both end up everywhere.
+    @Test("a carry that does not finish keeps the replay pass from merging into its vault")
+    func replayWaitsForTheCarry() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 30_500)
+        let member = members[0]
+        let saved = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+        var first = try await member.session.item(id: saved.id)
+        first.title = "Bank, first"
+        _ = try await member.session.save(first)
+        let atOwner = try await owner.session.item(id: saved.id)
+        _ = try await owner.session.save(Self.setting(.username, to: "owner-user", in: atOwner))
+        try await owner.session.sync()
+
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        let before = try #require(try await member.vault.store.record(key))
+        await member.session.lock()
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        await member.state.tamper(.streamIndex, vaultID: vaultID, value: nil)
+        let store = CarryLockingStore(base: member.vault.store)
+        let restored = TestVault(
+            store: store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: member.vault.sync, seed: 30_501, deviceKeys: member.vault.deviceKeys)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+
+        await store.failNextCommit(upserting: [key])
+        let report = try await restored.session.syncAll()
+        #expect(await store.failed == 1, "the carry's commit did not fail: nothing is tested")
+        let held = try #require(try await member.vault.store.record(key))
+        #expect(
+            held.version == before.version && held.deviceID == before.deviceID,
+            "something was merged into the row before its carry")
+        #expect(report.publishingHeldForCarry == [vaultID])
+
+        _ = try await restored.session.syncAll()
+        _ = try await restored.session.syncAll()
+        try await Self.syncAll([owner])
+        let ownerCopy = try await owner.session.item(id: saved.id)
+        #expect(ownerCopy.title == "Bank, first", "the carried edit never reached the owner")
+        #expect(ownerCopy.fields.contains { $0.kind == .username && $0.value == "owner-user" })
+        let here = try await restored.session.item(id: saved.id)
+        #expect(here.fields.contains { $0.kind == .username && $0.value == "owner-user" })
+        #expect(ItemMerge.sameState(here, ownerCopy), "the restored device and the owner hold different items")
+    }
+}
+
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed but a restore (review of round 15, Z210, the order of review of round 14's L1). The member's
+    /// device reorders an item's fields and is restored from a backup before that goes out; the owner reorders the same
+    /// item concurrently, at the same version. The field order is a register whose later write wins, and two writes at
+    /// one version are ordered by their writers' IDs: renamed after the merge, the person's order met the owner's under
+    /// the earlier ID and then went out under the new one, so where the owner's ID falls between the two the person's
+    /// reorder (which ranks above the owner's under the new ID and below it under the earlier one) was lost on every
+    /// device, though every device holding the owner's version and the carry would have kept it. Carried before the
+    /// merge, the restored device holds `R(a) ⊔ b`, what every device holds: the test computes that reference with
+    /// `ItemMerge` for IDs that order this way, and every device must end with it. A session that merges first fails
+    /// here (checked by reverting the order).
+    @Test("a restore's carry before the merge leaves every device the field order the merge of the carry gives")
+    func carryBeforeTheMergeKeepsTheFieldOrder() async throws {
+        var tried = 0
+        // The first seed is one whose IDs order this way (found by the loop); the loop covers a change of derivation.
+        for seed in stride(from: UInt64(30_700), to: 30_700 + 40 * 10, by: 10) {
+            let household = SharedVaultHousehold()
+            let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: seed)
+            let member = members[0]
+            let saved = try await member.session.save(Self.bank(in: vaultID))
+            try await Self.syncAll([member, owner])
+            let key = RecordKey(recordID: saved.id, kind: .item)
+            let published = try #require(try await member.vault.store.record(key)).version
+
+            var mine = try await member.session.item(id: saved.id)
+            mine.fields.reverse()
+            _ = try await member.session.save(mine)
+            let a = try await member.session.item(id: saved.id)
+            let aRow = try #require(try await member.vault.store.record(key))
+            var theirs = try await owner.session.item(id: saved.id)
+            theirs.fields.append(theirs.fields.removeFirst())
+            _ = try await owner.session.save(theirs)
+            try await owner.session.sync()
+            let b = try await owner.session.item(id: saved.id)
+            let bRow = try #require(await owner.session.storedRowForTest(key))
+            #expect(aRow.version == bRow.version, "the two reorders are not at one version: nothing is tested")
+
+            let oldID = aRow.deviceID
+            let restored = try await Self.restoredOntoOtherHardware(member, household: household, seed: seed + 1)
+            let newID = try #require(await restored.session.deviceIDForTest())
+            let aOrigin = Revision(version: aRow.version, device: oldID)
+            let bOrigin = Revision(version: bRow.version, device: bRow.deviceID)
+            let carriedFirst = ItemMerge.reattributed(a, origin: aOrigin, from: oldID, above: published, to: newID)
+            let reference = ItemMerge.merge(
+                carriedFirst, origin: Revision(version: aRow.version, device: newID), b, origin: bOrigin)
+            let mergedFirst = ItemMerge.reattributed(
+                ItemMerge.merge(a, origin: aOrigin, b, origin: bOrigin), origin: bOrigin, from: oldID,
+                above: published, to: newID)
+            tried += 1
+            // Only IDs that order so that the person's reorder wins under the new ID and lost under the earlier one:
+            // renamed after the merge, it was gone before the rename (the other way round, the owner's order wins
+            // either way once the carry is merged, and nothing tells the two orders apart).
+            guard reference.fields.map(\.id) == a.fields.map(\.id), mergedFirst.fields.map(\.id) == b.fields.map(\.id)
+            else { continue }
+
+            for _ in 0..<3 {
+                _ = try await restored.session.syncAll()
+                try await owner.session.sync()
+            }
+            let expected = reference.fields.map(\.id)
+            let ownerCopy = try await owner.session.item(id: saved.id)
+            let here = try await restored.session.item(id: saved.id)
+            #expect(ownerCopy.fields.map(\.id) == expected, "the owner does not hold the merge of the carry")
+            #expect(here.fields.map(\.id) == expected, "the restored device does not hold the merge of the carry")
+            #expect(ItemMerge.sameState(here, ownerCopy), "the restored device and the owner hold different items")
+            return
+        }
+        Issue.record("no seed of \(tried) gave IDs whose order the carry's place decides")
     }
 }

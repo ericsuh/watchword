@@ -78,8 +78,9 @@ extension ItemMerge {
         return state.item
     }
 
-    /// `seenByOthers` of `item`, read from a record written as `origin`: for a restore's carry that bounds what
-    /// `device` published by versions it has pulled and not merged yet (review of round 14, L1).
+    /// `seenByOthers` of `item`, read from a record written as `origin`. Only of a version a judge has admitted: a
+    /// downloaded version nobody has judged may claim anything (review of round 15, Z208), so a restore's carry no
+    /// longer reads one this way; what a third device saw comes from the row (`reattributed`).
     public static func seenByOthers(_ item: Item, origin: Revision, of device: UUID, besides writer: UUID) -> UInt64 {
         seenByOthers(ItemState(item, origin: origin), of: device, besides: writer)
     }

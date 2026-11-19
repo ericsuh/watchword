@@ -142,6 +142,9 @@ extension VaultSession {
         // The vaults holding what a restore has still to carry over: they publish nothing in this sync, and carry it
         // after their log (review of round 13, M2).
         var carrying: Set<UUID> = []
+        // Of those, the vaults whose carry did not run or finish in this sync: nothing is merged into them, the
+        // replay pass included, until it has (review of round 15, Z209).
+        var uncarried: Set<UUID> = []
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
             let shared = sharedEngineOptions(
@@ -155,16 +158,16 @@ extension VaultSession {
                     // earlier device ID published is known (review of round 13, M2), and before anything pulled is
                     // merged into it, so that the pulled versions are merged into the renamed version as every other
                     // device merges them (review of round 14, L1); and before a replay (whose take-out leaves these
-                    // rows alone, `takeOutWhatNoLongerCounts`). The bound is the stream index and what the downloaded
-                    // segments carry (`stagedBounds`). Published at the next sync; meanwhile the hold below keeps
-                    // every deletion back. A carry that cannot run, or does not finish, merges nothing into the vault
-                    // in this sync: what was downloaded stays staged for the next.
+                    // rows alone, `takeOutWhatNoLongerCounts`). The bound is the earlier ID's own stream, as the stream
+                    // index and its downloaded segments show it (`stagedBounds`, Z208). Published at the next sync;
+                    // meanwhile the hold below keeps every deletion back. A carry that cannot run, or does not finish,
+                    // merges nothing into the vault in this sync, in any pass (Z209): what was downloaded stays staged
+                    // for the next.
                     carrying.insert(vaultID)
                     let pulled = try await engine(vaultID).download(transportStopped: stopped)
                     var carried = false
                     if stopped == nil, !pulled.transportUnavailable, pulled.transportFailure == nil,
-                        let staged = await stagedBounds(
-                            in: vaultID, engine: engine(vaultID), account: record, since: epoch)
+                        let staged = await stagedBounds(in: vaultID, engine: engine(vaultID), since: epoch)
                     {
                         carried = await carryRestoredWork(
                             account: record, view: view, since: epoch, in: [vaultID], staged: [vaultID: staged])
@@ -177,6 +180,7 @@ extension VaultSession {
                     } else {
                         vaultReport = pulled
                         reconciled = false
+                        uncarried.insert(vaultID)
                     }
                 } else {
                     vaultReport = try await engine(vaultID).sync(
@@ -221,6 +225,11 @@ extension VaultSession {
         if mayWrite, stopped == nil {
             for vaultID in sharedVaultsNeedingReplay() {
                 guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
+                // A vault whose carry did not finish merges nothing in this sync, a replay no more than the first pass
+                // (Z209): the pulled versions would be merged into rows still holding the earlier ID's work, and the
+                // carry would rename after the merge (L1). Its replay stays asked for (`needsReconcile`), for the sync
+                // whose carry finishes.
+                guard !uncarried.contains(vaultID) else { continue }
                 await prepareSharedReplay(vaultID)
                 let shared = sharedEngineOptions(
                     vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,

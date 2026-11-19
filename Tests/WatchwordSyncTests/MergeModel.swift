@@ -610,9 +610,11 @@ extension MergeModel {
     /// earlier ID's writes any other copy has seen and `given` a bound at or below it (a state that says too little was
     /// published: lost, rolled back, saved before a later publish), against `others`, versions other devices stored:
     ///
-    /// 1. renamed before the merge, as the session carries it, `R(a) ⊔ b` is what every device holding `b` holds once
-    ///    it merges the carry, for every `b` that holds nothing of the earlier ID above `published`; renamed after it,
-    ///    `R(a ⊔ b)` differs only in a field order's tie (`checkCarryOrder`, review of round 14, L1);
+    /// 1. the carry commutes with merges outside the field order: for every `b` that holds nothing of the earlier ID
+    ///    above `published`, `R(a ⊔ b)` equals `R(a) ⊔ b`, and in the field order too unless `a`'s renamed order and
+    ///    `b`'s tie at one version; where they tie, only `R(a) ⊔ b` is what every device holding `b` holds once it
+    ///    merges the carry, so the carry is made before the merge (`checkCarryOrder`, review of round 14, L1, and of
+    ///    round 15, Z210);
     /// 2. it is idempotent: `R(R(a)) == R(a)`, for `given` too;
     /// 3. it keeps supersession and coverage: for every pair of stamped parts of `a` and `b`, one contains the other's
     ///    revision exactly when their images do;
@@ -718,14 +720,18 @@ extension MergeModel {
         return (carried.item != a.item, tie)
     }
 
-    /// Law 1 of `checkReattribution`, for one `b`: the carry renames the backup `a` before anything pulled is merged
-    /// into it (`VaultSession.carryRestoredWork`, review of round 14, L1), so the restored device holds `R(a) ⊔ b`,
-    /// which is what every other device holding `b` holds once it merges the published carry: merging `b` again, or
-    /// in the other order, changes nothing. Renaming after the merge, `R(a ⊔ b)`, gives the same item but for one
-    /// part: the field order, a register whose later write wins, where two concurrent orders at one version are
-    /// ordered by device ID, and the new ID can rank otherwise against a third device than the earlier ID did. Then
-    /// the two differ in the order alone, and only where `a`'s renamed order and `b`'s tie at one version. Returns
-    /// whether they did.
+    /// Law 1 of `checkReattribution`, for one `b` (review of round 14, L1; review of round 15, Z210). The reference is
+    /// what every device holding `b` holds once it merges the published carry, `b ⊔ R(a)`; the restored device that
+    /// carries before it merges (`VaultSession.syncAll`) holds `R(a) ⊔ b`. That the two agree, and that merging `b`
+    /// again changes nothing, is the join's commutativity and idempotence: checked, but true of any renaming. The law
+    /// proper is about the other order: renamed after the merge, `R(a ⊔ b)` must equal the reference in every part but
+    /// the field order, and in the order too unless `a`'s renamed order and `b`'s tie at one version (the order is a
+    /// register whose later write wins, two concurrent orders at one version are ordered by device ID, and the new ID
+    /// can rank otherwise against a third device than the earlier ID did). Where they tie it differs, which is why the
+    /// session carries first; the exhaustive exploration asserts that such cases occur (`tiedCarries`), so that the
+    /// model goes on showing that order to be wrong. No model law sees the session's own order:
+    /// `carryBeforeTheMergeKeepsTheFieldOrder` (the shared-vault adversarial suite) fails if the session merges first.
+    /// Returns whether they tied.
     mutating func checkCarryOrder(
         _ a: Version, _ b: Version, carried: Version, of device: UUID, above bound: UInt64, restored: UUID
     ) -> Bool {
