@@ -613,8 +613,16 @@ store contract; `passwordChangeKeepsACompletedMove`, Z186); a version 1 database
 (`upgradeFromVersion1`, "SQLite record store", Mac only, Z187); a summary made across a lock nobody has announced yet
 is dropped (`unheardLockLeavesNoSummary`, `lockSignalMark`, Z188); a registration that fails before its commit leaves
 no device key (`failedRegistrationLeavesNoKey`, Z189); the unlock's retry of the move carries a private vault's
-deletion (`unlockRetryReadsMarkersFirst`, Z190). Z191 (a restore's unpublished work in a shared vault) has no test:
-it is open.
+deletion (`unlockRetryReadsMarkersFirst`, Z190). The review of the twelfth round (Z191 to Z196): a restore's
+unpublished edit and deletion in a shared vault reach the vault's members, and stay on the restored device through a
+replay (`restoredEditAndDeletionReachMembers`, "shared vaults through the session", Z191; `ItemReattributionTests`,
+"Item reattribution"); a restore's unpublished move into a shared vault held closed keeps the original until the
+copy is carried and published, naming it meanwhile, and the person can stop waiting for a vault that will not open
+(`restoredMoveIntoAClosedVault`, `stopWaitingForRestoredWork`, Z192; `restoredWorkWaiting`, wording;
+`everyFieldIsCovered`, `laterFieldsOnlyWhenSet`, "Sync state authentication"); a registration interrupted by an unlock
+leaves no registered device without its key (`registrationDuringRegistration`, "account enrolment and device
+registry", Z193); a deletion parked for want of a key is reported held back (`restoreWithASharedVaultHeldClosed`,
+Z194).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

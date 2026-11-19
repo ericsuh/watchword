@@ -524,6 +524,40 @@ Empty lists are not encoded, so lines that are shown and entries from old record
 index of an earlier format filed none of these values, so it is refused on load and rebuilt by a replay
 (`SharedStreamIndex` format 3).
 
+**A restore's carried work (review of round 12, Z191, Z192).** A store restored onto other hardware writes under a new
+device ID `n`, and what its old ID `o` wrote and never published must be published by `n` (the engine publishes only
+its own device's rows). Carried with `o`'s stamps, those values were carried by no segment of `o`'s stream, so (2)
+failed for them, and `o`'s clock count above what it published failed (3): every judge held the carried version
+aside, and with it, through the gate, the source half of a move. So the carry writes the item again under
+`ItemMerge.reattributed(o, above: p, to: n)`, where `p` is the last version of the record `o` published (from `o`'s own
+signed sync state, read before the move replaces it): every revision `(k, o)` with `k > p`, wherever the item names
+one (group values, conflicts and retained values, the field order, note line IDs, anchors and removals, discards,
+history writers), becomes `(k, n)`, and every version vector keeps `o`'s count up to `p` and gives the rest to `n`.
+
+- *It is a renaming, so the merge is unchanged.* `n` never wrote the record before, so the renamed revisions are new;
+  they are distinct from each other because their versions are; and `contains` is preserved, since a vector that held
+  `o: c > p` now holds `n: c`, which contains exactly the renamed `(k, n)` with `k ≤ c`. Supersession, coverage by a
+  discard and by an erasure, and line order among the renamed lines are as before. No other device holds anything of
+  `o` above `p` (that is what unpublished means), so a join with any version another device holds is the join it
+  was, renamed; nothing is dropped and nothing is invented.
+- *`J` holds for it.* Every value still attributed to `o` has a revision at or below `p`, and its bytes are unchanged
+  (its stamp's `seen` held no count of `o` above its own revision, which is at most `p`), so it is in version `p`, which
+  `o`'s stream carried; every other device's value is unchanged too (it was written having seen at most what `o`
+  published), and was carried by its own writer's stream as before; every renamed value is `n`'s and is carried by the
+  segment that carries the carried version (2); and the clock names `o` at most at `p`, which `o`'s stream carried, and
+  `n`, the version's own author (3). A carried deletion's erased row is renamed the same way, so its summary claims
+  of `o` only what `o` published, and settling it on a member erases that member's copy where it is covered, as the
+  deletion did here.
+- *Where it can be wrong.* `p` comes from a signed state; with none (lost with the restore, or edited, A8) it is 0, and
+  `o`'s published values are written again as `n`'s: members then hold both, as concurrent values the person
+  resolves, never fewer. If the old hardware is still running under `o` and publishes the same work later, it arrives
+  beside `n`'s copy the same way. It is done only where `o` commits: a non-committing ID's published work counts
+  nowhere anyway, and Z167's parking and hold stay in charge of it.
+
+A row that cannot be sealed again at registration, for want of the vault's key here, keeps `o`'s stamps until a sync
+carries it (`SyncState.restoredUnpublished` records it, with `p`); until then it holds every deletion back
+(`holdsRestoredWork`), so a source half never goes out ahead of a copy that is still only `o`'s.
+
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,
 `lateClaimOfFutureEdits`). Clause (3) can only wait for a claim about a current member, never refute it, because no

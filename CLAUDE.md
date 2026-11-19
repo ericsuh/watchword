@@ -739,8 +739,16 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   session did not sign. Nothing may make the move fail for good: a deletion it cannot sign as the new ID's (no current
   key for its vault) is parked, never thrown (Z185). The migration changes only through `StoreChange.migration`
   (`.set` at registration, `.clear` by the move); every other account write keeps the stored value, and the session
-  caches it with `keepingCachedMigration` (Z186). A registration that fails before its commit deletes the key it made
-  (Z189).
+  reads it back with `keepingStoredMigration` (Z186, Z196). A registration that fails before its commit deletes the key
+  it made, and only that key (`delete(accountID:deviceID:)`), and registrations never overlap
+  (`registrationInFlight`, Z189, Z193). What a restore carries into a vault that may be shared has the old ID's work
+  above the version it published written again as the new ID's (`ItemMerge.reattributed`; the erased row of a carried
+  deletion too), or every member's judge holds it aside (Z191): never carry such work unchanged where the old ID
+  commits. A row registration cannot carry for want of a vault key is recorded by the move in the vault's signed state
+  (`SyncState.restoredUnpublished`, with the old ID's last published version), carried by `carryRestoredWork` before
+  any log once the vault has a key, and until then holds every vault's deletions (`holdsRestoredWork`) and is named in
+  `restoredWorkWaiting`; only carrying it, a version that holds none of that work, or the person
+  (`stopWaitingForRestoredWork`) ends the hold (Z192).
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
   whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's
   deletions go out, the new ID's own included (Z170); `copiesNobodyReceived` names those items for the summary (Z171). Every engine pass in
