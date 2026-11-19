@@ -756,10 +756,11 @@ extension VaultSession {
         var verified: SyncState?
         if let raw { verified = await verifiedSyncState(raw, vaultID: vaultID) }
         // A state that does not verify is started over, as a sync would start it over (review of round 13, L-a). The
-        // chain only then, where it decides something (review of round 20, Z239); one that cannot be read throws.
+        // chain only then, and only for a vault that may be shared, where it decides something (review of round 20,
+        // Z239, and of round 21, Z248, as the gate reads it); one that cannot be read throws.
         var state = verified ?? SyncState(vaultID: vaultID)
         var found: [RecordKey: RecordStamp] = [:]
-        if verified == nil {
+        if verified == nil, isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
             let chain = try await restoredChain(account: account)
             found = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account) ?? [:]
         }

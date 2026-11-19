@@ -208,3 +208,63 @@ extension AdversarialSharedVaultTests {
         #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
     }
 }
+
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed but a sharing store that keeps failing its reads of the chain rows (a damaged
+    /// `sharing.sqlite` page, honest or by A8, an attacker with the device's files), beside a damaged sync state file,
+    /// or one A8 edited, on a restored device that may stop waiting for a shared vault held closed (review of round 21,
+    /// Z248). Stop Waiting reads the chain only where it decides something, as the gate does (Z239): for a vault that
+    /// may be shared whose state does not verify. There a row that cannot be read throws and nothing is written: read
+    /// as none, the state was started over with nothing marked dismissed, and the rows came back as held if the state
+    /// was damaged again. Elsewhere (a state that verifies, a vault that is not shared) no row is read, so the person's
+    /// choice is not refused for a row it does not need. No test pinned any of the three: each mutation passed.
+    @Test("stopping the wait reads the chain only for a shared vault whose state does not verify, and fails closed")
+    func stopWaitingReadsTheChainOnlyWhereItDecides() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 32_260)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        _ = try await member.session.move(itemID: original.id, to: vaultID)
+
+        await member.session.lock()
+        await member.contacts.removePin(for: owner.accountID)
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let restored = member.vault.relaunched(seed: 32_261)
+        let failing = ChainRowUnreadableSharingStore(base: member.state)
+        await restored.session.configureSharing(
+            SharingSettings(state: failing, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+        let report = try await restored.session.syncAll()
+        #expect(report.restoredWorkMayStopWaiting.contains(vaultID), "Stop Waiting is not offered: nothing is tested")
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        let genuine = try #require(await raw.loadState(vaultID: vaultID))
+        #expect(!genuine.restoredUnpublished.isEmpty, "nothing recorded to carry")
+        await failing.failNextReads(.max, in: nil)
+
+        // A vault that is not shared, and will not open here: no row is read.
+        var refused = await failing.refused
+        try await restored.session.stopWaitingForRestoredWork(in: UUID())
+        #expect(await failing.refused == refused, "a chain row was read for a vault that is not shared")
+
+        // The shared vault's state damaged: the row is read, cannot be, and nothing is written.
+        var damaged = genuine
+        damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
+        await raw.tamper(damaged)
+        await #expect(throws: VaultSession.RestoredChainRowUnreadable.self) {
+            try await restored.session.stopWaitingForRestoredWork(in: vaultID)
+        }
+        #expect(await failing.refused > refused, "no read of the chain row failed: nothing is tested")
+        #expect(await raw.loadState(vaultID: vaultID) == damaged, "the state was started over on a row not read")
+
+        // The state verifying again: it is the record, and no row is read.
+        await raw.tamper(genuine)
+        refused = await failing.refused
+        try await restored.session.stopWaitingForRestoredWork(in: vaultID)
+        #expect(await failing.refused == refused, "a chain row was read where the state verifies")
+        let stopped = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(!stopped.isEmpty && stopped.values.allSatisfy(VaultSession.isDismissed), "the wait was not stopped")
+    }
+}
