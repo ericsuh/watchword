@@ -701,6 +701,16 @@ as a field order's tie (Z204); Stop Waiting is one action per vault that will no
 in an unverified state as a restore's earlier ID is not another account's device (`plantedChainIDOfAnotherAccount`,
 Z206); and a vault whose publishing waits for the carry is named until the carry is done
 (`publishingHeldForTheCarryIsNamed`, "shared vaults through the session"; `publishingHeldForCarry`, wording, Z207).
+The review of the fifteenth round (Z208 to Z215), all in "shared vaults through the session": a member's claim, in a
+downloaded and not yet judged version, to have seen the earlier ID's work does not stop the carry, which counts only
+that ID's own stream (`inflatedClaimInAStagedSegment`, with a control, Z208); a carry that does not finish keeps the
+replay pass from merging into its vault (`replayWaitsForTheCarry`, Z209); the session carries before it merges, for
+three device IDs whose order makes the two orders differ, every device ending with `R(a) ⊔ b` computed by `ItemMerge`
+(`carryBeforeTheMergeKeepsTheFieldOrder`, which fails with the session's order reverted, Z210); a sibling device named
+in an edited state as an earlier ID keeps its published work, with its stream withheld too
+(`plantedChainIDOfASiblingDevice`, Z211); a lock at each read of a carried record stops the sync without a trap and
+loses nothing (`lockDuringTheCarry`, Z212); and each Stop Waiting action names its vault (`restoredWorkAction`,
+wording, Z215).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

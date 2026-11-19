@@ -1030,23 +1030,34 @@ judge held them aside, the restored device's own on a replay (Z191). A carried d
 same way, so its summary claims nothing the old ID did not publish. Only the old ID's own parts (and the new ID's) are
 renamed: another device's stamps, discards and lines stay byte for byte as its stream carried them (Z197). What counts
 as published is the most of three: the last version of the record the old ID's own signed state recorded, the highest
-version the old ID's stream carried as the stream index and the vault's downloaded segments show it once the vault's
-log has been pulled, and what the item itself, or a downloaded version of it, shows a third device saw of the old ID
-(Z197, Z198, Z204). So registration carries none of a shared vault's items:
+version the old ID's own stream carried as the stream index and that stream's downloaded segments show it once the
+vault's log has been pulled (`SyncEngine.stagedEntries(of:authoredBy:)`, which opens and checks each segment but asks
+nothing of the judge, so only what a segment says of its own author's versions is taken from it), and what the row
+itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). Never what a
+downloaded version of a third device claims: nothing has judged it yet, and a member who may write could claim to have
+seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside (Z208). In a
+shared vault the log is whole, so whatever an honest third device saw of the old ID is in the old ID's own segments.
+So registration carries none of a shared vault's items:
 the move records each row the old ID left there, before it empties the old ID's state, in the vault's new signed state
 with the old ID's last published version of the record (`SyncState.restoredUnpublished`), and each of the old ID's
 deletions there; a sync carries them (`carryRestoredWork`) after it has downloaded that vault's log and before it
-merges anything it downloaded (`SyncEngine.download`, then `stagedEntries` for the bound, then the pass that merges),
+merges anything it downloaded (`SyncEngine.download`, then `stagedEntries` for the bound, then the pass that merges;
+the session test `carryBeforeTheMergeKeepsTheFieldOrder` fails if it merges first, Z210),
 so that the pulled versions are merged into the renamed version as every other device merges them (Z204: renamed after
 the merge, a field order's tie could fall otherwise there than everywhere else); the vault publishes nothing while
 anything is still to carry there, so that no merge of a row still holding the old ID's work goes out, and a carry that
-cannot run or finish merges nothing there in that sync, the sync naming the vault (`publishingHeldForCarry`, Z207);
+cannot run or finish merges nothing there in that sync, in any pass, a replay asked for included, which waits for the
+sync whose carry finishes (Z209), the sync naming the vault (`publishingHeldForCarry`, Z207); the carry reads the keys
+again after every suspension, so a lock during it stops it rather than reading zeroised keys (Z212);
 the carried rows go out at the next sync, and a take-out leaves such rows alone. While a recorded
 row still holds that work every vault's deletions wait (`holdsRestoredWork`), since one of them may be the source half
 of a move whose copy it is, and the sync names the items (`restoredWorkWaiting`, Z192). The hold fails closed (Z200): a
 state that cannot be read holds, so does one that does not verify while the restore's chain of earlier IDs is known
-(the move under way, every ID an entry of a verified state names, and every ID this account's registry lists that an
-entry of an unverified one names, in any vault: `restoredChain`, Z206); and in a vault whose state is lost or
+(the move under way, every ID an entry of a verified state names, and every ID this account's registry lists, current
+or revoked, that registered before this device did, so that this device's own registration entry descends from its,
+that an entry of an unverified one names, in any vault: `restoredChain`, `earlierRegisteredIDs`, Z206, Z211; a sibling
+registered before this device still reads, its work bounded by its own stream, and only a predecessor link in the
+registry would tell it apart, an owner decision); and in a vault whose state is lost or
 does not verify, a row still that ID's, holding its work above what its stream carried, holds as if an entry named it
 (`rowsLeftByEarlierIDs`), and is recorded again in a state this session signs before the logs. The hold ends when the vault opens here and the row is carried, when a version that holds none
 of the work replaces the row, when the vault is deleted or this account's membership of it ends (`restoredWorkReleased`:

@@ -823,22 +823,27 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   What a restore carries into a vault that may be shared has the old ID's work above what it published written again
   as the new ID's (`ItemMerge.reattributed`; the erased row of a carried deletion too), or every member's judge holds it
   aside (Z191): never carry such work unchanged where the old ID commits, and never rename another device's part
-  (Z197). "Published" is the most of the old ID's signed state, its stream as the index and the downloaded segments
-  show it (`publishedBound`, `SyncEngine.stagedEntries`, Z198), and what the item or a downloaded version shows a third
-  device saw (`seenByOthers`). So registration carries none of a shared vault's items: the move records them in the
-  vault's signed state (`SyncState.restoredUnpublished`), and a sync carries them (`carryRestoredWork`) after it has
-  downloaded that vault's log and before it merges anything downloaded: never rename after the merge, where a field
-  order's tie falls by device ID (Z204); a carry that cannot run or finish merges nothing there in that sync. The vault
-  publishes nothing while anything is left to carry there (named, `publishingHeldForCarry`, Z207), and a take-out
-  leaves those rows alone. Until then they hold
-  every vault's deletions (`holdsRestoredWork`, failing closed on a state it cannot read or trust, and derived from the
-  rows where the state is lost or does not verify, `rowsLeftByEarlierIDs`, Z200) and are named in `restoredWorkWaiting`; only carrying them, a version that
-  holds none of that work, the vault deleted or left (`restoredWorkReleased`, reported as `restoredWorkKeptHere`), or
-  the person (`stopWaitingForRestoredWork`, one action per vault, offered and accepted only where the vault has no
-  current key here or a disputed owner, Z205; it marks the entries `dismissedVersion`) ends the hold (Z192, Z199). A
-  restore's chain read from a state that does not verify names only IDs this account's registry lists (Z206). Old hardware still running under the old ID that publishes the same work later leaves members both
-  copies, recorded (Z198). A version kept after this device's own pending deletion holds no deletion back (Z202, V46's
-  non-publishing bound with what it published added, in `waitsOnlyBehind`), and
+  (Z197). "Published" is the most of the old ID's signed state, its own stream as the index and that stream's
+  downloaded segments show it (`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`, Z198), and what the row
+  (judged versions) shows a third device saw (`seenByOthers`); never what an unmerged version of a third device claims,
+  which no judge has looked at (Z208: a member could make the carry drop its entry). So registration carries none of a
+  shared vault's items: the move records them in the vault's signed state (`SyncState.restoredUnpublished`), and a
+  sync carries them (`carryRestoredWork`) after it has downloaded that vault's log and before it merges anything
+  downloaded: never rename after the merge, where a field order's tie falls by device ID (Z204; the session test
+  `carryBeforeTheMergeKeepsTheFieldOrder` fails if it does, Z210); a carry that cannot run or finish merges nothing
+  there in that sync, in any pass, the replay included (Z209). The carry reads the keys again after every suspension
+  (Z212). The vault publishes nothing while anything is left to carry there (named, `publishingHeldForCarry`, Z207),
+  and a take-out leaves those rows alone. Until then they hold every vault's deletions (`holdsRestoredWork`, failing
+  closed on a state it cannot read or trust, and derived from the rows where the state is lost or does not verify,
+  `rowsLeftByEarlierIDs`, Z200) and are named in `restoredWorkWaiting`; only carrying them, a version that holds none
+  of that work, the vault deleted or left (`restoredWorkReleased`, reported as `restoredWorkKeptHere`), or the person
+  (`stopWaitingForRestoredWork`, one action per vault, offered and accepted only where the vault has no current key
+  here or a disputed owner, Z205; it marks the entries `dismissedVersion`) ends the hold (Z192, Z199). A restore's
+  chain read from a state that does not verify names only IDs this account's registry lists whose registration this
+  device's own registration entry descends from (`earlierRegisteredIDs`, Z206, Z211). Old hardware still running
+  under the old ID that publishes the same work later leaves members both copies, recorded (Z198). A version kept
+  after this device's own pending deletion holds no deletion back (Z202, V46's non-publishing bound with what it
+  published added, in `waitsOnlyBehind`), and
   only pending deletions read through `syncState` (the session's signed ones) count there: never decide on
   `syncSettings.state`'s raw `pendingDeletions` without checking the signature (Z203).
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,

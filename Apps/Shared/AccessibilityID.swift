@@ -21,7 +21,9 @@ enum AccessibilityID {
         static let export = "settings.export"
         static let restore = "settings.restore"
         static let syncNotice = "settings.syncNotice"
-        static let syncNoticeAction = "settings.syncNoticeAction"
+        /// A sync notice's action for one vault (`SyncNoticeAction.vaultID`): one per vault, so that a test finds the
+        /// one it means when two vaults offer it (review of round 15, Z215).
+        static func syncNoticeAction(_ vaultID: UUID) -> String { "settings.syncNoticeAction.\(vaultID.uuidString)" }
     }
 
     enum Vaults {
