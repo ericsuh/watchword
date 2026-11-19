@@ -724,7 +724,8 @@ position past a forked name the judged download refused, at once and one sync af
 (`refusedForkCountsNothingAfterIt`, `refusedForkCountsNothingOnTheNextSync`, V56). In "shared vaults through the
 session": the stream index counts for the carry only as far as a merge reaches, so a restore's work that only a forked
 name of its earlier ID carried reaches a member who saw the fork first (`forkedNameOfTheEarlierIDCountsForNothing`,
-V56). Each fails at the commit before its fix.
+V56); and a move made again after its vault's state was damaged keeps an earlier restore's work there
+(`moveMadeAgainKeepsAnEarlierRestoresWork`, V57). Each fails at the commit before its fix.
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

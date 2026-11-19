@@ -56,6 +56,21 @@ extension VaultSession {
         {
             if restored[key] == nil { restored[key] = left(key) }
         }
+        // With no state that verifies for either ID, a move made again after the first attempt's state for the vault
+        // was damaged or edited (A8) reads, besides the rows `previous` left, those of every other earlier ID the
+        // vault's chain row names (`RestoredChainRow`, signed for this device's ID before that state was saved): an
+        // earlier restore's work that state recorded, which no other record names now (a merge review of round 17,
+        // V57). Each as `rowsLeftByEarlierIDs` finds a row left without a state.
+        if earlier == nil, var chained = await restoredChainRow(in: vaultID, account: account) {
+            chained.subtract([previous, account.deviceID])
+            let reach = await mergeReach(in: vaultID, of: chained) ?? [:]
+            for row in try await store.records(in: vaultID, kind: .item)
+            where chained.contains(row.deviceID) && restored[row.key] == nil {
+                let entry = RecordStamp(version: 0, device: row.deviceID)
+                let bound = publishedBound(entry, of: row.key, in: vaultID, reach: reach)
+                if holdsEdit(of: row.deviceID, in: row, above: bound.version) { restored[row.key] = entry }
+            }
+        }
         return restored
     }
 
