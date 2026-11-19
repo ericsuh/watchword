@@ -351,7 +351,7 @@ public actor VaultSession: SharesExecutor {
 
     /// `record`, just committed with its migration kept (`MigrationWrite.keep`), as the store now holds it: with the
     /// migration this session holds now, never the one `record` was read with before its awaits, which a move
-    /// completed meanwhile cleared (review of round 11, L1). The two writes that change the migration cache it as they
+    /// completed meanwhile cleared (review of round 11, Z186). The two writes that change the migration cache it as they
     /// commit (`registerThisDevice`, `completeDeviceMigration`), so the cached copy is the stored one.
     func keepingCachedMigration(_ record: AccountRecord) -> AccountRecord {
         guard let cached = account, cached.accountID == record.accountID else { return record }
@@ -976,7 +976,7 @@ public actor VaultSession: SharesExecutor {
     /// operation then fails with `locked` or `lockedDuringUnlock`.
     /// How many times the session has locked: moved inside `lock()` itself, before anyone listening to `lockEvents()`
     /// hears of it, so work outside the session that must not keep what it made across a lock compares it after its
-    /// awaits (review of round 11, I1; `LockSignal.Mark`).
+    /// awaits (review of round 11, Z188; `LockSignal.Mark`).
     public var lockCount: UInt64 { lockEpoch }
 
     public func lock() {

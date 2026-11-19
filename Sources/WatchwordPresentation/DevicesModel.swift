@@ -197,7 +197,7 @@ public final class DevicesModel: LockSensitive {
         // The summary is stored after the sync's awaits, and a lock that landed during them has cleared it already
         // (Z176): one made across a lock is dropped, not stored on a locked screen (review of round 10, Z183).
         // The session's own count too, which moves in `lock()` itself, before this model is told (review of round 11,
-        // I1); read last, so that a lock after it reaches `dropOnLock` after the summary is stored.
+        // Z188); read again after the awaits, so that a lock after that read reaches `dropOnLock` after the store.
         let sessionLocks = await context.session.lockCount
         let generation = lockGeneration
         await perform {

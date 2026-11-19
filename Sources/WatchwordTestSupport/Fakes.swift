@@ -163,7 +163,7 @@ public actor FakeDeviceKeyStore: DeviceKeyStore {
     private var generator: SeededGenerator
     public private(set) var signatures = 0
     /// How many keys have been made, by either `create`: with `isEmpty` and `publicKey`, whether a failure left one
-    /// behind (review of round 11, I2).
+    /// behind (review of round 11, Z189).
     public private(set) var created = 0
 
     public init(seed: UInt64 = 1) {

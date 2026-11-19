@@ -15,7 +15,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case deviceNotRegistered
     case registryUnavailable
     /// A restore onto other hardware has not finished moving this device's sync records to its new identity
-    /// (`AccountSyncReport.deviceMigrationIncomplete`, review of round 11, M1): it receives changes and sends none, in
+    /// (`AccountSyncReport.deviceMigrationIncomplete`, review of round 11, Z185): it receives changes and sends none, in
     /// any vault, until a sync finishes the move.
     case deviceMigrationIncomplete
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it

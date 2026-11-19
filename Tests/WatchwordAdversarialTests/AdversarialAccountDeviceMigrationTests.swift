@@ -149,7 +149,7 @@ extension AdversarialAccountTests {
     }
 
     /// Threat: none needed but a sync state file that fails one write at a restore's unlock, and an app relaunched
-    /// before the next; the review of round 11 (I3). The unlock made the move again before it read which vaults are
+    /// before the next; the review of round 11 (Z190). The unlock made the move again before it read which vaults are
     /// shared, and until it has read them every vault but the Personal one is held closed: the deletion of an item of a
     /// private vault found no key, and (now that such a deletion is parked rather than stopping the move, M1) would
     /// wait parked for the next sync. The markers are read first, and the deletion is carried as the new ID's.
@@ -199,7 +199,7 @@ extension AdversarialAccountTests {
     }
 
     /// Threat: none needed but a database that refuses one write (full, or busy past its timeout) while a restore
-    /// registers its new device ID; the review of round 11 (I2, Z182's residual). The new device's key is made before
+    /// registers its new device ID; the review of round 11 (Z189, Z182's residual). The new device's key is made before
     /// the label is sealed for its ID and the registry entry signed with it, and a failure after it and before the
     /// commit left the key in the Keychain under an ID nothing registered, one per failed attempt. It is deleted again.
     @Test("a restore's registration that fails before its commit leaves no device key behind")
@@ -228,7 +228,7 @@ extension AdversarialAccountTests {
         #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")
     }
 
-    /// Threat: none needed; the review of round 11 (L1). A password change reads the account record, derives and signs
+    /// Threat: none needed; the review of round 11 (Z186). A password change reads the account record, derives and signs
     /// across several awaits, and commits the record it read. A move completed during those awaits cleared the record's
     /// migration, and the commit wrote it back: the move ran again after the device had published under its new ID
     /// (each vault's state started over, the log replayed, rows published again). The store now keeps the migration a

@@ -160,7 +160,7 @@ struct DevicesModelTests {
         locks.stop()
     }
 
-    /// Review of round 11 (I1): the generation moved only when the lock signal's watch ran on the main actor, so a
+    /// Review of round 11 (Z188): the generation moved only when the lock signal's watch ran on the main actor, so a
     /// sync whose continuation the main actor ran first found it unchanged and stored a summary made across the lock.
     /// The session's own count moves in `lock()` itself: here no signal tells the model of the lock at all, and the
     /// summary is dropped all the same.
@@ -187,7 +187,7 @@ struct DevicesModelTests {
     }
 
     /// The mark the Settings summary takes before its sync (`AppModel.syncNow`, not built here; review of round 11,
-    /// I1): a lock of the session counts from `lock()` itself, before the signal's watch has run, and so does a fire.
+    /// Z188): a lock of the session counts from `lock()` itself, before the signal's watch has run, and so does a fire.
     @Test("a lock signal's mark sees a lock before the signal does, and a fire")
     func lockSignalMark() async throws {
         let vault = TestVault()

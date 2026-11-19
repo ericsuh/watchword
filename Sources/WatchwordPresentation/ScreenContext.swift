@@ -90,7 +90,7 @@ public final class LockSignal {
     }
 
     /// Every lock so far: the signal's fires, and the session's own count (`VaultSession.lockCount`), which `lock()`
-    /// moves before any listener hears of it (review of round 11, I1: a continuation the main actor ran ahead of the
+    /// moves before any listener hears of it (review of round 11, Z188: a continuation the main actor ran ahead of the
     /// signal's watch found the generation unchanged).
     public struct Mark: Hashable, Sendable {
         let fires: Int

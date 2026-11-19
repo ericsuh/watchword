@@ -225,7 +225,7 @@
                             account.emergencyKitConfirmedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
                         ])
                     // The migration as `accountToStore` resolved it: kept, set or cleared, never the copy a writer
-                    // read before its awaits (review of round 11, L1).
+                    // read before its awaits (review of round 11, Z186).
                     try connection.execute("DELETE FROM device_migration")
                     if let migration = account.migration {
                         try connection.query(

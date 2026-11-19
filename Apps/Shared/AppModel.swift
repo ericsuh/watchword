@@ -82,7 +82,7 @@ final class AppModel {
             phase = .unavailable(message)
         }
         // Every lock of the session clears the last sync's summary, not only the app's own lock paths (review of
-        // round 11, I1).
+        // round 11, Z188).
         lockSignal.register(self)
     }
 
@@ -367,7 +367,7 @@ final class AppModel {
         lastSync = nil
         // `didLock` clears the summary (Z176), and a lock that lands during the awaits below has done so already: a
         // summary made across a lock is dropped, never stored after it (review of round 10, Z183).
-        // With the session's own count, which moves in `lock()` itself (review of round 11, I1).
+        // With the session's own count, which moves in `lock()` itself (review of round 11, Z188).
         let mark = await lockSignal.mark(session)
         await perform {
             let report = try await session.syncAll()

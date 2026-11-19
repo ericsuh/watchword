@@ -604,7 +604,17 @@ it is complete, and a move record the session did not sign moves nothing (`inter
 `migrationRoundTrip`, store contract); a failed registration leaves no device key behind
 (`parkedDeletionsUnreadableAtRegistration`, Z182); a lock after the sync but before its summary is stored leaves none
 (`lockBeforeSummaryLeavesNone`, `lockSignalGeneration`, "Screen models: devices", Z183); the empty state the move saves
-verifies (`migratedStateIsSigned`, Z184).
+verifies (`migratedStateIsSigned`, Z184). The review of the eleventh round (Z185 to Z190): a restore's deletion in a
+shared vault held closed is parked, the move completes and the device publishes in its other vaults, and the parked
+deletion goes out once the vault opens (`restoreWithASharedVaultHeldClosed`, "shared vaults through the session", Z185;
+`deviceMigrationIncomplete`, wording); an account write that does not name the migration keeps it, and a password
+change across a completed move does not bring it back (`migrationKeptByOtherWrites`, `migrationWriteWithoutAccount`,
+store contract; `passwordChangeKeepsACompletedMove`, Z186); a version 1 database opens as version 2 with its rows
+(`upgradeFromVersion1`, "SQLite record store", Mac only, Z187); a summary made across a lock nobody has announced yet
+is dropped (`unheardLockLeavesNoSummary`, `lockSignalMark`, Z188); a registration that fails before its commit leaves
+no device key (`failedRegistrationLeavesNoKey`, Z189); the unlock's retry of the move carries a private vault's
+deletion (`unlockRetryReadsMarkersFirst`, Z190). Z191 (a restore's unpublished work in a shared vault) has no test:
+it is open.
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

@@ -30,7 +30,7 @@
             }
         }
 
-        /// Review of round 11 (L2): schema version 2 added `device_migration` (Z181), and nothing opened a database an
+        /// Review of round 11 (Z187): schema version 2 added `device_migration` (Z181), and nothing opened a database an
         /// earlier build wrote. A version 1 database (its three schema objects exactly, `user_version` 1) holding an
         /// account and a record opens, keeps both, and is version 2, with no migration recorded and room for one.
         @Test("a version 1 database with an account is upgraded to version 2 and keeps its rows")

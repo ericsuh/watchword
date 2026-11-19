@@ -890,11 +890,19 @@ The same commit records the move of the old ID's sync state (`AccountRecord.migr
 account key with the account and the new ID under `SignatureDomain.deviceMigration`; review finding Z181), which
 `completeDeviceMigration` then makes: each vault's sync state starts over, saved empty and signed for the new ID (the
 old ID's stream is not this device's to continue; an unsigned row would read as no state, Z184), each of the old ID's
-verified pending deletions is recorded again as the new ID's, stamped above it, and the record is cleared. A move that
-fails part way (a state file that cannot be written) is made again at each unlock and each sync until it is complete;
-until then the device publishes nothing (`deviceMigrationIncomplete`), and registers no further ID over it. A record
-the session did not sign moves nothing: planted in the file (A8), it would make this device take another device's
-pending deletions for its own. One exception (review
+verified pending deletions is recorded again as the new ID's, stamped above it, and the record is cleared. A deletion
+this device cannot sign as the new ID's, for want of a current key for its vault (a shared vault held closed, Z41 and
+Z59, or a key not held here), is parked instead (below) and released once the vault has a key, so no deletion stops
+the move (review finding Z185). A move that fails part way (a state file that cannot be written) is made again at
+each unlock, after the vaults' markers are read (Z190), and each sync until it is complete; until then the device
+publishes nothing (`deviceMigrationIncomplete`, shown in the sync summary), and registers no further ID over it. The
+record is written and cleared only by the commits that say so (`StoreChange.migration`); every other write of the
+account record, a password change read before its awaits among them, keeps what the store holds (Z186). A
+registration that fails before its commit deletes the device key it made (Z189). A record the session did not sign
+moves nothing: planted in the file (A8), it would make this device take another device's pending deletions for its
+own. What is carried into a shared vault, even from an old ID that commits, reaches no member: its values keep the
+old ID's stamps and a deletion's summary its unpublished edits, which no segment of the old ID's stream carried, so
+every judge holds them aside (Z191, open). One exception (review
 finding Z167): where a shared vault holds an edit of the old ID that nobody received (the old ID does not commit, Z162,
 so a copy it published there reached nobody), the old ID's pending deletions are not carried over but **parked**:
 signed by the session under an ID derived from the new one that names no device (`parkedDeletionDevice`), which the

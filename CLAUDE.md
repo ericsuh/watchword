@@ -253,7 +253,10 @@ Fifteen shipped modules, dependency-ordered, plus test support:
   file mover, Z80), `ScreenPrivacy` and `RevealedSecrets` (when revealed secrets are hidden again, F5.7, Z95), and the
   wording (`ErrorWording`, `SyncSummary`, `InterchangeWording`, `SharingCodes`). Depends on
   `WatchwordKit` and the modules whose types it shows; `WatchwordPresentationTests` drives it over real sessions on
-  Linux. It decides nothing about security: every refusal stays in `VaultSession`, and the model words it.
+  Linux. It decides nothing about security: every refusal stays in `VaultSession`, and the model words it. What must
+  go with the keys and is stored after an await (a sync's summary) is stored only if no lock came between, by the
+  session's own count (`VaultSession.lockCount`, moved in `lock()` itself; `LockSignal.mark`, `unchanged(since:in:)`),
+  never by the signal's generation alone, which moves only when its watch runs (Z188).
 - **`WatchwordTestSupport`** — `SeededGenerator`, `RepeatingGenerator`, hex helpers, the nightly knobs, and the
   fakes (`FakeKeychain`, `FakeBiometricGate`, `FakeClock`, `FakeDeviceKeyStore`, `TestVault`, whose
   `enrolledDevice` enrols a real second device over the transport; `RegistryFixture` for hand-built registry
@@ -732,7 +735,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the old ID's sync state is recorded, signed (`AccountRecord.migration`, `SignatureDomain.deviceMigration`), in the
   commit that names the new ID, and `completeDeviceMigration` makes it again at each unlock and sync until it is
   complete (Z181): never do any of it under `try?` after that commit, never publish while it is incomplete
-  (`deviceMigrationIncomplete`), never register a further ID over it, and act on no record the session did not sign.
+  (`deviceMigrationIncomplete`, worded in the summary), never register a further ID over it, and act on no record the
+  session did not sign. Nothing may make the move fail for good: a deletion it cannot sign as the new ID's (no current
+  key for its vault) is parked, never thrown (Z185). The migration changes only through `StoreChange.migration`
+  (`.set` at registration, `.clear` by the move); every other account write keeps the stored value, and the session
+  caches it with `keepingCachedMigration` (Z186). A registration that fails before its commit deletes the key it made
+  (Z189).
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
   whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's
   deletions go out, the new ID's own included (Z170); `copiesNobodyReceived` names those items for the summary (Z171). Every engine pass in

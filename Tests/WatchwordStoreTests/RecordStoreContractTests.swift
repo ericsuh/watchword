@@ -108,7 +108,7 @@ struct RecordStoreContractTests {
         #expect(try await store.loadAccount()?.migration == nil)
     }
 
-    /// Review of round 11 (L1): the account row is written whole, and a writer that read it before its awaits (a
+    /// Review of round 11 (Z186): the account row is written whole, and a writer that read it before its awaits (a
     /// password change) wrote back the migration it read. A commit that does not say what becomes of the migration
     /// keeps the stored one, whatever the record it writes says: a cleared move does not come back, and a recorded one
     /// is not cleared.

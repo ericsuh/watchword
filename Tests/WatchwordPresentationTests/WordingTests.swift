@@ -117,7 +117,7 @@ struct WordingTests {
         #expect(!summary.headline.contains("when you unlock"))
     }
 
-    /// Review of round 11 (M1): the gate that holds every vault while a restore's move is incomplete was silent.
+    /// Review of round 11 (Z185): the gate that holds every vault while a restore's move is incomplete was silent.
     @Test("a restore whose move is incomplete says that nothing is sent and nothing is lost")
     func deviceMigrationIncomplete() {
         var report = AccountSyncReport()
