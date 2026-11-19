@@ -261,6 +261,113 @@ extension AdversarialSharedVaultTests {
     }
 }
 
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed; the review of round 21 (Z247). Since Z241 the move under way was made once more from the
+    /// account of the last caller it turned away. A caller holding an account read before a registration recorded the
+    /// move the store now holds (here, a record that is not the store's) made nothing, and when it came last it
+    /// overwrote `configureSharing`'s request: the move that sharing had unblocked waited for the next sync or unlock.
+    /// The move is now made again from the account the store holds.
+    @Test("a restore's move turned away by one waiting for sharing is made from the store's record, whoever asked last")
+    func turnedAwayMoveIsMadeFromTheStoresRecord() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 32_240)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+        let middle = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 32_241)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+
+        await middle.session.lock()
+        await middle.forgetDeviceKey(accountID: member.accountID)
+        var damaged = try #require(await raw.loadState(vaultID: vaultID))
+        damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
+        await raw.tamper(damaged)
+        let store = DirectoryListingHookedStore(base: middle.store)
+        let second = TestVault(
+            store: store, keychain: middle.keychain, biometrics: middle.biometrics, clock: middle.clock,
+            sync: middle.sync, seed: 32_242, deviceKeys: middle.deviceKeys)
+        try await second.session.unlock(password: TestVault.password)
+        let waiting = try #require(try await store.loadAccount())
+        #expect(waiting.migration != nil, "the move did not wait for sharing: nothing is tested")
+
+        // Inside `moveAwaitsSharing`, after it read that sharing is not configured: sharing is configured, whose move
+        // is turned away, and then a caller holding an older record is turned away too.
+        var stale = waiting
+        stale.migration = DeviceMigration(previousDeviceID: UUID(), authenticator: [])
+        let older = stale
+        let session = second.session
+        let settings = SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory)
+        await store.onNextDirectoryListing {
+            await session.configureSharing(settings)
+            try? await session.completeDeviceMigration(account: older)
+        }
+        try await second.session.completeDeviceMigration(account: waiting)
+        #expect(await store.hookRan, "sharing was not configured during the move: nothing is tested")
+        #expect(try await store.loadAccount()?.migration == nil, "the move sharing unblocked was not made")
+
+        let state = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(state[RecordKey(recordID: copy.id, kind: .item)]?.device == first, "the copy was not recorded again")
+        let report = try await second.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete)
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+    }
+
+    /// Threat: none needed but a sharing store that keeps failing its reads of a chain row a restore's move needs (as
+    /// in `lastingChainRowFailureIsReported`, Z240), and a caller of the move turned away while it fails that holds an
+    /// account read before the store's record changed (review of round 21, Z247). The move under way threw, was made
+    /// again from that caller's account, which named a record the store does not hold, returned without making it,
+    /// and the throw became success: the sync that made it would not have said why its move failed, nor an unlock
+    /// noted it. The failure now stands until an attempt makes the move.
+    @Test("a restore's move that fails keeps its failure when a caller it turned away asks again with an older record")
+    func turnedAwayMoveKeepsTheFailure() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 32_250)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        _ = try await member.session.move(itemID: original.id, to: vaultID)
+        let middle = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 32_251)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+
+        await middle.session.lock()
+        await middle.forgetDeviceKey(accountID: member.accountID)
+        var damaged = try #require(await raw.loadState(vaultID: vaultID))
+        damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
+        await raw.tamper(damaged)
+        let failing = ChainRowUnreadableSharingStore(base: member.state)
+        await failing.failNextReads(.max, in: vaultID)
+        let store = DirectoryListingHookedStore(base: middle.store)
+        let second = TestVault(
+            store: store, keychain: middle.keychain, biometrics: middle.biometrics, clock: middle.clock,
+            sync: middle.sync, seed: 32_252, deviceKeys: middle.deviceKeys)
+        await second.session.configureSharing(
+            SharingSettings(state: failing, contacts: member.contacts, directory: household.directory))
+        try await second.session.unlock(password: TestVault.password)
+        let waiting = try #require(try await store.loadAccount())
+        #expect(waiting.migration != nil, "the move finished on a row it did not read: nothing is tested")
+
+        var stale = waiting
+        stale.migration = DeviceMigration(previousDeviceID: UUID(), authenticator: [])
+        let older = stale
+        let session = second.session
+        await store.onNextDirectoryListing { try? await session.completeDeviceMigration(account: older) }
+        await #expect(throws: VaultSession.RestoredChainRowUnreadable.self) {
+            try await session.completeDeviceMigration(account: waiting)
+        }
+        #expect(await store.hookRan, "no caller was turned away during the move: nothing is tested")
+        #expect(await failing.refused > 0, "no read of the chain row failed: nothing is tested")
+        #expect(try await store.loadAccount()?.migration != nil, "the move finished on a row it did not read")
+    }
+}
+
 /// A record store over `base` that runs a step once, the next time the account's vault directory is listed.
 actor DirectoryListingHookedStore: RecordStore {
     let base: any RecordStore
