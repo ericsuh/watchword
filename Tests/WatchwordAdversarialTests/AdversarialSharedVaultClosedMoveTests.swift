@@ -49,6 +49,8 @@ extension AdversarialSharedVaultTests {
 
         let report = try await restored.session.syncAll()
         #expect(!report.deviceMigrationIncomplete)
+        // The deletion that waits for want of a key is said to wait (review of round 12).
+        #expect(report.deletionsHeldBack.contains(vaultID), "the parked deletion was not reported")
         try await other.session.sync()
         #expect((try? await other.session.item(id: mine.id)) == nil, "the Personal vault's deletion never went out")
         try await owner.session.sync()
