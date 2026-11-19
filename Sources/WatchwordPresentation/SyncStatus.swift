@@ -35,6 +35,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// a shared vault this account may not write to now, or one not set up here, or was held aside
     /// (`AccountSyncReport.deletionsHeldBack`).
     case deletionsHeldBack
+    /// This device's deletions, in every vault, are not going out because these items of a shared vault hold an edit
+    /// that has reached nobody else, made under an earlier identity of this device or by a device that is not counted
+    /// in shared vaults (`AccountSyncReport.copiesNobodyReceived`, review finding Z171). By vault name and title.
+    case copiesReachedNobody([UnreceivedCopy])
 
     public var id: String {
         switch self {
@@ -50,6 +54,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .sharedVaultsNotUploaded: return "sharedVaultsNotUploaded"
         case .vaultsTooLargeToUpload: return "vaultsTooLargeToUpload"
         case .deletionsHeldBack: return "deletionsHeldBack"
+        case .copiesReachedNobody: return "copiesReachedNobody"
         }
     }
 
@@ -90,6 +95,16 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
             return "Deletions made on this device are waiting. Something it moved or added has not reached your "
                 + "other devices: it is in a shared vault this device cannot write to now, or was held aside. They "
                 + "go out once it has, or once you discard it under Held-Aside Changes."
+        case .copiesReachedNobody(let copies):
+            let shown = copies.prefix(3).map(\.phrase)
+            let more = copies.count > shown.count ? " and \(copies.count - shown.count) more" : ""
+            let one = copies.count == 1
+            return "Deletions made on this device are waiting, in every vault, because "
+                + shown.joined(separator: ", ") + more + (one ? " has" : " have") + " reached nobody else: "
+                + (one ? "it holds" : "they hold") + " changes from a setup of your devices that shared vaults do "
+                + "not count, such as this device before it was restored. Move " + (one ? "it" : "each") + " out of "
+                + "the shared vault from this device, or delete " + (one ? "it" : "each") + ", and the deletions go "
+                + "out."
         }
     }
 }
@@ -160,6 +175,28 @@ public struct ReuploadQuestion: Hashable, Sendable {
     }
 }
 
+/// An item of a shared vault that has reached nobody else (`SyncNotice.copiesReachedNobody`): its vault's name and
+/// its title, which the vault list and the item list show anyway; nothing secret.
+public struct UnreceivedCopy: Hashable, Sendable, Comparable {
+    /// `nil` where the name is empty or could not be read.
+    public let vault: String?
+    public let title: String?
+
+    public init(vault: String?, title: String?) {
+        self.vault = vault.flatMap { $0.isEmpty ? nil : $0 }
+        self.title = title.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// “Bank” in “Household”, or the fallbacks.
+    var phrase: String {
+        (title.map { "“\($0)”" } ?? "an item") + " in " + (vault.map { "“\($0)”" } ?? "a shared vault")
+    }
+
+    public static func < (lhs: UnreceivedCopy, rhs: UnreceivedCopy) -> Bool {
+        (lhs.vault ?? "", lhs.title ?? "") < (rhs.vault ?? "", rhs.title ?? "")
+    }
+}
+
 /// What the last sync did, for Settings and the Devices screen.
 public struct SyncSummary: Hashable, Sendable {
     /// One line: what was received and sent, or why nothing was.
@@ -169,8 +206,13 @@ public struct SyncSummary: Hashable, Sendable {
     public var updateRequired: Bool { notices.contains(.updateRequired) }
 
     /// `names` gives device names by ID (`VaultSession.devices()`); a device it lacks is another account's, in a
-    /// shared vault.
-    public init(_ report: AccountSyncReport, deviceNames names: [UUID: String] = [:]) {
+    /// shared vault. `vaultNames` and `itemTitles` name the copies of `AccountSyncReport.copiesNobodyReceived`
+    /// (`loading(_:deviceNames:from:)` reads them from the session); one they lack is worded "a shared vault" or
+    /// "an item".
+    public init(
+        _ report: AccountSyncReport, deviceNames names: [UUID: String] = [:], vaultNames: [UUID: String] = [:],
+        itemTitles: [UUID: String] = [:]
+    ) {
         let combined = report.combined
         headline = SyncSummary.describe(combined)
         var notices: [SyncNotice] = []
@@ -199,12 +241,39 @@ public struct SyncSummary: Hashable, Sendable {
         if shared > 0 { notices.append(.sharedVaultsNotUploaded(shared)) }
         let tooLarge = refusals.filter { $0 == .tooLarge }.count
         if tooLarge > 0 { notices.append(.vaultsTooLargeToUpload(tooLarge)) }
-        if !report.deletionsHeldBack.isEmpty { notices.append(.deletionsHeldBack) }
+        var copies: [UnreceivedCopy] = []
+        for (vaultID, items) in report.copiesNobodyReceived {
+            for itemID in items { copies.append(UnreceivedCopy(vault: vaultNames[vaultID], title: itemTitles[itemID])) }
+        }
+        if !copies.isEmpty { notices.append(.copiesReachedNobody(copies.sorted())) }
+        if !report.deletionsHeldBack.subtracting(report.copiesNobodyReceived.keys).isEmpty {
+            notices.append(.deletionsHeldBack)
+        }
         self.notices = notices
     }
 
     /// Whether the person should be asked about uploading again (`SyncNotice.storageNeedsUpload`).
     public var storageNeedsUpload: Bool { notices.contains(.storageNeedsUpload) }
+
+    /// The summary with the names `init` needs read from `session`: the vaults' names, and the titles of the items in
+    /// `AccountSyncReport.copiesNobodyReceived`. A name that cannot be read (the session locked, the item gone) is left
+    /// to `init`'s fallback.
+    public static func loading(
+        _ report: AccountSyncReport, deviceNames names: [UUID: String] = [:], from session: VaultSession
+    )
+        async -> SyncSummary
+    {
+        guard !report.copiesNobodyReceived.isEmpty else { return SyncSummary(report, deviceNames: names) }
+        let vaults = (try? await session.vaults(includingDeleted: true)) ?? []
+        var titles: [UUID: String] = [:]
+        for itemID in report.copiesNobodyReceived.values.flatMap({ $0 }) {
+            titles[itemID] = try? await session.item(id: itemID).title
+        }
+        return SyncSummary(
+            report, deviceNames: names,
+            vaultNames: Dictionary(vaults.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first }),
+            itemTitles: titles)
+    }
 
     /// The one line about a sync's outcome. The words "received" and "sent" are what the UI tests wait for.
     public static func describe(_ report: SyncReport) -> String {

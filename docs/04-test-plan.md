@@ -633,7 +633,33 @@ segments below it once a lagging listing shows them (`ownSegmentsBelowTheFloorMe
 object holds a device's next number is named, junk names nobody (`plantInAPromotedMembersStream`,
 `removedMemberRevokesANewDevice`, Z164). An ID two registries list counts in neither in either order
 (`listedTwiceCountsNowhere`), and a stream forgotten leaves the index of a device that never recorded it
-(`forgottenStream`, Z165).
+(`forgottenStream`, Z165). The review of the seventh round (Z167 to Z169): such a device restored onto other hardware
+keeps the move's deletion parked, reported, until the copy is moved out from the new ID, which then goes out first
+(`restoredNonCommittingMove`, Z167); the package's test hooks are refused outside their file and test support
+(`test_unsafe_tripwire.py`, Z168); a device key that cannot be read for a moment refuses as a retry and publishes
+nothing that sync (`unreadableDeviceKey`, `deviceKeyUnreadable`, Z169). The review of the eighth round (Z170 to
+Z172): a second restore keeps the deletion parked (`twiceRestoredNonCommittingMove`, Z170); the original deleted again
+while its move's deletion is parked does not go out, and the report names the copy (`deletionWhileParked`, Z170,
+Z171); the notice names the copy, its vault and the way out (`copiesReachedNobody`, wording, Z171); the tripwire
+refuses a hook split over lines, backticked, unapplied, the session's state and the initialiser, and a new line in a
+defining file (`test_unsafe_tripwire.py`, Z172). The review of the ninth round (Z173 to Z178): a writing member's
+clock claim, or a value relabelled, naming another account's non-committing ID holds none of its deletions back
+(`clockClaimHoldsNothingBack`, Z173); a lock while the report is made names no copy, and a directory that cannot be read
+then keeps the report (`lockWhileReporting`, `unreadableDirectoryWhileReporting`, "Vault session: the copies nobody
+received, in the sync report", Z174, Z175); a lock clears the Devices screen's summary (`syncSummaryClearedOnLock`,
+Z176); parked deletions that cannot be read fail a restore's registration rather than stranding
+(`parkedDeletionsUnreadableAtRegistration`, Z177); a copy of an allowed line in its file is refused
+(`test_unsafe_tripwire.py`, Z178). The review of the tenth round (Z179 to Z184): a writing member's version superseding,
+or deletion claiming, the values of a copy under this account's unreceived ID is held aside and the copy and its parked
+deletion stay (`supersedingClaimOverAnUnreceivedCopy`, `erasureClaimOverAnUnreceivedCopy`, Z179); a clock claim naming
+this device's own non-committing ID holds none of its deletions back (`clockClaimNamingThisDevice`, Z180); a restore's
+move of its old ID's deletions that fails once is made again at the next unlock, or at a sync, publishing nothing until
+it is complete, and a move record the session did not sign moves nothing (`interruptedDeviceMigration`,
+`incompleteMigrationPublishesNothing`, `plantedMigrationMovesNothing`, "account enrolment and device registry", Z181;
+`migrationRoundTrip`, store contract); a failed registration leaves no device key behind
+(`parkedDeletionsUnreadableAtRegistration`, Z182); a lock after the sync but before its summary is stored leaves none
+(`lockBeforeSummaryLeavesNone`, `lockSignalGeneration`, "Screen models: devices", Z183); the empty state the move saves
+verifies (`migratedStateIsSigned`, Z184).
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload

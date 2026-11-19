@@ -69,6 +69,13 @@ extension VaultSession {
         }
         // Which vaults are shared, before any vault's key is picked or its engine set up (V31).
         await loadSharedMarkersIfNeeded()
+        // A move of an earlier device ID's sync state that an unlock could not finish is tried again; until it is
+        // complete this device publishes nothing, since the move starts each vault's state over (Z181).
+        if keys != nil, record.migration != nil {
+            try? await completeDeviceMigration(account: record)
+            record = try await loadAccount() ?? record
+        }
+        report.deviceMigrationIncomplete = record.migration != nil
         // A device whose registration no longer counts registers again, now that it has seen why.
         if let keys, let view = try? await registry(record), view.state.pendingCredentials.isEmpty,
             view.state.standing(of: record.deviceID) == .unknown
@@ -84,10 +91,26 @@ extension VaultSession {
         let changePending = await passwordChangePending(record)
         report.awaitingNewPassword = changePending || !(view?.state.pendingCredentials.isEmpty ?? true)
         report.registryUnavailable = view == nil
-        let mayWrite = keys != nil && standing == .active && !report.awaitingNewPassword
+        let mayWrite =
+            keys != nil && standing == .active && !report.awaitingNewPassword && !report.deviceMigrationIncomplete
+        // Not `epoch`, the person's answer to a reset (§7.10), which this must not shadow: named alike, every sync
+        // handed on as though the person had said yes (found by the reset suites at the second merge, V45).
+        let keysEpoch = lockEpoch
+        // Deletions an earlier ID of this installation made, parked while a shared vault holds an edit of that ID that
+        // nobody received, go out once none remains; until then they are reported held back (Z167).
+        if mayWrite { report.deletionsHeldBack.formUnion(await releaseParkedDeletions(account: record, view: view)) }
         let ownDevices: Set<UUID> = view.map { Set($0.state.devices.keys) } ?? []
         // A device whose ID does not commit to its account publishes nothing in a shared vault, and says so (Z162).
-        let ownIDCommits = await thisDeviceCommits(record)
+        // A key that could not be read is not one that does not commit: nothing is published there, and it is reported
+        // as a failure to retry, never as a reason to enrol again.
+        let ownIDCommits: Bool
+        var deviceKeyUnreadable = false
+        do {
+            ownIDCommits = try await thisDeviceCommits(record)
+        } catch {
+            ownIDCommits = false
+            deviceKeyUnreadable = true
+        }
 
         let adapter = VaultSyncAdapter(session: self)
         let merger = KindRoutingMerger([
@@ -111,7 +134,11 @@ extension VaultSession {
         }
         if !ownIDCommits {
             for vaultID in sharing.vaults.keys {
-                sharingReports[vaultID, default: SharedVaultSyncReport()].deviceIDDoesNotCommit = true
+                if deviceKeyUnreadable {
+                    sharingReports[vaultID, default: SharedVaultSyncReport()].deviceKeyUnreadable = true
+                } else {
+                    sharingReports[vaultID, default: SharedVaultSyncReport()].deviceIDDoesNotCommit = true
+                }
             }
         }
         func engine(_ vaultID: UUID) -> SyncEngine {
@@ -215,10 +242,38 @@ extension VaultSession {
         if mayWrite, stopped == nil {
             await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
         }
+        // The copies that hold every deletion back, by item, for the screen to name (Z171), while the keys this sync
+        // started with are still here (Z174).
+        if mayWrite, let view, (try? requireKeys(since: keysEpoch)) != nil {
+            report.copiesNobodyReceived = await copiesNobodyReceived(
+                account: record, view: view, since: keysEpoch, otherwise: Array(report.vaults.keys))
+            report.deletionsHeldBack.formUnion(report.copiesNobodyReceived.keys)
+        }
         report.sharing = sharingReports
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
         try? await reconcileHygiene()
         return report
+    }
+
+    /// The items of each shared vault that hold an edit nobody received (`itemsHoldingEdits`), for the report
+    /// (`AccountSyncReport.copiesNobodyReceived`, Z171). Read while the keys of `epoch` are here: a row that does not
+    /// open counts, so after a lock every item would be named; a lock during the scan reports none (review of round 9,
+    /// Z174). The vaults are the directory's, or `otherwise` (the vaults the sync ran) where it cannot be read now: a
+    /// report that names too few is better than none, and the gate decided by itself (Z175).
+    func copiesNobodyReceived(account: AccountRecord, view: RegistryView, since epoch: UInt64, otherwise: [UUID])
+        async -> [UUID: Set<UUID>]
+    {
+        let nobodyReceived = Self.idsNobodyReceives(account: account, view: view)
+        guard !nobodyReceived.isEmpty else { return [:] }
+        let vaults = (try? await vaultDirectory(account)).map { Array($0.keys) } ?? otherwise
+        var copies: [UUID: Set<UUID>] = [:]
+        for vaultID in vaults {
+            let items = await itemsHoldingEdits(of: nobodyReceived, in: vaultID, account: account)
+            guard (try? requireKeys(since: epoch)) != nil else { return [:] }
+            guard let items, !items.isEmpty else { continue }
+            copies[vaultID] = items
+        }
+        return copies
     }
 
     /// Whether `vaultID` holds an item that exists nowhere but on this device: one it created, of which the sync layer
@@ -239,9 +294,29 @@ extension VaultSession {
     /// clock's entry for this device (`ItemMerge.effectiveClock`), never merely that it sealed the row. One that does
     /// not open here counts.
     func holdsUnpublishedEdit(_ row: StoredRecord, published: RecordStamp?, account: AccountRecord) -> Bool {
+        holdsEdit(of: account.deviceID, in: row, above: published?.version ?? 0)
+    }
+
+    /// Whether `row` holds an edit of `deviceID` above `version`: its clock's entry for that device
+    /// (`ItemMerge.effectiveClock`). One that does not open here counts.
+    func holdsEdit(of deviceID: UUID, in row: StoredRecord, above version: UInt64 = 0) -> Bool {
         guard let keys, let item = try? openItem(row, keys: keys) else { return true }
-        let own = ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[account.deviceID] ?? 0
-        return own > (published?.version ?? 0)
+        return (ItemMerge.effectiveClock(item, origin: Self.origin(row)).entries[deviceID] ?? 0) > version
+    }
+
+    /// Whether `row` holds a value written by any of `deviceIDs`, opening it once: a value of `ItemMerge.attributedValues`
+    /// (history entries included) whose stamp names one of them. One that does not open here counts.
+    ///
+    /// By values, never by the clock (review of round 9, Z173): a clock entry, or a stamp's `seen`, is its writer's
+    /// claim, and a writing member (A4) can publish a version that claims to have seen edits of any ID, which no judge
+    /// asks about when no account lists that ID as counted. A value stamped by such an ID, from another account's
+    /// stream, is held aside by the judge (it is attributed to the stream of the device its stamp names, which counts
+    /// nowhere), so only this account's own writes, made here or carried over, hold one in a row.
+    func holdsValue(ofAny deviceIDs: Set<UUID>, in row: StoredRecord) -> Bool {
+        guard let keys, let item = try? openItem(row, keys: keys) else { return true }
+        return ItemMerge.attributedValues(item, origin: Self.origin(row)).contains {
+            deviceIDs.contains($0.revision.device)
+        }
     }
 
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
@@ -250,11 +325,26 @@ extension VaultSession {
         let known = state?.known ?? [:]
         let pending = (try? await syncState.pendingDeletions(vaultID: vaultID)) ?? [:]
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
-        // (review finding Z162): an edit of its own in a row it holds is unpublished whatever its state says, such as a
-        // move's copy published by a build from before this was refused.
-        let receivedNowhere = sharing.vaults[vaultID] != nil ? !(await thisDeviceCommits(account)) : false
+        // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
+        // move's copy published by a build from before this was refused. A value it stamped, never its clock's entry
+        // for it: a writing member's version can claim that entry, and merged here it held every deletion back (Z180).
+        // A key that cannot be read counts as one that does not commit here: the gate fails closed.
+        let receivedNowhere =
+            sharing.vaults[vaultID] != nil ? !((try? await thisDeviceCommits(account)) ?? false) : false
+        // Nor did anything a device ID of this account's registry that does not commit wrote there, in whichever row of
+        // this device it now sits (review finding Z170): an earlier ID of this installation, restored onto other
+        // hardware once or more, whose copy of a move is here only. Its deletions are parked, and the new ID's own wait
+        // with every other vault's while the copy is here, or one made again of an original that came back would go out.
+        // A registry that cannot be read here counts as one listing such an ID.
+        if isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+            guard let view = try? await registry(account),
+                let items = await itemsHoldingEdits(
+                    of: Self.idsNobodyReceives(account: account, view: view), in: vaultID, account: account)
+            else { return true }
+            if !items.isEmpty { return true }
+        }
         for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
-            if receivedNowhere, holdsUnpublishedEdit(row, published: nil, account: account) { return true }
+            if receivedNowhere, holdsValue(ofAny: [account.deviceID], in: row) { return true }
             guard let stamp = known[row.key] else { return true }
             // Known only as a deletion: the log says nothing of a version of it. A move's copy has an ID anyone who
             // reads the source vault can derive, and a tombstone for it, found in the log before the copy was written,
@@ -651,14 +741,23 @@ extension VaultSession {
         let (keys, record) = try syncKeys()
         let signingKey = try keys.keyset.publicKeyBundle().signingKey
         return deletions.filter { key, deletion in
-            guard key == deletion.record.key, deletion.stamp.device == record.deviceID, deletion.stamp.deleted,
-                deletion.record.vaultID == vaultID
-            else { return false }
-            return
-                (try? Signatures.verify(
-                    deletion.authenticator, for: Self.pendingDeletionMessage(deletion), domain: .pendingDeletion,
-                    signingKey: signingKey)) != nil
+            deletion.stamp.device == record.deviceID
+                && Self.isSigned(deletion, as: key, in: vaultID, signingKey: signingKey)
         }
+    }
+
+    /// Whether `deletion`, stored under `key` for `vaultID`, is a deletion the account key signed, whichever device
+    /// ID stamped it.
+    static func isSigned(_ deletion: PendingDeletion, as key: RecordKey, in vaultID: UUID, signingKey: [UInt8])
+        -> Bool
+    {
+        guard key == deletion.record.key, deletion.stamp.deleted, deletion.record.vaultID == vaultID else {
+            return false
+        }
+        return
+            (try? Signatures.verify(
+                deletion.authenticator, for: pendingDeletionMessage(deletion), domain: .pendingDeletion,
+                signingKey: signingKey)) != nil
     }
 
     // MARK: - The stash (ADR 0009)
@@ -954,8 +1053,20 @@ public struct AccountSyncReport: Sendable, Equatable {
     public var sharing: [UUID: SharedVaultSyncReport] = [:]
     /// A vault that holds an item of this device's that exists nowhere else (a move's copy that could not be
     /// published, or was held aside): while there is one, no vault's deletions are published, so that an original is
-    /// never erased ahead of its copy (PRD F7.6; review findings Z44, Z54). The first such vault found.
+    /// never erased ahead of its copy (PRD F7.6; review findings Z44, Z54). The first such vault found. Also every
+    /// shared vault holding an edit, nobody received, of an earlier ID of this installation whose deletions are parked
+    /// (`releaseParkedDeletions`, Z167).
     public var deletionsHeldBack: Set<UUID> = []
+    /// Why, where it is a copy nobody received (review finding Z171): per shared vault, the items whose rows hold an
+    /// edit of a device ID of this account's registry that does not commit (`idsNobodyReceives`), such as an earlier ID
+    /// of this installation restored onto other hardware. Each such vault is in `deletionsHeldBack` too. The person
+    /// releases the deletions by moving each item out of the shared vault from this device, which writes it as this
+    /// device's, or by deleting it.
+    public var copiesNobodyReceived: [UUID: Set<UUID>] = [:]
+    /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
+    /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
+    /// unlock and sync.
+    public var deviceMigrationIncomplete = false
 
     public init() {}
 

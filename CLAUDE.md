@@ -584,8 +584,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   device, Z20): its erasures become this device's signed tombstones and its merged vector signed coverage, so a row
   the session did not sign is no state and the log is replayed. A field added to `SyncState` goes into
   `authenticatedBytes` (appended only when set, as `retryUnfinished` and `quarantineDropped` are, so that older rows
-  still verify); read the row through the session's `syncState`, never `syncSettings.state`, wherever what
-  it says is acted on.
+  still verify); read and save the row through the session's `syncState`, never `syncSettings.state`, wherever what
+  it says is acted on (a state saved raw reads back as none, Z184).
 
 ### `WatchwordSharing` invariants
 
@@ -795,7 +795,19 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   alone release the gate. The one exception is a row this device's own pending deletion of the same record is queued
   with (a version kept after the deletion, which goes out right behind the tombstone): counted, the deletion and the
   row waited for each other for good (V44). In a shared vault, every row of a device whose ID does not commit that holds an edit of its
-  own counts, whatever its state says: nothing it published there reached anyone (Z162). Every engine pass in
+  own counts, whatever its state says: nothing it published there reached anyone (Z162). Moving an installation to a
+  new device ID (a restore onto other hardware, and any re-enrolment) parks the old ID's pending deletions, stamped
+  for the new ID (`parkedDeletionDevice`, an ID naming no device), while a shared vault holds an edit nobody received
+  of that ID or of any non-committing ID of the registry, and only `releaseParkedDeletions` records them as the new
+  ID's, once none remains (Z167): never carry them over unconditionally, never release one at registration (what the
+  old ID had parked is parked again, Z170), and never release a deletion stamped by another device's ID. The move of
+  the old ID's sync state is recorded, signed (`AccountRecord.migration`, `SignatureDomain.deviceMigration`), in the
+  commit that names the new ID, and `completeDeviceMigration` makes it again at each unlock and sync until it is
+  complete (Z181): never do any of it under `try?` after that commit, never publish while it is incomplete
+  (`deviceMigrationIncomplete`), never register a further ID over it, and act on no record the session did not sign.
+  The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
+  whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's
+  deletions go out, the new ID's own included (Z170); `copiesNobodyReceived` names those items for the summary (Z171). Every engine pass in
   `syncAll`, replays included, defers deletions; they go out once, last (Z55).
 - Search runs over decrypted items in memory (`ItemSearch`); nothing is indexed on disk, and secret fields are
   never searched.
@@ -848,11 +860,15 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `sharing.registries` or the own view's `devices`/`revoked` directly in shared vault code, but in `ownStreamSigner`,
   which names who signed an object that counts nowhere and decides nothing (Z164).
 - **This device takes part in a shared vault only if its own ID commits** (`thisDeviceCommits`, Z162): otherwise
-  `checkSharedWrite`, `checkSharedDeletion`, `shareVault` and `acceptInvitation` throw `deviceIDDoesNotCommit`, the
+  `checkSharedWrite`, `checkSharedDeletion`, `shareVault` and `acceptInvitation` throw `deviceIDDoesNotCommit` (or
+  `deviceKeyUnreadable` when the key could not be read, a retry, never "enrol again", Z169), the
   engine publishes nothing there (`sharedEngineOptions(ownIDCommits:)`, reported), and `syncVerifyOwn` leaves its own
   objects there undecided. A device of an account from before IDs committed takes part once enrolled again as a new
   device (owner decision). `playModifiedClient` (package only) is for tests playing an adversary's device under another
-  device's ID; nothing in production sets it. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
+  device's ID; nothing in production sets it, and `assert-unsafe-confined.sh` refuses it, `playsModifiedClient`,
+  `enrol(…, assigningDeviceID:)`, `MemberKeyCheck.unchecked(in:)` and `MemberKeyCheck`'s initialiser anywhere in
+  `Sources/` or `Apps/` but the lines it lists for them (`hook_lines`, file and whole line, each as many times as it is listed) and
+  `WatchwordTestSupport` (Z168, Z172, Z178): a new line naming one gets an entry there, and a new `package` hook of that kind one in `test_hooks`. A segment of an account whose work cannot count at all is passed over in sequence and nothing of it kept
   (`SegmentAdmission.passOver`, Z137): never refuse one at download, where no device would ever step over it. It is not
   recorded at all (no cut runs over it; the change of head that lets its account write replays the log, which records
   it then), so a never-writing member grows no index (Z146 and Z155, superseded by Z157).
@@ -863,7 +879,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   writer chose (S36). Then its clock (`knowledgeCounts`): every edit it contains, of any device but its own writer's,
   must have been published in a segment of that device's stream that counts, so a version built on a late write is
   held aside with it (S44), and one claiming a current member's edits their stream has not published waits for it
-  (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z136; a stream with
+  (S46; a claim beyond this device's own published edits is refused, asked before anything else, Z136, and so is one
+  about an ID of this account that nobody receives whose values this device's row holds, unless carried, Z179; a stream with
   no first segment here is waited for, never taken for one that cannot be read; a stream that will never grow here, a
   revoked device's or an owner's device's whose first segments were collected before sharing, is never waited for, and
   what names it is believed for an account that may write, Z144). The revoked devices (`revokedDevices`, the same set
@@ -1238,7 +1255,8 @@ directions are tested; keep both when adjusting constants.
 - **Script tests** (`Tests/ScriptTests`, Python `unittest`, `mise run test:scripts`) cover the scripts Swift tests
   cannot reach: `screenshots-index.py`, the `app:screenshots` task, `app:diagnose` and its helpers, the inline steps of
   `screenshots.yml` and `ci.yml`'s `Required checks`, and the supply-chain gates themselves (`audit:actions`, the adversarial-suite check,
-  `audit:mise-pins`, `assert-no-dependencies.sh` with its `Apps/project.yml` allowlist, the app tasks' resolved-package
+  `audit:mise-pins`, `assert-no-dependencies.sh` with its `Apps/project.yml` allowlist, `assert-unsafe-confined.sh`'s
+  test-hook check, the app tasks' resolved-package
   check and `app:release`, `cloud-setup.sh`), each run
   as it is against stand-ins for `gh`, `curl`, `mise`, `xcrun`, `sips`, `swift`, `xcodebuild` and `gpg`. Standard library
   only, Python 3.9 syntax (Xcode's `python3`), and bash that macOS's 3.2 runs. A change to one of those scripts needs

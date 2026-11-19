@@ -173,4 +173,7 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// text (`SharingCodes.text(for:)`); the joiner, who checked this device, pastes it (docs/06-adversarial-review.md,
     /// V22).
     case invitationNotDelivered(Invitation)
+    /// This device's key could not be read just now (the Keychain failed), so whether its ID commits is unknown.
+    /// Refused as `deviceIDDoesNotCommit` would be, and worth trying again: nothing is wrong with the device.
+    case deviceKeyUnreadable
 }

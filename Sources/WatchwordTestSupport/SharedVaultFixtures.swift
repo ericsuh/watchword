@@ -36,16 +36,17 @@ public struct SharingAccount: Sendable {
         bundle.fingerprint.safetyNumber
     }
 
+    /// `store` is the device's record store (a test's hook over one); a fresh in-memory store by default.
     public static func make(
         over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory, seed: UInt64,
-        hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil, board: (any SharingBoard)? = nil
+        hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil, board: (any SharingBoard)? = nil,
+        store: (any RecordStore)? = nil
     ) async throws -> SharingAccount {
-        let vault =
-            configuration.map {
-                TestVault(
-                    sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport, configuration: $0),
-                    seed: seed, hygiene: hygiene)
-            } ?? TestVault.syncing(over: transport, seed: seed, hygiene: hygiene)
+        let syncState = InMemorySyncStateStore()
+        let sync =
+            configuration.map { SyncSettings(state: syncState, transport: transport, configuration: $0) }
+            ?? SyncSettings(state: syncState, transport: transport)
+        let vault = TestVault(store: store ?? InMemoryRecordStore(), sync: sync, seed: seed, hygiene: hygiene)
         try await vault.createAccount()
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
@@ -66,12 +67,12 @@ public struct SharingAccount: Sendable {
     /// unlocked, with sharing configured over sharing state and contacts of its own: pins, ledgers and stream
     /// indexes are per device (review finding S35), so it starts with none. `modifiedClient` makes it an adversary's
     /// modified client (`VaultSession.playModifiedClient`, Z162): it writes, accepts and publishes in a shared vault
-    /// whatever its ID, where an honest client whose ID does not commit refuses to.
+    /// whatever its ID, where an honest client whose ID does not commit refuses to. `syncState` is its sync state store.
     public func enrolledDevice(
         deviceID: UUID? = nil, over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory,
-        modifiedClient: Bool = false
+        modifiedClient: Bool = false, syncState: (any SyncStateStore)? = nil
     ) async throws -> SharingAccount {
-        let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport)
+        let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport, syncState: syncState)
         if modifiedClient { await device.session.playModifiedClient() }
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
@@ -128,12 +129,13 @@ public struct SharedVaultHousehold: Sendable {
 
     public init() {}
 
-    public func account(seed: UInt64, hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil)
-        async throws -> SharingAccount
-    {
+    public func account(
+        seed: UInt64, hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil,
+        store: (any RecordStore)? = nil
+    ) async throws -> SharingAccount {
         try await SharingAccount.make(
             over: transport, directory: directory, seed: seed, hygiene: hygiene, configuration: configuration,
-            board: board)
+            board: board, store: store)
     }
 
     /// An owner with a new shared vault called `name`, and one member per role, each invited and joined.

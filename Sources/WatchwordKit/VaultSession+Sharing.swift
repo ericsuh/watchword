@@ -275,6 +275,10 @@ public struct SharedVaultSyncReport: Sendable, Equatable {
     /// the vault, where no other device would receive it, and nothing is written there until the device is enrolled
     /// again as a new device (`SharedVaultError.deviceIDDoesNotCommit`).
     public var deviceIDDoesNotCommit = false
+    /// This device's key could not be read this sync (a Keychain error, not a key that is missing or does not
+    /// commit): nothing of this device's was published in the vault, and the next sync tries again
+    /// (`SharedVaultError.deviceKeyUnreadable`).
+    public var deviceKeyUnreadable = false
     /// The account whose keys signed the object that holds this device's next number in the vault's log, where the
     /// engine reported `ownStreamConflict` (round 6's L2): a member who listed a device under this device's ID in
     /// their own registry (S33) signed it. It verifies nowhere (Z157) and costs nothing but this stream, which waits
@@ -1596,10 +1600,12 @@ extension VaultSession {
     /// (`DeviceIdentifier`, review findings Z157 and Z162). Every device of a shared vault counts only the devices whose
     /// IDs commit, so a device whose ID does not (an account made before IDs committed, a device an older build
     /// approved) writes nothing there that anyone receives. `false` with no key held: such a device registers again,
-    /// as a new device, at its next unlock.
-    func thisDeviceCommits(_ account: AccountRecord) async -> Bool {
+    /// as a new device, at its next unlock. Throws what the key store threw (a Keychain that could not be read just
+    /// now, review of round 7): that says nothing about the ID, and every caller fails closed on it without calling the
+    /// device one whose ID does not commit (`SharedVaultError.deviceKeyUnreadable`).
+    func thisDeviceCommits(_ account: AccountRecord) async throws -> Bool {
         if playsModifiedClient { return true }
-        guard let key = try? await deviceKeys.publicKey(accountID: account.accountID, deviceID: account.deviceID)
+        guard let key = try await deviceKeys.publicKey(accountID: account.accountID, deviceID: account.deviceID)
         else { return false }
         return DeviceIdentifier.commits(account.deviceID, to: account.accountID, key: key)
     }
@@ -1610,7 +1616,13 @@ extension VaultSession {
     /// (PRD F7.6). A device of an account from before IDs committed takes part once it is enrolled again as a new device
     /// (an owner decision, docs/06-adversarial-review.md Z162).
     func requireCommittingDevice(_ account: AccountRecord) async throws {
-        guard await thisDeviceCommits(account) else { throw SharedVaultError.deviceIDDoesNotCommit }
+        let commits: Bool
+        do {
+            commits = try await thisDeviceCommits(account)
+        } catch {
+            throw SharedVaultError.deviceKeyUnreadable
+        }
+        guard commits else { throw SharedVaultError.deviceIDDoesNotCommit }
     }
 
     /// For `playsModifiedClient`; `false` makes it the honest client again (a build that refuses, after one that did

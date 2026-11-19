@@ -76,10 +76,12 @@ public struct TestVault: Sendable {
     /// transport alone, with the account password and the Secret Key off the Emergency Kit. Its ID commits to the
     /// account under its key, as every production device's does (`DeviceIdentifier`, Z157); `deviceID` names the new
     /// device instead, so a test can address its stream, and such a device counts for nothing in a shared vault.
+    /// `syncState` is its sync state store (a test's hook over one); a fresh in-memory one by default.
     /// Returned locked, as a device is until someone unlocks it.
     public func enrolledDevice(
         deviceID: UUID? = nil, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64? = nil,
-        password: String = TestVault.password, name: String = "", hygiene: HygieneSettings? = nil
+        password: String = TestVault.password, name: String = "", hygiene: HygieneSettings? = nil,
+        syncState: (any SyncStateStore)? = nil
     ) async throws -> TestVault {
         try await session.sync()
         let kit = try await session.emergencyKit(password: password)
@@ -87,7 +89,8 @@ public struct TestVault: Sendable {
         let ownSeed =
             seed ?? (deviceID ?? UUID()).uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }
         let device = TestVault(
-            clock: clock ?? self.clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport),
+            clock: clock ?? self.clock,
+            sync: SyncSettings(state: syncState ?? InMemorySyncStateStore(), transport: transport),
             seed: ownSeed, deviceName: name, hygiene: hygiene)
         try await device.session.enrol(
             password: password, secretKey: kit.secretKey, accountID: kit.accountID, assigningDeviceID: deviceID)

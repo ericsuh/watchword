@@ -171,6 +171,8 @@ public final class DevicesModel: LockSensitive {
     public var storageNeedsUpload: Bool { sync?.storageNeedsUpload ?? false }
 
     private let context: ScreenContext
+    /// How many locks this model has been told of: a sync notes it first, and stores nothing it made across one.
+    private var lockGeneration = 0
 
     public init(context: ScreenContext) {
         self.context = context
@@ -179,9 +181,12 @@ public final class DevicesModel: LockSensitive {
     }
 
     public func dropOnLock() {
+        lockGeneration &+= 1
         revocation = RevocationForm()
         // A question answered after a lock would be answered unread.
         reuploadQuestion = nil
+        // The last sync's summary names items and vaults by title (Z171): it does not outlast the keys (Z176).
+        sync = nil
     }
 
     /// How sentences name each device, by ID, for wording reports that name devices.
@@ -197,10 +202,15 @@ public final class DevicesModel: LockSensitive {
 
     public func syncNow() async {
         guard isSyncConfigured else { return }
+        // The summary is stored after the sync's awaits, and a lock that landed during them has cleared it already
+        // (Z176): one made across a lock is dropped, not stored on a locked screen (review of round 10, Z183).
+        let generation = lockGeneration
         await perform {
             let report = try await context.session.syncAll()
             try await reload()
-            sync = SyncSummary(report, deviceNames: names)
+            let summary = await SyncSummary.loading(report, deviceNames: names, from: context.session)
+            guard generation == lockGeneration else { return }
+            sync = summary
         }
     }
 
@@ -231,11 +241,16 @@ public final class DevicesModel: LockSensitive {
     public func confirmUpload(_ question: ReuploadQuestion) async -> Bool {
         var done = false
         reuploadQuestion = nil
+        // As `syncNow`: the summary names copies by title (Z171), is read from the session, and is dropped if a lock
+        // landed during the awaits (Z176, Z183).
+        let generation = lockGeneration
         await perform {
             do {
                 let report = try await context.session.reuploadAfterStoreReset(confirming: question.plan)
                 try await reload()
-                sync = SyncSummary(report, deviceNames: names)
+                let summary = await SyncSummary.loading(report, deviceNames: names, from: context.session)
+                guard generation == lockGeneration else { return }
+                sync = summary
                 if Self.uploadFinished(report, uploading: question.plan) {
                     notice = "This device uploaded what it holds. Your other devices will pick it up when they sync."
                     done = true

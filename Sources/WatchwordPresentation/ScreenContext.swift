@@ -45,6 +45,9 @@ public final class LockSignal {
 
     private var entries: [Entry] = []
     private var watch: Task<Void, Never>?
+    /// How many times the signal has fired: work that stores what must go with the keys notes it before its awaits and
+    /// stores nothing if it changed (review of round 10, Z183).
+    public private(set) var generation = 0
 
     public init() {}
 
@@ -74,6 +77,7 @@ public final class LockSignal {
 
     /// Drops what every registered model holds. The app also calls it on its own lock paths; twice is harmless.
     public func fire() {
+        generation &+= 1
         entries.removeAll { $0.model == nil }
         for entry in entries { entry.model?.dropOnLock() }
     }

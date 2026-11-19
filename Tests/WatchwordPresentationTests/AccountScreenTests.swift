@@ -116,6 +116,68 @@ struct DevicesModelTests {
         locks.stop()
     }
 
+    /// The summary can name items and vaults by title (Z171), which a locked screen does not show (Z176).
+    @Test("the last sync's summary is cleared by a lock of the session")
+    func syncSummaryClearedOnLock() async throws {
+        let devices = try await TwoDevices.make()
+        let locks = await LockSignal.watching(devices.first.session)
+        let model = DevicesModel(context: ScreenContext(session: devices.first.session, locks: locks))
+        await model.syncNow()
+        #expect(model.sync != nil)
+        await devices.first.session.lock()
+        for _ in 0..<1000 where model.sync != nil { await Task.yield() }
+        #expect(model.sync == nil)
+        locks.stop()
+    }
+
+    /// The summary was stored after the sync's awaits, so a lock that landed after the sync but before the summary
+    /// was stored (here in the reload's reads of the device's standing, which do not throw), whose clearing had
+    /// already run, left the summary of that sync on a locked screen (review of round 10, Z183). The model notes the
+    /// lock generation before the sync and drops the result if it changed.
+    @Test("a lock after the sync but before its summary is stored leaves no summary behind")
+    func lockBeforeSummaryLeavesNone() async throws {
+        let store = LockingStore()
+        let sync = SyncSettings(state: InMemorySyncStateStore(), transport: InMemorySyncTransport())
+        let vault = TestVault(store: store, sync: sync, seed: 183)
+        try await vault.createAccount()
+        let locks = await LockSignal.watching(vault.session)
+        let model = DevicesModel(context: ScreenContext(session: vault.session, locks: locks))
+        let probe = LockProbe()
+        locks.register(probe)
+        // Quiet syncs, then how many reads the sync and the reload's list of devices make before the rest of it.
+        await model.syncNow()
+        await model.syncNow()
+        await store.resetCount()
+        _ = try await vault.session.syncAll()
+        _ = try await vault.session.devices()
+        let beforeStanding = await store.reads
+        await store.arm(atRead: beforeStanding + 1, vault.session, until: { await probe.drops > 0 })
+        await model.syncNow()
+        let state = try await vault.session.state()
+        #expect(state == .locked)
+        #expect(probe.drops == 1, "the lock's clearing had not run before the summary was stored")
+        #expect(model.sync == nil)
+        locks.stop()
+    }
+
+    /// What the Settings summary notes before its sync (`AppModel.syncNow`, not built here; Z183): every lock of the
+    /// session, and every lock the app reports itself, moves it.
+    @Test("the lock signal's generation moves with every lock")
+    func lockSignalGeneration() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let locks = await LockSignal.watching(vault.session)
+        let probe = LockProbe()
+        locks.register(probe)
+        #expect(locks.generation == 0)
+        await vault.session.lock()
+        for _ in 0..<1000 where probe.drops == 0 { await Task.yield() }
+        #expect(locks.generation == 1)
+        locks.fire()
+        #expect(locks.generation == 2)
+        locks.stop()
+    }
+
     @Test("keeping the password needs both statements confirmed")
     func keepPasswordNeedsConfirmations() {
         var form = RevocationForm()
