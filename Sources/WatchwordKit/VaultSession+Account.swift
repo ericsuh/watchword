@@ -988,23 +988,25 @@ extension VaultSession {
     /// vault's current key. A row that does not open is left as it is; it carries nothing this device can read. One
     /// whose vault has no current key here is left too, and the move records it for a later sync to carry
     /// (`SyncState.restoredUnpublished`, review of round 12, M1). With `reattributing`, an item in a vault that may be
-    /// shared has what the old ID wrote above the version it published written as the new ID's
-    /// (`ItemMerge.reattributed`, Z191).
+    /// shared is left the same way: what the old ID wrote there above what it published is written as the new ID's
+    /// (`ItemMerge.reattributed`, Z191), and what it published is known only once a sync has pulled the vault's log
+    /// (review of round 13, M2). The backup's own record of that can be older than the old ID's last publish.
     func carriedOver(_ rows: [UnpublishedRow], keys: UnlockedKeys, as updated: AccountRecord, reattributing: Bool)
         throws -> [(row: StoredRecord, replacing: UInt64)]
     {
         var result: [(row: StoredRecord, replacing: UInt64)] = []
-        for (row, published) in rows {
+        for (row, _) in rows {
             guard let vaultKey = currentVaultKey(row.vaultID, keys: keys, account: updated) else { continue }
+            if row.kind == .item, reattributing,
+                isMarkedShared(row.vaultID, keys: keys, personalVaultID: updated.personalVaultID)
+            {
+                continue
+            }
             let revision = try nextRevision(in: row.vaultID, above: row, account: updated)
             highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, revision.version)
             switch row.kind {
             case .item:
-                guard var item = try? openItem(row, keys: keys) else { continue }
-                if reattributing, isMarkedShared(row.vaultID, keys: keys, personalVaultID: updated.personalVaultID) {
-                    item = ItemMerge.reattributed(
-                        item, origin: Self.origin(row), from: row.deviceID, above: published, to: updated.deviceID)
-                }
+                guard let item = try? openItem(row, keys: keys) else { continue }
                 let written = ItemMerge.written(item, as: revision)
                 result.append((try sealItem(written, vaultKey: vaultKey, account: updated), row.version))
             case .vaultMetadata:

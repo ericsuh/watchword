@@ -61,16 +61,25 @@ extension VaultSession {
     /// (Z191). An entry is dropped once nothing of it is left to carry: carried, or replaced by a version that holds
     /// none of that work, or no longer in the store, or unreadable under the vault's key.
     ///
-    /// Run by `syncAll` before any vault's log, so that what it writes is published in the same sync, ahead of any
-    /// deletion. A step that fails keeps its entry for the next sync; meanwhile the deletion gate holds every
-    /// deletion back while a row it names holds that work (`holdsRestoredWork`).
-    func carryRestoredWork(account: AccountRecord, view: RegistryView?, since epoch: UInt64) async {
-        guard let syncState, let base = syncSettings?.state, let view,
-            let vaults = try? await vaultDirectory(account).keys
-        else { return }
+    /// What counts as published of the earlier ID's work is the most of three (review of round 13, M2): the version
+    /// its own signed state recorded (`left.version`), the highest version of the record that ID's stream carried as
+    /// the stream index shows it (`publishedBound`), and what the item shows a third device saw of it
+    /// (`ItemMerge.reattributed`). A backup older than the earlier ID's last publish, or a state lost with the
+    /// restore, so renames none of what that ID published: renamed, it would have come back beside itself, its
+    /// superseded values as conflicts and an item it deleted as one kept after the deletion.
+    ///
+    /// Run by `syncAll` for the vaults in `vaults`: those whose log this sync has pulled, after it, so that the stream
+    /// index is the transport's and not the backup's; their pass published nothing, so that no merge of the rows
+    /// still holding the earlier ID's work went out before it was carried. The carried rows go out at the next sync,
+    /// ahead of any deletion. A step that fails keeps its entry for the next sync; meanwhile the deletion gate holds
+    /// every deletion back while a row it names holds that work (`holdsRestoredWork`).
+    func carryRestoredWork(account: AccountRecord, view: RegistryView?, since epoch: UInt64, in vaults: Set<UUID>)
+        async
+    {
+        guard let syncState, let base = syncSettings?.state, let view else { return }
         let own = account.deviceID
         let parked = Self.parkedDeletionDevice(of: own)
-        for vaultID in vaults {
+        for vaultID in vaults.sorted(by: { $0.uuidString < $1.uuidString }) {
             guard let keys = try? requireKeys(since: epoch),
                 let vaultKey = currentVaultKey(vaultID, keys: keys, account: account),
                 var state = try? await syncState.loadState(vaultID: vaultID), !state.restoredUnpublished.isEmpty,
@@ -78,8 +87,9 @@ extension VaultSession {
                 let signingKey = try? keys.keyset.publicKeyBundle().signingKey
             else { continue }
             var remaining: [RecordKey: RecordStamp] = [:]
-            for (key, left) in state.restoredUnpublished {
+            for (key, recorded) in state.restoredUnpublished {
                 guard (try? requireKeys(since: epoch)) != nil else { return }
+                let left = publishedBound(recorded, of: key, in: vaultID)
                 let reattributing = !Self.idsNobodyReceives(account: account, view: view, including: left.device)
                     .contains(left.device)
                 let row: StoredRecord?
@@ -87,7 +97,7 @@ extension VaultSession {
                     row = try await store.record(key)
                 } catch {
                     // Not read now: tried again at the next sync.
-                    remaining[key] = left
+                    remaining[key] = recorded
                     continue
                 }
                 var keep = false
@@ -135,12 +145,30 @@ extension VaultSession {
                         keep = true
                     }
                 }
-                if keep { remaining[key] = left }
+                if keep { remaining[key] = recorded }
             }
             guard remaining != state.restoredUnpublished, (try? requireKeys(since: epoch)) != nil else { continue }
             state.restoredUnpublished = remaining
             try? await syncState.saveState(state)
         }
+    }
+
+    /// `left` (an entry of `SyncState.restoredUnpublished`) with its version raised to the highest version of the
+    /// record that `left.device`'s own stream carried in `vaultID`, as the stream index shows it (review of round 13,
+    /// M2): whatever that stream carried was published, whatever the earlier ID's state said.
+    func publishedBound(_ left: RecordStamp, of key: RecordKey, in vaultID: UUID) -> RecordStamp {
+        let carried =
+            sharing.vaults[vaultID]?.index.highestVersionCarried(
+                by: left.device, of: key.recordID, kind: key.kind.rawValue) ?? 0
+        return RecordStamp(version: max(left.version, carried), device: left.device)
+    }
+
+    /// Whether `vaultID`'s signed state records anything a restore has still to carry over there: its first pass of a
+    /// sync then publishes nothing (`syncAll`, review of round 13, M2).
+    func restoredWorkToCarry(in vaultID: UUID) async -> Bool {
+        guard let syncState else { return false }
+        guard let state = try? await syncState.loadState(vaultID: vaultID) else { return false }
+        return !state.restoredUnpublished.isEmpty
     }
 
     /// Whether `item`, read from `row`, holds work of `left.device` above `left.version`: its clock's count for that
@@ -159,7 +187,8 @@ extension VaultSession {
         let keys = keys
         let vaultKey = keys.flatMap { currentVaultKey(vaultID, keys: $0, account: account) }
         var items: Set<UUID> = []
-        for (key, left) in restored {
+        for (key, recorded) in restored {
+            let left = publishedBound(recorded, of: key, in: vaultID)
             let row: StoredRecord?
             do {
                 row = try await store.record(key)

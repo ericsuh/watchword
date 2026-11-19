@@ -100,9 +100,6 @@ extension VaultSession {
         ])
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
-        // What a restore could not carry over for want of a vault key, now that the shared vaults' keys are current,
-        // before any log, so that it is published ahead of any deletion (review of round 12, M1).
-        if mayWrite { await carryRestoredWork(account: record, view: view, since: epoch) }
         if !ownIDCommits {
             for vaultID in sharing.vaults.keys {
                 if deviceKeyUnreadable {
@@ -129,6 +126,9 @@ extension VaultSession {
         // The first failure that stops a sync stops this one: the vaults after it merge what they hold and do not ask
         // the transport again (a throttled store asked once per vault would only throttle longer).
         var stopped = report.transportFailure ?? sharingReports.values.lazy.compactMap(\.transportFailure).first
+        // The vaults holding what a restore has still to carry over: they publish nothing in this sync, and carry it
+        // after their log (review of round 13, M2).
+        var carrying: Set<UUID> = []
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
             let shared = sharedEngineOptions(
@@ -136,9 +136,20 @@ extension VaultSession {
                 ownIDCommits: ownIDCommits)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 let requests = sharedReplayRequests(vaultID)
+                if await restoredWorkToCarry(in: vaultID) { carrying.insert(vaultID) }
+                let stoppedBefore = stopped
                 vaultReport = try await engine(vaultID).sync(
-                    reconcile: reconcile || shared.reconcile, deferringDeletions: true, publishing: shared.publishing,
-                    transportStopped: stopped)
+                    reconcile: reconcile || shared.reconcile, deferringDeletions: true,
+                    publishing: shared.publishing && !carrying.contains(vaultID), transportStopped: stopped)
+                // What a restore left, carried once the vault's log has been pulled since it, so that the stream
+                // index shows what the earlier device ID published (review of round 13, M2), and before a replay
+                // (whose take-out leaves these rows alone, `takeOutWhatNoLongerCounts`). Published at the next sync;
+                // meanwhile the hold below keeps every deletion back.
+                if carrying.contains(vaultID), stoppedBefore == nil, !vaultReport.transportUnavailable,
+                    vaultReport.transportFailure == nil
+                {
+                    await carryRestoredWork(account: record, view: view, since: epoch, in: [vaultID])
+                }
                 await sharedEngineDidRun(
                     vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport, requestsBefore: requests)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
@@ -184,7 +195,8 @@ extension VaultSession {
                     ownIDCommits: ownIDCommits)
                 let requests = sharedReplayRequests(vaultID)
                 let second = try await engine(vaultID).sync(
-                    reconcile: true, deferringDeletions: true, publishing: shared.publishing)
+                    reconcile: true, deferringDeletions: true,
+                    publishing: shared.publishing && !carrying.contains(vaultID))
                 await sharedEngineDidRun(vaultID, reconciled: true, report: second, requestsBefore: requests)
                 if second.deletionsDeferred > 0, !deferred.contains(vaultID) { deferred.append(vaultID) }
                 if second.transportUnavailable || second.ownStreamConflict != nil || second.ownStreamExhausted

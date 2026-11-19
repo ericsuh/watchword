@@ -191,3 +191,85 @@ extension AdversarialSharedVaultTests {
         #expect(try await restored.session.quarantine().isEmpty, "the restored device held its own work aside")
     }
 }
+
+// The review of round 13 (docs/06-adversarial-review.md Z197, M2): what a restore's carry counts as published. In the
+// suite "shared vaults through the session".
+extension AdversarialSharedVaultTests {
+    /// The member's store as it was when `backup` was taken, restored onto other hardware: the item's row, the
+    /// vault's sync state and the stream index put back, the device key lost.
+    struct Backup {
+        let row: StoredRecord
+        let state: SyncState?
+        let index: [UInt8]?
+
+        static func take(of member: SharingAccount, item: UUID, vaultID: UUID) async throws -> Backup {
+            let state = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+            return Backup(
+                row: try #require(try await member.vault.store.record(RecordKey(recordID: item, kind: .item))),
+                state: await state.loadState(vaultID: vaultID),
+                index: await member.state.value(.streamIndex, vaultID: vaultID))
+        }
+
+        func restore(_ member: SharingAccount, household: SharedVaultHousehold, seed: UInt64) async throws
+            -> TestVault
+        {
+            await member.session.lock()
+            let store = try #require(member.vault.store as? InMemoryRecordStore)
+            await store.tamper(row)
+            let syncState = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+            if let state { await syncState.tamper(state) }
+            await member.state.tamper(.streamIndex, vaultID: row.vaultID, value: index)
+            await member.vault.forgetDeviceKey(accountID: member.accountID)
+            let restored = member.vault.relaunched(seed: seed)
+            await restored.session.configureSharing(
+                SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+            try await restored.session.unlock(password: TestVault.password)
+            return restored
+        }
+    }
+
+    /// Threat: none needed but a backup older than the device's last publish; the review of round 13, M2. The member
+    /// renames an item of a shared vault, the store is backed up before that is published, then the rename goes out
+    /// and the member renames the item again. Restored from that backup onto other hardware, the device carried the
+    /// first rename over as its new ID's, reading what was published from the backup's sync state: the vault's
+    /// members then held it beside the second rename, which superseded only the old ID's copy, and the title the
+    /// person had replaced came back as a conflict on every device. What counts as published is now also what the
+    /// old ID's stream carried, read once the vault's log has been pulled: nothing is renamed, and nothing comes back.
+    /// The same with the backup's sync state edited (A8), so that it says nothing was published at all.
+    @Test(
+        "a restore from a backup older than the device's last publish brings back nothing it replaced",
+        arguments: [false, true])
+    func restoreFromALaggingBackup(stateEdited: Bool) async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 19_700)
+        let member = members[0]
+        let saved = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+
+        var first = try await member.session.item(id: saved.id)
+        first.title = "Bank, first"
+        _ = try await member.session.save(first)
+        var backup = try await Backup.take(of: member, item: saved.id, vaultID: vaultID)
+        if stateEdited, var state = backup.state {
+            state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+            backup = Backup(row: backup.row, state: state, index: backup.index)
+        }
+        try await Self.syncAll([member, owner])
+        var second = try await member.session.item(id: saved.id)
+        second.title = "Bank, second"
+        _ = try await member.session.save(second)
+        try await Self.syncAll([member, owner])
+
+        let restored = try await backup.restore(member, household: household, seed: 19_701)
+        _ = try await restored.session.syncAll()
+        _ = try await restored.session.syncAll()
+        try await Self.syncAll([owner])
+        let atOwner = try await owner.session.item(id: saved.id)
+        #expect(atOwner.title == "Bank, second")
+        #expect(!atOwner.hasConflicts, "the replaced title came back beside the one that replaced it")
+        #expect(try await owner.session.quarantine().isEmpty)
+        let here = try await restored.session.item(id: saved.id)
+        #expect(here.title == "Bank, second")
+        #expect(!here.hasConflicts)
+    }
+}
