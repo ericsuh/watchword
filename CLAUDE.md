@@ -761,15 +761,19 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   `rowsLeftByEarlierIDs`, Z200) and are named in `restoredWorkWaiting`; only carrying them, a version that holds none
   of that work, the vault deleted or left (`restoredWorkReleased`, reported as `restoredWorkKeptHere`), or the person
   (`stopWaitingForRestoredWork`, one action per vault, offered and accepted only where the vault has no current key
-  here or a disputed owner, Z205; it marks the entries `dismissedVersion`) ends the hold (Z192, Z199). A restore's
-  chain of earlier IDs (`restoredChain`) is the move under way, the entries of states that verify, and each vault's
-  chain row (`RestoredChainRow`, `WWRC`, signed, bound to the vault and this device's ID), which the move writes
-  before the vault's state and each later save of the entries rewrites, so it outlives a damaged state (Z200): never
-  read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206, Z211, Z216:
-  a restored device's registration descends from every sibling enrolled before the restore, so the registry cannot
-  tell them apart). Old hardware still running under the old ID that publishes the same work later leaves members both
-  copies, recorded (Z198). A version kept after this device's own pending deletion holds no deletion back (Z202), and
-  only pending deletions read through `syncState` (the session's signed ones) count there: never decide on
+  here or a disputed owner, Z205; it marks the entries `dismissedVersion`) ends the hold (Z192, Z199). A restore's chain
+  of earlier IDs (`restoredChain`) is the move under way (its record verified, Z227), the entries of states that verify,
+  and each vault's chain row (`RestoredChainRow`, `WWRC`, signed, bound to the vault and this device's ID), which the
+  move writes before the vault's state, adding to it (Z225), and each later save of the entries rewrites, so it outlives
+  a damaged state (Z200). The row needs the keys and sharing configured, so `backfillRestoredChains` adds what a
+  verified state names and the row lacks when sharing is configured unlocked, after each unlock and at each sync (Z222):
+  a new way for sharing to become configured calls it too. Only the carry and Stop Waiting narrow the row. Where no
+  state verifies, the move finds the rows of the IDs the chain row names (this device's row, or the earlier ID's own,
+  Z226). Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
+  Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
+  cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves
+  members both copies, recorded (Z198). A version kept after this device's own pending deletion holds no deletion back
+  (Z202), and only pending deletions read through `syncState` (the session's signed ones) count there: never decide on
   `syncSettings.state`'s raw `pendingDeletions` without checking the signature (Z203).
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
   whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's
