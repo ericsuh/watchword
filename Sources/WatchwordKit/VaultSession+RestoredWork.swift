@@ -350,7 +350,10 @@ extension VaultSession {
     ///
     /// Throws where a chain row could not be read (review of round 19, Z236): read as none, a sharing store that
     /// failed once beside a state that does not verify left the chain empty and the hold open. Every caller fails
-    /// closed on it: the gate holds, and nothing is recorded or stopped.
+    /// closed on it: the gate holds, and nothing is recorded or stopped. So it does where the vault directory or a
+    /// vault's state could not be read (review of round 21, Z245): read as none, a listing that failed once left the
+    /// chain without a row or a verified entry, and the hold of a shared vault whose damaged state left its chain row
+    /// the only record of a restore's copy opened.
     ///
     /// The rows only of vaults that may be shared (review of round 20, Z239): only there does a restore record
     /// anything (`restoredWork`, `recordRestoredWorkLeft`), so only there is a row written, and a row read elsewhere
@@ -364,9 +367,9 @@ extension VaultSession {
         {
             chain.insert(migration.previousDeviceID)
         }
-        guard let base = syncSettings?.state, let vaults = try? await vaultDirectory(account).keys else { return chain }
-        for vaultID in vaults {
-            if let raw = try? await base.loadState(vaultID: vaultID),
+        guard let base = syncSettings?.state else { return chain }
+        for vaultID in try await vaultDirectory(account).keys {
+            if let raw = try await base.loadState(vaultID: vaultID),
                 let verified = await verifiedSyncState(raw, vaultID: vaultID)
             {
                 for left in verified.restoredUnpublished.values where !Self.isDismissed(left) {
@@ -388,10 +391,13 @@ extension VaultSession {
     struct RestoredChainRead {
         /// The chain, once read.
         fileprivate(set) var chain: Set<UUID>?
-        /// A row could not be read: asked again, the chain stays unread for the rest of the pass.
+        /// The chain could not be read: asked again, it stays unread for the rest of the pass.
         fileprivate(set) var failed = false
-        /// The vaults whose judgement asked for the chain while it could not be read: each fails closed, and the sync
-        /// says so (`AccountSyncReport.restoredChainUnreadable`).
+        /// What failed was a chain row (`RestoredChainRowUnreadable`), not the directory or a state (Z245), which the
+        /// sync reports as it reports any other failed read.
+        fileprivate(set) var rowUnreadable = false
+        /// The vaults whose judgement asked for the chain while a row could not be read: each fails closed, and the
+        /// sync says so (`AccountSyncReport.restoredChainUnreadable`).
         fileprivate(set) var unreadableFor: Set<UUID> = []
     }
 
@@ -402,17 +408,21 @@ extension VaultSession {
         let vaultID: UUID
     }
 
-    /// The chain `read` holds, read now if it has not been: `nil` (and `vaultID` noted) where a row cannot be read.
+    /// The chain `read` holds, read now if it has not been: `nil` where it cannot be read (a row, the directory or a
+    /// vault's state), and `vaultID` noted where a row could not.
     func restoredChain(_ read: inout RestoredChainRead, for vaultID: UUID, account: AccountRecord) async -> Set<UUID>? {
         if let chain = read.chain { return chain }
         if !read.failed {
-            if let chain = try? await restoredChain(account: account) {
+            do {
+                let chain = try await restoredChain(account: account)
                 read.chain = chain
                 return chain
+            } catch {
+                read.failed = true
+                read.rowUnreadable = error is RestoredChainRowUnreadable
             }
-            read.failed = true
         }
-        read.unreadableFor.insert(vaultID)
+        if read.rowUnreadable { read.unreadableFor.insert(vaultID) }
         return nil
     }
 

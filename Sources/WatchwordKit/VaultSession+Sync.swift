@@ -408,7 +408,15 @@ extension VaultSession {
         } catch {
             return true
         }
-        for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
+        // Rows that cannot be listed hold, as a state that cannot be read does (review of round 21, Z246): read as
+        // none, an edit of this device's that no sync has sent (a move's copy among them) held nothing back.
+        let rows: [StoredRecord]
+        do {
+            rows = try await store.records(in: vaultID, kind: .item)
+        } catch {
+            return true
+        }
+        for row in rows where row.deviceID == account.deviceID {
             if receivedNowhere, holdsValue(ofAny: [account.deviceID], in: row) { return true }
             guard let stamp = known[row.key] else { return true }
             // Known only as a deletion: the log says nothing of a version of it. A move's copy has an ID anyone who
