@@ -405,3 +405,90 @@ extension AdversarialSharedVaultTests {
         #expect(written.isEmpty, "the planted ID was recorded as a restore's earlier ID")
     }
 }
+
+/// A view of a transport that reports itself unavailable for every object under one prefix while `failing` is set:
+/// one vault's log out of reach while everything else syncs.
+actor PrefixUnavailableTransport: SyncTransport {
+    let base: any SyncTransport
+    private var failing: String?
+
+    init(base: any SyncTransport) {
+        self.base = base
+    }
+
+    func fail(under prefix: String?) {
+        failing = prefix
+    }
+
+    private func check(_ name: String) throws {
+        if let failing, name.hasPrefix(failing) { throw SyncTransportError.unavailable }
+    }
+
+    func list(prefix: String) async throws -> [String] {
+        try check(prefix)
+        return try await base.list(prefix: prefix)
+    }
+
+    func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
+        try check(name)
+        return try await base.fetch(name, maximumLength: maximumLength)
+    }
+
+    func create(_ name: String, contents: [UInt8]) async throws {
+        try check(name)
+        try await base.create(name, contents: contents)
+    }
+
+    func delete(_ name: String) async throws {
+        try check(name)
+        try await base.delete(name)
+    }
+}
+
+// The review of round 14 (docs/06-adversarial-review.md Z207, L4): a vault whose publishing waits for a restore's
+// carry. In the suite "shared vaults through the session".
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed but a shared vault's log out of reach after a restore (the transport failing for it; a
+    /// failure in an earlier vault that stops the sync does the same). While a restore has work left to carry in a
+    /// vault, the vault publishes nothing, new edits included, and the carry runs only once its log has been pulled:
+    /// for as long as the log stays out of reach nothing of this device's goes out there, and the sync said nothing
+    /// of it. The sync names the vault now, and stops naming it once the carry is done; the edit then goes out.
+    @Test("a vault whose publishing waits for a restore's carry is named until the carry is done")
+    func publishingHeldForTheCarryIsNamed() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 20_200)
+        let member = members[0]
+        let saved = try await member.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([member, owner])
+        var first = try await member.session.item(id: saved.id)
+        first.title = "Bank, first"
+        _ = try await member.session.save(first)
+
+        // Restored onto other hardware before the rename went out, over a view of the transport that cannot reach
+        // the vault's log.
+        await member.session.lock()
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let view = PrefixUnavailableTransport(base: household.transport)
+        await view.fail(under: SyncObjectLocation.vaultPrefix(vaultID))
+        let state = try #require(member.vault.sync?.state)
+        let restored = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: SyncSettings(state: state, transport: view), seed: 20_201,
+            deviceKeys: member.vault.deviceKeys)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+
+        let held = try await restored.session.syncAll()
+        #expect(held.publishingHeldForCarry == [vaultID], "the vault publishing nothing for the carry is not named")
+        let summary = SyncSummary(held)
+        #expect(summary.notices.contains { $0.id == "publishingHeldForCarry" })
+
+        await view.fail(under: nil)
+        let carried = try await restored.session.syncAll()
+        #expect(carried.publishingHeldForCarry.isEmpty, "named after its carry was done")
+        _ = try await restored.session.syncAll()
+        try await Self.syncAll([owner])
+        #expect(try await owner.session.item(id: saved.id).title == "Bank, first", "the carried edit never went out")
+    }
+}

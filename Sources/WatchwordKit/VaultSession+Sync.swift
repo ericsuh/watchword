@@ -244,6 +244,10 @@ extension VaultSession {
             (report.restoredWorkWaiting, report.restoredWorkKeptHere) = await restoredWorkWaiting(
                 account: record, since: epoch)
             report.deletionsHeldBack.formUnion(report.restoredWorkWaiting.keys)
+            // The vaults whose publishing waits for the carry, and will wait again at the next sync (L4).
+            for vaultID in carrying {
+                if await restoredWorkToCarry(in: vaultID) { report.publishingHeldForCarry.insert(vaultID) }
+            }
         }
         report.sharing = sharingReports
         // What the merges changed is shown to the hygiene engine now, not only at its next query (§13.8).
@@ -1091,6 +1095,14 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// account is no longer a member of (review of round 13, M3). They hold no deletion back, stay on this device as
     /// they are, and reach no other device.
     public var restoredWorkKeptHere: [UUID: Set<UUID>] = [:]
+    /// The vaults that published nothing in this sync, new edits included, and will publish nothing at the next,
+    /// because a restore has still to carry over work there (`SyncState.restoredUnpublished`) and its carry did not
+    /// finish: their log could not be pulled (the transport failing for them, or a failure in an earlier vault that
+    /// stopped the sync), or a step of the carry failed (review of round 14, L4). The carry runs only after a vault's
+    /// log is pulled, and while anything is left to carry the vault publishes nothing, so that no merge of a row still
+    /// holding an earlier ID's work goes out ahead of it. A carry that finishes in this sync is not named: the vault
+    /// publishes at the next.
+    public var publishingHeldForCarry: Set<UUID> = []
     /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
     /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
     /// unlock and sync.

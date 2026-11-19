@@ -208,6 +208,31 @@ struct WordingTests {
         #expect(kept.text.contains("stay on this device only"))
     }
 
+    @Test("vaults whose publishing waits for a restore's carry are named, and nothing is lost (round 14, L4)")
+    func publishingHeldForCarry() throws {
+        let household = UUID()
+        let club = UUID()
+        var report = AccountSyncReport()
+        report.publishingHeldForCarry = [household]
+        let summary = SyncSummary(report, vaultNames: [household: "Household"])
+        let notice = try #require(summary.notices.first { $0.id == "publishingHeldForCarry" })
+        #expect(notice == .publishingHeldForCarry(["Household"], unnamed: 0))
+        #expect(notice.action == nil)
+        let text = notice.text
+        #expect(text.contains("Changes made on this device in “Household” are waiting"))
+        #expect(text.contains("carrying over the changes it made there before it was restored"))
+        #expect(text.contains("Nothing has been lost."))
+        #expect(!text.contains("sent") && !text.contains("received"), "the words the UI tests wait for")
+        #expect(!summary.notices.contains(.deletionsHeldBack), "publishing held for the carry is not a deletion held")
+
+        report.publishingHeldForCarry = [household, club, UUID()]
+        let several = SyncSummary(report, vaultNames: [household: "Household", club: "Club"])
+        let listed = try #require(several.notices.first { $0.id == "publishingHeldForCarry" })
+        #expect(listed.text.contains("in “Club”, “Household” and a shared vault are waiting"))
+        #expect(listed.text.contains("the changes it made in each before"))
+        #expect(SyncSummary(AccountSyncReport()).notices.allSatisfy { $0.id != "publishingHeldForCarry" })
+    }
+
     @Test("a wrong password and tampering read the same", arguments: [CryptoError.authenticationFailed])
     func authenticationFailed(error: CryptoError) {
         #expect(ErrorWording.message(for: error) == "Incorrect password.")

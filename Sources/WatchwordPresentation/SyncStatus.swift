@@ -43,6 +43,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// is no longer a member of or that was deleted: they stay on this device only, and hold nothing back
     /// (`AccountSyncReport.restoredWorkKeptHere`, review of round 13, M3). By vault name and title.
     case restoredWorkKeptHere([UnreceivedCopy])
+    /// Nothing made on this device in these vaults is going out, new edits included, until a restore's carry of
+    /// what this device held there before it was restored has finished (`AccountSyncReport.publishingHeldForCarry`,
+    /// review of round 14, L4). By vault name, sorted, and how many more whose names could not be read.
+    case publishingHeldForCarry([String], unnamed: Int)
 
     /// What the person can do about it from the notice itself, if anything.
     public var action: SyncNoticeAction? {
@@ -65,6 +69,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .copiesReachedNobody: return "copiesReachedNobody"
         case .restoredWorkWaiting: return "restoredWorkWaiting"
         case .restoredWorkKeptHere: return "restoredWorkKeptHere"
+        case .publishingHeldForCarry: return "publishingHeldForCarry"
         }
     }
 
@@ -126,7 +131,24 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "device before it was restored, in a shared vault you are no longer a member of or that was "
                 + "deleted. " + (one ? "They stay" : "Those changes stay") + " on this device only, and deletions "
                 + "made here are not waiting for them."
+        case .publishingHeldForCarry(let names, let unnamed):
+            let vaults =
+                names.map { "“\($0)”" }
+                + (unnamed == 0 ? [] : [unnamed == 1 ? "a shared vault" : "\(unnamed) shared vaults"])
+            let one = vaults.count == 1 && unnamed <= 1
+            return "Changes made on this device in " + Self.list(vaults) + " are waiting: before they go out, this "
+                + "device has to finish carrying over the changes it made " + (one ? "there" : "in each")
+                + " before it was restored. It tries again at each sync. Nothing has been lost."
         }
+    }
+}
+
+extension SyncNotice {
+    /// “A”, “A and B”, “A, B and C”.
+    static func list(_ names: [String]) -> String {
+        guard let last = names.last else { return "" }
+        guard names.count > 1 else { return last }
+        return names.dropLast().joined(separator: ", ") + " and " + last
     }
 }
 
@@ -240,6 +262,11 @@ public struct SyncSummary: Hashable, Sendable {
             }
         }
         if !keptHere.isEmpty { notices.append(.restoredWorkKeptHere(keptHere.sorted())) }
+        if !report.publishingHeldForCarry.isEmpty {
+            let held = report.publishingHeldForCarry.map { vaultNames[$0].flatMap { $0.isEmpty ? nil : $0 } }
+            let named = held.compactMap { $0 }
+            notices.append(.publishingHeldForCarry(named.sorted(), unnamed: held.count - named.count))
+        }
         let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
         if !report.deletionsHeldBack.subtracting(explained).isEmpty {
             notices.append(.deletionsHeldBack)
@@ -258,7 +285,9 @@ public struct SyncSummary: Hashable, Sendable {
         let named =
             report.copiesNobodyReceived.values.flatMap { $0 } + report.restoredWorkWaiting.values.flatMap { $0 }
             + report.restoredWorkKeptHere.values.flatMap { $0 }
-        guard !named.isEmpty else { return SyncSummary(report, deviceNames: names) }
+        guard !named.isEmpty || !report.publishingHeldForCarry.isEmpty else {
+            return SyncSummary(report, deviceNames: names)
+        }
         let vaults = (try? await session.vaults(includingDeleted: true)) ?? []
         var titles: [UUID: String] = [:]
         for itemID in named {
