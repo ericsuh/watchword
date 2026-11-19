@@ -80,11 +80,15 @@ extension VaultSession {
     /// rows, saved a state that verifies and cleared its record, and nothing read the earlier ID's row again (the
     /// backfill reads only verified states, Z222), so the hold ended while the rows were on this device only (PRD
     /// F7.6). So the move waits, its record kept, publishing nothing (`deviceMigrationIncomplete`), until sharing is
-    /// configured: `configureSharing` makes it, and so does the next unlock or sync after it. Only that case waits:
-    /// a vault whose state verifies needs no row (the earlier ID's own state names the IDs before it, and the backfill
-    /// writes this device's row from the state the move saves), so a process that never configures sharing (the
-    /// AutoFill extension) still makes an ordinary move, and leaves this one to the app. Nothing a sync does while it
-    /// waits replaces the state: a download only stages, and nothing that may write runs while a move is pending.
+    /// configured: `configureSharing` makes it, and so does the next unlock or sync after it. Only that case waits,
+    /// and a shared vault with no state at all (one the earlier ID joined and never synced, or a first restore's state
+    /// lost), where `restoredWork` would read the rows too (review of round 19, Z238): a vault whose state verifies,
+    /// for this device's ID (a move made again over what an earlier attempt saved) or for `previous` (a first
+    /// restore), needs no row (the state names the IDs before it, and the backfill writes this device's row from the
+    /// state the move saves), so a process that never configures sharing (the AutoFill extension) still makes those
+    /// moves, and leaves this one to the app (both checks are pinned, Z235). Nothing replaces the state while it
+    /// waits: a download only stages, and nothing that may write a vault's sync state or chain row runs while a move
+    /// is pending (the sync's writes need `mayWrite`, Stop Waiting is refused and the backfill waits, Z234).
     func moveAwaitsSharing(from previous: UUID, account: AccountRecord) async throws -> Bool {
         guard sharing.settings == nil, let base = syncSettings?.state else { return false }
         for vaultID in try await vaultDirectory(account).keys
@@ -417,7 +421,9 @@ extension VaultSession {
             var named = Set(verified.restoredUnpublished.values.filter { !Self.isDismissed($0) }.map(\.device))
             named.remove(account.deviceID)
             guard !named.isEmpty else { continue }
-            guard !named.isSubset(of: await restoredChainRow(in: vaultID, account: account) ?? []) else { continue }
+            guard !named.isSubset(of: (try? await restoredChainRow(in: vaultID, account: account)) ?? []) else {
+                continue
+            }
             guard (try? requireKeys(since: epoch)) != nil else { return }
             try? await noteRestoredChain(
                 verified.restoredUnpublished, in: vaultID, account: account, keeping: true, since: epoch)

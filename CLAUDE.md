@@ -772,7 +772,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the row (Z232). Where no state verifies, the move finds the rows of the IDs the chain row names (this device's row,
   or the earlier ID's own, Z226), read through sharing: a move that would read one without sharing configured waits,
   record kept and nothing published, until `configureSharing` (which makes it) or the next unlock or sync (Z229,
-  `moveAwaitsSharing`); never let it complete without them, and never make an ordinary move wait.
+  `moveAwaitsSharing`; a shared vault with no state at all waits too, Z238); never let it complete without them, and
+  never make a move wait whose vaults' states verify, for the earlier ID or this device's own (Z235). Nothing that may
+  write a vault's sync state or chain row runs while a move is pending (Stop Waiting throws
+  `deviceMigrationIncomplete`, the backfill waits, Z234); the move runs once at a time and only while the store still
+  records it (`migrationInFlight`, Z237); and a chain row that cannot be read throws (Z236): the move is made again,
+  and every other reader fails closed.
   Never read an ID from a state that does not verify, where A8 names another account's device or a sibling (Z206,
   Z211, Z216: a restored device's registration descends from every sibling enrolled before the restore, so the registry
   cannot tell them apart). Old hardware still running under the old ID that publishes the same work later leaves

@@ -16,7 +16,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case registryUnavailable
     /// A restore onto other hardware has not finished moving this device's sync records to its new identity
     /// (`AccountSyncReport.deviceMigrationIncomplete`, review of round 11, Z185): it receives changes and sends none,
-    /// in any vault, until a sync finishes the move.
+    /// in any vault, until the move is made. A sync makes it again after a failure (Z181); one that waits for sharing
+    /// (`moveAwaitsSharing`, Z229) only a process that configures sharing makes, the app at its next unlock, so the
+    /// text promises neither "each sync" nor any step of the person's (review of round 19, Z238).
     case deviceMigrationIncomplete
     /// This device was due to write a snapshot and held it back because these devices' objects carried entries it
     /// cannot read (`SyncReport.snapshotWithheldBy`): the devices to update.
@@ -93,7 +95,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
             return "This device cannot check your other devices yet. Nothing they sent has been trusted."
         case .deviceMigrationIncomplete:
             return "This device is still moving its sync records over from before it was restored. It receives "
-                + "changes and sends none until that is done, and tries again at each sync. Nothing has been lost."
+                + "changes and sends none until that is done. Watchword finishes it by itself, at a later sync or "
+                + "the next time you open and unlock the app. Nothing has been lost."
         case .snapshotWithheld(let names):
             return "Older devices need updating before this one can tidy the shared storage: "
                 + names.joined(separator: ", ") + "."

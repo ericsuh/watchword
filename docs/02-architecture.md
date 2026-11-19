@@ -957,8 +957,14 @@ verify, a row still that ID's, holding its work above what its stream carried, h
 where neither this device's state nor the earlier ID's verifies, for the IDs the vault's chain row names (the row of an
 earlier attempt at the move, or the earlier ID's own, from its own restore; Z225, Z226). Those rows are read through
 sharing, so a move that would read one while sharing is not configured waits, its record kept and nothing published,
-and `configureSharing` makes it, or the next unlock or sync after it (`moveAwaitsSharing`, Z229); a vault whose state
-verifies needs no row, so an ordinary move does not wait. The hold ends when the vault opens here and the row is
+and `configureSharing` makes it, or the next unlock or sync after it (`moveAwaitsSharing`, Z229); so does a move into a
+shared vault with no state at all, where the rows would be read too (Z238). A vault whose state verifies, for the
+earlier ID (a first restore) or for this device's own (a move made again), needs no row, so those moves do not wait
+(Z235). While a move is pending nothing that may write a vault's sync state or chain row runs: the sync's writes need it
+to be complete, Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`) and the backfill waits for it (Z234).
+The move is made once at a time, and only while the store still records it (`migrationInFlight`, Z237), and a chain row
+the sharing store cannot read fails it, to be made again, never read as none (Z236). The hold ends when the vault opens
+here and the row is
 carried, when a version that holds none of the work replaces the row, when the vault is deleted or this account's
 membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows kept on this
 device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open

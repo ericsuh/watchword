@@ -256,8 +256,9 @@ extension VaultSession {
     /// states (`backfillRestoredChains`, review of round 17, Z222): a move made before sharing was configured wrote
     /// none, and the hold for what it left would end with the next damage to a state. Locked, the next unlock does it.
     /// First a restore's move that waited for sharing is made (`moveAwaitsSharing`, review of round 18, Z229), so
-    /// that it reads the chain rows it needs, and the backfill reads the state it saves; one that fails is made again
-    /// at the next unlock or sync, as any move is (Z181).
+    /// that it reads the chain rows it needs; one that fails is made again at the next unlock or sync, as any move is
+    /// (Z181). The markers come first (Z190); the order of the move and the backfill is not load-bearing (review of
+    /// round 19, Z238): the move writes each vault's row itself, and the backfill waits while a move is pending (Z234).
     public func configureSharing(_ settings: SharingSettings) async {
         let epoch = lockEpoch
         sharing.settings = settings

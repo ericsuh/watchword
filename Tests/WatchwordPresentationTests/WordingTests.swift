@@ -118,6 +118,8 @@ struct WordingTests {
     }
 
     /// Review of round 11 (Z185): the gate that holds every vault while a restore's move is incomplete was silent.
+    /// Review of round 19 (Z238): a move that waits for sharing is not made again at each sync, only by a process that
+    /// configures sharing (the app), so the text says it finishes by itself without promising each sync.
     @Test("a restore whose move is incomplete says that nothing is sent and nothing is lost")
     func deviceMigrationIncomplete() {
         var report = AccountSyncReport()
@@ -129,6 +131,10 @@ struct WordingTests {
         let text = SyncNotice.deviceMigrationIncomplete.text
         #expect(text.contains("sends none"))
         #expect(text.contains("Nothing has been lost"))
+        #expect(!text.contains("each sync"), "a move that waits for sharing is not made at each sync")
+        #expect(text.contains("open and unlock the app"))
+        let refused = ErrorWording.message(for: VaultError.deviceMigrationIncomplete)
+        #expect(refused.contains("still moving its sync records"), "Stop Waiting refused during a move says why")
     }
 
     @Test("held-aside and quarantined versions are counted for the person to review (S49)")

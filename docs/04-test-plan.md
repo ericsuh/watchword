@@ -680,6 +680,15 @@ whose middle ID's state does not verify keeps its first restore's uncarried copy
 after the unlock, with a sync in between: the move waits, publishing nothing, and `configureSharing` makes it
 (`restoredTwiceWithSharingConfiguredLate`, which fails at round 17's end: the move finished without the chain row and
 the waiting sync deleted the original on the other device, Z229).
+The review of the nineteenth round (Z234 to Z238): in "shared vaults through the session", Stop Waiting is refused while
+the move waits and the first restore's copy stays held (`stopWaitingRefusedWhileTheMoveWaits`, Z234); an ordinary move
+finishes without sharing, at its first attempt and when made again over a first attempt's states
+(`ordinaryMoveFinishesWithoutSharing`, and `.afterTheUnlock` of `restoredChainWhateverSharingWasConfigured` checking the
+record at the unlock, which fail with either of `moveAwaitsSharing`'s checks removed, Z235); a chain row the sharing
+store fails to read fails the move, which the next sync makes (`unreadableChainRowFailsTheMove`, Z236); in "account
+enrolment and device registry", a sync during the unlock's move does not make it again or publish, and a move from an
+account read before it finished changes nothing (`moveIsMadeOnceAtATime`, Z237); and the notice's wording
+(`deviceMigrationIncomplete` in `WordingTests`, Z238). All but Z235's fail at 54ce459.
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
