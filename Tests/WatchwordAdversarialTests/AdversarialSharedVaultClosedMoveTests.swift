@@ -292,9 +292,9 @@ extension AdversarialSharedVaultTests {
     /// hold read it through `try?`, and a state that does not verify reads as none: the hold saw no entry, the copy
     /// was still the old device ID's, and the original's deletion went out while the copy existed on this device only.
     /// The hold now fails closed on a state it cannot trust, and the sync finds the copy again from the row the old ID
-    /// left (the old ID read from the entries the damaged state still names), records it in a state it signs, and
-    /// names it; once the vault opens, the copy is carried and published first. (An attacker who can edit the file
-    /// can delete the row as well; the hold is for damage, not for them.)
+    /// left (the old ID read from the chain row the move signed, never from the damaged state, Z216), records it in a
+    /// state it signs, and names it; once the vault opens, the copy is carried and published first. (An attacker who
+    /// can edit the file can delete the row as well; the hold is for damage, not for them.)
     @Test("a restore's uncarried copy holds deletions back even after its vault's sync state is damaged")
     func restoredWorkSurvivesAnEditedState() async throws {
         let household = SharedVaultHousehold()
