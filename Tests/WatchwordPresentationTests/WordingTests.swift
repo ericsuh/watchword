@@ -159,6 +159,9 @@ struct WordingTests {
         #expect(!summary.notices.contains(.deletionsHeldBack), "the generic notice hides the reason")
         let text = SyncNotice.restoredChainUnreadable.text
         #expect(text.contains("could not read part of its sharing records"))
+        // True on a device never restored, whose damaged state asks for the record too (review of round 21, Z250).
+        #expect(text.contains("cannot rule out that changes from before a restore"))
+        #expect(!text.contains("before it was restored"), "says the device was restored, which it may never have been")
         #expect(text.contains("deletions made on this device wait"))
         #expect(text.contains("tries again at each sync"))
         #expect(text.contains("Nothing has been lost"))

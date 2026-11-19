@@ -1069,47 +1069,52 @@ extension VaultSession {
     ///
     /// A caller turned away is not lost (review of round 20, Z241): it may be the one the move under way was waiting
     /// for (`configureSharing` while that move, begun without sharing, waits in `moveAwaitsSharing`), or the unlock
-    /// after a lock that the move under way then stops at (`requireKeys(since:)`). So it leaves its account
-    /// (`migrationAskedAgain`), and the move under way, once it has returned or thrown, is made once more from that
-    /// account, with the keys and the epoch of then; a throw is the caller's only when nobody asked meanwhile.
+    /// after a lock that the move under way then stops at (`requireKeys(since:)`). So it says it asked
+    /// (`migrationAskedAgain`), and the move under way, once it has returned or thrown, is made once more, with the
+    /// keys and the epoch of then, from the account the store holds then (review of round 21, Z247): not from a
+    /// caller's, which may have been read before a registration recorded the move the store holds now, so that the
+    /// last caller turned away, holding the older record, made nothing and the newer move waited. And an attempt's
+    /// failure is kept until an attempt makes the move: a later one that returns without making it (a record it does
+    /// not hold, a wait for sharing) does not turn the failure into success, so a sync whose move failed on a chain
+    /// row still says so (`restoredChainUnreadable`), and an unlock still notes it (Z247).
     func completeDeviceMigration(account caller: AccountRecord) async throws {
         guard caller.migration != nil, syncSettings?.state != nil, syncState != nil else { return }
         guard !migrationInFlight else {
-            migrationAskedAgain = caller
+            migrationAskedAgain = true
             return
         }
         migrationInFlight = true
         defer { migrationInFlight = false }
         var next = caller
+        var failure: (any Error)?
         while true {
             do {
-                try await makeDeviceMigration(account: next)
+                if try await makeDeviceMigration(account: next) { failure = nil }
             } catch {
-                guard let asked = migrationAskedAgain else { throw error }
-                migrationAskedAgain = nil
-                next = asked
-                continue
+                failure = error
             }
-            guard let asked = migrationAskedAgain else { return }
-            migrationAskedAgain = nil
-            next = asked
+            guard migrationAskedAgain else { break }
+            migrationAskedAgain = false
+            // Read under the flag, so that a record cleared or replaced since is what the next attempt finds (Z237).
+            next = (try? await store.loadAccount()) ?? next
         }
+        if let failure { throw failure }
     }
 
-    /// One attempt at the move (`completeDeviceMigration`), under its flag. The lock epoch is taken first, before any
-    /// await (review of round 20, Z242): taken after the account's read, a lock and an unlock during that read let a
-    /// move begun under the earlier keys go on under the new ones.
-    private func makeDeviceMigration(account caller: AccountRecord) async throws {
+    /// One attempt at the move (`completeDeviceMigration`), under its flag: whether it made it, clearing the record.
+    /// The lock epoch is taken first, before any await (review of round 20, Z242): taken after the account's read, a
+    /// lock and an unlock during that read let a move begun under the earlier keys go on under the new ones.
+    private func makeDeviceMigration(account caller: AccountRecord) async throws -> Bool {
         let epoch = lockEpoch
         guard let account = try await store.loadAccount(), account.deviceID == caller.deviceID,
             let migration = account.migration, migration == caller.migration, let base = syncSettings?.state,
             syncState != nil
-        else { return }
+        else { return false }
         let previous = migration.previousDeviceID
         if try verifiedMigration(migration, to: account, keyset: try requireKeys(since: epoch).keyset) {
             // Not yet where it would read a chain row it cannot: the record stays, the sync publishes nothing, and the
             // move is made at the next unlock or sync with sharing configured, or by `configureSharing` (Z229).
-            if try await moveAwaitsSharing(from: previous, account: account) { return }
+            if try await moveAwaitsSharing(from: previous, account: account) { return false }
             let view = try await registry(account)
             try await startSyncStatesOver(account, from: previous, since: epoch)
             let deletions = try await signedPendingDeletions(stampedBy: previous, account: account)
@@ -1145,7 +1150,7 @@ extension VaultSession {
         _ = try requireKeys(since: epoch)
         guard let current = try await store.loadAccount(), current.deviceID == account.deviceID,
             current.migration == migration
-        else { return }
+        else { return false }
         var done = current
         done.migration = nil
         try await store.commit(
@@ -1153,6 +1158,7 @@ extension VaultSession {
                 account: .update(done, expectedKeysetVersion: current.keysetVersion), migration: .clear,
                 expectedDeviceID: current.deviceID))
         self.account = done
+        return true
     }
 
     /// The move from `previous` to `updated`'s device ID, signed by the account key (Z181).

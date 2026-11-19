@@ -499,7 +499,15 @@ extension VaultSession {
         } catch {
             return true
         }
-        for row in (try? await store.records(in: vaultID, kind: .item)) ?? [] where row.deviceID == account.deviceID {
+        // Rows that cannot be listed hold, as a state that cannot be read does (review of round 21, Z246): read as
+        // none, an edit of this device's that no sync has sent (a move's copy among them) held nothing back.
+        let rows: [StoredRecord]
+        do {
+            rows = try await store.records(in: vaultID, kind: .item)
+        } catch {
+            return true
+        }
+        for row in rows where row.deviceID == account.deviceID {
             if receivedNowhere, holdsValue(ofAny: [account.deviceID], in: row) { return true }
             guard let stamp = known[row.key] else { return true }
             // Known only as a deletion: the log says nothing of a version of it. A move's copy has an ID anyone who
@@ -1266,9 +1274,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     public var deviceMigrationIncomplete = false
     /// The vaults where what a restore left can be told only from the vault's chain row of earlier device IDs
     /// (`RestoredChainRow`), and the sharing store could not read it (review of round 20, Z240): a shared vault whose
-    /// sync state does not verify, or a restore's move that needs the row. Each fails closed: such a vault holds every
-    /// vault's deletions back (it is in `deletionsHeldBack`), and a move that needs the row is not made
-    /// (`deviceMigrationIncomplete`), for as long as the store fails. Tried again at each sync.
+    /// sync state does not verify or that has none (on any device, restored or not: review of round 21, Z250), or a
+    /// restore's move that needs the row. Each fails closed: such a vault holds every vault's deletions back (it is in
+    /// `deletionsHeldBack`), and a move that needs the row is not made (`deviceMigrationIncomplete`), for as long as
+    /// the store fails. Tried again at each sync.
     public var restoredChainUnreadable: Set<UUID> = []
 
     public init() {}

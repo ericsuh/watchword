@@ -786,6 +786,19 @@ their fix reverted; the Stop Waiting and gate tests pin behaviour that was alrea
 it pins removed. The notices' wording is in `WordingTests` (`deviceMigrationIncomplete`, `restoredChainUnreadable`,
 Z240, Z243). Merged into this branch, Z234's Stop Waiting tests and V60's `downloadWhileTheMoveWaitsLeavesTheState`
 pin the same refusal (one implementation, PR #23's) and are all kept; only V60's pins the download's guard.
+The review of the twenty-first round (Z245 to Z252), in "shared vaults through the session": a vault directory listing
+that fails as a restore's chain is read holds the deletions back where the chain row is the only record of a copy
+(`directoryListingFailingInTheChainHolds`, the review's PoC, failing only the chain's own listing; Z245), and so does an
+item listing that fails as the gate reads this device's own rows (`itemListingFailingInTheGateHolds`, Z246); a move
+turned away by one waiting for sharing is made from the store's record when a caller holding an older one asked last
+(`turnedAwayMoveIsMadeFromTheStoresRecord`), and a move that fails keeps its failure when such a caller asked meanwhile
+(`turnedAwayMoveKeepsTheFailure`, Z247); Stop Waiting reads no chain row for a vault that is not shared or whose state
+verifies, and throws, writing nothing, on a row it needs and cannot read (`stopWaitingReadsTheChainOnlyWhereItDecides`,
+failing with the read unguarded, eager or read as empty; Z248). All five fail at 131dd94. A sync begun locked saves no
+vault state across the unlock that registers a restored device, whether the move waits for sharing or is made there
+(`lockedSyncAcrossTheUnlocksRegistration`, Z249): it passes at 131dd94 and fails with a download that saves its state
+(PR #22's shape) or with the per-vault branch reading the keys late. `restoredChainUnreadable` in `WordingTests` checks
+the notice no longer says the device was restored (Z250).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
