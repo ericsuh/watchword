@@ -1396,9 +1396,12 @@ extension VaultSession {
             sharing.vaults[vaultID]?.needsReconcile = true
             return
         }
-        // What this device wrote and has not published, as its signed sync state has it (Z20).
+        // What this device wrote and has not published, as its signed sync state has it (Z20). A state that cannot be
+        // read throws, and the take-out is left to the next sync, the judged head unmoved (review of PR #22's seventh
+        // merge, Z258): read as none, it judged a restore's uncarried rows, which no segment carried, and took them out
+        // into the quarantine, where nothing carries them.
         let ownDevice = account?.deviceID
-        let state = try? await syncState?.loadState(vaultID: vaultID)
+        let state = try await syncState?.loadState(vaultID: vaultID)
         let published = state?.published ?? [:]
         // What a restore left under an earlier device ID of this installation and has still to carry over
         // (`SyncState.restoredUnpublished`): this installation's own work, which no segment carried because nobody

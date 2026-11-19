@@ -318,9 +318,22 @@ extension VaultSession {
     /// Whether `vaultID`'s signed state records anything a restore has still to carry over there: its first pass of a
     /// sync then publishes nothing (`syncAll`, review of round 13, M2). Entries the person stopped waiting for do not
     /// count.
+    ///
+    /// A state that cannot be read counts as something to carry (review of round 22, Z254): read as nothing, one
+    /// failed read sent the vault down the ordinary pass, which merged what it pulled into rows still holding an
+    /// earlier ID's work and published, before the carry, so that a field order the carry would have kept was lost
+    /// (Z204's L1) and members held aside a version under the new ID with the earlier ID's values (Z191). The carry
+    /// reads the state again, and a carry that cannot read it merges nothing in that sync (Z209); a state that then
+    /// holds nothing to carry costs that sync's publishing in that vault.
     func restoredWorkToCarry(in vaultID: UUID) async -> Bool {
         guard let syncState else { return false }
-        guard let state = try? await syncState.loadState(vaultID: vaultID) else { return false }
+        let loaded: SyncState?
+        do {
+            loaded = try await syncState.loadState(vaultID: vaultID)
+        } catch {
+            return true
+        }
+        guard let state = loaded else { return false }
         return state.restoredUnpublished.values.contains { !Self.isDismissed($0) }
     }
 
@@ -602,42 +615,67 @@ extension VaultSession {
     /// Z239); one that cannot be read records nothing, and the gate holds for that vault.
     ///
     /// `writes` binds the states it saves to what the sync that runs it began with (`SyncStateWrites`, Z253).
+    ///
+    /// Returns the vaults whose state does not verify, or could not be read, where what a restore left could not be
+    /// told or recorded (review of round 22, Z254): a state, the chain, the rows or a write that failed; `nil` for
+    /// every vault that may be shared, where the directory could not be read or the keys went. Each merges and
+    /// publishes nothing in that sync, as a vault whose carry did not finish (Z209): merged first, its rows became the
+    /// new ID's, so the earlier ID's work in them was neither found again (`rowsLeftByEarlierIDs`) nor carried before
+    /// the merge (Z204's L1). Tried again at the next sync.
+    @discardableResult
     func recordRestoredWorkLeft(account: AccountRecord, since epoch: UInt64, within writes: SyncStateWrites? = nil)
-        async
+        async -> Set<UUID>?
     {
-        guard let syncState = syncState(within: writes), let base = syncSettings?.state else { return }
+        guard let syncState = syncState(within: writes), let base = syncSettings?.state else { return [] }
         await backfillRestoredChains(account: account, since: epoch, within: writes)
-        guard let vaults = try? await vaultDirectory(account).keys else { return }
+        guard let vaults = try? await vaultDirectory(account).keys else { return nil }
         var read = RestoredChainRead()
+        var unrecorded: Set<UUID> = []
         for vaultID in vaults where isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
             let raw: SyncState?
             do {
                 raw = try await base.loadState(vaultID: vaultID)
             } catch {
+                unrecorded.insert(vaultID)
                 continue
             }
             if let raw, await verifiedSyncState(raw, vaultID: vaultID) != nil { continue }
-            guard let chain = await restoredChain(&read, for: vaultID, account: account), !chain.isEmpty else { return }
-            guard let left = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account),
-                !left.isEmpty || raw != nil
-            else { continue }
+            guard let chain = await restoredChain(&read, for: vaultID, account: account) else {
+                unrecorded.insert(vaultID)
+                continue
+            }
+            // No earlier ID anywhere: nothing to record in any vault.
+            guard !chain.isEmpty else { return unrecorded }
+            guard let left = await rowsLeftByEarlierIDs(in: vaultID, chain: chain, recorded: [:], account: account)
+            else {
+                unrecorded.insert(vaultID)
+                continue
+            }
+            guard !left.isEmpty || raw != nil else { continue }
             var state = SyncState(vaultID: vaultID)
             state.restoredUnpublished = left
             // The chain row first, so that it never names fewer IDs than the state (Z216).
-            guard (try? requireKeys(since: epoch)) != nil,
+            guard (try? requireKeys(since: epoch)) != nil else { return nil }
+            guard
                 (try? await noteRestoredChain(
-                    left, in: vaultID, account: account, keeping: true, since: epoch, within: writes)) != nil,
-                (try? requireKeys(since: epoch)) != nil
-            else { return }
-            guard (try? await syncState.saveState(state)) != nil, (try? requireKeys(since: epoch)) != nil else {
+                    left, in: vaultID, account: account, keeping: true, since: epoch, within: writes)) != nil
+            else {
+                unrecorded.insert(vaultID)
                 continue
             }
+            guard (try? requireKeys(since: epoch)) != nil else { return nil }
+            guard (try? await syncState.saveState(state)) != nil else {
+                unrecorded.insert(vaultID)
+                continue
+            }
+            guard (try? requireKeys(since: epoch)) != nil else { return nil }
             // Then exactly the state's IDs: with the carry and Stop Waiting, the one write that narrows the row (review
             // of round 18, Z232). It drops only IDs with no row left above their bound in the vault, and a row never
             // becomes an earlier ID's again.
             try? await noteRestoredChain(
                 left, in: vaultID, account: account, keeping: false, since: epoch, within: writes)
         }
+        return unrecorded
     }
 
     /// Whether what a restore left in `vaultID` waits for nothing any more (review of round 13, M3): the vault is

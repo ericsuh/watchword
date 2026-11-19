@@ -137,8 +137,16 @@ extension VaultSession {
             .scanStatus: ScanStatusMerger(sealer: adapter),
         ])
         // What a restore left that no entry records any more, recorded again before the take-out and any log
-        // (review of round 13, L-a).
-        if mayWrite { await recordRestoredWorkLeft(account: record, since: epoch, within: stateWrites) }
+        // (review of round 13, L-a). A vault where that could not be told or done merges nothing in this sync, as one
+        // whose carry did not finish (review of round 22, Z254); `nil` for every vault that may be shared.
+        var unrecorded: Set<UUID>? = []
+        if mayWrite { unrecorded = await recordRestoredWorkLeft(account: record, since: epoch, within: stateWrites) }
+        func reRecordFailed(_ vaultID: UUID) -> Bool {
+            guard let unrecorded else {
+                return isMarkedShared(vaultID, keys: keys, personalVaultID: record.personalVaultID)
+            }
+            return unrecorded.contains(vaultID)
+        }
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record, writing: mayWrite)
         if !ownIDCommits {
@@ -181,7 +189,9 @@ extension VaultSession {
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 let requests = sharedReplayRequests(vaultID)
                 var reconciled = reconcile || shared.reconcile
-                if await restoredWorkToCarry(in: vaultID) {
+                let unrecordedHere = reRecordFailed(vaultID)
+                let carryPending = unrecordedHere ? true : await restoredWorkToCarry(in: vaultID)
+                if carryPending {
                     // What a restore left, carried once the vault's log has been pulled since it, so that what the
                     // earlier device ID published is known (review of round 13, M2), and before anything pulled is
                     // merged into it, so that the pulled versions are merged into the renamed version as every other
@@ -190,11 +200,12 @@ extension VaultSession {
                     // index and its downloaded segments show it (`stagedBounds`, Z208). Published at the next sync;
                     // meanwhile the hold below keeps every deletion back. A carry that cannot run, or does not finish,
                     // merges nothing into the vault in this sync, in any pass (Z209): what was downloaded stays staged
-                    // for the next.
+                    // for the next. So does a vault whose state does not verify and where what a restore left could
+                    // not be recorded again (Z254), which has nothing recorded to carry yet.
                     carrying.insert(vaultID)
                     let pulled = try await engine(vaultID).download(transportStopped: stopped)
                     var carried = false
-                    if stopped == nil, !pulled.transportUnavailable, pulled.transportFailure == nil,
+                    if !unrecordedHere, stopped == nil, !pulled.transportUnavailable, pulled.transportFailure == nil,
                         let staged = await stagedBounds(in: vaultID, engine: engine(vaultID), since: epoch)
                     {
                         carried = await carryRestoredWork(
@@ -307,7 +318,8 @@ extension VaultSession {
             report.deletionsHeldBack.formUnion(restored.chainUnreadable)
             // The vaults whose publishing waits for the carry, and will wait again at the next sync (L4).
             for vaultID in carrying {
-                if await restoredWorkToCarry(in: vaultID) { report.publishingHeldForCarry.insert(vaultID) }
+                let held = reRecordFailed(vaultID) ? true : await restoredWorkToCarry(in: vaultID)
+                if held { report.publishingHeldForCarry.insert(vaultID) }
             }
         }
         report.sharing = sharingReports
@@ -1217,7 +1229,9 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// stopped the sync), or a step of the carry failed (review of round 14, L4). The carry runs only after a vault's
     /// log is pulled, and while anything is left to carry the vault publishes nothing, so that no merge of a row still
     /// holding an earlier ID's work goes out ahead of it; nor does it merge what it pulled, which waits, staged, for
-    /// the carry (L1). A carry that finishes in this sync is not named: the vault publishes at the next.
+    /// the carry (L1). A carry that finishes in this sync is not named: the vault publishes at the next. Named too: a
+    /// vault whose sync state does not verify, or could not be read, where what a restore left could not be recorded
+    /// again in this sync (review of round 22, Z254); it is tried again at the next.
     public var publishingHeldForCarry: Set<UUID> = []
     /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
     /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
