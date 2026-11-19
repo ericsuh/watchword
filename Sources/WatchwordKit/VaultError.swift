@@ -99,6 +99,9 @@ public enum VaultError: Error, Equatable, Sendable {
     /// `reuploadAfterStoreReset` was confirmed for a plan that no longer describes what this device would upload:
     /// something arrived, or was saved, since the person was asked (docs/02-architecture.md §7.10). Ask again.
     case reuploadNotConfirmed
+    /// `reuploadAfterStoreReset` was called while this installation's move to a new device ID is not complete
+    /// (`AccountRecord.migration`, a store restored onto other hardware): sync, which makes it again, then ask (V51).
+    case deviceMigrationIncomplete
     /// This device is not registered with the account as it sees the registry (its registration has not been
     /// accepted, or was made with a password since changed), so nothing it uploaded would be read by any device.
     case deviceNotRegistered

@@ -96,6 +96,9 @@ extension VaultSession {
         _ = try requireKeys()
         guard let syncSettings else { throw VaultError.syncNotConfigured }
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        // A device move that is not complete would start this device's states over after the upload began, and the
+        // sync publishes nothing until it is complete: the store would be started again and left empty (V51).
+        guard account.migration == nil else { throw VaultError.deviceMigrationIncomplete }
         guard let view = try? await registry(account) else { throw VaultError.deviceRegistryUnavailable }
         switch view.state.standing(of: account.deviceID) {
         case .active: break

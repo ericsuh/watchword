@@ -807,7 +807,7 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the old ID's sync state is recorded, signed (`AccountRecord.migration`, `SignatureDomain.deviceMigration`), in the
   commit that names the new ID, and `completeDeviceMigration` makes it again at each unlock and sync until it is
   complete (Z181): never do any of it under `try?` after that commit, never publish while it is incomplete
-  (`deviceMigrationIncomplete`), never let it forget that the
+  (`deviceMigrationIncomplete`; `reuploadAfterStoreReset` refuses then too, V51), never let it forget that the
   installation had synced or that an upload was unfinished (`startSyncStatesOver`, V49), never register a further ID over it, and act on no record the session did not sign.
   The move, the release and the gate share one predicate (`vaultsHoldingEditsNobodyReceived`: any row of a shared vault,
   whichever device's, holding a value stamped by an ID `idsNobodyReceives` names: values, never a clock's claim, Z173; and so for this device's own non-committing ID in `holdsUnpublishedWork`, Z180), and while it finds a row no vault's

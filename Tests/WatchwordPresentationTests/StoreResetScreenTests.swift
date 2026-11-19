@@ -234,5 +234,6 @@ struct StoreResetScreenTests {
         report.vaults[UUID()] = asking
         #expect(SyncSummary(report).storageNeedsUpload)
         #expect(ErrorWording.message(for: VaultError.deviceNotRegistered).contains("not registered"))
+        #expect(ErrorWording.message(for: VaultError.deviceMigrationIncomplete).contains("restored from"))
     }
 }

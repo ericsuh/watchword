@@ -10,7 +10,7 @@ import WatchwordTestSupport
 // A store reset meeting a device move (docs/02-architecture.md §7.10; owner decision, 2026-11-17: re-upload, "but
 // ask the user first"): an installation restored onto other hardware starts each vault's sync state over for its new
 // device ID (Z181), and must still know that it had synced, and that an upload it began was not finished
-// (docs/06-adversarial-review.md V49).
+// (docs/06-adversarial-review.md V49, V51).
 extension AdversarialVaultSyncTests {
     /// The device's store and sync state on other hardware: the same files, without the device key, so the next unlock
     /// registers a new device ID and moves the old ID's sync state to it.
@@ -131,5 +131,39 @@ extension AdversarialVaultSyncTests {
         try await c.session.unlock(password: TestVault.password)
         try await c.session.sync()
         #expect(try await c.session.items().items.map(\.title) == ["Bank"])
+    }
+
+    /// Threat: none needed but a sync state file that fails one write while a restore moves the old device ID's state
+    /// (Z181). While the move is incomplete the sync publishes nothing; an upload after a reset begun then would start
+    /// the store again and leave it empty, and the move, made afterwards, would start the states over beneath it. The
+    /// call refuses (V51), starts nothing, and works once a sync has completed the move.
+    @Test("the upload after a reset is refused while a device move is incomplete")
+    func reuploadRefusedDuringMove() async throws {
+        let store = ResettableSyncTransport()
+        let state = InterceptingStateStore()
+        let a = TestVault(sync: SyncSettings(state: state, transport: store), seed: 5_100)
+        try await a.createAccount()
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Kept", in: vaultID))
+        let doomed = try await a.session.save(Self.login("Deleted, never published", in: vaultID))
+        try await a.session.sync()
+        try await a.session.trash(id: doomed.id)
+        try await a.session.deletePermanently(id: doomed.id)
+        await store.reset()
+
+        await state.failNextPendingDeletionWrite()
+        try await Self.restoreOntoOtherHardware(a)
+        #expect(try await a.store.loadAccount()?.migration != nil, "the move was not left incomplete")
+        let plan = try await a.session.reuploadPlan()
+        await #expect(throws: VaultError.deviceMigrationIncomplete) {
+            try await a.session.reuploadAfterStoreReset(confirming: plan)
+        }
+        #expect(await store.startsAgain == 0)
+
+        _ = try await a.session.syncAll()
+        #expect(try await a.store.loadAccount()?.migration == nil)
+        let answered = try await a.session.reuploadAfterStoreReset(confirming: try await a.session.reuploadPlan())
+        #expect(!answered.storeNeedsReupload)
+        #expect(await store.startsAgain == 1)
     }
 }

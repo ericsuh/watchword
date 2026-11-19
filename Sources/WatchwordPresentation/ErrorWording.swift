@@ -123,6 +123,8 @@ public enum ErrorWording {
             return "Something changed on this device since you were asked. Nothing was uploaded; review and try again."
         case .deviceNotRegistered:
             return "This device is not registered with your account yet, so nothing it uploaded would be read."
+        case .deviceMigrationIncomplete:
+            return "This device is still taking over from the one it was restored from. Sync, then try again."
         default:
             return "Something went wrong. Your vault is unchanged."
         }

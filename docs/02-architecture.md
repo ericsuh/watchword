@@ -1351,7 +1351,9 @@ else, and a `storeReset` is to it a failed sync that backs off.
 confirms). `reuploadPlan()` says what would be uploaded — the account's own vaults and how many items each holds,
 and the shared vaults that cannot be — for the question; the call takes the plan the person was shown and refuses
 (`reuploadNotConfirmed`) if it no longer describes this device, as `deleteVault` does with its count. It needs the
-vault unlocked and this device registered, not revoked and following the current password. It holds the session's
+vault unlocked, this device registered, not revoked and following the current password, and no device move incomplete
+(`deviceMigrationIncomplete`: the move would start the states over beneath the upload, and the sync publishes
+nothing until it is complete, so the store would be started again and left empty; V51). It holds the session's
 sync lock from before the plan is checked, so no ordinary sync merges anything between the answer and the upload,
 or runs between the two steps. Then:
 
