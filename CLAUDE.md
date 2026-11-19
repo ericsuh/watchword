@@ -767,8 +767,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   move writes before the vault's state, adding to it (Z225), and each later save of the entries rewrites, so it outlives
   a damaged state (Z200). The row needs the keys and sharing configured, so `backfillRestoredChains` adds what a
   verified state names and the row lacks when sharing is configured unlocked, after each unlock and at each sync (Z222):
-  a new way for sharing to become configured calls it too. Only the carry and Stop Waiting narrow the row. Where no
-  state verifies, the move finds the rows of the IDs the chain row names (this device's row,
+  a new way for sharing to become configured calls it too; it verifies only states whose raw form names an earlier ID
+  (Z230). Only the carry, Stop Waiting and `recordRestoredWorkLeft`'s write after a started-over state's save narrow
+  the row (Z232). Where no state verifies, the move finds the rows of the IDs the chain row names (this device's row,
   or the earlier ID's own, Z226), read through sharing: a move that would read one without sharing configured waits,
   record kept and nothing published, until `configureSharing` (which makes it) or the next unlock or sync (Z229,
   `moveAwaitsSharing`); never let it complete without them, and never make an ordinary move wait.

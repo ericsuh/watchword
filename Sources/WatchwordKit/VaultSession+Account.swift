@@ -1080,7 +1080,8 @@ extension VaultSession {
                 // or edited (A8) verifies no more, and the row keeps the chain (review of round 16, Z216). Added to
                 // what the row names, never replacing it (review of round 17, Z225): a move made again after the
                 // state an earlier attempt saved stopped verifying would otherwise drop an ID before the previous one
-                // (a store restored twice). Only the carry and Stop Waiting narrow the row.
+                // (a store restored twice). Only the carry, Stop Waiting and the re-record of a started-over state
+                // narrow the row (Z232).
                 _ = try requireKeys(since: epoch)
                 try await noteRestoredChain(
                     state.restoredUnpublished, in: vaultID, account: account, keeping: true, since: epoch)

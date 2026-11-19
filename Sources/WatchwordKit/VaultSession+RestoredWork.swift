@@ -386,12 +386,22 @@ extension VaultSession {
     /// hold failed open. Run when sharing is configured on an unlocked session, after each unlock, and at each sync
     /// that may write (`recordRestoredWorkLeft`). A state damaged before any of those since the move is still lost
     /// with its chain: no row can be signed while locked, and none is kept without sharing.
+    ///
+    /// A state is verified only where its raw form names an entry of another device the person has not stopped
+    /// waiting for (review of round 18, Z230): one that verifies is the raw state, so a raw state naming none names
+    /// none verified either, and the unlock the person waits on pays one load per vault, not a signature check of
+    /// every state. The row is written adding to what it names (`keeping: true`): it may rightly name more than the
+    /// state (the carry's and Stop Waiting's narrowing write after their saves is `try?`), and the state was read
+    /// before the awaits that follow, so replacing the row could drop what a write since added. No case found makes
+    /// the difference observable (Z231): defence in depth.
     func backfillRestoredChains(account: AccountRecord, since epoch: UInt64) async {
         guard sharing.settings != nil, let base = syncSettings?.state, (try? requireKeys(since: epoch)) != nil,
             let vaults = try? await vaultDirectory(account).keys
         else { return }
+        let own = account.deviceID
         for vaultID in vaults.sorted(by: { $0.uuidString < $1.uuidString }) {
             guard let raw = try? await base.loadState(vaultID: vaultID),
+                raw.restoredUnpublished.values.contains(where: { !Self.isDismissed($0) && $0.device != own }),
                 let verified = await verifiedSyncState(raw, vaultID: vaultID)
             else { continue }
             var named = Set(verified.restoredUnpublished.values.filter { !Self.isDismissed($0) }.map(\.device))
@@ -523,6 +533,9 @@ extension VaultSession {
             guard (try? await syncState.saveState(state)) != nil, (try? requireKeys(since: epoch)) != nil else {
                 continue
             }
+            // Then exactly the state's IDs: with the carry and Stop Waiting, the one write that narrows the row (review
+            // of round 18, Z232). It drops only IDs with no row left above their bound in the vault, and a row never
+            // becomes an earlier ID's again.
             try? await noteRestoredChain(left, in: vaultID, account: account, keeping: false, since: epoch)
         }
     }
