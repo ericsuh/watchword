@@ -117,4 +117,90 @@ extension AdversarialSharedVaultTests {
         try await other.session.sync()
         #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
     }
+
+    /// Threat: none needed but a sharing store that fails one read (a busy or damaged database) during a restore's
+    /// move, beside a damaged sync state file, or one edited by an attacker with the device's files (A8), on a store
+    /// restored twice, as in `restoredTwiceAfterADamagedState(retried: false)` (review of round 19, Z236). The move
+    /// read the chain rows with `try?`, so a read that threw was read as no row: it recorded nothing for the first
+    /// ID's uncarried copy, saved a state that verifies and cleared its record, and the hold ended, which is Z229's
+    /// outcome with another cause. A row that cannot be read now fails the move, which is made again at the next sync.
+    @Test("a chain row the sharing store fails to read during a restore's move fails the move, which is made again")
+    func unreadableChainRowFailsTheMove() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_920)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+        let middle = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 31_921)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+
+        await middle.session.lock()
+        await middle.forgetDeviceKey(accountID: member.accountID)
+        var damaged = try #require(await raw.loadState(vaultID: vaultID))
+        damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
+        await raw.tamper(damaged)
+        let sharingState = ChainRowUnreadableSharingStore(base: member.state)
+        let second = TestVault(
+            store: middle.store, keychain: middle.keychain, biometrics: middle.biometrics, clock: middle.clock,
+            sync: middle.sync, seed: 31_922, deviceKeys: middle.deviceKeys)
+        await second.session.configureSharing(
+            SharingSettings(state: sharingState, contacts: member.contacts, directory: household.directory))
+        // Both of the move's reads (this device's row, then the middle ID's), so that the row is not found by the
+        // second read, nor by the read of the chain row's own write after them.
+        await sharingState.failNextReads(2, in: vaultID)
+        try await second.session.unlock(password: TestVault.password)
+        #expect(await sharingState.refused > 0, "no read of a chain row failed: nothing is tested")
+        #expect(try await second.store.loadAccount()?.migration != nil, "the move finished on a row it did not read")
+        await sharingState.readAgain()
+
+        let report = try await second.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete, "the move was not made again")
+        let state = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(state[RecordKey(recordID: copy.id, kind: .item)]?.device == first, "the copy was not recorded again")
+        #expect(report.deletionsHeldBack.contains(vaultID), "the hold ended with a row the move could not read")
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+    }
+}
+
+/// A sharing state store over `base` whose next reads of one vault's chain row (`SharingStateKey.restoredChain`)
+/// throw, as a busy or damaged database would.
+actor ChainRowUnreadableSharingStore: SharingStateStore {
+    struct ReadFailed: Error {}
+
+    let base: InMemorySharingStateStore
+    private var failing = 0
+    private var failingVault: UUID?
+    private(set) var refused = 0
+
+    init(base: InMemorySharingStateStore) {
+        self.base = base
+    }
+
+    func failNextReads(_ count: Int, in vaultID: UUID) {
+        failing = count
+        failingVault = vaultID
+    }
+
+    func readAgain() { failing = 0 }
+
+    func sharedVaultIDs() async throws -> [UUID] { await base.sharedVaultIDs() }
+
+    func value(_ key: SharingStateKey, vaultID: UUID) async throws -> [UInt8]? {
+        if failing > 0, key == .restoredChain, vaultID == failingVault {
+            failing -= 1
+            refused += 1
+            throw ReadFailed()
+        }
+        return await base.value(key, vaultID: vaultID)
+    }
+
+    func setValue(_ value: [UInt8]?, for key: SharingStateKey, vaultID: UUID) async throws {
+        await base.setValue(value, for: key, vaultID: vaultID)
+    }
 }

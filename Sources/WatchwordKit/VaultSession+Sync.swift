@@ -361,7 +361,7 @@ extension VaultSession {
         let known = state?.known ?? [:]
         // What a restore left here and could not carry yet: perhaps a move's copy, whose original's deletion is
         // another vault's (review of round 12, M1). Fails closed (review of round 13, L-a).
-        let chain = await restoredChain(account: account)
+        guard let chain = try? await restoredChain(account: account) else { return true }
         if await holdsRestoredWork(in: vaultID, chain: chain, account: account) { return true }
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
