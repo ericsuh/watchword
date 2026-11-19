@@ -139,7 +139,9 @@ struct WordingTests {
         #expect(!text.contains("finishes"), "a failure that lasts never finishes by itself")
         let refused = ErrorWording.message(for: VaultError.deviceMigrationIncomplete)
         #expect(refused.contains("still moving its sync records"), "Stop Waiting refused during a move says why")
-        #expect(refused.contains("Try again after the next sync"))
+        #expect(refused.contains("try again once it is done"))
+        #expect(!refused.contains("next sync"), "the next sync need not finish the move (V69)")
+        #expect(!refused.contains("from the device"), "the records are this installation's own (V69)")
         #expect(!refused.contains("unlock"), "the message is read in the open, unlocked app")
     }
 

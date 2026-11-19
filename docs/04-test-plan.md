@@ -805,7 +805,8 @@ merge's PoC, both halves; V66): at the merge (8a2cfb8) the download's save, sign
 state under the waiting move or the state the move had just saved, the copy was not recorded, the hold ended and the
 other device lost the original. `syncStateWritesAreCheckedAtSigning` pins each clause of the check made as a sync's
 state or stash is signed (begun locked, another device ID, a lock and unlock since); with that check disabled it fails,
-and the first test fails only at its probe that nothing may be signed while the move waits.
+and the first test fails only at its probe that nothing may be signed while the move waits. `deviceMigrationIncomplete`
+in `WordingTests` checks that the error no longer promises the next sync (V69).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
