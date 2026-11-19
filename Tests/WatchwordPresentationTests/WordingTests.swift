@@ -236,6 +236,7 @@ struct WordingTests {
         #expect(notice.actions.isEmpty)
         let text = notice.text
         #expect(text.contains("Changes made on this device in “Household” are waiting"))
+        #expect(text.contains("changes from others there are not shown yet"))
         #expect(text.contains("carrying over the changes it made there before it was restored"))
         #expect(text.contains("Nothing has been lost."))
         #expect(!text.contains("sent") && !text.contains("received"), "the words the UI tests wait for")
@@ -245,6 +246,7 @@ struct WordingTests {
         let several = SyncSummary(report, vaultNames: [household: "Household", club: "Club"])
         let listed = try #require(several.notices.first { $0.id == "publishingHeldForCarry" })
         #expect(listed.text.contains("in “Club”, “Household” and a shared vault are waiting"))
+        #expect(listed.text.contains("changes from others in those vaults are not shown yet"))
         #expect(listed.text.contains("the changes it made in each before"))
         #expect(SyncSummary(AccountSyncReport()).notices.allSatisfy { $0.id != "publishingHeldForCarry" })
     }

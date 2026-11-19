@@ -88,9 +88,10 @@ struct LongRunningItemMergeLawTests {
     /// have carried) and `given` a bound drawn at or below it (a state that says too little). Then the history goes
     /// on, the earlier ID included: old hardware still running, which publishes `a2`, a version that contains `a`.
     ///
-    /// `checkReattribution` checks, against every version the other devices stored before the backup: the carry
-    /// commutes with merges, is idempotent, keeps supersession and coverage, and (with `given`) never rewrites a third
-    /// device's part (M1). Then, for versions `b` other devices stored after it, `R(a)`, `a2` and `b` merged in every
+    /// `checkReattribution` checks, against every version the other devices stored before the backup: the carry, made
+    /// before anything pulled is merged into it, is what every device holding the pulled version holds, and made after
+    /// the merge it differs only in a field order's tie (L1, the restored ID drawn at random); it is idempotent, keeps
+    /// supersession and coverage, and (with `given`) never rewrites a third device's part (M1). Then, for versions `b` other devices stored after it, `R(a)`, `a2` and `b` merged in every
     /// order give one item, holding every value `a2 ⊔ b` holds (M2's case: nothing old hardware published is lost
     /// beside the carry). The field order is the exception, and is left out: it is one register whose latest write
     /// wins, and the carry's renamed copy of the same write can win over `a2`'s with the same field IDs.
@@ -109,6 +110,7 @@ struct LongRunningItemMergeLawTests {
         var renamed = 0
         var raised = 0
         var continued = 0
+        var tied = 0
         var failures: [String] = []
         for history in 0..<histories where failures.isEmpty {
             let devices = Int.random(in: 2...4, using: &generator)
@@ -135,10 +137,12 @@ struct LongRunningItemMergeLawTests {
             let before = model.versions.filter { $0.origin.device != device }
             // Half the time no state at all (lost with the restore, or one that does not verify, A8): nothing published.
             let given = Bool.random(using: &generator) ? 0 : UInt64.random(in: 0...published, using: &generator)
+            let restored = MergeModel.restoredDevice(using: &generator)
             let found = model.checkReattribution(
-                backup, of: device, published: published, given: given, others: before)
+                backup, of: device, published: published, given: given, others: before, restored: restored)
             if found.renamed { renamed += 1 }
             if found.raised { raised += 1 }
+            if found.tied { tied += 1 }
 
             // Old hardware goes on under the earlier ID, and the others with it.
             let stored = model.versions.count
@@ -153,7 +157,7 @@ struct LongRunningItemMergeLawTests {
                 continue
             }
             continued += 1
-            let carried = MergeModel.carried(backup, from: device, above: published)
+            let carried = MergeModel.carried(backup, from: device, above: published, to: restored)
             let after = model.versions[stored...].filter { $0.origin.device != device }
             for b in after.shuffled(using: &generator).prefix(4) {
                 let orders = [
@@ -180,8 +184,10 @@ struct LongRunningItemMergeLawTests {
             failures = model.failures
         }
         #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
+        // Ties (`tied`) are rare under random histories and not asserted here; the exhaustive exploration meets them.
         #expect(
-            renamed > 0 && raised > 0 && continued > 0, "renamed \(renamed), raised \(raised), continued \(continued)")
+            renamed > 0 && raised > 0 && continued > 0,
+            "renamed \(renamed), raised \(raised), continued \(continued), tied \(tied)")
     }
 
     /// Edits of every kind; the kinds that only matter once something else has happened are drawn more often.

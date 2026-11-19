@@ -80,23 +80,45 @@ extension VaultSession {
     /// still holding the earlier ID's work went out before it was carried. The carried rows go out at the next sync,
     /// ahead of any deletion. A step that fails keeps its entry for the next sync; meanwhile the deletion gate holds
     /// every deletion back while a row it names holds that work (`holdsRestoredWork`).
-    func carryRestoredWork(account: AccountRecord, view: RegistryView?, since epoch: UInt64, in vaults: Set<UUID>)
-        async
-    {
-        guard let syncState, let base = syncSettings?.state, let view else { return }
+    ///
+    /// `staged` is what the vault's staged segments, downloaded and not merged yet, carry of each record
+    /// (`stagedBounds`): the carry runs after the download and before the pass that merges it, so that it renames the
+    /// backup's version and the pulled versions are merged into the renamed one, as every other device merges them
+    /// (review of round 14, L1: renamed after the merge, a field order that had won a tie by the earlier ID's place
+    /// could lose it by the new ID's, or the reverse, against an order the merge had already dropped). Returns whether
+    /// every step that had something to do did it: one that failed (a row not read, a seal or commit that threw, a
+    /// lock) leaves its entry, and the caller then merges nothing into the vault in this sync, so that the entry is
+    /// still carried before any merge.
+    @discardableResult
+    func carryRestoredWork(
+        account: AccountRecord, view: RegistryView?, since epoch: UInt64, in vaults: Set<UUID>,
+        staged: [UUID: [RecordKey: [UUID: UInt64]]] = [:]
+    ) async -> Bool {
+        guard let syncState, let base = syncSettings?.state, let view else { return false }
         let own = account.deviceID
         let parked = Self.parkedDeletionDevice(of: own)
+        var finished = true
         for vaultID in vaults.sorted(by: { $0.uuidString < $1.uuidString }) {
-            guard !(await restoredWorkReleased(vaultID, account: account)),
-                let keys = try? requireKeys(since: epoch),
+            guard !(await restoredWorkReleased(vaultID, account: account)) else { continue }
+            let loaded: SyncState?
+            do {
+                loaded = try await syncState.loadState(vaultID: vaultID)
+            } catch {
+                finished = false
+                continue
+            }
+            guard var state = loaded, !state.restoredUnpublished.isEmpty else { continue }
+            guard let keys = try? requireKeys(since: epoch),
                 let vaultKey = currentVaultKey(vaultID, keys: keys, account: account),
-                var state = try? await syncState.loadState(vaultID: vaultID), !state.restoredUnpublished.isEmpty,
                 let deletions = try? await base.pendingDeletions(vaultID: vaultID),
                 let signingKey = try? keys.keyset.publicKeyBundle().signingKey
-            else { continue }
+            else {
+                finished = false
+                continue
+            }
             var remaining: [RecordKey: RecordStamp] = [:]
             for (key, recorded) in state.restoredUnpublished {
-                guard (try? requireKeys(since: epoch)) != nil else { return }
+                guard (try? requireKeys(since: epoch)) != nil else { return false }
                 if Self.isDismissed(recorded) {
                     // Kept while the row is still the earlier ID's (`dismissedVersion`).
                     if let row = try? await store.record(key), row.deviceID == recorded.device {
@@ -104,7 +126,9 @@ extension VaultSession {
                     }
                     continue
                 }
-                let left = publishedBound(recorded, of: key, in: vaultID)
+                let pulled = staged[vaultID]?[key]?[recorded.device] ?? 0
+                let indexed = publishedBound(recorded, of: key, in: vaultID)
+                let left = RecordStamp(version: max(indexed.version, pulled), device: recorded.device)
                 let reattributing = !Self.idsNobodyReceives(account: account, view: view, including: left.device)
                     .contains(left.device)
                 let row: StoredRecord?
@@ -113,6 +137,7 @@ extension VaultSession {
                 } catch {
                     // Not read now: tried again at the next sync.
                     remaining[key] = recorded
+                    finished = false
                     continue
                 }
                 var keep = false
@@ -160,12 +185,58 @@ extension VaultSession {
                         keep = true
                     }
                 }
-                if keep { remaining[key] = recorded }
+                if keep {
+                    remaining[key] = recorded
+                    finished = false
+                }
             }
-            guard remaining != state.restoredUnpublished, (try? requireKeys(since: epoch)) != nil else { continue }
+            guard remaining != state.restoredUnpublished else { continue }
+            guard (try? requireKeys(since: epoch)) != nil else { return false }
             state.restoredUnpublished = remaining
-            try? await syncState.saveState(state)
+            do {
+                try await syncState.saveState(state)
+            } catch {
+                finished = false
+            }
         }
+        return finished
+    }
+
+    /// What the staged segments of `vaultID`'s log, downloaded and not merged yet, show each earlier ID published of
+    /// the records a restore has still to carry there (`SyncState.restoredUnpublished`), per record and earlier ID:
+    /// the highest version of the record that ID's own stream carried, and the most of that ID's work a third device's
+    /// version shows it had seen (`ItemMerge.seenByOthers`; whatever a third device saw, that ID published). What the
+    /// stream index shows once those segments are merged, and what the merged item would show, read before the merge
+    /// (review of round 14, L1). A version that does not open here shows nothing. `nil` where the state or the stage
+    /// cannot be read, or while locked: the carry then waits.
+    func stagedBounds(in vaultID: UUID, engine: SyncEngine, account: AccountRecord, since epoch: UInt64) async
+        -> [RecordKey: [UUID: UInt64]]?
+    {
+        guard let syncState else { return [:] }
+        let state: SyncState?
+        do {
+            state = try await syncState.loadState(vaultID: vaultID)
+        } catch {
+            return nil
+        }
+        let restored = (state?.restoredUnpublished ?? [:]).filter { !Self.isDismissed($0.value) }
+        guard !restored.isEmpty else { return [:] }
+        guard let entries = try? await engine.stagedEntries(of: Set(restored.keys)),
+            let keys = try? requireKeys(since: epoch)
+        else { return nil }
+        var bounds: [RecordKey: [UUID: UInt64]] = [:]
+        for entry in entries {
+            guard let earlier = restored[entry.key]?.device else { continue }
+            var seen = entry.device == earlier ? entry.version : 0
+            if entry.device != earlier, entry.device != account.deviceID, entry.kind == .item,
+                let row = entry.record(in: vaultID), let item = try? openItem(row, keys: keys)
+            {
+                seen = ItemMerge.seenByOthers(
+                    item, origin: Self.origin(row), of: earlier, besides: account.deviceID)
+            }
+            bounds[entry.key, default: [:]][earlier] = max(bounds[entry.key]?[earlier] ?? 0, seen)
+        }
+        return bounds
     }
 
     /// `left` (an entry of `SyncState.restoredUnpublished`) with its version raised to the highest version of the

@@ -78,6 +78,12 @@ extension ItemMerge {
         return state.item
     }
 
+    /// `seenByOthers` of `item`, read from a record written as `origin`: for a restore's carry that bounds what
+    /// `device` published by versions it has pulled and not merged yet (review of round 14, L1).
+    public static func seenByOthers(_ item: Item, origin: Revision, of device: UUID, besides writer: UUID) -> UInt64 {
+        seenByOthers(ItemState(item, origin: origin), of: device, besides: writer)
+    }
+
     /// The most of `device`'s work on the record that `state` shows a third device (neither `device` nor `besides`)
     /// had seen: its count in each such device's stamps and discards, each line of `device`'s that such a device's
     /// line is anchored after, and each line of `device`'s that such a device removed. All of it was published.

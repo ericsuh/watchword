@@ -45,8 +45,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// is no longer a member of or that was deleted: they stay on this device only, and hold nothing back
     /// (`AccountSyncReport.restoredWorkKeptHere`, review of round 13, M3). By vault name and title.
     case restoredWorkKeptHere([UnreceivedCopy])
-    /// Nothing made on this device in these vaults is going out, new edits included, until a restore's carry of
-    /// what this device held there before it was restored has finished (`AccountSyncReport.publishingHeldForCarry`,
+    /// Nothing made on this device in these vaults is going out, new edits included, and nothing from others there is
+    /// applied, until a restore's carry of what this device held there before it was restored has finished (`AccountSyncReport.publishingHeldForCarry`,
     /// review of round 14, L4). By vault name, sorted, and how many more whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
 
@@ -139,9 +139,11 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 names.map { "“\($0)”" }
                 + (unnamed == 0 ? [] : [unnamed == 1 ? "a shared vault" : "\(unnamed) shared vaults"])
             let one = vaults.count == 1 && unnamed <= 1
-            return "Changes made on this device in " + Self.list(vaults) + " are waiting: before they go out, this "
-                + "device has to finish carrying over the changes it made " + (one ? "there" : "in each")
-                + " before it was restored. It tries again at each sync. Nothing has been lost."
+            return "Changes made on this device in " + Self.list(vaults) + " are waiting, and changes from others "
+                + (one ? "there" : "in " + (vaults.count == 2 ? "them" : "those vaults")) + " are not shown yet: "
+                + "before they go out, this device has to finish carrying over the changes it made "
+                + (one ? "there" : "in each") + " before it was restored. It tries again at each sync. Nothing has "
+                + "been lost."
         }
     }
 }

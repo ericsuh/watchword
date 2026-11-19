@@ -478,6 +478,24 @@ public actor SyncEngine {
         return report
     }
 
+    /// The entries for `keys` that this vault's staged segments carry, each segment checked as a merge checks it
+    /// (`open`, and its entries' structure) and each entry its segment's author's own; a segment that fails a check
+    /// gives nothing. For a caller that must know, after a `download` and before the pass that merges it, what each
+    /// stream carried of those records: a restore's carry, which renames the backup's version before anything pulled
+    /// is merged into it (docs/10-sync-correctness.md §9, review of round 14, L1). Merges nothing; throws what the
+    /// state store threw.
+    public func stagedEntries(of keys: Set<RecordKey>) async throws -> [SyncEntry] {
+        guard !keys.isEmpty else { return [] }
+        var entries: [SyncEntry] = []
+        for staged in try await syncState.staged(vaultID: vaultID) where staged.location.kind == .segment {
+            guard let payload = try? await open(staged), (try? validate(payload, at: staged.location)) != nil else {
+                continue
+            }
+            entries += payload.entries.filter { keys.contains($0.key) && $0.device == staged.location.author }
+        }
+        return entries
+    }
+
     // MARK: - Download
 
     struct Listing {

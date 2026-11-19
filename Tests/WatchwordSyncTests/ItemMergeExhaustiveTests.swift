@@ -58,6 +58,9 @@ struct LongRunningItemMergeExhaustiveTests {
         /// of the nightly run were recorded before carries were checked; asserted to be above zero instead.
         var carries = 0
         var renamingCarries = 0
+        /// How many of them met a tie of two field orders that renaming after the merge would break (review of round
+        /// 14, L1), with the restored ID below or above every device.
+        var tiedCarries = 0
 
         init(alphabet: [MergeModel.Operation]) {
             self.alphabet = alphabet
@@ -129,7 +132,12 @@ struct LongRunningItemMergeExhaustiveTests {
                         carriedPairs.insert([x, y]).inserted
                     else { continue }
                     carries += 1
-                    if model.checkCarry(stored[position], against: stored[index], of: earlier) { renamingCarries += 1 }
+                    for restored in [MergeModel.restoredBelow, MergeModel.restoredAbove] {
+                        let found = model.checkCarry(
+                            stored[position], against: stored[index], of: earlier, restored: restored)
+                        if found.renamed { renamingCarries += 1 }
+                        if found.tied { tiedCarries += 1 }
+                    }
                 }
             }
             // Through the public merge, as a device receiving the versions one at a time would: in the order stored,
@@ -219,7 +227,7 @@ struct LongRunningItemMergeExhaustiveTests {
     /// equals one the old exploration stored.
     static func check(
         _ start: MergeModel, alphabet: [MergeModel.Operation], depth: Int, expecting expected: Totals,
-        sourceLocation: SourceLocation = #_sourceLocation
+        meetingTies: Bool = false, sourceLocation: SourceLocation = #_sourceLocation
     ) {
         var exploration = Exploration(alphabet: alphabet)
         exploration.explore(start, depth: depth, path: "", known: 0)
@@ -228,6 +236,8 @@ struct LongRunningItemMergeExhaustiveTests {
             sourceLocation: sourceLocation)
         #expect(exploration.totals == expected, sourceLocation: sourceLocation)
         #expect(exploration.carries > 0 && exploration.renamingCarries > 0, sourceLocation: sourceLocation)
+        // The case L1 found, where the start's histories reach it: so that a change cannot leave it untested.
+        if meetingTies { #expect(exploration.tiedCarries > 0, sourceLocation: sourceLocation) }
     }
 
     /// Edits of a field, its removal, a reorder, an attribute, a notes line, trash and restore, conflict resolution
@@ -252,7 +262,8 @@ struct LongRunningItemMergeExhaustiveTests {
                     versions: 29581, pairs: 232569, triples: 855053)
                 : Totals(
                     histories: 6569, conflicts: 792, resolutions: 0, erased: 42, kept: 54, versions: 2219,
-                    pairs: 12595, triples: 36795))
+                    pairs: 12595, triples: 36795),
+            meetingTies: true)
     }
 
     @Test("two devices that already disagree about one field, every history from there")

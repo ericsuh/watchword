@@ -149,22 +149,41 @@ extension VaultSession {
                 ownIDCommits: ownIDCommits)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 let requests = sharedReplayRequests(vaultID)
-                if await restoredWorkToCarry(in: vaultID) { carrying.insert(vaultID) }
-                let stoppedBefore = stopped
-                vaultReport = try await engine(vaultID).sync(
-                    reconcile: reconcile || shared.reconcile, deferringDeletions: true,
-                    publishing: shared.publishing && !carrying.contains(vaultID), transportStopped: stopped)
-                // What a restore left, carried once the vault's log has been pulled since it, so that the stream
-                // index shows what the earlier device ID published (review of round 13, M2), and before a replay
-                // (whose take-out leaves these rows alone, `takeOutWhatNoLongerCounts`). Published at the next sync;
-                // meanwhile the hold below keeps every deletion back.
-                if carrying.contains(vaultID), stoppedBefore == nil, !vaultReport.transportUnavailable,
-                    vaultReport.transportFailure == nil
-                {
-                    await carryRestoredWork(account: record, view: view, since: epoch, in: [vaultID])
+                var reconciled = reconcile || shared.reconcile
+                if await restoredWorkToCarry(in: vaultID) {
+                    // What a restore left, carried once the vault's log has been pulled since it, so that what the
+                    // earlier device ID published is known (review of round 13, M2), and before anything pulled is
+                    // merged into it, so that the pulled versions are merged into the renamed version as every other
+                    // device merges them (review of round 14, L1); and before a replay (whose take-out leaves these
+                    // rows alone, `takeOutWhatNoLongerCounts`). The bound is the stream index and what the downloaded
+                    // segments carry (`stagedBounds`). Published at the next sync; meanwhile the hold below keeps
+                    // every deletion back. A carry that cannot run, or does not finish, merges nothing into the vault
+                    // in this sync: what was downloaded stays staged for the next.
+                    carrying.insert(vaultID)
+                    let pulled = try await engine(vaultID).download(transportStopped: stopped)
+                    var carried = false
+                    if stopped == nil, !pulled.transportUnavailable, pulled.transportFailure == nil,
+                        let staged = await stagedBounds(
+                            in: vaultID, engine: engine(vaultID), account: record, since: epoch)
+                    {
+                        carried = await carryRestoredWork(
+                            account: record, view: view, since: epoch, in: [vaultID], staged: [vaultID: staged])
+                    }
+                    if carried {
+                        let merged = try await engine(vaultID).sync(
+                            reconcile: reconciled, deferringDeletions: true, publishing: false,
+                            transportStopped: stopped)
+                        vaultReport = Self.report(pulled, followedBy: merged)
+                    } else {
+                        vaultReport = pulled
+                        reconciled = false
+                    }
+                } else {
+                    vaultReport = try await engine(vaultID).sync(
+                        reconcile: reconciled, deferringDeletions: true, publishing: shared.publishing,
+                        transportStopped: stopped)
                 }
-                await sharedEngineDidRun(
-                    vaultID, reconciled: reconcile || shared.reconcile, report: vaultReport, requestsBefore: requests)
+                await sharedEngineDidRun(vaultID, reconciled: reconciled, report: vaultReport, requestsBefore: requests)
                 // Entries a shared vault's earlier version could not read are readable now: replayed with the judge
                 // in this sync (ADR 0009), as its log is whole.
                 if vaultReport.replayNeeded { sharing.vaults[vaultID]?.needsReconcile = true }
@@ -1104,8 +1123,8 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// finish: their log could not be pulled (the transport failing for them, or a failure in an earlier vault that
     /// stopped the sync), or a step of the carry failed (review of round 14, L4). The carry runs only after a vault's
     /// log is pulled, and while anything is left to carry the vault publishes nothing, so that no merge of a row still
-    /// holding an earlier ID's work goes out ahead of it. A carry that finishes in this sync is not named: the vault
-    /// publishes at the next.
+    /// holding an earlier ID's work goes out ahead of it; nor does it merge what it pulled, which waits, staged, for
+    /// the carry (L1). A carry that finishes in this sync is not named: the vault publishes at the next.
     public var publishingHeldForCarry: Set<UUID> = []
     /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
     /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
