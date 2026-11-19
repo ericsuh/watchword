@@ -974,6 +974,11 @@ public actor VaultSession: SharesExecutor {
 
     /// Zeroises every key. Safe to call at any time, including while another operation is in flight: that
     /// operation then fails with `locked` or `lockedDuringUnlock`.
+    /// How many times the session has locked: moved inside `lock()` itself, before anyone listening to `lockEvents()`
+    /// hears of it, so work outside the session that must not keep what it made across a lock compares it after its
+    /// awaits (review of round 11, I1; `LockSignal.Mark`).
+    public var lockCount: UInt64 { lockEpoch }
+
     public func lock() {
         lockEpoch &+= 1
         keys?.zeroise()
