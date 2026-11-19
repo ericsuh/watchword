@@ -60,10 +60,16 @@ struct ExportView: View {
                         HStack {
                             Text(kind.title)
                             Spacer()
-                            if model.kind == kind { Image(systemName: "checkmark").accessibilityLabel("Chosen") }
+                            if model.kind == kind { Image(systemName: "checkmark").accessibilityHidden(true) }
                         }
+                        // The whole row chooses: a borderless button is hit only where it draws, and on iOS a tap
+                        // beside a short title, in the spacer, chose nothing.
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
+                    // The checkmark, said once: as the row's value, which the UI tests wait for (`chooseExportKind`).
+                    .accessibilityValue(model.kind == kind ? "Chosen" : "")
+                    .accessibilityAddTraits(model.kind == kind ? .isSelected : [])
                     .accessibilityIdentifier(AccessibilityID.Export.kind + "." + kind.rawValue)
                 }
             }

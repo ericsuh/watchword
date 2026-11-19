@@ -393,6 +393,24 @@ extension XCUIApplication {
         target.click()
     }
 
+    /// Chooses the export format whose `ExportKind` raw value is `kind`, and waits until the form shows it chosen (the
+    /// row's accessibility value is "Chosen"); a tap that chose nothing is made once more. The rows that depend on the
+    /// format (the archive's passphrase fields) are there only once it is chosen: the tour, choosing the archive after
+    /// a plaintext export's report had scrolled the form to its foot, went on to look for a passphrase field that the
+    /// form never made (iOS, CI run 44416865943). Not a failure of its own when the value is never seen: the step that
+    /// needs the format fails, with the tree attached here first.
+    func chooseExportKind(_ kind: String, file: StaticString = #filePath, line: UInt = #line) {
+        let identifier = AccessibilityID.Export.kind + "." + kind
+        let chosen = descendants(matching: .any).matching(identifier: identifier)
+            .matching(NSPredicate(format: "value == %@", "Chosen")).firstMatch
+        for attempt in 1...2 {
+            reveal(identifier, file: file, line: line).click()
+            if chosen.appears(within: 5) { return }
+            print("UI-test note: \(identifier) was tapped and is not chosen; attempt \(attempt) of 2")
+        }
+        attachTree("choose \(identifier)", target: identifier)
+    }
+
     /// Types into the single-line text or secure field with `identifier`. On iOS the text ends in Return, which ends
     /// editing in a field with no submit action and puts the keyboard away with the keystrokes already being sent:
     /// left up, it covered the next field or button, and finding that out and dismissing it cost a dozen queries each
