@@ -56,6 +56,11 @@ extension AdversarialSharedVaultTests {
         }
         #expect(await raw.loadState(vaultID: vaultID) == damaged, "the refused call replaced the state")
         #expect(try await second.store.loadAccount()?.migration != nil, "the refused call finished the move")
+        // Refused for the pending move first, before the vault's own reasons are asked (review of round 20, Z244): a
+        // vault that opens here is refused for the move, not as one whose work a sync carries.
+        await #expect(throws: VaultError.deviceMigrationIncomplete) {
+            try await second.session.stopWaitingForRestoredWork(in: personal)
+        }
 
         await second.session.configureSharing(
             SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
@@ -218,6 +223,41 @@ extension AdversarialSharedVaultTests {
         #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
         try await other.session.sync()
         #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+    }
+}
+
+extension AdversarialSharedVaultTests {
+    /// Threat: none needed but a move recorded in the store after this session read the account (a registration as a
+    /// new device since, Z234, or a record planted by A8, an attacker with the device's files, which can only make it
+    /// refuse); the review of round 20 (Z244). Stop Waiting checks the pending move twice: on the account the session
+    /// holds, and again from the store before its save. No test pinned the second: with it neutralised, every suite
+    /// passed. Here only the store records the move, and Stop Waiting is refused and writes nothing.
+    @Test("stopping the wait is refused for a move recorded in the store after the session read the account")
+    func stopWaitingRereadsTheAccountBeforeItsSave() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 32_150)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        _ = try await member.session.move(itemID: original.id, to: vaultID)
+        let restored = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 32_151)
+        let report = try await restored.session.syncAll()
+        #expect(report.restoredWorkMayStopWaiting.contains(vaultID), "Stop Waiting is not offered: nothing is tested")
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        let before = await raw.loadState(vaultID: vaultID)
+
+        let account = try #require(try await restored.store.loadAccount())
+        #expect(account.migration == nil)
+        try await restored.store.commit(
+            StoreChange(
+                account: .update(account, expectedKeysetVersion: account.keysetVersion),
+                migration: .set(DeviceMigration(previousDeviceID: UUID(), authenticator: []))))
+        await #expect(throws: VaultError.deviceMigrationIncomplete) {
+            try await restored.session.stopWaitingForRestoredWork(in: vaultID)
+        }
+        #expect(await raw.loadState(vaultID: vaultID) == before, "the refused call replaced the state")
     }
 }
 
