@@ -135,14 +135,26 @@ actor ListingFailingStore: RecordStore {
 }
 
 /// A sync state store over `base` whose reads of one vault's state (`loadState`) throw, as a busy or damaged database
-/// would: once, at the read after the next `skipping` of them, or every read while `failing` says so.
+/// would: once, at the read after the next `skipping` of them, every read while `failing` says so, or as `script`
+/// says, one read at a time.
 actor LoadFailingSyncState: SyncStateStore {
     struct LoadFailed: Error {}
+
+    /// What one read of the vault's state does, in `script`.
+    enum ScriptedRead: Sendable {
+        /// Reads the state.
+        case read
+        /// Answers that there is none, as a store that lost the row would.
+        case none
+        /// Runs the step, if any, and throws.
+        case fail(before: (@Sendable () async -> Void)?)
+    }
 
     let base: any SyncStateStore
     let vaultID: UUID
     private var skipping: Int?
     private var failing: (@Sendable () async -> Bool)?
+    private var script: [ScriptedRead] = []
     private(set) var failed = 0
 
     init(base: any SyncStateStore, vaultID: UUID) {
@@ -160,8 +172,25 @@ actor LoadFailingSyncState: SyncStateStore {
         self.failing = failing
     }
 
+    /// The next reads of the vault's state, one answer each, before anything else armed.
+    func script(_ reads: [ScriptedRead]) {
+        script = reads
+    }
+
     func loadState(vaultID: UUID) async throws -> SyncState? {
         if vaultID == self.vaultID {
+            if !script.isEmpty {
+                switch script.removeFirst() {
+                case .read:
+                    return try await base.loadState(vaultID: vaultID)
+                case .none:
+                    return nil
+                case .fail(let step):
+                    if let step { await step() }
+                    failed += 1
+                    throw LoadFailed()
+                }
+            }
             if let skipping {
                 if skipping == 0 {
                     self.skipping = nil
