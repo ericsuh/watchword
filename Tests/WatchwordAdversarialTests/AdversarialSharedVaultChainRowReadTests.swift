@@ -47,6 +47,7 @@ extension AdversarialSharedVaultTests {
         let report = try await restored.session.syncAll()
         #expect(!report.deviceMigrationIncomplete, "the ordinary move waited on a row it has no use for")
         #expect(report.deletionsHeldBack.isEmpty, "a row nothing depends on held the deletions back")
+        #expect(report.restoredChainUnreadable.isEmpty, "a row nothing depends on was reported")
         #expect(report.combined.segmentsWritten > 0, "the restored device published nothing")
         #expect(await failing.refused == 0, "a chain row was read where none can matter")
         try await other.session.sync()
@@ -79,6 +80,7 @@ extension AdversarialSharedVaultTests {
         try await member.session.deletePermanently(id: shared.id)
         let report = try await member.session.syncAll()
         #expect(report.deletionsHeldBack.isEmpty, "a row nothing depends on held the deletions back")
+        #expect(report.restoredChainUnreadable.isEmpty, "a row nothing depends on was reported")
         #expect(await failing.refused == 0, "a chain row was read where none can matter")
         try await other.session.sync()
         #expect((try? await other.session.item(id: doomed.id)) == nil, "the Personal vault's deletion never went out")
@@ -127,6 +129,7 @@ extension AdversarialSharedVaultTests {
         let named = try await restored.session.syncAll()
         #expect(named.deletionsHeldBack.contains(vaultID))
         #expect(named.restoredWorkWaiting[vaultID] == [copy.id], "the row of a vault that is not shared was read")
+        #expect(named.restoredChainUnreadable.isEmpty, "the row of a vault that is not shared was read")
         #expect(await failing.refused == 0, "the row of a vault that is not shared was read")
 
         // The shared vault's own row fails, its state damaged again (the sync recorded it afresh).
@@ -136,6 +139,9 @@ extension AdversarialSharedVaultTests {
         let held = try await restored.session.syncAll()
         #expect(await failing.refused > 0, "no read of the chain row failed: nothing is tested")
         #expect(held.deletionsHeldBack.contains(vaultID), "the hold failed open on a row that could not be read")
+        // And says why (Z240), rather than the generic notice's untrue reason.
+        #expect(held.restoredChainUnreadable == [vaultID], "the sync did not say the row could not be read")
+        #expect(held.restoredWorkWaiting.isEmpty)
         try await other.session.sync()
         #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
 
@@ -143,6 +149,61 @@ extension AdversarialSharedVaultTests {
         let report = try await restored.session.syncAll()
         #expect(report.deletionsHeldBack.contains(vaultID))
         #expect(report.restoredWorkWaiting[vaultID] == [copy.id], "the row, read again, did not name the copy")
+        #expect(report.restoredChainUnreadable.isEmpty)
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+    }
+
+    /// Threat: none needed but a sharing store that keeps failing its reads of a chain row a restore's move needs (as
+    /// in `unreadableChainRowFailsTheMove`, Z236, but lasting), on a store restored twice whose middle ID's state for a
+    /// shared vault was damaged in the backup, or edited by A8 (review of round 20, Z240). The move failed at every
+    /// attempt and nothing said why: the notice said Watchword would finish the move by itself. Each sync now reports
+    /// the vault whose row could not be read, and once the row reads again the move is made and the hold stands.
+    @Test("a restore's move that keeps failing on a chain row it needs says so at each sync, and is made once it reads")
+    func lastingChainRowFailureIsReported() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 32_130)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let first = try #require(await member.session.deviceIDForTest())
+        let middle = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 32_131)
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+
+        await middle.session.lock()
+        await middle.forgetDeviceKey(accountID: member.accountID)
+        var damaged = try #require(await raw.loadState(vaultID: vaultID))
+        damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
+        await raw.tamper(damaged)
+        let failing = ChainRowUnreadableSharingStore(base: member.state)
+        await failing.failNextReads(.max, in: vaultID)
+        let second = TestVault(
+            store: middle.store, keychain: middle.keychain, biometrics: middle.biometrics, clock: middle.clock,
+            sync: middle.sync, seed: 32_132, deviceKeys: middle.deviceKeys)
+        await second.session.configureSharing(
+            SharingSettings(state: failing, contacts: member.contacts, directory: household.directory))
+        try await second.session.unlock(password: TestVault.password)
+        #expect(try await second.store.loadAccount()?.migration != nil, "the move finished on a row it did not read")
+
+        for _ in 0..<2 {
+            let report = try await second.session.syncAll()
+            #expect(report.deviceMigrationIncomplete)
+            #expect(report.restoredChainUnreadable == [vaultID], "the sync did not say the row could not be read")
+            #expect(report.combined.segmentsWritten == 0, "the device published while its move was incomplete")
+        }
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+
+        await failing.readAgain()
+        let report = try await second.session.syncAll()
+        #expect(!report.deviceMigrationIncomplete, "the move was not made once the row read again")
+        #expect(report.restoredChainUnreadable.isEmpty)
+        let state = await raw.loadState(vaultID: vaultID)?.restoredUnpublished ?? [:]
+        #expect(state[RecordKey(recordID: copy.id, kind: .item)]?.device == first, "the copy was not recorded")
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
         try await other.session.sync()
         #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
     }

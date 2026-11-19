@@ -395,6 +395,13 @@ extension VaultSession {
         fileprivate(set) var unreadableFor: Set<UUID> = []
     }
 
+    /// What `restoredChainRow` throws where the sharing store could not read `vaultID`'s chain row (Z236): the vault,
+    /// so that a move that fails on it is reported (`AccountSyncReport.restoredChainUnreadable`, review of round 20,
+    /// Z240), as every other wait on the row is.
+    struct RestoredChainRowUnreadable: Error {
+        let vaultID: UUID
+    }
+
     /// The chain `read` holds, read now if it has not been: `nil` (and `vaultID` noted) where a row cannot be read.
     func restoredChain(_ read: inout RestoredChainRead, for vaultID: UUID, account: AccountRecord) async -> Set<UUID>? {
         if let chain = read.chain { return chain }
@@ -414,11 +421,17 @@ extension VaultSession {
     /// does not verify, sharing is not configured (the move waits for sharing where it would read one,
     /// `moveAwaitsSharing`, Z229), or no trusted signing key is at hand. Throws what the sharing store threw (review of
     /// round 19, Z236): a row that could not be read is not one that is not there, and each caller fails closed on it.
+    /// What it throws is `RestoredChainRowUnreadable`, naming the vault, so that a sync can say so (review of round
+    /// 20, Z240).
     func restoredChainRow(in vaultID: UUID, account: AccountRecord, device: UUID? = nil) async throws -> Set<UUID>? {
-        guard let settings = sharing.settings,
-            let bytes = try await settings.state.value(.restoredChain, vaultID: vaultID),
-            let signingKey = await trustedAccountSigningKey(account)
-        else { return nil }
+        guard let settings = sharing.settings else { return nil }
+        let stored: [UInt8]?
+        do {
+            stored = try await settings.state.value(.restoredChain, vaultID: vaultID)
+        } catch {
+            throw RestoredChainRowUnreadable(vaultID: vaultID)
+        }
+        guard let bytes = stored, let signingKey = await trustedAccountSigningKey(account) else { return nil }
         return RestoredChainRow.parse(
             bytes, device: device ?? account.deviceID, account: account.accountID, signingKey: signingKey,
             vaultID: vaultID)
@@ -664,19 +677,24 @@ extension VaultSession {
     /// account's membership of it ended (`restoredWorkKeptHere`, review of round 13, M3). Read while the keys of
     /// `epoch` are here; a lock meanwhile reports none (as `copiesNobodyReceived`, Z174).
     ///
-    /// `mayStopWaiting` is the waiting vaults the person may stop waiting for (`mayStopWaitingForRestoredWork`).
+    /// `mayStopWaiting` is the waiting vaults the person may stop waiting for (`mayStopWaitingForRestoredWork`), and
+    /// `chainUnreadable` those whose hold rests on a chain row that could not be read (`RestoredChainRead`, review of
+    /// round 20, Z240): they hold the deletions back and name no item, and the sync says why
+    /// (`AccountSyncReport.restoredChainUnreadable`) rather than leaving the generic notice to.
     func restoredWorkWaiting(account: AccountRecord, since epoch: UInt64) async -> (
-        waiting: [UUID: Set<UUID>], keptHere: [UUID: Set<UUID>], mayStopWaiting: Set<UUID>
+        waiting: [UUID: Set<UUID>], keptHere: [UUID: Set<UUID>], mayStopWaiting: Set<UUID>, chainUnreadable: Set<UUID>
     ) {
-        guard let vaults = try? await vaultDirectory(account).keys else { return ([:], [:], []) }
+        guard let vaults = try? await vaultDirectory(account).keys else { return ([:], [:], [], []) }
         var chain = RestoredChainRead()
         var waiting: [UUID: Set<UUID>] = [:]
         var keptHere: [UUID: Set<UUID>] = [:]
         var mayStopWaiting: Set<UUID> = []
+        var chainUnreadable: Set<UUID> = []
         for vaultID in vaults {
             let items = await itemsHoldingRestoredWork(in: vaultID, chain: &chain, account: account)
             let released = await restoredWorkReleased(vaultID, account: account)
-            guard let keys = try? requireKeys(since: epoch) else { return ([:], [:], []) }
+            guard let keys = try? requireKeys(since: epoch) else { return ([:], [:], [], []) }
+            if items == nil, !released, chain.unreadableFor.contains(vaultID) { chainUnreadable.insert(vaultID) }
             guard let items, !items.isEmpty else { continue }
             if released {
                 keptHere[vaultID] = items
@@ -687,7 +705,7 @@ extension VaultSession {
                 }
             }
         }
-        return (waiting, keptHere, mayStopWaiting)
+        return (waiting, keptHere, mayStopWaiting, chainUnreadable)
     }
 
     /// Whether the person may stop waiting to carry over what a restore left in `vaultID` (review of round 14, L2):

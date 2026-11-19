@@ -100,8 +100,8 @@ public enum ErrorWording {
             return "That vault opens on this device, so the changes made there before this device was restored go "
                 + "out at a sync. Sync, then try again if it still waits."
         case .deviceMigrationIncomplete:
-            return "This device is still moving its sync records over from before it was restored. Try again once "
-                + "that is done: sync, or open and unlock Watchword."
+            return "This device is still moving its sync records over from before it was restored. Try again after "
+                + "the next sync."
         case .vaultDeletionNotConfirmed:
             return "Something arrived in the vault since you were asked. Review it and try again."
         case .itemHasUnresolvedValues:
