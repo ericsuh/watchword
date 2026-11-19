@@ -535,12 +535,16 @@ history writers), becomes `(k, n)`, and the vectors of `o`'s and `n`'s own parts
 `p'` and give the rest to `n`. Nothing of a third device is touched.
 
 The bound `p'` is the most of three, each a lower bound on what `o` published: `p`, the last version of the record `o`'s
-own signed state recorded; the highest version of the record `o`'s stream carried, as the stream index shows it and the
-segments downloaded since the restore carry it (`publishedBound`, `SyncEngine.stagedEntries`; the carry waits for the
-vault's log to be downloaded, so the bound is the transport's and not the backup's); and what the item itself, or a
-downloaded version of it, shows a third device `x` (neither `o` nor `n`) saw of `o`: `o`'s count in each of `x`'s
+own signed state recorded; the highest version of the record `o`'s stream carried, as the stream index shows it and
+`o`'s own segments downloaded since the restore carry it (`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`;
+the carry waits for the vault's log to be downloaded, so the bound is the transport's and not the backup's); and what
+the item itself, the row, shows a third device `x` (neither `o` nor `n`) saw of `o`: `o`'s count in each of `x`'s
 stamps and discards, each `o` line one of `x`'s lines is anchored after, each `o` line `x` removed (`seenByOthers`).
-Whatever `x` saw, `o` published. Before Z197 only `p` was used and every vector was renamed:
+Whatever an honest `x` saw, `o` published, and the row's versions are ones the judge admitted (a claim of `x` about
+`o` counts there only once `o`'s stream has carried it, S46). A downloaded version of `x` that nothing has judged yet
+is no evidence: a member who may write can claim any `seen` vector, and before Z208 such a claim made the carry find
+nothing above `p'` to carry, drop the entry, and leave `o`'s work for every judge to hold aside. A shared vault's log is
+whole, so what an honest `x` saw of `o` is in `o`'s own segments, merged (the index) or downloaded. Before Z197 only `p` was used and every vector was renamed:
 with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
 `(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every
 member's judge failed (2) for it.
@@ -558,8 +562,12 @@ member's judge failed (2) for it.
   carry did before the review of round 14 (L1, Z204), gives the same item, `R(a ⊔ b) = R(a) ⊔ b`, but for a
   tie-break: two concurrent field orders at the same version are ordered by device ID, and `n` may rank otherwise
   against a third device than `o` did. The field order is a register whose later write wins, so the merge had
-  already dropped the loser, and renamed afterwards the restored device kept an arrangement no other device held.
-  A carry that cannot run or finish therefore merges nothing into the vault in that sync.
+  already dropped the loser, and renamed afterwards the restored device kept an arrangement no other device held, or
+  (where its order lost under `o` and wins under `n`) every device lost the person's reorder. A carry that cannot run
+  or finish therefore merges nothing into the vault in that sync, in any pass (Z209). The laws of the model
+  (`checkCarryOrder`) show that renaming after the merge differs from the reference `b ⊔ R(a)` in such a tie, and the
+  exhaustive exploration must meet one; no model law sees which order the session uses, and the session test
+  `carryBeforeTheMergeKeepsTheFieldOrder` fails if the session merges first (Z210).
 - *`J` holds for it.* Every value still attributed to `o` has a revision at or below `p'`, and its bytes are unchanged
   (its stamp's `seen` held no count of `o` above its own revision), so it is in a version of `o`'s stream; every third
   device's value is unchanged, byte for byte, and was carried by its own writer's stream as before; every renamed
