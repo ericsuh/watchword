@@ -42,9 +42,11 @@ extension SyncState {
         writer.append(vector: snapshotCoverage)
         writer.append(stashUnsaved)
         writer.append(stashGeneration)
-        // Fields added after the state was first signed (review findings Z33, Z38, then Z147 and Z149), written only
-        // when one is set, so a row saved before them still verifies; their length tells the forms apart.
-        let later = quarantineCrowded != nil || collectedThrough > 0
+        // Fields added after the state was first signed (review findings Z33, Z38, then Z147 and Z149, then the
+        // review of round 12), written only when one is set, so a row saved before them still verifies; their length
+        // tells the forms apart.
+        let restored = !restoredUnpublished.isEmpty
+        let later = quarantineCrowded != nil || collectedThrough > 0 || restored
         if retryUnfinished || !quarantineDropped.isEmpty || later {
             writer.append(retryUnfinished)
             writer.append(UInt64(quarantineDropped.count))
@@ -55,6 +57,7 @@ extension SyncState {
             writer.append(quarantineCrowded ?? 0)
             writer.append(collectedThrough)
         }
+        if restored { writer.append(stamps: restoredUnpublished) }
         return writer.bytes
     }
 

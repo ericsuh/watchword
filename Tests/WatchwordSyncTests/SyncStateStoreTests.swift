@@ -78,6 +78,7 @@ enum StateStoreFixtures {
         state.quarantineDropped = [SyncFixtures.deviceB]
         state.quarantineCrowded = 17
         state.collectedThrough = 2
+        state.restoredUnpublished = [record(4).key: RecordStamp(version: 2, device: SyncFixtures.deviceB)]
         state.authenticator = [0xA1, 0xA2, 0xA3]
         return state
     }
@@ -122,6 +123,13 @@ struct SyncStateAuthenticationTests {
             changed("quarantineCrowded, cleared") { $0.quarantineCrowded = nil },
             changed("quarantineCrowded, zero") { $0.quarantineCrowded = 0 },
             changed("collectedThrough") { $0.collectedThrough = 3 },
+            changed("restoredUnpublished") {
+                $0.restoredUnpublished[other] = RecordStamp(version: 0, device: SyncFixtures.deviceB)
+            },
+            changed("restoredUnpublished, a stamp") {
+                $0.restoredUnpublished[StateStoreFixtures.record(4).key]?.version = 3
+            },
+            changed("restoredUnpublished, emptied") { $0.restoredUnpublished = [:] },
         ]
     }
 
@@ -137,7 +145,7 @@ struct SyncStateAuthenticationTests {
         #expect(resigned.authenticatedBytes == signed)
         // A field added to the state must be added to `authenticatedBytes` and to `variants`: this count is the
         // reminder.
-        #expect(Mirror(reflecting: base).children.count == 18)
+        #expect(Mirror(reflecting: base).children.count == 19)
         #expect(Set(Self.variants.map(\.1.authenticatedBytes)).count == Self.variants.count)
     }
 
@@ -150,6 +158,7 @@ struct SyncStateAuthenticationTests {
         state.quarantineDropped = []
         state.quarantineCrowded = nil
         state.collectedThrough = 0
+        state.restoredUnpublished = [:]
         let before = state.authenticatedBytes
         state.retryUnfinished = true
         #expect(state.authenticatedBytes.count == before.count + 1 + 8)
@@ -159,6 +168,11 @@ struct SyncStateAuthenticationTests {
         state.collectedThrough = 4
         #expect(state.authenticatedBytes.count == withRetry.count + 1 + 8 + 8)
         #expect(Array(state.authenticatedBytes.prefix(withRetry.count)) == withRetry)
+        // And the review of round 12's: a row saved before it still verifies.
+        let withCollected = state.authenticatedBytes
+        state.restoredUnpublished = [StateStoreFixtures.record(5).key: RecordStamp(version: 1, device: UUID())]
+        #expect(state.authenticatedBytes.count == withCollected.count + 8 + (16 + 1) + (8 + 16 + 1))
+        #expect(Array(state.authenticatedBytes.prefix(withCollected.count)) == withCollected)
     }
 
     @Test("what is signed does not depend on the order a dictionary happens to iterate in")

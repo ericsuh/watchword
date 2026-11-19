@@ -358,6 +358,8 @@ public actor SyncEngine {
             state.publishedAcknowledgement = kept.publishedAcknowledgement
             state.lastPublishedSequence = kept.lastPublishedSequence
             state.collectedThrough = kept.collectedThrough
+            // What a restore has still to carry over is this device's own record, which no log holds.
+            state.restoredUnpublished = kept.restoredUnpublished
             if judge == nil { state.erasures = kept.erasures }
             state.stashGeneration = kept.stashGeneration
             // The replay brings back everything the log holds. A revoked device's own versions it no longer reads,
