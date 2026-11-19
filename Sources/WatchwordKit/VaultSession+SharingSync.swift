@@ -1025,18 +1025,14 @@ extension VaultSession {
             if !accounts.isEmpty { relied.insert(value.device) }
             // A stream that will never carry it here: a revoked device's, which is not read again, or one whose first
             // segments were collected before the vault was shared (review finding Z144). Believed of an account that
-            // may write, and for a description one that may also name the vault (§T, V48), in a version that
+            // may write, and for a description one that holds the role now (§T, V48, V50), in a version that
             // otherwise counts, and never waited for.
             if !accounts.isEmpty,
                 Self.neverCarriesHere(
                     value.device, accounts: accounts, claimed: revisions[value] ?? .max, of: originKey, in: vault,
                     retired: retired)
             {
-                if Self.neverCarriedValueCounts(
-                    accounts, isDescription: isDescription, sealedUnder: record.keyID, in: vault.ledger)
-                {
-                    continue
-                }
+                if Self.neverCarriedValueCounts(accounts, isDescription: isDescription, in: vault.ledger) { continue }
                 admitted = false
                 continue
             }
@@ -1363,16 +1359,16 @@ extension VaultSession {
     }
 
     /// Whether a value of a device whose stream will never carry it here (`neverCarriesHere`) is believed: every one of
-    /// `accounts` may write now, and for a vault's description every one may also have named the vault in a version
-    /// sealed under `keyID` (`descriptionMayBeVouched`), as `judgeAdmits` asks of every other route a description takes
-    /// (§T; review of the first merge, I2; V48). The review found no route by which a description that the other
-    /// routes would refuse reaches this one; asked here too, the rule is one rule wherever a description comes from.
+    /// `accounts` may write now, and for a vault's description every one also holds the owner's or an administrator's
+    /// role now (§T; review of the first merge, I2; V48). Not `descriptionMayBeVouched`, which believes a former
+    /// administrator's description in a version sealed under a key introduced at or after the cut that ended the role:
+    /// there the version is judged against that cut, and here nothing carried it, so a former administrator who may
+    /// still write could stamp a name as one of their own revoked devices' with the current key, and it counted (V50).
     static func neverCarriedValueCounts(
-        _ accounts: [UUID], isDescription: Bool, sealedUnder keyID: UUID, in ledger: MembershipLedger
+        _ accounts: [UUID], isDescription: Bool, in ledger: MembershipLedger
     ) -> Bool {
         guard allMayWrite(accounts, in: ledger) else { return false }
-        return !isDescription
-            || accounts.allSatisfy { descriptionMayBeVouched(of: $0, sealedUnder: keyID, in: ledger) }
+        return !isDescription || accounts.allSatisfy { ledger.administratorStanding(of: $0) == .holdsRole }
     }
 
     /// The devices revoked from their own account, in this account's registry or in a member's as `vaultID`'s chain

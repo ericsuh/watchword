@@ -2616,7 +2616,7 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   with its revision is refused there at once. A value carried by no segment held here waits: the version is held
   aside and the device its stamp names is remembered (`SharedStreamIndex.awaiting`), and a new segment of that
   device's stream replays the log; except where that stream will never carry it here, a revoked device's or the
-  owner's collected one, where it is believed for an account that may write (Z144). The one exception is a member who joined after a rotation, who cannot open the
+  owner's collected one, where it is believed for an account that may write, and for the vault's description only one that holds the owner's or an administrator's role now: nothing carried it, so no cut can judge it (Z144, V48, V50). The one exception is a member who joined after a rotation, who cannot open the
   segments that carried older values: for them a version sealed under a key introduced at or after the latest record
   that ended anyone's permission to write vouches for such values (its sealer held that record and every earlier
   segment, and judged them), provided the device is listed by an account whose work can count. Segments sealed under a

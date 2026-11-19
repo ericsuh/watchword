@@ -486,7 +486,7 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   `moreThanOneKeyIDMarksAVaultShared`, V40); a chain that names no granted key held is not joined
   (`stalePrefixIsNotJoined`, V41); with no marker no pin is replaced on a session's word (`noMarkerNoPinReplacement`,
   V42); a kept invitation is delivered only in its role while the chain lists the invitee
-  (`keptInvitationFollowsTheChain`, V43). A value no stream will carry here counts for a description only as an administrator's (`uncarriedDescriptionNeedsTheRole`, V48).
+  (`keptInvitationFollowsTheChain`, V43). A value no stream will carry here counts for a description only as an administrator's (`uncarriedDescriptionNeedsTheRole`, V48), one who holds the role now: a demoted administrator's does not, even under a key rotated after the cut (`demotedAdministratorsUncarriedDescription`, V50).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed
