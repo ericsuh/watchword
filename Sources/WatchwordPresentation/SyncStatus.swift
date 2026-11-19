@@ -39,6 +39,16 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// made on this device before it was restored that it has not sent yet, for want of the vault's key here
     /// (`AccountSyncReport.restoredWorkWaiting`, review of round 12, M1). By vault name and title.
     case restoredWorkWaiting([UnreceivedCopy])
+    /// These items of a shared vault hold changes made on this device before it was restored, in a vault this account
+    /// is no longer a member of or that was deleted: they stay on this device only, and hold nothing back
+    /// (`AccountSyncReport.restoredWorkKeptHere`, review of round 13, M3). By vault name and title.
+    case restoredWorkKeptHere([UnreceivedCopy])
+
+    /// What the person can do about it from the notice itself, if anything.
+    public var action: SyncNoticeAction? {
+        if case .restoredWorkWaiting = self { return .stopWaitingForRestoredWork }
+        return nil
+    }
 
     public var id: String {
         switch self {
@@ -54,6 +64,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .deletionsHeldBack: return "deletionsHeldBack"
         case .copiesReachedNobody: return "copiesReachedNobody"
         case .restoredWorkWaiting: return "restoredWorkWaiting"
+        case .restoredWorkKeptHere: return "restoredWorkKeptHere"
         }
     }
 
@@ -107,6 +118,39 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "after " + (one ? "it" : "them") + ". If the vault will not open on this device, you can choose to "
                 + "stop waiting, and " + (one ? "its changes stay" : "their changes stay")
                 + " on this device only."
+        case .restoredWorkKeptHere(let copies):
+            let shown = copies.prefix(3).map(\.phrase)
+            let more = copies.count > shown.count ? " and \(copies.count - shown.count) more" : ""
+            let one = copies.count == 1
+            return shown.joined(separator: ", ") + more + (one ? " holds" : " hold") + " changes made on this "
+                + "device before it was restored, in a shared vault you are no longer a member of or that was "
+                + "deleted. " + (one ? "They stay" : "Those changes stay") + " on this device only, and deletions "
+                + "made here are not waiting for them."
+        }
+    }
+}
+
+/// Something the person can do from a notice (`SyncNotice.action`), with what it means, for the button and the
+/// confirmation that asks before it is done.
+public enum SyncNoticeAction: Hashable, Sendable {
+    /// Stop waiting to send what a restore left in the shared vaults the notice names
+    /// (`VaultSession.stopWaitingForRestoredWork(in:)`, review of round 13, M3): the person's choice, for a vault
+    /// that will not open on this device.
+    case stopWaitingForRestoredWork
+
+    public var title: String {
+        switch self {
+        case .stopWaitingForRestoredWork: return "Stop Waiting"
+        }
+    }
+
+    /// What the confirmation says before the action is taken.
+    public var confirmation: String {
+        switch self {
+        case .stopWaitingForRestoredWork:
+            return "The changes this device made before it was restored stay on this device only: they are not sent "
+                + "to the shared vault's other members, now or later, even if the vault opens here again. Deletions "
+                + "made on this device then go out."
         }
     }
 }
@@ -138,6 +182,8 @@ public struct SyncSummary: Hashable, Sendable {
     /// One line: what was received and sent, or why nothing was.
     public let headline: String
     public let notices: [SyncNotice]
+    /// The vaults `SyncNotice.restoredWorkWaiting` names, for its action (`perform(_:using:)`).
+    public let restoredWorkVaults: [UUID]
 
     public var updateRequired: Bool { notices.contains(.updateRequired) }
 
@@ -184,6 +230,16 @@ public struct SyncSummary: Hashable, Sendable {
             }
         }
         if !waiting.isEmpty { notices.append(.restoredWorkWaiting(waiting.sorted())) }
+        restoredWorkVaults = report.restoredWorkWaiting.filter { !$0.value.isEmpty }.keys.sorted {
+            $0.uuidString < $1.uuidString
+        }
+        var keptHere: [UnreceivedCopy] = []
+        for (vaultID, items) in report.restoredWorkKeptHere {
+            for itemID in items {
+                keptHere.append(UnreceivedCopy(vault: vaultNames[vaultID], title: itemTitles[itemID]))
+            }
+        }
+        if !keptHere.isEmpty { notices.append(.restoredWorkKeptHere(keptHere.sorted())) }
         let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
         if !report.deletionsHeldBack.subtracting(explained).isEmpty {
             notices.append(.deletionsHeldBack)
@@ -192,14 +248,16 @@ public struct SyncSummary: Hashable, Sendable {
     }
 
     /// The summary with the names `init` needs read from `session`: the vaults' names, and the titles of the items in
-    /// `AccountSyncReport.copiesNobodyReceived` and `restoredWorkWaiting`. A name that cannot be read (the session locked, the item gone) is left
+    /// `AccountSyncReport.copiesNobodyReceived`, `restoredWorkWaiting` and `restoredWorkKeptHere`. A name that cannot be read (the session locked, the item gone) is left
     /// to `init`'s fallback.
     public static func loading(
         _ report: AccountSyncReport, deviceNames names: [UUID: String] = [:], from session: VaultSession
     )
         async -> SyncSummary
     {
-        let named = report.copiesNobodyReceived.values.flatMap { $0 } + report.restoredWorkWaiting.values.flatMap { $0 }
+        let named =
+            report.copiesNobodyReceived.values.flatMap { $0 } + report.restoredWorkWaiting.values.flatMap { $0 }
+            + report.restoredWorkKeptHere.values.flatMap { $0 }
         guard !named.isEmpty else { return SyncSummary(report, deviceNames: names) }
         let vaults = (try? await session.vaults(includingDeleted: true)) ?? []
         var titles: [UUID: String] = [:]
@@ -210,6 +268,16 @@ public struct SyncSummary: Hashable, Sendable {
             report, deviceNames: names,
             vaultNames: Dictionary(vaults.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first }),
             itemTitles: titles)
+    }
+
+    /// Does what a notice's action says (`SyncNotice.action`), once the person has confirmed it
+    /// (`SyncNoticeAction.confirmation`): for `stopWaitingForRestoredWork`, in every vault the notice names. The
+    /// caller syncs again afterwards, so that the deletions go out and the notice is gone.
+    public func perform(_ action: SyncNoticeAction, using session: VaultSession) async throws {
+        switch action {
+        case .stopWaitingForRestoredWork:
+            for vaultID in restoredWorkVaults { try await session.stopWaitingForRestoredWork(in: vaultID) }
+        }
     }
 
     /// The one line about a sync's outcome. The words "received" and "sent" are what the UI tests wait for.

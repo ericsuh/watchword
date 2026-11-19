@@ -98,6 +98,9 @@ extension VaultSession {
             .vaultMetadata: VaultMetadataMerger(sealer: adapter),
             .scanStatus: ScanStatusMerger(sealer: adapter),
         ])
+        // What a restore left that no entry records any more, recorded again before the take-out and any log
+        // (review of round 13, L-a).
+        if mayWrite { await recordRestoredWorkLeft(account: record, since: epoch) }
         // Shared vaults: membership, keys and what no longer counts, before any log (VaultSession+SharingSync.swift).
         var sharingReports = await syncSharedVaultsBeforeLogs(account: record)
         if !ownIDCommits {
@@ -228,7 +231,8 @@ extension VaultSession {
             report.deletionsHeldBack.formUnion(report.copiesNobodyReceived.keys)
         }
         if mayWrite, (try? requireKeys(since: epoch)) != nil {
-            report.restoredWorkWaiting = await restoredWorkWaiting(account: record, since: epoch)
+            (report.restoredWorkWaiting, report.restoredWorkKeptHere) = await restoredWorkWaiting(
+                account: record, since: epoch)
             report.deletionsHeldBack.formUnion(report.restoredWorkWaiting.keys)
         }
         report.sharing = sharingReports
@@ -302,12 +306,21 @@ extension VaultSession {
     }
 
     func holdsUnpublishedWork(in vaultID: UUID, account: AccountRecord) async -> Bool {
-        guard let syncState, let base = syncSettings?.state else { return false }
-        let state = try? await syncState.loadState(vaultID: vaultID)
+        guard let base = syncSettings?.state else { return false }
+        // The state this session signed (Z20). One that cannot be read holds (review of round 13, L-a).
+        let raw: SyncState?
+        do {
+            raw = try await base.loadState(vaultID: vaultID)
+        } catch {
+            return true
+        }
+        var state: SyncState?
+        if let raw { state = await verifiedSyncState(raw, vaultID: vaultID) }
         let known = state?.known ?? [:]
         // What a restore left here and could not carry yet: perhaps a move's copy, whose original's deletion is
-        // another vault's (review of round 12, M1).
-        if await holdsRestoredWork(in: vaultID, state: state, account: account) { return true }
+        // another vault's (review of round 12, M1). Fails closed (review of round 13, L-a).
+        let chain = await restoredChain(account: account)
+        if await holdsRestoredWork(in: vaultID, chain: chain, account: account) { return true }
         // In a shared vault, nothing a device whose ID does not commit to its account published there reached anyone
         // (review finding Z162): a value of its own in a row it holds is unpublished whatever its state says, such as a
         // move's copy published by a build from before this was refused. A value it stamped, never its clock's entry
@@ -1039,8 +1052,12 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// vault here (`SyncState.restoredUnpublished`, review of round 12, M1): such an item exists on this device only.
     /// Each such vault is in `deletionsHeldBack` too. A sync carries them once the vault opens here (its ledger
     /// verified, or the owner's invitation accepted again), and the deletions go out after them; for a vault that will
-    /// not open, the person can stop waiting (`VaultSession.stopWaitingForRestoredWork(in:)`).
+    /// not open, the person can stop waiting (`VaultSession.stopWaitingForRestoredWork(in:)`, the notice's action).
     public var restoredWorkWaiting: [UUID: Set<UUID>] = [:]
+    /// Per shared vault, items holding such work in a vault that waits for nothing any more: deleted, or one this
+    /// account is no longer a member of (review of round 13, M3). They hold no deletion back, stay on this device as
+    /// they are, and reach no other device.
+    public var restoredWorkKeptHere: [UUID: Set<UUID>] = [:]
     /// This installation registered a new device ID and has not finished moving the old ID's sync state to it
     /// (`AccountRecord.migration`, review of round 10, Z181): downloads only, and the move is tried again at each
     /// unlock and sync.

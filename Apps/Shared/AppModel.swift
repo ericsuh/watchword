@@ -381,6 +381,14 @@ final class AppModel {
         }
     }
 
+    /// A sync notice's action (`SyncNotice.action`), once the person has confirmed it, then a sync so that its effect
+    /// shows (review of round 13, M3).
+    func perform(_ action: SyncNoticeAction) async {
+        guard let session, let summary = lastSync else { return }
+        await perform { try await summary.perform(action, using: session) }
+        await syncNow()
+    }
+
     /// The person's choice between conflicting values (PRD F7.6); the values not chosen are discarded.
     func resolveConflict(_ item: Item, group: ItemGroup, choosing value: ItemGroupValue) async {
         guard let session else { return }

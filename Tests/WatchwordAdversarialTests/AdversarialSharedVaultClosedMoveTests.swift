@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import WatchwordKit
 import WatchwordModel
+import WatchwordPresentation
 import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
@@ -142,9 +143,15 @@ extension AdversarialSharedVaultTests {
         try await Self.syncAll([member, owner, other])
         let copy = try await member.session.move(itemID: original.id, to: vaultID)
         let restored = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 19_221)
-        #expect(try await restored.session.syncAll().restoredWorkWaiting[vaultID] == [copy.id])
+        let waiting = try await restored.session.syncAll()
+        #expect(waiting.restoredWorkWaiting[vaultID] == [copy.id])
 
-        try await restored.session.stopWaitingForRestoredWork(in: vaultID)
+        // Through the notice's action, as the Settings screen offers it (review of round 13, M3).
+        let summary = SyncSummary(waiting)
+        let notice = try #require(summary.notices.first { $0.id == "restoredWorkWaiting" })
+        let action = try #require(notice.action)
+        #expect(action.confirmation.contains("stay on this device only"))
+        try await summary.perform(action, using: restored.session)
         let report = try await restored.session.syncAll()
         #expect(report.restoredWorkWaiting.isEmpty)
         try await other.session.sync()
@@ -271,5 +278,88 @@ extension AdversarialSharedVaultTests {
         let here = try await restored.session.item(id: saved.id)
         #expect(here.title == "Bank, second")
         #expect(!here.hasConflicts)
+    }
+}
+
+// The review of round 13 (docs/06-adversarial-review.md Z198, Z199; L-a, M3): what holds deletions back for a restore's
+// work, and what ends that hold. In the suite "shared vaults through the session".
+extension AdversarialSharedVaultTests {
+    /// Threat: a damaged sync state file, or one edited by an attacker with the device's files (A8), for a shared vault
+    /// that holds a restore's uncarried copy of a move (review of round 13, L-a): the state no longer verifies. The
+    /// hold read it through `try?`, and a state that does not verify reads as none: the hold saw no entry, the copy
+    /// was still the old device ID's, and the original's deletion went out while the copy existed on this device only.
+    /// The hold now fails closed on a state it cannot trust, and the sync finds the copy again from the row the old ID
+    /// left (the old ID read from the entries the damaged state still names), records it in a state it signs, and
+    /// names it; once the vault opens, the copy is carried and published first. (An attacker who can edit the file
+    /// can delete the row as well; the hold is for damage, not for them.)
+    @Test("a restore's uncarried copy holds deletions back even after its vault's sync state is damaged")
+    func restoredWorkSurvivesAnEditedState() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 19_800)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        let restored = try await Self.restoredWithVaultClosed(member, household: household, owner: owner, seed: 19_801)
+
+        let raw = try #require(member.vault.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await raw.loadState(vaultID: vaultID))
+        #expect(!state.restoredUnpublished.isEmpty, "the move recorded nothing to carry")
+        state.authenticator = Array(repeating: 0, count: state.authenticator.count)
+        await raw.tamper(state)
+
+        let report = try await restored.session.syncAll()
+        #expect(report.deletionsHeldBack.contains(vaultID), "the hold failed open on a state that does not verify")
+        #expect(report.restoredWorkWaiting[vaultID] == [copy.id])
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) != nil, "the original was deleted ahead of its copy")
+
+        try await restored.session.acceptInvitation(
+            Invitation(vaultID: vaultID, ownerAccountID: owner.accountID),
+            ownerEvidence: .safetyNumber(owner.safetyNumber))
+        _ = try await restored.session.syncAll()
+        _ = try await restored.session.syncAll()
+        try await Self.syncAll([owner, other])
+        #expect(try await owner.session.item(id: copy.id).title == copy.title, "the copy never reached the owner")
+        #expect((try? await other.session.item(id: original.id)) == nil, "the original's deletion never went out")
+    }
+
+    /// Threat: none needed; review of round 13, M3. A restore's uncarried copy of a move, in a shared vault this
+    /// account is then removed from: the vault's key is rotated away, so nothing can carry the copy there, and every
+    /// deletion of the account's waited for it for good, the Personal vault's included, with nothing but a choice
+    /// nobody was offered to end it. A vault this account is no longer a member of waits for nothing: the deletions go
+    /// out, the copy stays on this device, and the sync says so.
+    @Test("a restore's uncarried work in a vault this account was removed from is kept here and holds nothing back")
+    func restoredWorkInAVaultLeft() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 19_900)
+        let member = members[0]
+        let other = try await household.secondDevice(of: member)
+        let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
+        let original = try await member.session.save(Self.bank(in: personal))
+        try await Self.syncAll([member, owner, other])
+        let copy = try await member.session.move(itemID: original.id, to: vaultID)
+        await member.session.lock()
+        await member.vault.forgetDeviceKey(accountID: member.accountID)
+        let restored = member.vault.relaunched(seed: 19_901)
+        await restored.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await restored.session.unlock(password: TestVault.password)
+
+        #expect(try await owner.session.removeMember(member.accountID, from: vaultID) == .complete)
+        try await owner.session.sync()
+        let report = try await restored.session.syncAll()
+        #expect(report.restoredWorkWaiting.isEmpty, "the sync still waits to carry work into a vault it left")
+        #expect(report.restoredWorkKeptHere[vaultID] == [copy.id], "the sync does not say the copy stays here")
+        _ = try await restored.session.syncAll()
+        try await other.session.sync()
+        #expect((try? await other.session.item(id: original.id)) == nil, "the deletion still waited")
+        let kept = try await member.vault.store.record(RecordKey(recordID: copy.id, kind: .item))
+        #expect(kept != nil, "the copy was discarded")
+        let summary = SyncSummary(report)
+        #expect(summary.notices.contains { $0.id == "restoredWorkKeptHere" })
+        #expect(summary.notices.allSatisfy { $0.action == nil })
     }
 }

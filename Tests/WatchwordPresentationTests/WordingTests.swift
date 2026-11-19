@@ -186,6 +186,28 @@ struct WordingTests {
         #expect(unnamed?.text.contains("an item in a shared vault holds") == true)
     }
 
+    @Test("the restore's wait offers to stop waiting, and says what stays where; work left in a vault left is named")
+    func restoredWorkAction() throws {
+        let vaultID = UUID()
+        let left = UUID()
+        var report = AccountSyncReport()
+        report.deletionsHeldBack = [vaultID]
+        report.restoredWorkWaiting = [vaultID: [UUID()]]
+        report.restoredWorkKeptHere = [left: [UUID()]]
+        let summary = SyncSummary(report, vaultNames: [left: "Old club"])
+        #expect(summary.restoredWorkVaults == [vaultID])
+        let waiting = try #require(summary.notices.first { $0.id == "restoredWorkWaiting" })
+        #expect(waiting.action == .stopWaitingForRestoredWork)
+        let action = try #require(waiting.action)
+        #expect(action.title == "Stop Waiting")
+        #expect(action.confirmation.contains("stay on this device only"))
+        #expect(action.confirmation.contains("even if the vault opens here again"))
+        let kept = try #require(summary.notices.first { $0.id == "restoredWorkKeptHere" })
+        #expect(kept.action == nil)
+        #expect(kept.text.contains("an item in “Old club” holds changes made on this device before it was restored"))
+        #expect(kept.text.contains("stay on this device only"))
+    }
+
     @Test("a wrong password and tampering read the same", arguments: [CryptoError.authenticationFailed])
     func authenticationFailed(error: CryptoError) {
         #expect(ErrorWording.message(for: error) == "Incorrect password.")
