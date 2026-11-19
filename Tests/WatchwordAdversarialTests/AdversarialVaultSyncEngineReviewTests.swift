@@ -70,7 +70,7 @@ extension AdversarialVaultSyncTests {
     /// record (Z202). It read the pending deletions from the raw store, so a row planted for the move's copy, stamped
     /// by this device far above its edits and signed by nobody, raised the bound over the copy's edits, and the
     /// original's deletion went out while the copy existed on this device alone. Only a deletion the session signed
-    /// counts there now (review of round 14, M1).
+    /// counts there now (review of round 14, M1; Z203).
     @Test("a planted pending deletion of a move's copy does not let its original's deletion go out")
     func plantedPendingDeletionForAMovesCopy() async throws {
         let f = try await Self.fixture()

@@ -902,7 +902,8 @@ registration that fails before its commit deletes the device key it made, and on
 never run at once (Z189, Z193); one reads the account record again once it runs, goes ahead only while the record
 names the ID its caller saw, and commits only over that ID (`StoreChange.expectedDeviceID`), and a restore whose
 registration did not happen at its unlock registers at the next sync (Z201). A version this device kept after its own
-deletion, which follows that deletion out, holds no deletion back (Z202). A record the session did not sign moves nothing: planted in the file (A8), it would
+deletion, which follows that deletion out, holds no deletion back (Z202); only pending deletions the session signed count
+there (Z203). A record the session did not sign moves nothing: planted in the file (A8), it would
 make this device take another device's pending deletions for its own.
 
 What is carried into a vault that may be shared, from an old ID that commits, has the old ID's work above what it
@@ -912,24 +913,31 @@ judge held them aside, the restored device's own on a replay (Z191). A carried d
 same way, so its summary claims nothing the old ID did not publish. Only the old ID's own parts (and the new ID's) are
 renamed: another device's stamps, discards and lines stay byte for byte as its stream carried them (Z197). What counts
 as published is the most of three: the last version of the record the old ID's own signed state recorded, the highest
-version the old ID's stream carried as the stream index shows it once the vault's log has been pulled, and what the
-item itself shows a third device saw of the old ID (Z197, Z198). So registration carries none of a shared vault's items:
+version the old ID's stream carried as the stream index and the vault's downloaded segments show it once the vault's
+log has been pulled, and what the item itself, or a downloaded version of it, shows a third device saw of the old ID
+(Z197, Z198, Z204). So registration carries none of a shared vault's items:
 the move records each row the old ID left there, before it empties the old ID's state, in the vault's new signed state
 with the old ID's last published version of the record (`SyncState.restoredUnpublished`), and each of the old ID's
-deletions there; a sync carries them (`carryRestoredWork`) right after that vault's first pass of the sync, which pulls
-its log and publishes nothing while anything is still to carry there, so that no merge of a row still holding the old
-ID's work goes out; the carried rows go out at the next sync, and a take-out leaves such rows alone. While a recorded
+deletions there; a sync carries them (`carryRestoredWork`) after it has downloaded that vault's log and before it
+merges anything it downloaded (`SyncEngine.download`, then `stagedEntries` for the bound, then the pass that merges),
+so that the pulled versions are merged into the renamed version as every other device merges them (Z204: renamed after
+the merge, a field order's tie could fall otherwise there than everywhere else); the vault publishes nothing while
+anything is still to carry there, so that no merge of a row still holding the old ID's work goes out, and a carry that
+cannot run or finish merges nothing there in that sync, the sync naming the vault (`publishingHeldForCarry`, Z207);
+the carried rows go out at the next sync, and a take-out leaves such rows alone. While a recorded
 row still holds that work every vault's deletions wait (`holdsRestoredWork`), since one of them may be the source half
 of a move whose copy it is, and the sync names the items (`restoredWorkWaiting`, Z192). The hold fails closed (Z200): a
 state that cannot be read holds, so does one that does not verify while the restore's chain of earlier IDs is known
-(the move under way, and every ID an entry names, in any vault: `restoredChain`); and in a vault whose state is lost or
+(the move under way, every ID an entry of a verified state names, and every ID this account's registry lists that an
+entry of an unverified one names, in any vault: `restoredChain`, Z206); and in a vault whose state is lost or
 does not verify, a row still that ID's, holding its work above what its stream carried, holds as if an entry named it
 (`rowsLeftByEarlierIDs`), and is recorded again in a state this session signs before the logs. The hold ends when the vault opens here and the row is carried, when a version that holds none
 of the work replaces the row, when the vault is deleted or this account's membership of it ends (`restoredWorkReleased`:
 nothing can carry it there, and the sync reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or
-when the person stops waiting for a vault that will not open (`stopWaitingForRestoredWork`, the action of the waiting
-notice, `SyncNoticeAction.stopWaitingForRestoredWork`), which leaves the rows on this device alone and marks them so
-that nothing finds them again. Where the bound understates what the old ID published (old hardware still running under
+when the person stops waiting for a vault that will not open (`stopWaitingForRestoredWork`, an action of the waiting
+notice per such vault, `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no
+current key here or its owner is disputed, Z205), which leaves the rows on this device alone and marks them so that
+nothing finds them again; later edits of those items reach no member either, and the confirmation says so. Where the bound understates what the old ID published (old hardware still running under
 it that publishes after the carry, or a segment of its stream this device does not show) members hold the old ID's
 copy and the new ID's both, as concurrent values: nothing is lost, but what the old ID later replaced or deleted
 comes back beside it (Z198, recorded). One exception (review

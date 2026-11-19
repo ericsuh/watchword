@@ -637,6 +637,15 @@ stale account record does not register over the one that finished, and a refused
 (`registrationFromAStaleAccount`, `registrationAtTheNextSync`, "account enrolment and device registry";
 `updateNamesTheDevice`, store contract, Z201); and a version kept after a device's own deletion in a vault deleted
 elsewhere holds nothing back (`keptAfterOwnDeletionInADeletedVault`, "Vault session: vaults across devices", Z202).
+The review of the fourteenth round (Z203 to Z207): a pending deletion planted in the state file for a move's copy does
+not open Z148's gate (`plantedPendingDeletionForAMovesCopy`, "sync with real keys", Z203); the carry renames the backup
+before anything pulled is merged into it, and the law tests draw the restored ID at random (`reattribution`), the
+exhaustive exploration below and above every device, which "two devices, every history from a fresh item" must meet
+as a field order's tie (Z204); Stop Waiting is one action per vault that will not open here, refused for one that opens
+(`restoredWorkAction`, wording; `publishingHeldForTheCarryIsNamed`, `stopWaitingForRestoredWork`, Z205); an ID planted
+in an unverified state as a restore's earlier ID is not another account's device (`plantedChainIDOfAnotherAccount`,
+Z206); and a vault whose publishing waits for the carry is named until the carry is done
+(`publishingHeldForTheCarryIsNamed`, "shared vaults through the session"; `publishingHeldForCarry`, wording, Z207).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

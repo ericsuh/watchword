@@ -535,11 +535,12 @@ history writers), becomes `(k, n)`, and the vectors of `o`'s and `n`'s own parts
 `p'` and give the rest to `n`. Nothing of a third device is touched.
 
 The bound `p'` is the most of three, each a lower bound on what `o` published: `p`, the last version of the record `o`'s
-own signed state recorded; the highest version of the record `o`'s stream carried, as the stream index shows it once
-the vault's log has been pulled since the restore (`publishedBound`; the carry waits for that pull, so the index is the
-transport's and not the backup's); and what the item itself shows a third device `x` (neither `o` nor `n`) saw of `o`:
-`o`'s count in each of `x`'s stamps and discards, each `o` line one of `x`'s lines is anchored after, each `o` line `x`
-removed (`seenByOthers`). Whatever `x` saw, `o` published. Before Z197 only `p` was used and every vector was renamed:
+own signed state recorded; the highest version of the record `o`'s stream carried, as the stream index shows it and the
+segments downloaded since the restore carry it (`publishedBound`, `SyncEngine.stagedEntries`; the carry waits for the
+vault's log to be downloaded, so the bound is the transport's and not the backup's); and what the item itself, or a
+downloaded version of it, shows a third device `x` (neither `o` nor `n`) saw of `o`: `o`'s count in each of `x`'s
+stamps and discards, each `o` line one of `x`'s lines is anchored after, each `o` line `x` removed (`seenByOthers`).
+Whatever `x` saw, `o` published. Before Z197 only `p` was used and every vector was renamed:
 with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
 `(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every
 member's judge failed (2) for it.
@@ -550,11 +551,15 @@ member's judge failed (2) for it.
   preserved, since a vector that held `o: c > p'` now holds `n: c`, which contains exactly the renamed `(k, n)` with
   `k ≤ c`, and a vector that held `o: c ≤ p'` contains no renamed revision before or after. Supersession, coverage by a
   discard and by an erasure, and line order among the renamed lines are as before. Let `b` be any version another
-  device holds that holds nothing of `o` above `p'`: then `R(a ⊔ b) = R(a) ⊔ b`, `R` is idempotent, and for every pair
-  of parts of `a` and `b`, one supersedes or covers the other exactly when their images do. The one exception is a
-  tie-break: two concurrent field orders at the same version are ordered by device ID, and `n` may order otherwise
-  against a third device than `o` did. The field order is an arrangement, both orders hold the same fields, and every
-  device sees the same renamed one, so nothing is lost and devices still converge.
+  device holds that holds nothing of `o` above `p'`: `R` is idempotent, and for every pair of parts of `a` and `b`,
+  one supersedes or covers the other exactly when their images do. The carry renames the backup's version `a` before
+  anything downloaded is merged into it, so the restored device holds `R(a) ⊔ b`, which is what every other device
+  holds once it merges the carry with `b`: they converge by the join's laws alone. Renaming after the merge, as the
+  carry did before the review of round 14 (L1, Z204), gives the same item, `R(a ⊔ b) = R(a) ⊔ b`, but for a
+  tie-break: two concurrent field orders at the same version are ordered by device ID, and `n` may rank otherwise
+  against a third device than `o` did. The field order is a register whose later write wins, so the merge had
+  already dropped the loser, and renamed afterwards the restored device kept an arrangement no other device held.
+  A carry that cannot run or finish therefore merges nothing into the vault in that sync.
 - *`J` holds for it.* Every value still attributed to `o` has a revision at or below `p'`, and its bytes are unchanged
   (its stamp's `seen` held no count of `o` above its own revision), so it is in a version of `o`'s stream; every third
   device's value is unchanged, byte for byte, and was carried by its own writer's stream as before; every renamed
@@ -572,15 +577,18 @@ member's judge failed (2) for it.
   appear twice. Nothing is lost (F7.6), but the person's later discards are undone there (F7.7) and must be made again.
   Before Z198 a lost or edited state, or a lagging backup, reached this case for everything `o` had published since;
   with the stream index it does only for what `o` publishes after the pull, which a restore that proceeds while the
-  old hardware still runs cannot avoid without coordinating with it. The laws are checked under random histories
-  (`LongRunningItemMergeLawTests`: for `b` with nothing of `o` above `p'`, the four laws above; with a bound drawn
-  below `p'`, every third part unchanged; and with old hardware going on to publish `a2 ⊒ a`, `R(a)`, `a2` and any
-  other version merged in every order give one item holding every value `a2 ⊔ b` holds), and against every small
-  history (`LongRunningItemMergeExhaustiveTests`). It is done only where `o` commits: a non-committing ID's published
+  old hardware still runs cannot avoid without coordinating with it. The laws are checked under random histories, the
+  new ID drawn at random (`LongRunningItemMergeLawTests`: for `b` with nothing of `o` above `p'`, the carry before the
+  merge is what a device holding `b` holds and renaming after it differs only in a field order's tie, idempotence,
+  supersession and coverage; with a bound drawn below `p'`, every third part unchanged; and with old hardware going
+  on to publish `a2 ⊒ a`, `R(a)`, `a2` and any other version merged in every order give one item holding every value
+  `a2 ⊔ b` holds), and against every small history (`LongRunningItemMergeExhaustiveTests`, the new ID below and
+  above every device; the fresh start must meet a tie). It is done only where `o` commits: a non-committing ID's published
   work counts nowhere anyway, and Z167's parking and hold stay in charge of it.
 
-A row is carried only by a sync, after the vault's first pass of it, which publishes nothing there while something is
-still to carry, so that no merge of a row still holding `o`'s work goes out first; until then
+A row is carried only by a sync, after it has downloaded the vault's log and before it merges it, and the vault
+publishes nothing while something is still to carry, so that no merge of a row still holding `o`'s work goes out first
+(the sync names such a vault, Z207); until then
 `SyncState.restoredUnpublished` records it, with `p`, a take-out leaves it alone, and it holds every deletion back
 (`holdsRestoredWork`), so a source half never goes out ahead of a copy that is still only `o`'s. The hold fails closed
 on a state it cannot read or trust, and, where the state is lost or does not verify, finds such a row again from the row
