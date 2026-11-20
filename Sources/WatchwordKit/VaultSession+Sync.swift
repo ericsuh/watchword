@@ -332,6 +332,9 @@ extension VaultSession {
         for vaultID in owedUnpublished.union(takeOutFailed) where takeOutsOwed.contains(vaultID) {
             restPublished = false
             report.takeOutUnfinished.insert(vaultID)
+            // Its first pass published nothing for the owed take-out, nor did a replay (Z276): its changes wait. A
+            // vault only in `takeOutFailed` may have published in its first pass (review of round 25, Z273).
+            if owedUnpublished.contains(vaultID) { report.takeOutUnfinishedSentNothing.insert(vaultID) }
         }
         if restPublished {
             for vaultID in deferred {
@@ -1330,12 +1333,18 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// untrue to a person whose vault is open. `false` while locked, where the next unlock tries the move again.
     public var movePendingWhileUnlocked = false
     /// The shared vaults where this device began taking out what no longer counts (`takeOutWhatNoLongerCounts`) and
-    /// could not finish, a local store failing (review of round 24, Z268): their replay waits, nothing of this
-    /// device's was published there (Z270), and no vault's deletions went out in this sync, after what the take-out
-    /// may have put aside of this device's own (Z262). Not `deletionsHeldBack`, whose wording (something moved has not
-    /// reached the other devices) would be untrue here. Tried again at the next sync; nothing a member or the sync
-    /// storage writes can make a take-out throw.
+    /// could not finish, a local store failing or a lock during it (review of round 24, Z268; review of round 25,
+    /// Z273): their replay waits, and no vault's deletions went out in this sync, after what the take-out may have put
+    /// aside of this device's own (Z262). Not `deletionsHeldBack`, whose wording (something moved has not reached the
+    /// other devices) would be untrue here. Tried again at the next sync; nothing a member or the sync storage writes
+    /// can make a take-out throw. Those where nothing of this device's was published in this sync are also in
+    /// `takeOutUnfinishedSentNothing`; in the others, a first pass that was not owed published before the replay's
+    /// take-out failed (Z273).
     public var takeOutUnfinished: Set<UUID> = []
+    /// Of `takeOutUnfinished`, the vaults whose take-out was owed as their first pass ran and still is: nothing of this
+    /// device's was published there in this sync, first pass or replay (Z270, Z276), so its changes there wait too
+    /// (Z273).
+    public var takeOutUnfinishedSentNothing: Set<UUID> = []
 
     public init() {}
 

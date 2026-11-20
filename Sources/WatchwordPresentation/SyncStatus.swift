@@ -71,11 +71,14 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
     /// This device could not finish checking a shared vault's changes against who may write there now (its take-out
-    /// of what no longer counts failed on local storage, `AccountSyncReport.takeOutUnfinished`, review of round 24,
-    /// Z268): deletions made on this device wait until it has, and so does what it made in that vault (Z270). Not
+    /// of what no longer counts failed on local storage, or a lock came during it; `AccountSyncReport`'s
+    /// `takeOutUnfinished`, review of round 24, Z268): deletions made on this device wait until it has. `changesWait`
+    /// where every such vault published nothing of this device's in the sync (`takeOutUnfinishedSentNothing`, Z270):
+    /// its changes there wait too. Otherwise a first pass that was not owed sent some before the replay's take-out
+    /// failed, and the notice says only that changes it makes there may wait (review of round 25, Z273). Not
     /// `deletionsHeldBack`, which says something moved has not reached the other devices, untrue here. Tried again at
     /// each sync.
-    case takeOutUnfinished
+    case takeOutUnfinished(changesWait: Bool)
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.
     public var actions: [SyncNoticeAction] {
@@ -191,10 +194,12 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "before they go out, this device has to finish carrying over the changes it made "
                 + (one ? "there" : "in each") + " before it was restored. It tries again at each sync. Nothing has "
                 + "been lost."
-        case .takeOutUnfinished:
+        case .takeOutUnfinished(let changesWait):
+            // "May wait" where this sync sent some of them: the next sync's take-out may finish first (Z273).
             return "This device could not finish checking a shared vault's changes. Until it has, deletions made on "
-                + "this device wait, and so do its changes in that vault. It tries again at each sync. Nothing has "
-                + "been lost."
+                + "this device wait, and "
+                + (changesWait ? "so do its changes in that vault" : "changes it makes in that vault may wait too")
+                + ". It tries again at each sync. Nothing has been lost."
         }
     }
 }
@@ -350,7 +355,12 @@ public struct SyncSummary: Hashable, Sendable {
             let named = held.compactMap { $0 }
             notices.append(.publishingHeldForCarry(named.sorted(), unnamed: held.count - named.count))
         }
-        if !report.takeOutUnfinished.isEmpty { notices.append(.takeOutUnfinished) }
+        if !report.takeOutUnfinished.isEmpty {
+            // Its changes wait only where every such vault sent nothing of this device's in the sync (Z273).
+            notices.append(
+                .takeOutUnfinished(
+                    changesWait: report.takeOutUnfinished.isSubset(of: report.takeOutUnfinishedSentNothing)))
+        }
         let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
             .union(report.restoredChainUnreadable)
         if !report.deletionsHeldBack.subtracting(explained).isEmpty {

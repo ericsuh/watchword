@@ -146,7 +146,9 @@ extension AdversarialSharedVaultTests {
         #expect(first.vaults[vaultID]?.pushedEntries == 0, "a replay ran after a take-out that did not finish")
         // Said, in words of its own (Z268): not as something moved that reached nobody.
         #expect(first.takeOutUnfinished == [vaultID], "the hold was silent")
-        #expect(SyncSummary(first).notices.contains(.takeOutUnfinished))
+        // Nothing of this device's went out there, so the notice says its changes wait (Z273).
+        #expect(first.takeOutUnfinishedSentNothing == [vaultID])
+        #expect(SyncSummary(first).notices.contains(.takeOutUnfinished(changesWait: true)))
         #expect(!SyncSummary(first).notices.contains(.deletionsHeldBack))
         let pending = try await setting.sync.state.pendingDeletions(vaultID: setting.personal)
         #expect(pending.count == 1, "the deletion went out after a take-out that did not finish")
@@ -225,6 +227,7 @@ extension AdversarialSharedVaultTests {
             #expect(first.takeOutUnfinished.isEmpty)
         } else {
             #expect(first.takeOutUnfinished == [vaultID], "the vault that published nothing was not named")
+            #expect(first.takeOutUnfinishedSentNothing == [vaultID])
             #expect(
                 try await setting.sync.state.pendingDeletions(vaultID: setting.personal).count == 1,
                 "a deletion went out while the vault was owed")
@@ -283,6 +286,12 @@ extension AdversarialSharedVaultTests {
         #expect(await failing.failed == 1, "the replay's take-out did not fail: nothing is tested")
         #expect((first.vaults[vaultID]?.pushedEntries ?? 0) > 0, "the first pass did not publish: nothing is tested")
         #expect(first.takeOutUnfinished == [vaultID], "the hold was silent")
+        // The first pass sent this device's changes: the notice says only that changes made there may wait (Z273).
+        #expect(first.takeOutUnfinishedSentNothing.isEmpty, "a vault that published is said to have sent nothing")
+        let notices = SyncSummary(first).notices
+        #expect(notices.contains(.takeOutUnfinished(changesWait: false)))
+        #expect(!notices.contains(.takeOutUnfinished(changesWait: true)), "changes this sync sent are said to wait")
+        #expect(SyncNotice.takeOutUnfinished(changesWait: false).text.contains("may wait too"))
         #expect(
             try await sync.state.pendingDeletions(vaultID: personal).count == 1,
             "the deletion went out after a take-out that did not finish")

@@ -218,16 +218,17 @@ struct WordingTests {
         let vaultID = UUID()
         var report = AccountSyncReport()
         report.vaults[vaultID] = SyncReport()
-        #expect(!SyncSummary(report).notices.contains(.takeOutUnfinished))
+        #expect(!SyncSummary(report).notices.contains { $0.id == "takeOutUnfinished" })
         report.takeOutUnfinished = [vaultID]
+        report.takeOutUnfinishedSentNothing = [vaultID]
         let summary = SyncSummary(report)
-        #expect(summary.notices.contains(.takeOutUnfinished))
+        #expect(summary.notices.contains(.takeOutUnfinished(changesWait: true)))
         #expect(!summary.notices.contains(.deletionsHeldBack))
-        let text = SyncNotice.takeOutUnfinished.text
+        let text = SyncNotice.takeOutUnfinished(changesWait: true).text
         #expect(text.contains("could not finish checking a shared vault's changes"))
         #expect(text.contains("deletions made on this device wait"))
-        // Its own changes there wait too (Z270).
-        #expect(text.contains("and so do its changes in that vault"))
+        // Its own changes there wait too, where the sync sent none of them (Z270).
+        #expect(text.contains("and so do its changes in that vault."))
         #expect(text.contains("tries again at each sync"))
         #expect(text.contains("Nothing has been lost"))
         #expect(!text.contains("reached"), "says something has not reached the other devices")
@@ -236,6 +237,33 @@ struct WordingTests {
         // A vault held back for another reason still says so.
         report.deletionsHeldBack.insert(UUID())
         #expect(SyncSummary(report).notices.contains(.deletionsHeldBack))
+    }
+
+    /// Review of round 25 (Z273): the notice said "and so do its changes in that vault" where the vault's first pass,
+    /// not owed, had published and only the replay's take-out failed, beside a headline saying changes were sent.
+    /// Where any such vault sent some in the sync, it says only that changes made there may wait; the deletions wait
+    /// in every case.
+    @Test("a take-out that did not finish after a pass that sent changes says they may wait, not that they wait")
+    func takeOutUnfinishedAfterSending() {
+        let sent = UUID()
+        let unsent = UUID()
+        var report = AccountSyncReport()
+        report.vaults[sent] = SyncReport()
+        report.takeOutUnfinished = [sent]
+        #expect(SyncSummary(report).notices.contains(.takeOutUnfinished(changesWait: false)))
+        #expect(!SyncSummary(report).notices.contains(.takeOutUnfinished(changesWait: true)))
+        let text = SyncNotice.takeOutUnfinished(changesWait: false).text
+        #expect(text.contains("deletions made on this device wait"))
+        #expect(text.contains("changes it makes in that vault may wait too."))
+        #expect(!text.contains("so do its changes"), "says changes wait that this sync sent")
+        #expect(text.contains("tries again at each sync"))
+        #expect(text.contains("Nothing has been lost"))
+
+        // A vault that sent nothing beside one that sent some: one notice, in the words true of both.
+        report.takeOutUnfinished.insert(unsent)
+        report.takeOutUnfinishedSentNothing = [unsent]
+        let both = SyncSummary(report).notices.filter { $0.id == "takeOutUnfinished" }
+        #expect(both == [.takeOutUnfinished(changesWait: false)])
     }
 
     /// Review of round 20 (Z240): a chain row of a restore's earlier device IDs that the sharing store cannot read held
