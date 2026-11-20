@@ -124,8 +124,9 @@ extension VaultSession {
         let keysEpoch = lockEpoch
         // Unlocked, and download-only for this device's own key alone: said as such, never "when you unlock" to a
         // person whose vault is open (review of round 23, Z264). A move pending is a reason of its own, said by
-        // `deviceMigrationIncomplete`, and leaves this `nil`; a store reset, or one suspected (§7.10, V52), is said
-        // beside it, since the key holds this device back there too.
+        // `deviceMigrationIncomplete`, and leaves this `nil`; a store that was reset (§7.10) is said beside it, since
+        // the key holds the upload back too (V70), and a reset only suspected (V52) is asked about by the next sync
+        // that may write.
         if keys != nil, standing == .active, !report.awaitingNewPassword, !report.deviceMigrationIncomplete {
             switch ownKey {
             case .unreadable: report.ownDeviceKeyWait = .unreadable
