@@ -27,6 +27,17 @@ extension VaultSession {
         takeOutsOwed.insert(vaultID)
     }
 
+    /// For tests: a vault whose index is being rebuilt (`indexRebuilding`, a replay asked for, nothing judged, as
+    /// `shareVault` and joining leave it) while an entry of `takeOutsOwed` stands for it from before, as for a take-out
+    /// owed against the index the rebuild replaces.
+    func rebuildIndexWhileOwedForTest(_ vaultID: UUID) {
+        guard sharing.vaults[vaultID] != nil else { return }
+        sharing.vaults[vaultID]?.indexRebuilding = true
+        sharing.vaults[vaultID]?.needsReconcile = true
+        sharing.vaults[vaultID]?.index.judgedHead = nil
+        takeOutsOwed.insert(vaultID)
+    }
+
     /// For tests: the vault's judged basis comes back to the head last judged and saved (a revocation the basis was
     /// bound by stops counting), stood for by moving that judged head to the basis as it is now, saved. An unsettled
     /// head (`nil`) is one no basis equals, and is left as it is.
@@ -359,6 +370,31 @@ extension AdversarialSharedVaultTests {
         #expect(try await sync.state.pendingDeletions(vaultID: personal).isEmpty, "the deletion never went out")
         try await owner.session.sync()
         #expect((try? await owner.session.item(id: added.id)) != nil)
+    }
+
+    /// Threat: none but a stale entry of `takeOutsOwed` beside an index being rebuilt; the review of round 25 (Z275,
+    /// finding 3, by mutation). The rebuilding guard of the take-out clears the owed entry, and that is load-bearing:
+    /// `sharedEngineDidRun` asks whether the vault is owed before whether its index is being rebuilt, so without the
+    /// clear no pass ever ended the rebuild, every take-out returned at the guard, and the vault stayed owed for the
+    /// session: its first pass published nothing (Z270) and every sync held every deletion (`takeOutUnfinished`). With
+    /// it, the rebuild ends in the first sync, and the vault publishes and settles.
+    @Test("a vault owed while its index is rebuilt is not owed for good: it publishes and settles")
+    func owedWhileRebuildingIsNotWedged() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_300)
+        let member = members[0]
+        _ = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, member])
+        await member.session.rebuildIndexWhileOwedForTest(vaultID)
+        let added = try await member.session.save(Self.bank(in: vaultID))
+
+        let first = try await member.session.syncAll()
+        #expect(first.takeOutUnfinished.isEmpty, "the stale owed entry held every deletion")
+        let second = try await member.session.syncAll()
+        #expect(second.takeOutUnfinished.isEmpty, "the vault stayed owed")
+        #expect(await member.session.judgementIsSettled(vaultID), "the rebuild never ended")
+        try await owner.session.sync()
+        #expect((try? await owner.session.item(id: added.id)) != nil, "the vault never published")
     }
 
     /// Threat: none needed; the review of round 24 (Z272, finding 4). An unlocked sync whose device key is held but
