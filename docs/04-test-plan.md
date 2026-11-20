@@ -852,6 +852,18 @@ checks that a sync stopped at a reset store with the key unreadable says the res
 question, with no notice saying changes were downloaded, and that the upload's refusal is a retry (V70); and in
 "shared vaults through the session" `takeOutThatFailedAtTheHeadItLastSawIsNotSettledAway` pins `takeOutsOwed` where
 S65's `takenOutAgainst` still names the current head, which the relaunched PoC above does not (Z262's merge note).
+The review of the twenty-fourth round (Z267 to Z272). In "shared vaults through the session"
+(`AdversarialSharedVaultOwedTakeOutTests`): a sync whose two take-outs fail (the sharing pass's and the replay loop's,
+scripted) publishes nothing, holds every deletion, names the vault, and a relaunch takes the late write out
+(`replayLoopTakeOutThatFailsHoldsDeletions`; fails with `try?` in `prepareSharedReplay` or the hold removed, Z267,
+Z268);
+an owed take-out found at the judged basis asks for the replay that rebuilds what it took out
+(`owedTakeOutAtTheJudgedBasisReplays`, Z269); an owed vault's first pass publishes nothing, with a replay owed and
+without, and it publishes again once a take-out finishes (`owedTakeOutPublishesNothingFirst`, Z270); a replay's take-out
+that fails after a first pass that published holds deletions (`replayTakeOutFailsAfterAPassThatPublished`, Z270); a held
+key with a registration under way reports `.registering` (`heldKeyWhileRegistering`, Z272). In "account enrolment and
+device registry", `incompleteMigrationPublishesNothing` checks `movePendingWhileUnlocked` (Z271). In `WordingTests`,
+`takeOutUnfinished` (Z268, Z270), `movePendingWhileUnlocked` and `ownDeviceKeyWording` (Z271).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

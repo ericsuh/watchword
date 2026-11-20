@@ -656,7 +656,9 @@ for its carry rather than merge first (Z254), and the take-out leaves `o`'s rows
 take-out that does not finish keeps the judged basis from being settled by the replay after it (Z262, beside S65's
 check of the head the take-out saw): settled, the head that made a late write stop counting was never acted on here, and
 the write, current on this device alone, went into its later merges as its own work, where every other device holds it
-aside by `J`.
+aside by `J`. Meanwhile the vault publishes nothing, in any pass, the one that hands on after a reset included (Z270;
+merged so at round 25): a version built on the write, sent then, would be held aside by `J` on every other device; and
+deletions wait, named (Z268), until a take-out finishes.
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

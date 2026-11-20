@@ -82,12 +82,15 @@ extension AdversarialAccountTests {
         await state.failNextPendingDeletionWrite()
         let blocked = try await restored.session.syncAll()
         #expect(blocked.deviceMigrationIncomplete)
+        // Unlocked: said as waiting for the move, not for an unlock (review of round 25, Z271).
+        #expect(blocked.movePendingWhileUnlocked)
         #expect(blocked.combined.segmentsWritten == 0)
         try await other.session.sync()
         #expect((try? await other.session.item(id: fresh.id)) == nil, "published while the move was incomplete")
 
         let done = try await restored.session.syncAll()
         #expect(!done.deviceMigrationIncomplete)
+        #expect(!done.movePendingWhileUnlocked)
         try await restored.session.sync()
         try await other.session.sync()
         #expect((try? await other.session.item(id: doomed)) == nil, "the deletion never went out")

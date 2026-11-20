@@ -134,6 +134,9 @@ extension VaultSession {
             case .held: if registrationInFlight { report.ownDeviceKeyWait = .registering }
             }
         }
+        // Unlocked, and download-only for a move of this installation's sync records that is incomplete: said as such,
+        // never "when you unlock" (review of round 25, Z271, as Z264 for the key).
+        report.movePendingWhileUnlocked = keys != nil && report.deviceMigrationIncomplete
         // What this sync's engines, its carry and its re-record may save of a vault's state, decided here with
         // `mayWrite` and checked again as each state or stash is signed (V66, the same mechanism as PR #23's Z253):
         // only while the lock epoch, the device ID and the absence of a move are still the ones it began with. A sync
@@ -226,12 +229,19 @@ extension VaultSession {
         // Of those, the vaults whose carry did not run or finish in this sync: nothing is merged into them, the
         // replay pass included, until it has (review of round 15, Z209).
         var uncarried: Set<UUID> = []
+        // The shared vaults whose take-out is owed (`takeOutsOwed`: it began for a judged basis and did not finish,
+        // Z262) as their first pass runs: that pass publishes nothing, since what this device holds there may still be
+        // built on a write the take-out is to take out, and every other device would hold such a version aside (S44);
+        // the replay's take-out, or the next sync's, decides. Not to wedge: only a take-out that finishes ends it, and
+        // every sync that may write runs one (review of round 24, Z270).
+        var owedUnpublished: Set<UUID> = []
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
             var ranPublishing = false
             let shared = sharedEngineOptions(
                 vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
                 ownIDCommits: ownIDCommits)
+            let owed = sharing.vaults[vaultID] != nil && takeOutsOwed.contains(vaultID)
             if mayWrite, let keys, currentVaultKey(vaultID, keys: keys, account: record) != nil {
                 let requests = sharedReplayRequests(vaultID)
                 var reconciled = reconcile || shared.reconcile
@@ -273,11 +283,12 @@ extension VaultSession {
                         uncarried.insert(vaultID)
                     }
                 } else {
+                    if owed, shared.publishing { owedUnpublished.insert(vaultID) }
                     vaultReport = try await engine(vaultID).sync(
-                        reconcile: reconciled, deferringDeletions: true, publishing: shared.publishing,
+                        reconcile: reconciled, deferringDeletions: true, publishing: shared.publishing && !owed,
                         transportStopped: stopped, handingOn: reuploadAnswered(epoch))
                     noteCopyStops(vaultReport, in: vaultID)
-                    ranPublishing = shared.publishing
+                    ranPublishing = shared.publishing && !owed
                 }
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 await sharedEngineDidRun(
@@ -314,8 +325,9 @@ extension VaultSession {
             // A vault may hold the copy half of a move that this sync did not publish: it is not published to (this
             // account may not write there now, or it is shared with no ledger here), or the copy was taken out and
             // held aside before it went out. While any vault holds an item that exists nowhere else, no vault's
-            // deletions go out (Z44).
-            if restPublished, mayWrite,
+            // deletions go out (Z44). A vault that published nothing for an owed take-out is asked after its replay,
+            // or held below (Z270).
+            if restPublished, mayWrite, !owedUnpublished.contains(vaultID),
                 await holdsUnpublishedWork(in: vaultID, account: record, publishing: ranPublishing)
             {
                 restPublished = false
@@ -329,6 +341,7 @@ extension VaultSession {
         }
         // A shared vault's second replay, before any deletion goes out: its take-out can put a move's copy aside,
         // and a replay defers deletions like any other pass (review finding Z55).
+        var takeOutFailed: Set<UUID> = []
         if mayWrite, stopped == nil {
             for vaultID in sharedVaultsNeedingReplay() {
                 guard let first = report.vaults[vaultID], !first.deferredUntilUnlock else { continue }
@@ -341,19 +354,25 @@ extension VaultSession {
                     try await prepareSharedReplay(vaultID)
                 } catch {
                     // A take-out that did not finish: no replay in this sync, which would settle what it had still to
-                    // take out, and no deletion goes out after what it may have put aside (review of round 23, Z262).
-                    // The replay stays asked for (`needsReconcile`), for the next sync.
+                    // take out, and no deletion goes out after what it may have put aside (review of round 23, Z262;
+                    // held below). The replay stays asked for (`needsReconcile`), for the next sync.
                     sharingReports[vaultID, default: SharedVaultSyncReport()].failure = String(describing: error)
-                    restPublished = false
+                    takeOutFailed.insert(vaultID)
                     continue
                 }
                 let shared = sharedEngineOptions(
                     vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
                     ownIDCommits: ownIDCommits)
                 let requests = sharedReplayRequests(vaultID)
+                // A take-out that returned with nothing decided (no basis could be worked out, `judgedBasis`) leaves
+                // it owed: this replay publishes nothing either, as the first pass did not (Z270), and the vault is
+                // held below. Merged so at round 25, for every publishing pass of this branch's `runSync`: the
+                // first, which hands on after a reset (`handingOn`), and this one, postponed or not (`replayPostponed`).
+                let owedStill = takeOutsOwed.contains(vaultID)
+                let replayPublishing = shared.publishing && !carrying.contains(vaultID) && !owedStill
+                if owedStill, shared.publishing { owedUnpublished.insert(vaultID) }
                 let second = try await engine(vaultID).sync(
-                    reconcile: true, deferringDeletions: true,
-                    publishing: shared.publishing && !carrying.contains(vaultID))
+                    reconcile: true, deferringDeletions: true, publishing: replayPublishing)
                 noteCopyStops(second, in: vaultID)
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 await sharedEngineDidRun(
@@ -365,15 +384,22 @@ extension VaultSession {
                 {
                     restPublished = false
                 }
-                if restPublished,
-                    await holdsUnpublishedWork(
-                        in: vaultID, account: record, publishing: shared.publishing && !carrying.contains(vaultID))
+                if restPublished, !owedStill,
+                    await holdsUnpublishedWork(in: vaultID, account: record, publishing: replayPublishing)
                 {
                     restPublished = false
                     report.deletionsHeldBack.insert(vaultID)
                 }
                 report.vaults[vaultID] = Self.report(first, followedBy: second)
             }
+        }
+        // A vault whose replay's take-out threw (Z262), or that published nothing for an owed take-out and whose
+        // take-out has not finished in this sync either (no replay ran for it, or the replay's take-out threw, Z270):
+        // no deletion goes out after what the take-out may have put aside, or this device holds there unpublished,
+        // and the vault is named (Z268).
+        for vaultID in owedUnpublished.union(takeOutFailed) where takeOutsOwed.contains(vaultID) {
+            restPublished = false
+            report.takeOutUnfinished.insert(vaultID)
         }
         if restPublished {
             for vaultID in deferred {
@@ -1427,6 +1453,17 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// own key alone (review of round 23, Z264): its standing active, no new password awaited, no move pending. `nil`
     /// otherwise, locked included, where "when you unlock" is what is true.
     public var ownDeviceKeyWait: OwnDeviceKeyWait?
+    /// The session was unlocked, and this sync only downloaded because a move of this installation's sync records to
+    /// its new device ID is incomplete (`deviceMigrationIncomplete`, review of round 25, Z271): "when you unlock" is
+    /// untrue to a person whose vault is open. `false` while locked, where the next unlock tries the move again.
+    public var movePendingWhileUnlocked = false
+    /// The shared vaults where this device began taking out what no longer counts (`takeOutWhatNoLongerCounts`) and
+    /// could not finish, a local store failing (review of round 24, Z268): their replay waits, nothing of this
+    /// device's was published there (Z270), and no vault's deletions went out in this sync, after what the take-out
+    /// may have put aside of this device's own (Z262). Not `deletionsHeldBack`, whose wording (something moved has not
+    /// reached the other devices) would be untrue here. Tried again at the next sync; nothing a member or the sync
+    /// storage writes can make a take-out throw.
+    public var takeOutUnfinished: Set<UUID> = []
 
     public init() {}
 

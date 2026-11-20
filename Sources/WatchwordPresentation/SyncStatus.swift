@@ -78,6 +78,12 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// (`AccountSyncReport.publishingHeldForCarry`, review of round 14, L4). By vault name, sorted, and how many more
     /// whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
+    /// This device could not finish checking a shared vault's changes against who may write there now (its take-out
+    /// of what no longer counts failed on local storage, `AccountSyncReport.takeOutUnfinished`, review of round 24,
+    /// Z268): deletions made on this device wait until it has, and so does what it made in that vault (Z270). Not
+    /// `deletionsHeldBack`, which says something moved has not reached the other devices, untrue here. Tried again at
+    /// each sync.
+    case takeOutUnfinished
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.
     public var actions: [SyncNoticeAction] {
@@ -107,6 +113,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .restoredWorkWaiting: return "restoredWorkWaiting"
         case .restoredWorkKeptHere: return "restoredWorkKeptHere"
         case .publishingHeldForCarry: return "publishingHeldForCarry"
+        case .takeOutUnfinished: return "takeOutUnfinished"
         }
     }
 
@@ -136,7 +143,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "over. It tries again at each sync. Nothing has been lost."
         case .deviceKeyUnreadable:
             // "Until it can", not "changes were downloaded": a sync that stopped at a reset store (§7.10), said in
-            // the headline beside this, downloaded nothing (merged with this branch's reset wording).
+            // the headline beside this, downloaded nothing (merged with this branch's reset wording; PR #23 words it
+            // alike, review of round 25, Z271).
             return "This device could not read its own key from the Keychain, which can happen while the device is "
                 + "locked. Until it can, changes are downloaded, and none are applied or sent. It tries again at each "
                 + "sync. Nothing has been lost."
@@ -204,6 +212,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + (one ? "there" : "in " + (vaults.count == 2 ? "them" : "those vaults")) + " are not shown yet: "
                 + "before they go out, this device has to finish carrying over the changes it made "
                 + (one ? "there" : "in each") + " before it was restored. It tries again at each sync. Nothing has "
+                + "been lost."
+        case .takeOutUnfinished:
+            return "This device could not finish checking a shared vault's changes. Until it has, deletions made on "
+                + "this device wait, and so do its changes in that vault. It tries again at each sync. Nothing has "
                 + "been lost."
         }
     }
@@ -361,7 +373,8 @@ public struct SyncSummary: Hashable, Sendable {
         itemTitles: [UUID: String] = [:]
     ) {
         let combined = report.combined
-        headline = SyncSummary.describe(combined, ownDeviceKeyWait: report.ownDeviceKeyWait)
+        headline = SyncSummary.describe(
+            combined, ownDeviceKeyWait: report.ownDeviceKeyWait, movePending: report.movePendingWhileUnlocked)
         var notices: [SyncNotice] = []
         if combined.requiresNewerVersion || report.sharing.values.contains(where: \.requiresNewerVersion) {
             notices.append(.updateRequired)
@@ -431,6 +444,7 @@ public struct SyncSummary: Hashable, Sendable {
             let named = held.compactMap { $0 }
             notices.append(.publishingHeldForCarry(named.sorted(), unnamed: held.count - named.count))
         }
+        if !report.takeOutUnfinished.isEmpty { notices.append(.takeOutUnfinished) }
         let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
             .union(report.restoredChainUnreadable)
         if !report.deletionsHeldBack.subtracting(explained).isEmpty {
@@ -479,9 +493,14 @@ public struct SyncSummary: Hashable, Sendable {
 
     /// The one line about a sync's outcome. The words "received" and "sent" are what the UI tests wait for.
     /// `ownDeviceKeyWait` is the account's (`AccountSyncReport.ownDeviceKeyWait`): where it says why an unlocked sync
-    /// only downloaded, the line says that, not "when you unlock" (review of round 23, Z264). A store that was reset
-    /// is said first (§7.10), whatever else held the sync back.
-    public static func describe(_ report: SyncReport, ownDeviceKeyWait: OwnDeviceKeyWait? = nil) -> String {
+    /// only downloaded, the line says that, not "when you unlock" (review of round 23, Z264); so does `movePending`
+    /// (`AccountSyncReport.movePendingWhileUnlocked`, an unlocked sync held back by an incomplete move, Z271), before
+    /// the key's wait, which a move pending leaves `nil`. A store that was reset is said first (§7.10), whatever else
+    /// held the sync back, a move pending included: such a sync downloaded nothing, and "changes were downloaded"
+    /// would be untrue (merged so at round 25).
+    public static func describe(
+        _ report: SyncReport, ownDeviceKeyWait: OwnDeviceKeyWait? = nil, movePending: Bool = false
+    ) -> String {
         if report.transportFailure == .storeReset {
             return "Sync storage was emptied or reset. Nothing was sent, and nothing was uploaded again."
         }
@@ -490,6 +509,10 @@ public struct SyncSummary: Hashable, Sendable {
             return "Changes will be downloaded and checked after you unlock."
         }
         if report.deferredUntilUnlock && !report.awaitingNewPassword && !report.deviceRevoked {
+            if movePending {
+                return "Changes were downloaded and will be applied once this device has finished moving its sync "
+                    + "records."
+            }
             switch ownDeviceKeyWait {
             case .unreadable:
                 return "Changes were downloaded and will be applied once this device can read its own key."
