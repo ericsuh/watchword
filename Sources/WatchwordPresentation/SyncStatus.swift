@@ -131,9 +131,11 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "this device wait, and so does everything else it sends if it is still moving its sync records "
                 + "over. It tries again at each sync. Nothing has been lost."
         case .deviceKeyUnreadable:
+            // "Until it can", not "changes were downloaded": a sync stopped before it downloaded anything (a reset
+            // store, review of round 25, Z271) can stand beside this; worded as PR #22 words it.
             return "This device could not read its own key from the Keychain, which can happen while the device is "
-                + "locked. Changes were downloaded, and none were applied or sent. It tries again at each sync. "
-                + "Nothing has been lost."
+                + "locked. Until it can, changes are downloaded, and none are applied or sent. It tries again at each "
+                + "sync. Nothing has been lost."
         case .deviceRegistering:
             return "This device is still registering with your account, for example after being restored onto new "
                 + "hardware. Until it has, changes are downloaded, and none are applied or sent. It tries again at "
@@ -283,7 +285,8 @@ public struct SyncSummary: Hashable, Sendable {
         itemTitles: [UUID: String] = [:]
     ) {
         let combined = report.combined
-        headline = SyncSummary.describe(combined, ownDeviceKeyWait: report.ownDeviceKeyWait)
+        headline = SyncSummary.describe(
+            combined, ownDeviceKeyWait: report.ownDeviceKeyWait, movePending: report.movePendingWhileUnlocked)
         var notices: [SyncNotice] = []
         if combined.requiresNewerVersion || report.sharing.values.contains(where: \.requiresNewerVersion) {
             notices.append(.updateRequired)
@@ -393,13 +396,20 @@ public struct SyncSummary: Hashable, Sendable {
 
     /// The one line about a sync's outcome. The words "received" and "sent" are what the UI tests wait for.
     /// `ownDeviceKeyWait` is the account's (`AccountSyncReport.ownDeviceKeyWait`): where it says why an unlocked sync
-    /// only downloaded, the line says that, not "when you unlock" (review of round 23, Z264).
-    public static func describe(_ report: SyncReport, ownDeviceKeyWait: OwnDeviceKeyWait? = nil) -> String {
+    /// only downloaded, the line says that, not "when you unlock" (review of round 23, Z264); so does `movePending`
+    /// (`AccountSyncReport.movePendingWhileUnlocked`, an unlocked sync held back by an incomplete move, Z271).
+    public static func describe(
+        _ report: SyncReport, ownDeviceKeyWait: OwnDeviceKeyWait? = nil, movePending: Bool = false
+    ) -> String {
         if report.transportUnavailable { return "Sync storage could not be reached. Nothing was sent." }
         if !report.rejected.isEmpty, report.rejected.allSatisfy({ $0.reason == .keyring(.trustedKeyUnavailable) }) {
             return "Changes will be downloaded and checked after you unlock."
         }
         if report.deferredUntilUnlock && !report.awaitingNewPassword && !report.deviceRevoked {
+            if movePending {
+                return "Changes were downloaded and will be applied once this device has finished moving its sync "
+                    + "records."
+            }
             switch ownDeviceKeyWait {
             case .unreadable:
                 return "Changes were downloaded and will be applied once this device can read its own key."

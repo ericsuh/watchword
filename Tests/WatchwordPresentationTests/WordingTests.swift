@@ -143,6 +143,29 @@ struct WordingTests {
         #expect(!refused.contains("unlock"), "the message is read in the open, unlocked app")
     }
 
+    /// Review of round 25 (Z271): an unlocked sync held back by a restore's incomplete move said "will be applied when
+    /// you unlock" to a person whose vault was open, as Z264 found for the key. It says what it waits for; the move's
+    /// own notice stays; locked, the line is as before.
+    @Test("an unlocked sync held back by a move says it waits for the move, not for an unlock")
+    func movePendingWhileUnlocked() {
+        var vault = SyncReport()
+        vault.deferredUntilUnlock = true
+        var report = AccountSyncReport()
+        report.vaults[UUID()] = vault
+        report.deviceMigrationIncomplete = true
+        let locked = SyncSummary(report)
+        #expect(locked.headline == "Changes were downloaded and will be applied when you unlock.")
+
+        report.movePendingWhileUnlocked = true
+        let summary = SyncSummary(report)
+        #expect(
+            summary.headline
+                == "Changes were downloaded and will be applied once this device has finished moving its sync records.")
+        #expect(!summary.headline.contains("unlock"), "an open vault is told to unlock")
+        #expect(summary.notices.contains(.deviceMigrationIncomplete))
+        #expect(!summary.notices.contains(.deviceRegistering) && !summary.notices.contains(.deviceKeyUnreadable))
+    }
+
     /// Review of round 23 (Z264): an unlocked sync that only downloaded because this device's own key could not be
     /// read, or because it has still to register under a key of its own (a restored store), said "will be applied when
     /// you unlock" to a person whose vault was open. Each says why, and that it is tried again; locked, the line is as
@@ -168,7 +191,7 @@ struct WordingTests {
         #expect(summary.notices.contains(notice))
         #expect(summary.notices.filter { $0 == .deviceKeyUnreadable || $0 == .deviceRegistering }.count == 1)
         let text = notice.text
-        #expect(text.contains("none were applied or sent") || text.contains("none are applied or sent"))
+        #expect(text.contains("none are applied or sent"))
         #expect(text.contains("Nothing has been lost"))
         #expect(text.contains("tries again at each sync"))
         #expect(!text.contains("when you unlock"))
@@ -179,6 +202,9 @@ struct WordingTests {
     func ownDeviceKeyWording() {
         #expect(SyncNotice.deviceKeyUnreadable.text.contains("could not read its own key"))
         #expect(!SyncNotice.deviceKeyUnreadable.text.contains("regist"))
+        // A sync stopped before it downloaded anything can stand beside it (review of round 25, Z271).
+        #expect(SyncNotice.deviceKeyUnreadable.text.contains("Until it can, changes are downloaded"))
+        #expect(!SyncNotice.deviceKeyUnreadable.text.contains("were downloaded"))
         #expect(SyncNotice.deviceRegistering.text.contains("still registering"))
         #expect(SyncNotice.deviceRegistering.text.contains("each sync and each unlock"))
         #expect(!SyncNotice.deviceRegistering.text.contains("was restored"), "a device may be registering unrestored")

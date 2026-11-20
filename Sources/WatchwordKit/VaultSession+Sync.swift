@@ -110,6 +110,9 @@ extension VaultSession {
             case .held: if registrationInFlight { report.ownDeviceKeyWait = .registering }
             }
         }
+        // Unlocked, and download-only for a move of this installation's sync records that is incomplete: said as such,
+        // never "when you unlock" (review of round 25, Z271, as Z264 for the key).
+        report.movePendingWhileUnlocked = keys != nil && report.deviceMigrationIncomplete
         // What this sync's engines, its carry and its re-record may save of a vault's state, decided here with
         // `mayWrite` and checked again as each state or stash is signed (Z253, as PR #22's V66): only while the lock
         // epoch, the device ID and the absence of a move are still the ones it began with. A state loaded, and
@@ -1319,6 +1322,10 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// own key alone (review of round 23, Z264): its standing active, no new password awaited, no move pending. `nil`
     /// otherwise, locked included, where "when you unlock" is what is true.
     public var ownDeviceKeyWait: OwnDeviceKeyWait?
+    /// The session was unlocked, and this sync only downloaded because a move of this installation's sync records to
+    /// its new device ID is incomplete (`deviceMigrationIncomplete`, review of round 25, Z271): "when you unlock" is
+    /// untrue to a person whose vault is open. `false` while locked, where the next unlock tries the move again.
+    public var movePendingWhileUnlocked = false
     /// The shared vaults where this device began taking out what no longer counts (`takeOutWhatNoLongerCounts`) and
     /// could not finish, a local store failing (review of round 24, Z268): their replay waits, nothing of this
     /// device's was published there (Z270), and no vault's deletions went out in this sync, after what the take-out
