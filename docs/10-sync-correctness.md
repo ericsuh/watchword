@@ -624,8 +624,9 @@ here, and the write, current on this device alone, went into its later merges as
 device holds it aside by `J`. Meanwhile the vault publishes nothing, in its first pass (Z270) or its replay (Z276): a
 version built on the write, sent then, would be held aside by `J` on every other device; and deletions wait, named
 (Z268, worded after what went out, Z273), until a take-out finishes. Rows a take-out has taken out are rebuilt only by
-a replay, so the take-out writes the judged head down as unsettled before its first row goes (Z274): a relaunch then
-replays, whatever the basis has done since.
+a replay, so the take-out writes the judged head down as unsettled before its first row goes, and before it withdraws
+a pending deletion, which only the replay makes good too (Z274, Z279): a relaunch then replays, whatever the basis has
+done since.
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

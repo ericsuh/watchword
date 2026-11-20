@@ -72,13 +72,13 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
     /// This device could not finish checking a shared vault's changes against who may write there now (its take-out
-    /// of what no longer counts failed on local storage, or a lock came during it; `AccountSyncReport`'s
-    /// `takeOutUnfinished`, review of round 24, Z268): deletions made on this device wait until it has. `changesWait`
-    /// where every such vault published nothing of this device's in the sync (`takeOutUnfinishedSentNothing`, Z270):
-    /// its changes there wait too. Otherwise a first pass that was not owed sent some before the replay's take-out
-    /// failed, and the notice says only that changes it makes there may wait (review of round 25, Z273). Not
-    /// `deletionsHeldBack`, which says something moved has not reached the other devices, untrue here. Tried again at
-    /// each sync.
+    /// of what no longer counts failed on local storage, a lock came during it, or the sharing state could not be
+    /// saved; `AccountSyncReport`'s `takeOutUnfinished`, review of round 24, Z268; Z279): deletions made on this
+    /// device wait until it has. `changesWait` where every such vault published nothing of this device's in the sync
+    /// (`takeOutUnfinishedSentNothing`, Z270): its changes there wait too. Otherwise a first pass that was not owed
+    /// may have sent some before the replay's take-out failed, and the notice says only that changes it makes there
+    /// may wait (review of round 25, Z273; review of round 26, Z279). Not `deletionsHeldBack`, which says something
+    /// moved has not reached the other devices, untrue here. Tried again at each sync.
     case takeOutUnfinished(changesWait: Bool)
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.

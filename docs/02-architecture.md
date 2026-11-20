@@ -1003,10 +1003,11 @@ sync and is named (`AccountSyncReport.takeOutUnfinished`, its own notice, never 
 which says its changes there wait only where nothing of this device's went out there in the sync
 (`takeOutUnfinishedSentNothing`), and otherwise that they may (Z273). Only a take-out that finishes ends it, and every
 sync that may write and reaches the take-out runs one (a disputed vault, and a sync a transport failure stops, do not,
-and neither publishes, Z277). Before its first row goes, a take-out saves the judged head unsettled, so that rows it
-took out before it threw are rebuilt by a replay after any relaunch, whatever the basis does, not only while
-`takeOutsOwed` remembers it (Z274); a take-out owed and found at the judged basis asks for the replay too (Z269), and
-the rebuilding guard's clearing of an owed entry is what lets a rebuild end (Z275). But a row
+and neither publishes, Z277). Before its first row goes, and before it withdraws a pending deletion (Z279), a take-out
+saves the judged head unsettled, so that what it changed before it threw, or before the process ended, is made good by
+a replay after any relaunch, whatever the basis does, not only while `takeOutsOwed` remembers it (Z274); a sharing
+state that cannot be saved then fails the take-out, closed. A take-out owed and found at the judged basis asks for the
+replay too (Z269), and the rebuilding guard's clearing of an owed entry is what lets a rebuild end (Z275). But a row
 is read only where it can decide something (Z239): by a move only where no state verifies, and to add to it what the
 vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault that may be shared
 whose state does not verify, or that has none (`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248),

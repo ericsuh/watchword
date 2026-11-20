@@ -381,7 +381,7 @@ extension AdversarialSharedVaultTests {
     @Test("a vault owed while its index is rebuilt is not owed for good: it publishes and settles")
     func owedWhileRebuildingIsNotWedged() async throws {
         let household = SharedVaultHousehold()
-        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_300)
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_400)
         let member = members[0]
         _ = try await owner.session.save(Self.bank(in: vaultID))
         try await Self.syncAll([owner, member])
