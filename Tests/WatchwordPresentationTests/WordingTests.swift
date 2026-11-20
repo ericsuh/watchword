@@ -235,6 +235,9 @@ struct WordingTests {
         #expect(summary.notices.contains(.deviceKeyUnreadable))
         for notice in summary.notices { #expect(!notice.text.contains("were downloaded")) }
         let refused = ErrorWording.message(for: VaultError.deviceKeyUnreadable)
+        // "Could not", as every other message words it (V73).
+        #expect(refused.contains("could not read this device's key"))
+        #expect(!refused.contains("couldn't"))
         #expect(refused.contains("Nothing was uploaded"))
         #expect(refused.contains("Try again"))
         #expect(!refused.contains("enrol"), "a key that could not be read is a retry, never a reason to enrol again")
@@ -515,6 +518,8 @@ struct WordingTests {
     func deviceKeyUnreadable() {
         let unreadable = ErrorWording.message(for: SharedVaultError.deviceKeyUnreadable)
         let doesNotCommit = ErrorWording.message(for: SharedVaultError.deviceIDDoesNotCommit)
+        #expect(unreadable.contains("could not read this device's key"))
+        #expect(!unreadable.contains("couldn't"))
         #expect(unreadable.contains("Try again"))
         #expect(!unreadable.contains("Set it up again"))
         #expect(doesNotCommit.contains("Set it up again"))

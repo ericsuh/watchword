@@ -115,8 +115,11 @@ extension VaultSession {
         guard try await reuploadPlan() == plan else { throw VaultError.reuploadNotConfirmed }
         // Nor without a key for this device's ID here, read now, nor while a registration is under way: the sync below
         // would only download (`mayWrite`, Z253; said as `ownDeviceKeyWait`, Z264), and the store, started again, would
-        // be left empty, as V51 says of a move (merge of round 24, V70). Read as the last await before the store is
-        // touched, the flag after it.
+        // be left empty, as V51 says of a move (merge of round 24, V70). Read just before the upload is marked
+        // unfinished and the store started again, the flag after it. A check, not a guarantee (V73): the Keychain can
+        // close between it and `runSync`'s own read of the key, a device locking during the upload, and then the
+        // store is started again and the sync only downloads; the question stays open (`markUploadUnfinished`), so
+        // nothing is lost or wedged.
         switch await ownDeviceKey(of: account) {
         case .held: if registrationInFlight { throw VaultError.deviceNotRegistered }
         case .absent: throw VaultError.deviceNotRegistered

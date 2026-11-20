@@ -136,7 +136,7 @@ public enum ErrorWording {
         case .deviceNotRegistered:
             return "This device is not registered with your account yet, so nothing it uploaded would be read."
         case .deviceKeyUnreadable:
-            return "Watchword couldn't read this device's key just now, which can happen while the device is locked. "
+            return "Watchword could not read this device's key just now, which can happen while the device is locked. "
                 + "Nothing was uploaded. Try again."
         default:
             return "Something went wrong. Your vault is unchanged."
@@ -190,7 +190,7 @@ public enum ErrorWording {
             return "This device was set up by an older version of Watchword and cannot change shared vaults. "
                 + "Set it up again as a new device to share, join or change them."
         case .deviceKeyUnreadable:
-            return "Watchword couldn't read this device's key just now, so the shared vault was not changed. "
+            return "Watchword could not read this device's key just now, so the shared vault was not changed. "
                 + "Try again."
         }
     }
