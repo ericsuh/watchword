@@ -1193,7 +1193,6 @@ public enum QuarantineReason: Sendable, Hashable {
     case recordInAnotherVault
 }
 
-/// What one sync of the account did: the account's own objects, and each vault's log.
 /// What the Keychain answered for this device's own key under the account's device ID (`DeviceKeyStore.publicKey`).
 enum OwnDeviceKey: Equatable {
     case held
@@ -1230,6 +1229,7 @@ public enum OwnDeviceKeyWait: Hashable, Sendable {
     case registering
 }
 
+/// What one sync of the account did: the account's own objects, and each vault's log.
 public struct AccountSyncReport: Sendable, Equatable {
     public var account = AccountObjectsReport()
     /// One report per vault, deleted vaults included.
