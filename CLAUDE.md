@@ -1022,8 +1022,9 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   in a vault whose take-out did not finish in its passes, by a rotation's reseal step or the catch-up (`takeOutsOwed` as
   `syncSharedVaultsAfterLogs` reaches the vault, `resumeRotation(resealing: false)`: no replay would follow that
   take-out, merge of round 25, V71); a plan still revokes the transport's share and publishes its record, and waits at
-  `.resealing` for the next sync. A new path that seals a record of a shared vault again under the current key (any
-  kind) must do the same, or go through it.
+  `.resealing` until a sync whose take-out finishes (V75: what waits goes out sealed under the new key, and only a
+  departure's planning waits with it). A new path that seals a record of a shared vault again under the current key
+  (any kind) must do the same, or go through it.
 - `shareVault` can always be finished (Z50): the marker is written first, and a vault whose only mark is this
   account's own marker naming this account, with no granted key, is shared again from there, taking up a chain rooted
   at this account that the store already lists and signing a genesis only when none is (Z122: a second root wherever
