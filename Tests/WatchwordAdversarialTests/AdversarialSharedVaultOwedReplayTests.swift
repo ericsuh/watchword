@@ -99,4 +99,70 @@ extension AdversarialSharedVaultTests {
         try await setting.owner.session.sync()
         #expect((try? await setting.owner.session.item(id: later.id)) != nil, "the vault never published again")
     }
+
+}
+
+// The review of PR #22's eighth merge (finding 1): a rotation carried on in the sync whose take-out did not finish.
+extension AdversarialSharedVaultTests {
+    /// Threat: a demoted member (A4) whose late write this device, an administrator's, merged before it learnt of the
+    /// demotion, a sync state store that fails both take-outs of a sync (a busy or damaged database), and a rotation
+    /// this device planned and saved and did not carry out (an interruption, §8.6), routine or removing the demoted
+    /// member; any member can bring one about in the same pass, by a leave request an administrator turns into a
+    /// departure rotation. The sync skipped the standalone reseal for a vault whose take-out did not finish, but the
+    /// rotation resumed in the same pass reached `resealSharedVault` through its plan's reseal step, whose own take-out
+    /// (S59) finished this time and took the late write's row out with no replay after it: the item stood missing
+    /// (`itemNotFound`) at the end of a sync that said its take-out had not finished, until the next sync's replay.
+    /// The reseal step waits for the next sync there too (`resealing: false`): the plan's revocation of transport
+    /// access and its record still go out, the plan stays at `.resealing`, and the next sync's take-out, its replay and
+    /// the reseal act together, which seals every record under the new key in that sync.
+    @Test(
+        "a rotation after an unfinished take-out reseals at the next sync, and nothing stands missing meanwhile",
+        arguments: [false, true])
+    func rotationAfterAnUnfinishedTakeOutResealsAtTheNextSync(removing: Bool) async throws {
+        let setting = try await Self.owedTakeOut(replayOwed: true, memberRole: .administrator)
+        let (vaultID, failing, relaunched) = (setting.vaultID, setting.failing, setting.relaunched)
+        let key = RecordKey(recordID: setting.bank, kind: .item)
+        let reason: RotationReason = removing ? .removal(setting.demoted.accountID) : .routine
+        try await relaunched.session.planRotation(reason, in: vaultID)
+        #expect(try await relaunched.session.sharedVault(vaultID).plan != nil, "no plan saved: nothing is tested")
+        let oldKey = try await relaunched.session.sharedVault(vaultID).ledger.state.vaultKeyID
+
+        // The sharing pass's take-out fails (the third read), and so does the replay loop's (the sixth).
+        await failing.script([.read, .read, .fail(before: nil), .read, .read, .fail(before: nil)])
+        let first = try await relaunched.session.syncAll()
+        #expect(await failing.failed == 2, "the take-outs did not both fail: nothing is tested")
+        #expect(first.takeOutUnfinished == [vaultID], "no take-out unfinished: nothing is tested")
+        #expect(
+            (try? await relaunched.session.item(id: setting.bank)) != nil,
+            "the item stood missing after a sync that reported its take-out unfinished")
+        // The record went out and was adopted; the reseal waits, and the plan is kept for it.
+        let vault = try await relaunched.session.sharedVault(vaultID)
+        #expect(vault.ledger.state.vaultKeyID != oldKey, "the rotation's record was not adopted")
+        #expect(vault.plan != nil, "the plan was dropped with its reseal still to do")
+        guard case .resealing(let remaining)? = first.sharing[vaultID]?.rotation else {
+            Issue.record("the rotation is \(String(describing: first.sharing[vaultID]?.rotation)), not resealing")
+            return
+        }
+        #expect(remaining > 0)
+        #expect((first.sharing[vaultID]?.resealed ?? 0) == 0, "a vault whose take-out did not finish was sealed again")
+        if removing {
+            #expect(vault.ledger.state.member(setting.demoted.accountID) == nil)
+            #expect(
+                await setting.member.shareAccess.revoked.contains { $0.account == setting.demoted.accountID },
+                "the removed member's transport access was not revoked")
+        }
+
+        // The next sync's take-out finishes, its replay rebuilds the item from what counts, and the rotation reseals
+        // it under the new key and completes.
+        let next = try await relaunched.session.syncAll()
+        #expect(next.takeOutUnfinished.isEmpty)
+        #expect(next.sharing[vaultID]?.rotation == .complete, "the rotation's reseal did not complete at the next sync")
+        #expect(try await relaunched.session.sharedVault(vaultID).plan == nil)
+        #expect(try await relaunched.session.item(id: setting.bank).field(.password)?.value == "bank-password")
+        let current = try await relaunched.session.sharedVault(vaultID).ledger.state.vaultKeyID
+        #expect(try await setting.member.vault.store.record(key)?.keyID == current, "the item stayed under the old key")
+        let stale = try await relaunched.session.sharedVault(vaultID).ledger.recordsToReseal(
+            in: try await relaunched.session.sharedInventory(vaultID))
+        #expect(stale.isEmpty, "records stayed under the old key after the next sync")
+    }
 }

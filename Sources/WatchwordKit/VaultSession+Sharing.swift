@@ -1236,14 +1236,21 @@ extension VaultSession {
 
     /// Carries the saved plan forward from wherever it stands and syncs, so what it sealed again reaches the others.
     func carryOutRotation(in vaultID: UUID) async throws -> RotationStatus {
-        let status = try await resumeRotation(in: vaultID)
+        let status = try await resumeRotation(in: vaultID, resealing: true)
         try await syncAll()
         return status
     }
 
     /// Continues a saved plan (`RotationPlan.steps(in:)`); each step is safe to repeat. A superseded removal or
     /// departure is planned again, once per call.
-    func resumeRotation(in vaultID: UUID) async throws -> RotationStatus {
+    ///
+    /// `resealing: false` leaves the plan's reseal step for a later call: the transport's share is revoked and the
+    /// record published as with `true`, and an adopted plan with records still to seal again is kept, `.resealing`.
+    /// The sync passes it for a vault whose take-out did not finish in its passes (`takeOutsOwed`): the reseal's own
+    /// take-out (S59) would then run with no replay after it in that sync, and what it took out would stand missing
+    /// until the next (review of PR #22's eighth merge, V71). The next sync's take-out, its replay and then the
+    /// reseal act together.
+    func resumeRotation(in vaultID: UUID, resealing: Bool) async throws -> RotationStatus {
         // A saved plan is not carried on past a later format (§8.9): it would publish and seal on a chain this
         // version no longer follows.
         guard !(try sharedVault(vaultID).ledger.continuesInLaterFormat) else { throw SharingError.requiresNewerVersion }
@@ -1254,7 +1261,7 @@ extension VaultSession {
             let keys = try requireKeys()
             guard let saved = try sharedVault(vaultID).plan else { return status }
             let plan = try RotationPlan.parse(saved, account: try keys.keyset.publicKeyBundle())
-            status = try await carryOut(plan, in: vaultID)
+            status = try await carryOut(plan, in: vaultID, resealing: resealing)
             switch status {
             case .complete:
                 sharing.vaults[vaultID]?.plan = nil
@@ -1274,7 +1281,7 @@ extension VaultSession {
         return status
     }
 
-    private func carryOut(_ plan: RotationPlan, in vaultID: UUID) async throws -> RotationStatus {
+    private func carryOut(_ plan: RotationPlan, in vaultID: UUID, resealing: Bool) async throws -> RotationStatus {
         let settings = try sharingSettings()
         steps: for step in try sharedVault(vaultID).ledger.steps(of: plan) {
             _ = try requireKeys()
@@ -1291,6 +1298,9 @@ extension VaultSession {
                 }
                 try await publishSharingObject(object)
             case .resealRecords:
+                // The last step: left for a later call (V71). What follows the loop still ingests the record just
+                // published and fetches its key, so the status says `.resealing` and the plan is kept.
+                guard resealing else { break steps }
                 try await ingestMembership(vaultID)
                 guard try sharedVault(vaultID).ledger.status(of: plan.proposal) == .adopted else { break steps }
                 try await fetchCurrentKey(vaultID)

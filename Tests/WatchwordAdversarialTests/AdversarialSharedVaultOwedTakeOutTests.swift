@@ -58,6 +58,7 @@ extension AdversarialSharedVaultTests {
     struct OwedTakeOut {
         let household: SharedVaultHousehold
         let owner: SharingAccount
+        let demoted: SharingAccount
         let member: SharingAccount
         let vaultID: UUID
         let bank: UUID
@@ -67,7 +68,7 @@ extension AdversarialSharedVaultTests {
         let relaunched: TestVault
     }
 
-    static func owedTakeOut(replayOwed: Bool = true) async throws -> OwedTakeOut {
+    static func owedTakeOut(replayOwed: Bool = true, memberRole: MemberRole = .readWrite) async throws -> OwedTakeOut {
         let household = SharedVaultHousehold()
         let owner = try await household.account(seed: 900)
         let (demoted, demotedView) = try await household.withheldAccount(seed: 917)
@@ -75,7 +76,7 @@ extension AdversarialSharedVaultTests {
         let vaultID = try await owner.session.createVault(name: "Household").id
         try await owner.session.shareVault(vaultID)
         try await owner.invite(demoted, to: vaultID, as: .readWrite, owner: owner)
-        try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(member, to: vaultID, as: memberRole, owner: owner)
         let bank = try await owner.session.save(Self.bank(in: vaultID))
         let personal = try #require(try await member.vault.store.loadAccount()?.personalVaultID)
         let doomed = try await member.session.save(Self.bank(in: personal))
@@ -108,7 +109,9 @@ extension AdversarialSharedVaultTests {
             sync: SyncSettings(state: failing, transport: sync.transport, configuration: sync.configuration),
             seed: 935, deviceKeys: member.vault.deviceKeys)
         await relaunched.session.configureSharing(
-            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+            SharingSettings(
+                state: member.state, contacts: member.contacts, directory: household.directory,
+                shareAccess: member.shareAccess))
         try await relaunched.session.unlock(password: TestVault.password)
         await memberView.reveal()
         _ = try? await relaunched.session.sharedVaultStatus(vaultID)
@@ -117,7 +120,8 @@ extension AdversarialSharedVaultTests {
             #expect(await relaunched.session.replayIsRequested(vaultID), "no replay owed: nothing is tested")
         }
         return OwedTakeOut(
-            household: household, owner: owner, member: member, vaultID: vaultID, bank: bank.id, personal: personal,
+            household: household, owner: owner, demoted: demoted, member: member, vaultID: vaultID, bank: bank.id,
+            personal: personal,
             sync: sync, failing: failing, relaunched: relaunched)
     }
 

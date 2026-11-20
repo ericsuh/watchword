@@ -876,6 +876,10 @@ guard's clearing of the owed entry removed, Z275); the owed take-out tests asser
 notice's `changesWait` (Z273). In `WordingTests`, `takeOutUnfinished` and `takeOutUnfinishedAfterSending` (Z273), and
 `deletionsHeldBackWording` (Z278). The replay's publishing while owed (Z276) has no test on PR #23, whose guard is
 unreachable without a hook in `Sources/`; on this branch `owedTakeOutPublishesNothingInItsReplay` above pins it.
+Review of this branch's eighth merge (V71): a rotation carried on after a take-out that did not finish leaves its
+reseal for the next sync, the record and the revocation going out, and completes there with every record under the new
+key, nothing missing meanwhile (`rotationAfterAnUnfinishedTakeOutResealsAtTheNextSync`, "shared vaults through the
+session", routine and removal; fails before the fix, the item missing).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

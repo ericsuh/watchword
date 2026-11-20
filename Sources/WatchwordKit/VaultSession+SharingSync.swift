@@ -199,15 +199,21 @@ extension VaultSession {
     /// account may sign, turn leave requests into rotations as an administrator, and seal again what the ledger
     /// lists. Then save.
     ///
-    /// `takeOutUnfinished`: the vaults whose take-out did not finish in this sync's passes (`AccountSyncReport`'s,
-    /// Z262, Z268, Z270). Nothing is sealed again there: the reseal's own take-out (S59) would take out what no
-    /// longer counts with no replay after it in this sync, so the vault's items stood missing until the next, and the
-    /// sync said the take-out had not finished. The next sync's take-out and its replay act together, then the reseal
-    /// (merged so at round 25, found by `replayLoopTakeOutThatFailsHoldsDeletions`).
-    func syncSharedVaultsAfterLogs(
-        account: AccountRecord, reports: inout [UUID: SharedVaultSyncReport], takeOutUnfinished: Set<UUID> = []
-    ) async {
+    /// Nothing is sealed again in a vault whose take-out did not finish in this sync's passes (`takeOutsOwed` as the
+    /// loop reaches it: the vaults of `AccountSyncReport.takeOutUnfinished`, and an owed vault whose carry did not
+    /// finish or whose device ID does not commit, Z262, Z268, Z270), neither by the catch-up reseal nor by a plan's
+    /// reseal step (`resumeRotation(resealing: false)`). The reseal's own take-out (S59) would take out what no longer
+    /// counts with no replay after it in this sync, so the vault's items stood missing until the next, and the sync
+    /// said the take-out had not finished (merged so at round 25, found by `replayLoopTakeOutThatFailsHoldsDeletions`;
+    /// the plan's step since the review of PR #22's eighth merge, V71). A plan still revokes the transport's share and
+    /// publishes its record, and is kept at `.resealing`, so another owed removal waits for the next sync to be
+    /// planned. The next sync's take-out and its replay act together, then the reseal. What waits was already on the
+    /// transport under the old key, and the vault publishes nothing while its take-out is owed (Z270), so the wait
+    /// exposes nothing to a removed member that sealing again now would not.
+    func syncSharedVaultsAfterLogs(account: AccountRecord, reports: inout [UUID: SharedVaultSyncReport]) async {
         guard keys != nil, sharing.settings != nil else { return }
+        // Asked as each step is reached: only a take-out that finishes ends it.
+        func resealing(_ vaultID: UUID) -> Bool { !takeOutsOwed.contains(vaultID) }
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var report = reports[vaultID] ?? SharedVaultSyncReport()
             do {
@@ -226,7 +232,7 @@ extension VaultSession {
                     continue
                 }
                 if try sharedVault(vaultID).plan != nil {
-                    report.rotation = try await resumeRotation(in: vaultID)
+                    report.rotation = try await resumeRotation(in: vaultID, resealing: resealing(vaultID))
                 }
                 let ledger = try sharedVault(vaultID).ledger
                 for owed in ledger.owedRemovals
@@ -234,7 +240,7 @@ extension VaultSession {
                     && ledger.mayRemove(owed.accountID, signer: account.accountID)
                 {
                     guard (try? await planRotation(owed.reason, in: vaultID)) != nil else { continue }
-                    report.rotation = try await resumeRotation(in: vaultID)
+                    report.rotation = try await resumeRotation(in: vaultID, resealing: resealing(vaultID))
                 }
                 // Someone outside the vault holds its current key (an addition and its removal lost a fork
                 // together, Z43): a routine rotation, by any device whose account administers the vault.
@@ -244,7 +250,7 @@ extension VaultSession {
                     ledger.state.member(account.accountID)?.role.isAdministrator == true,
                     (try? await planRotation(.routine, in: vaultID)) != nil
                 {
-                    report.rotation = try await resumeRotation(in: vaultID)
+                    report.rotation = try await resumeRotation(in: vaultID, resealing: resealing(vaultID))
                 }
                 if ledger.state.member(account.accountID)?.role.isAdministrator == true {
                     let objects = try await listSharingObjects(
@@ -252,10 +258,10 @@ extension VaultSession {
                     for request in try sharedVault(vaultID).ledger.pendingLeaveRequests(among: objects)
                     where try sharedVault(vaultID).plan == nil {
                         guard (try? await planRotation(.departure(request), in: vaultID)) != nil else { continue }
-                        report.rotation = try await resumeRotation(in: vaultID)
+                        report.rotation = try await resumeRotation(in: vaultID, resealing: resealing(vaultID))
                     }
                 }
-                if !takeOutUnfinished.contains(vaultID) { report.resealed = try await resealSharedVault(vaultID) }
+                if resealing(vaultID) { report.resealed = try await resealSharedVault(vaultID) }
                 try await saveSharedVault(vaultID)
             } catch {
                 report.failure = String(describing: error)
