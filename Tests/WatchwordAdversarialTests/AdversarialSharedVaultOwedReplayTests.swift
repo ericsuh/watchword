@@ -83,6 +83,9 @@ extension AdversarialSharedVaultTests {
         // Neither pass published there, so the notice says its changes wait (Z273, merged so at round 26).
         #expect(first.takeOutUnfinishedSentNothing == [vaultID])
         #expect(SyncSummary(first).notices.contains(.takeOutUnfinished(changesWait: true)))
+        // Held by the final loop alone, in its own words (`owedReplayHoldsANewItemInItsOwnWords` pins the replay's
+        // part of it).
+        #expect(!SyncSummary(first).notices.contains(.deletionsHeldBack), "said as something moved that went nowhere")
         #expect(
             try await setting.sync.state.pendingDeletions(vaultID: setting.personal).count == 1,
             "a deletion went out while the vault was owed")
@@ -100,6 +103,93 @@ extension AdversarialSharedVaultTests {
         #expect((try? await setting.owner.session.item(id: later.id)) != nil, "the vault never published again")
     }
 
+    /// Threat: as `owedTakeOutPublishesNothingInItsReplay`, with an item the person added to the shared vault before
+    /// the sync (review of PR #22's eighth merge, finding 3). The replay of an owed vault publishes nothing, so the new
+    /// item is this device's work that reached nobody, and the replay's unpublished-work check, were it asked, would
+    /// name the vault in `deletionsHeldBack` too: the generic notice, which says the vault cannot be written to now or
+    /// its work was held aside, untrue beside `takeOutUnfinished`, whose notice says the vault's changes wait (Z268).
+    /// The replay asks it only of a vault no longer owed (`!owedStill`), and the final loop holds this one.
+    @Test("an owed vault's replay holds the deletions in the take-out's words, not the generic notice's")
+    func owedReplayHoldsANewItemInItsOwnWords() async throws {
+        let setting = try await Self.owedTakeOut()
+        let (vaultID, failing, relaunched) = (setting.vaultID, setting.failing, setting.relaunched)
+        let added = try await relaunched.session.save(Self.bank(in: vaultID))
+        let window = AnchorWindow(
+            keychain: setting.member.vault.keychain, accountID: setting.member.accountID, session: relaunched.session)
+        // As in `owedTakeOutPublishesNothingInItsReplay`.
+        await failing.script([
+            .read, .read, .fail(before: { await window.takeOut() }), .read, .read,
+            .readAfter({ await window.putBack() }),
+        ])
+        let first = try await relaunched.session.syncAll()
+        await window.putBack()
+        #expect(await failing.failed == 1, "the take-out did not fail: nothing is tested")
+        #expect(
+            await window.readsWhileOut > 0, "no take-out asked for the registry while it was out: nothing is tested")
+        #expect(first.vaults[vaultID]?.pushedEntries == 0, "an owed vault published in its replay")
+        #expect(first.takeOutUnfinished == [vaultID], "the vault that published nothing was not named")
+        #expect(!first.deletionsHeldBack.contains(vaultID), "the owed vault was also held as unpublished work")
+        let notices = SyncSummary(first).notices
+        #expect(notices.contains(.takeOutUnfinished(changesWait: true)))
+        #expect(!notices.contains(.deletionsHeldBack), "said as something that cannot be written or was held aside")
+        #expect(
+            try await setting.sync.state.pendingDeletions(vaultID: setting.personal).count == 1,
+            "a deletion went out while the vault was owed")
+
+        // Once a take-out finishes the item goes out, and so does the deletion.
+        for _ in 0..<2 { _ = try await relaunched.session.syncAll() }
+        try await setting.owner.session.sync()
+        #expect((try? await setting.owner.session.item(id: added.id)) != nil, "the vault never published the item")
+        #expect(try await setting.sync.state.pendingDeletions(vaultID: setting.personal).isEmpty)
+    }
+
+    /// Threat: a demoted member (A4) whose late write this device merged before it learnt of the demotion, and a vault
+    /// whose take-out is owed only from its replay on, its first pass not owed: in production a carried vault's, whose
+    /// first pass is the carry's (review of PR #22's eighth merge, finding 3), stood for by a test hook during the
+    /// first pass; with this account's registry unreadable when the replay's take-out asks for the judged basis, so
+    /// that it decides nothing. The replay publishes nothing and asks nothing of the vault's unpublished work
+    /// (`!owedStill`), so only its joining `owedUnpublished` names it and holds every deletion: without that, the vault
+    /// was named nowhere and the deletions went out after what the owed take-out had still to act on (Z262). Its first
+    /// pass published, so the notice says only that changes made there may wait (`takeOutUnfinishedSentNothing`, Z273,
+    /// as this branch reads it from what ran publishing).
+    @Test("a vault owed only from its replay on is named and holds every deletion, its first pass's sending said")
+    func vaultOwedOnlyFromItsReplayIsNamed() async throws {
+        let setting = try await Self.owedTakeOut()
+        let (vaultID, failing, relaunched) = (setting.vaultID, setting.failing, setting.relaunched)
+        let window = AnchorWindow(
+            keychain: setting.member.vault.keychain, accountID: setting.member.accountID, session: relaunched.session)
+        // The third read is the sharing pass's take-out, which finishes; the fourth and fifth are the first pass's,
+        // and at the fifth the vault becomes owed and the anchor goes out; the sixth to the eighth come before the
+        // replay's take-out, which reads none when it decides nothing; the ninth is the replay's engine, which puts
+        // the anchor back (as traced).
+        await failing.script([
+            .read, .read, .read, .read,
+            .readAfter({
+                await relaunched.session.markTakeOutOwedForTest(vaultID)
+                await window.takeOut()
+            }),
+            .read, .read, .read, .readAfter({ await window.putBack() }),
+        ])
+        let first = try await relaunched.session.syncAll()
+        await window.putBack()
+        #expect(await failing.failed == 0)
+        #expect(
+            await window.readsWhileOut > 0, "no take-out asked for the registry while it was out: nothing is tested")
+        #expect(first.takeOutUnfinished == [vaultID], "a vault owed from its replay on was not named")
+        #expect(first.takeOutUnfinishedSentNothing.isEmpty, "a vault that published is said to have sent nothing")
+        let notices = SyncSummary(first).notices
+        #expect(notices.contains(.takeOutUnfinished(changesWait: false)))
+        #expect(
+            try await setting.sync.state.pendingDeletions(vaultID: setting.personal).count == 1,
+            "a deletion went out while the vault was owed")
+
+        // The next take-out finishes: nothing is owed, and the deletion goes out.
+        var last = AccountSyncReport()
+        for _ in 0..<2 { last = try await relaunched.session.syncAll() }
+        #expect(last.takeOutUnfinished.isEmpty, "a take-out that finished is still reported unfinished")
+        #expect(try await setting.sync.state.pendingDeletions(vaultID: setting.personal).isEmpty)
+        #expect(try await relaunched.session.item(id: setting.bank).field(.password)?.value == "bank-password")
+    }
 }
 
 // The review of PR #22's eighth merge (finding 1): a rotation carried on in the sync whose take-out did not finish.

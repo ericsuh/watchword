@@ -16,6 +16,13 @@ extension VaultSession {
         registrationInFlight = inFlight
     }
 
+    /// For tests: the vault's take-out owed from now on (`takeOutsOwed`), as for a vault whose first pass was not owed
+    /// and whose take-out is owed by its replay: a carried vault's, whose first pass is the carry's and publishes
+    /// nothing.
+    func markTakeOutOwedForTest(_ vaultID: UUID) {
+        takeOutsOwed.insert(vaultID)
+    }
+
     /// For tests: what a take-out left where it took `key`'s row out (into the quarantine, out of the store) and then
     /// threw, with the vault still owed, and the basis since come back to the one judged. Since Z274 a take-out saves
     /// the judged head unsettled before its first row goes, so this is the state of one before then; the judged-basis

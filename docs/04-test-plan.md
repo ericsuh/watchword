@@ -880,6 +880,10 @@ Review of this branch's eighth merge (V71): a rotation carried on after a take-o
 reseal for the next sync, the record and the revocation going out, and completes there with every record under the new
 key, nothing missing meanwhile (`rotationAfterAnUnfinishedTakeOutResealsAtTheNextSync`, "shared vaults through the
 session", routine and removal; fails before the fix, the item missing).
+Pinned since that review (V72): a vault owed only from its replay on is named, holds the deletion and is said to have
+sent changes (`vaultOwedOnlyFromItsReplayIsNamed`), an owed replay holding a new item is not said in the generic notice
+(`owedReplayHoldsANewItemInItsOwnWords`), and the upload after a reset is refused while a registration is under way
+(`reuploadRefusedWhileRegistering`, "sync with real keys").
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
@@ -1654,7 +1658,8 @@ other does, and reported as not required on Linux, where they cannot compile.
   upload stopped part-way before the backup still asks after the move, `interruptedUploadAsksAfterMove`; and the upload
   is refused while the move is incomplete, V51, `reuploadRefusedDuringMove`, and while this device's own key cannot be
   read or is absent, V70, `reuploadRefusedWhileTheKeyIsUnreadable` (which also reports the key beside the question,
-  `ownDeviceKeyWait`) and `reuploadRefusedWithoutAKey`; once the moved installation has handed
+  `ownDeviceKeyWait`) and `reuploadRefusedWithoutAKey`, or while a registration is under way, V72,
+  `reuploadRefusedWhileRegistering`; once the moved installation has handed
   on and that snapshot was collected, a later reset another device answers ends here without asking, V52,
   `movedThenHandedOnAsksOnlyOnce`) and "account enrolment and device registry"
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a

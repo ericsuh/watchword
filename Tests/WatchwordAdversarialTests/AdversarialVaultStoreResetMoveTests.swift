@@ -263,6 +263,34 @@ extension AdversarialVaultSyncTests {
         #expect(await store.startsAgain == 1)
     }
 
+    /// Threat: none needed; the same as above while a registration of this installation is under way, its key held
+    /// (a same-ID registration begun by an unlock, Z253): the upload's sync would only download, said as
+    /// `ownDeviceKeyWait == .registering` (Z272), so the call refuses as for a device not registered and starts nothing
+    /// (V70; pinned since the review of PR #22's eighth merge, finding 3, where only reading had covered it).
+    @Test("the upload after a reset is refused while this device's registration is under way")
+    func reuploadRefusedWhileRegistering() async throws {
+        let store = ResettableSyncTransport()
+        let a = TestVault(sync: SyncSettings(state: InMemorySyncStateStore(), transport: store), seed: 5_250)
+        try await a.createAccount()
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Kept", in: vaultID))
+        try await a.session.sync()
+        await store.reset()
+        #expect(try await a.session.syncAll().storeNeedsReupload, "the reset was not noticed: nothing is tested")
+
+        await a.session.setRegistrationInFlightForTest(true)
+        let plan = try await a.session.reuploadPlan()
+        await #expect(throws: VaultError.deviceNotRegistered) {
+            try await a.session.reuploadAfterStoreReset(confirming: plan)
+        }
+        #expect(await store.startsAgain == 0, "the store was started again for an upload that could write nothing")
+
+        await a.session.setRegistrationInFlightForTest(false)
+        let answered = try await a.session.reuploadAfterStoreReset(confirming: try await a.session.reuploadPlan())
+        #expect(!answered.storeNeedsReupload)
+        #expect(await store.startsAgain == 1)
+    }
+
     /// Threat: none needed; the same as above for a store whose Keychain holds no key for the device ID the account
     /// names (restored onto other hardware, before its registration as a new device): the upload's sync would only
     /// download (Z253), so the call refuses as for a device not registered, and starts nothing (V70).
