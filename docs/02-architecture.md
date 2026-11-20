@@ -849,20 +849,20 @@ such and never "when you unlock" (Z264). A move pending leaves it unset and is s
 the headline (`movePendingWhileUnlocked`: applied once the device has finished moving its sync records, Z271). A store
 that was reset (§7.10) is said first in the headline, over either, since such a sync downloaded nothing, with the key's
 or the move's notice beside it (merged so at round 25); a reset only suspected is asked about by the next sync that may
-write. A download
-remembers what it learnt of conflict copies in the vault's state (§7.5), but every vault state, stash, released deletion
-and chain row the sync signs goes through what the sync began with (`SyncStateWrites`: the device ID, the lock epoch,
-and that it began as a writer), checked synchronously before its signature (this branch's V66; PR #23's Z253, Z256 and
-Z257 are the same mechanism, ported under the same names and extended to the release, the carry and the chain row). So a
-sync that outlives a lock, an unlock or a new ID saves none of what it loaded for the old, and the download-only pass of
-a sync that did not begin as a writer saves no state (`savingState: stateWrites.permitted`). The epoch clause carries
-the other two across the awaits between a check and the store's write (Z255). Its cost: a lock and an unlock between a
-push's create and its save leave the segment published and the state unsaved, so the next sync reports its place taken
-(`ownStreamConflict`) and holds deletions for that sync, and the one after recovers, nothing lost (V66, Z257). An unlock
-that registers a restored device and makes, or waits for, its move during a sync begun locked finds every vault's state
-as it left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands the unlock after the decision,
-`lockedSyncDecidesOnTheAccountAfterItsAwaits` before it, and `lockedSyncWithAnUnreadCopyAcrossTheUnlocksRegistration`
-leaves a copy unread, which is what makes the download save here).
+write. A download remembers what it learnt of conflict copies in the vault's state (§7.5), but every vault state, stash,
+released deletion and chain row the sync signs goes through what the sync began with (`SyncStateWrites`: the device ID,
+the lock epoch, and that it began as a writer), checked synchronously before its signature (this branch's V66; PR #23's
+Z253, Z256 and Z257 are the same mechanism, ported under the same names and extended to the release, the carry and the
+chain row). So a sync that outlives a lock, an unlock or a new ID saves none of what it loaded for the old, and the
+download-only pass of a sync that did not begin as a writer saves no state (`savingState: stateWrites.permitted`). The
+epoch clause carries the other two across the awaits between a check and the store's write (Z255). Its cost: a lock and
+an unlock between a push's create and its save leave the segment published and the state unsaved, so the next sync
+reports its place taken (`ownStreamConflict`) and holds deletions for that sync, and the one after recovers, nothing
+lost (V66, Z257). An unlock that registers a restored device and makes, or waits for, its move during a sync begun
+locked finds every vault's state as it left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands the unlock
+after the decision, `lockedSyncDecidesOnTheAccountAfterItsAwaits` before it, and
+`lockedSyncWithAnUnreadCopyAcrossTheUnlocksRegistration` leaves a copy unread, which is what makes the download save
+here).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the

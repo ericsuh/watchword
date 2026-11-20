@@ -248,7 +248,10 @@ struct WordingTests {
     /// at a reset store downloaded nothing, so its headline is the reset's, over an unlocked sync held back by a move
     /// pending, whose own notice stands beside the question; a move pending is said over the key's wait, which it
     /// leaves `nil` in a real report; and a take-out that did not finish is named beside the reset, with no notice
-    /// saying changes were downloaded or that something moved reached nobody.
+    /// saying changes were downloaded or that something moved reached nobody. Synthetic, as the key's wait beside a
+    /// move is (review of this branch's eighth merge, V74): a real report cannot hold `takeOutUnfinished` beside a
+    /// move pending, which makes `mayWrite` false, while `owedUnpublished` and `takeOutFailed` are filled only where it
+    /// is true. Kept so that the summary of such a report, should one ever be made, does not contradict itself.
     @Test("a reset store's headline comes before a move pending, and a move pending before the key's wait")
     func storeResetOverAMovePendingAndAnUnfinishedTakeOut() {
         var vault = SyncReport()
