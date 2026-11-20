@@ -1178,12 +1178,18 @@ beside S65's `takenOutAgainst`, which a take-out that throws leaves as it was), 
 for the next sync (Z262). Settled after one, every later take-out returned at its first guard, and a demoted member's
 late write merged before the demotion was known stayed current here for good. While a vault's take-out is owed it
 publishes nothing, in its first pass (the one that hands on after a reset too) or in a replay whose take-out returned
-with nothing decided, since what this device holds there may be built on the write to be taken out (Z270; merged so at
-round 25); a vault still owed after the replay loop, or whose replay's take-out threw, holds every deletion back for
-that sync and is named (`AccountSyncReport.takeOutUnfinished`, its own notice, never `deletionsHeldBack`'s wording,
-Z268). Only a take-out that finishes ends it, and every sync that may write runs one. A take-out owed and found at the
-judged basis (one that took rows out before it threw, the basis since come back) asks for the replay that rebuilds
-them (Z269), and records that basis's head as S65's `takenOutAgainst`. Nor is such a vault sealed again in that
+with nothing decided, since what this device holds there may be built on the write to be taken out (Z270, Z276; merged
+so at round 25); a vault still owed after the replay loop, or whose replay's take-out threw, holds every deletion back
+for that sync and is named (`AccountSyncReport.takeOutUnfinished`, its own notice, never `deletionsHeldBack`'s wording,
+Z268), which says its changes there wait only where no pass of the sync published there
+(`takeOutUnfinishedSentNothing`), and otherwise that they may (Z273). Only a take-out that finishes ends it, and every
+sync that may write and reaches the take-out runs one (a disputed vault, and a sync a transport failure stops, do not,
+and neither publishes, Z277). Before its first row goes, a take-out saves the judged head unsettled, so that rows it
+took out before it threw are rebuilt by a replay after any relaunch, whatever the basis does, not only while
+`takeOutsOwed` remembers it (Z274, beside S65's `takenOutAgainst`, which a take-out that throws still leaves as it was).
+A take-out owed and found at the judged basis (one that took rows out before it threw, the basis since come back) asks
+for the replay that rebuilds them (Z269), and records that basis's head as S65's `takenOutAgainst`; and the rebuilding
+guard's clearing of an owed entry is what lets a rebuild end (Z275). Nor is such a vault sealed again in that
 sync: the reseal's own take-out (S59) would act with no replay after it. But a row is read only where it can
 decide something (Z239): by a move only where no state verifies, and to add to it what the vault's entries name, and by
 the hold, the report, the re-record and Stop Waiting only for a vault that may be shared whose state does not verify, or
@@ -2371,9 +2377,11 @@ Not solved here, and to be decided with integration:
   entry naming this device that the sync state does not know holds the deletions back, as before Z54, until the
   quarantine holds none; a quarantine that cannot be read holds them back and forgets nothing. A shared
   vault's second replay in a sync defers deletions like every other pass, and deletions go out after the replays
-  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so;
-  where the cause is a copy nobody received (an edit of a non-committing device ID of the account's registry, Z170),
-  `copiesNobodyReceived` names the items, and the summary names each by title and vault with what releases it (Z171).
+  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so, as
+  something this device moved, added or changed that has not reached the others (an edit made over a write that stops
+  counting is held aside as this device's own as well, Z278); where the cause is a copy nobody received (an edit of a
+  non-committing device ID of the account's registry, Z170), `copiesNobodyReceived` names the items, and the summary
+  names each by title and vault with what releases it (Z171).
 - **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
   departed account's segments must not be collected while a device may still need them to judge a cut, or the cut
   must carry what is needed to judge without them.

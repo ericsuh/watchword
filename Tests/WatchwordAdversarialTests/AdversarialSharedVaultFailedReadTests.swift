@@ -105,16 +105,19 @@ actor ListingFailingStore: RecordStore {
     let base: any RecordStore
     private var failing: EnvelopeKind?
     private var skipping = 0
+    private var remaining: Int?
     private(set) var refused = 0
 
     init(base: any RecordStore) {
         self.base = base
     }
 
-    /// Listings of `kind` throw from now on, after the next `skipping` of them; `nil` reads every listing again.
-    func failListings(of kind: EnvelopeKind?, skipping: Int = 0) {
+    /// Listings of `kind` throw from now on, after the next `skipping` of them, and `times` of them if given (then
+    /// every listing reads again); `nil` reads every listing again.
+    func failListings(of kind: EnvelopeKind?, skipping: Int = 0, times: Int? = nil) {
         failing = kind
         self.skipping = skipping
+        remaining = times
     }
 
     func loadAccount() async throws -> AccountRecord? { try await base.loadAccount() }
@@ -125,6 +128,10 @@ actor ListingFailingStore: RecordStore {
                 skipping -= 1
             } else {
                 refused += 1
+                if let remaining {
+                    self.remaining = remaining - 1
+                    if remaining <= 1 { self.failing = nil }
+                }
                 throw ListingFailed()
             }
         }

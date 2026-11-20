@@ -55,9 +55,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case sharedVaultsNotUploaded(Int)
     /// Vaults the person asked to upload again that do not fit in one upload (`ReuploadRefusal.tooLarge`).
     case vaultsTooLargeToUpload(Int)
-    /// This device's deletions are not going out, because an item it moved or made has reached nobody else: it is in
-    /// a shared vault this account may not write to now, or one not set up here, or was held aside
-    /// (`AccountSyncReport.deletionsHeldBack`).
+    /// This device's deletions are not going out, because an item it moved, made or changed has reached nobody else:
+    /// it is in a shared vault this account may not write to now, or one not set up here, or was held aside
+    /// (`AccountSyncReport.deletionsHeldBack`). "Changed" since the review of round 25 (Z278): an edit made over a
+    /// write that stops counting is held aside as this device's own, and holds the deletions back like a move's copy.
     case deletionsHeldBack
     /// This device's deletions, in every vault, are not going out because these items of a shared vault hold an edit
     /// that has reached nobody else, made under an earlier identity of this device or by a device that is not counted
@@ -79,11 +80,14 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
     /// This device could not finish checking a shared vault's changes against who may write there now (its take-out
-    /// of what no longer counts failed on local storage, `AccountSyncReport.takeOutUnfinished`, review of round 24,
-    /// Z268): deletions made on this device wait until it has, and so does what it made in that vault (Z270). Not
+    /// of what no longer counts failed on local storage, or a lock came during it; `AccountSyncReport`'s
+    /// `takeOutUnfinished`, review of round 24, Z268): deletions made on this device wait until it has. `changesWait`
+    /// where every such vault published nothing of this device's in the sync (`takeOutUnfinishedSentNothing`, Z270):
+    /// its changes there wait too. Otherwise a first pass that was not owed sent some before the replay's take-out
+    /// failed, and the notice says only that changes it makes there may wait (review of round 25, Z273). Not
     /// `deletionsHeldBack`, which says something moved has not reached the other devices, untrue here. Tried again at
     /// each sync.
-    case takeOutUnfinished
+    case takeOutUnfinished(changesWait: Bool)
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.
     public var actions: [SyncNoticeAction] {
@@ -144,7 +148,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .deviceKeyUnreadable:
             // "Until it can", not "changes were downloaded": a sync that stopped at a reset store (§7.10), said in
             // the headline beside this, downloaded nothing (merged with this branch's reset wording; PR #23 words it
-            // alike, review of round 25, Z271).
+            // alike, found merging round 24 into PR #22, Z271).
             return "This device could not read its own key from the Keychain, which can happen while the device is "
                 + "locked. Until it can, changes are downloaded, and none are applied or sent. It tries again at each "
                 + "sync. Nothing has been lost."
@@ -171,9 +175,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
             return "\(count) vault(s) are too large to upload again in one piece. They stay on this device, "
                 + "unchanged."
         case .deletionsHeldBack:
-            return "Deletions made on this device are waiting. Something it moved or added has not reached your "
-                + "other devices: it is in a shared vault this device cannot write to now, or was held aside. They "
-                + "go out once it has, or once you discard it under Held-Aside Changes."
+            return "Deletions made on this device are waiting. Something it moved, added or changed has not reached "
+                + "your other devices: it is in a shared vault this device cannot write to now, or was held aside. "
+                + "They go out once it has, or once you discard it under Held-Aside Changes."
         case .copiesReachedNobody(let copies):
             let shown = copies.prefix(3).map(\.phrase)
             let more = copies.count > shown.count ? " and \(copies.count - shown.count) more" : ""
@@ -213,10 +217,12 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "before they go out, this device has to finish carrying over the changes it made "
                 + (one ? "there" : "in each") + " before it was restored. It tries again at each sync. Nothing has "
                 + "been lost."
-        case .takeOutUnfinished:
+        case .takeOutUnfinished(let changesWait):
+            // "May wait" where this sync sent some of them: the next sync's take-out may finish first (Z273).
             return "This device could not finish checking a shared vault's changes. Until it has, deletions made on "
-                + "this device wait, and so do its changes in that vault. It tries again at each sync. Nothing has "
-                + "been lost."
+                + "this device wait, and "
+                + (changesWait ? "so do its changes in that vault" : "changes it makes in that vault may wait too")
+                + ". It tries again at each sync. Nothing has been lost."
         }
     }
 }
@@ -444,7 +450,12 @@ public struct SyncSummary: Hashable, Sendable {
             let named = held.compactMap { $0 }
             notices.append(.publishingHeldForCarry(named.sorted(), unnamed: held.count - named.count))
         }
-        if !report.takeOutUnfinished.isEmpty { notices.append(.takeOutUnfinished) }
+        if !report.takeOutUnfinished.isEmpty {
+            // Its changes wait only where every such vault sent nothing of this device's in the sync (Z273).
+            notices.append(
+                .takeOutUnfinished(
+                    changesWait: report.takeOutUnfinished.isSubset(of: report.takeOutUnfinishedSentNothing)))
+        }
         let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
             .union(report.restoredChainUnreadable)
         if !report.deletionsHeldBack.subtracting(explained).isEmpty {

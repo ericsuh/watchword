@@ -16,13 +16,36 @@ extension VaultSession {
         registrationInFlight = inFlight
     }
 
-    /// For tests: what a take-out leaves where it took `key`'s row out (into the quarantine, out of the store) and then
-    /// threw, with the vault still owed, and the basis since come back to the one judged.
+    /// For tests: what a take-out left where it took `key`'s row out (into the quarantine, out of the store) and then
+    /// threw, with the vault still owed, and the basis since come back to the one judged. Since Z274 a take-out saves
+    /// the judged head unsettled before its first row goes, so this is the state of one before then; the judged-basis
+    /// guard's request for a replay (Z269) stays, and this pins it.
     func leavePartialTakeOut(of key: RecordKey, in vaultID: UUID) async throws {
         guard let row = try await store.record(key), let syncSettings else { return }
         try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
         try await store.commit(StoreChange(conditionalDeletions: [row.key: row.version]))
         takeOutsOwed.insert(vaultID)
+    }
+
+    /// For tests: a vault whose index is being rebuilt (`indexRebuilding`, a replay asked for, nothing judged, as
+    /// `shareVault` and joining leave it) while an entry of `takeOutsOwed` stands for it from before, as for a take-out
+    /// owed against the index the rebuild replaces.
+    func rebuildIndexWhileOwedForTest(_ vaultID: UUID) {
+        guard sharing.vaults[vaultID] != nil else { return }
+        sharing.vaults[vaultID]?.indexRebuilding = true
+        sharing.vaults[vaultID]?.needsReconcile = true
+        sharing.vaults[vaultID]?.index.judgedHead = nil
+        takeOutsOwed.insert(vaultID)
+    }
+
+    /// For tests: the vault's judged basis comes back to the head last judged and saved (a revocation the basis was
+    /// bound by stops counting), stood for by moving that judged head to the basis as it is now, saved. An unsettled
+    /// head (`nil`) is one no basis equals, and is left as it is.
+    func basisComesBackToTheJudgedHead(_ vaultID: UUID) async throws {
+        guard sharing.vaults[vaultID]?.index.judgedHead != nil, let basis = await judgedBasis(vaultID) else { return }
+        sharing.vaults[vaultID]?.index.judgedHead = basis
+        sharing.vaults[vaultID]?.indexChanged = true
+        try await saveSharedVault(vaultID)
     }
 }
 
@@ -146,7 +169,9 @@ extension AdversarialSharedVaultTests {
         #expect(first.vaults[vaultID]?.pushedEntries == 0, "a replay ran after a take-out that did not finish")
         // Said, in words of its own (Z268): not as something moved that reached nobody.
         #expect(first.takeOutUnfinished == [vaultID], "the hold was silent")
-        #expect(SyncSummary(first).notices.contains(.takeOutUnfinished))
+        // Nothing of this device's went out there, so the notice says its changes wait (Z273).
+        #expect(first.takeOutUnfinishedSentNothing == [vaultID])
+        #expect(SyncSummary(first).notices.contains(.takeOutUnfinished(changesWait: true)))
         #expect(!SyncSummary(first).notices.contains(.deletionsHeldBack))
         let pending = try await setting.sync.state.pendingDeletions(vaultID: setting.personal)
         #expect(pending.count == 1, "the deletion went out after a take-out that did not finish")
@@ -199,6 +224,51 @@ extension AdversarialSharedVaultTests {
         #expect(await member.session.judgementIsSettled(vaultID))
     }
 
+    /// Threat: a demoted member (A4) whose late write this device merged before it learnt of the demotion, and a record
+    /// store whose listing fails once in the middle of the sharing pass's take-out (a busy or damaged database), after
+    /// it has taken the late write's row out; the review of round 25 (Z274, finding 2, Z269 across a relaunch). The
+    /// take-out throws with the row out of the vault and the vault owed (`takeOutsOwed`), which is in memory. If the
+    /// basis then comes back to the head last judged and the app is relaunched, the next take-out found
+    /// `judgedHead == basis` with nothing owed, asked for no replay, and the item stayed missing from the vault (held
+    /// aside in the quarantine) until some later replay. The take-out now saves the judged head unsettled before the
+    /// first row goes, so a relaunch takes out and replays, and the item is rebuilt from what counts.
+    @Test("a take-out that took a row out and threw leaves the basis unsettled, so a relaunch rebuilds the item")
+    func partialTakeOutReplaysAfterARelaunch() async throws {
+        let setting = try await Self.owedTakeOut(replayOwed: false)
+        let (member, vaultID) = (setting.member, setting.vaultID)
+        let key = RecordKey(recordID: setting.bank, kind: .item)
+        await setting.relaunched.session.lock()
+        let listing = ListingFailingStore(base: member.vault.store)
+        let failing = TestVault(
+            store: listing, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: setting.sync, seed: 937, deviceKeys: member.vault.deviceKeys)
+        await failing.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: setting.household.directory))
+        try await failing.session.unlock(password: TestVault.password)
+        #expect(try await member.vault.store.record(key) != nil)
+        // The take-out lists the vault's items, takes the late write out, and fails listing its description.
+        await listing.failListings(of: .vaultMetadata, times: 1)
+        let first = try await failing.session.syncAll()
+        #expect(await listing.refused == 1, "no listing failed: nothing is tested")
+        #expect(first.sharing[vaultID]?.failure != nil, "the take-out's failure was not reported")
+        #expect(first.takeOutUnfinished == [vaultID], "the take-out finished: nothing is tested")
+        #expect(try await member.vault.store.record(key) == nil, "the row was not taken out: nothing is tested")
+
+        // The basis comes back to the head last judged (stood for), and the app is relaunched.
+        try await failing.session.basisComesBackToTheJudgedHead(vaultID)
+        await failing.session.lock()
+        let again = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: setting.sync, seed: 938, deviceKeys: member.vault.deviceKeys)
+        await again.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: setting.household.directory))
+        try await again.session.unlock(password: TestVault.password)
+        for _ in 0..<2 { _ = try await again.session.syncAll() }
+        #expect(try await member.vault.store.record(key) != nil, "what the take-out took out stayed out, relaunched")
+        #expect(try await again.session.item(id: setting.bank).field(.password)?.value == "bank-password")
+        #expect(await again.session.judgementIsSettled(vaultID))
+    }
+
     /// Threat: a demoted member (A4) whose late write this device merged before it learnt of the demotion, the person's
     /// edit of that item made before the sync, and a sync state store that fails the sharing pass's take-out (a busy
     /// or damaged database); the review of round 24 (Z270, finding 7, a window of the design's that Z262 made sure
@@ -225,6 +295,7 @@ extension AdversarialSharedVaultTests {
             #expect(first.takeOutUnfinished.isEmpty)
         } else {
             #expect(first.takeOutUnfinished == [vaultID], "the vault that published nothing was not named")
+            #expect(first.takeOutUnfinishedSentNothing == [vaultID])
             #expect(
                 try await setting.sync.state.pendingDeletions(vaultID: setting.personal).count == 1,
                 "a deletion went out while the vault was owed")
@@ -283,6 +354,12 @@ extension AdversarialSharedVaultTests {
         #expect(await failing.failed == 1, "the replay's take-out did not fail: nothing is tested")
         #expect((first.vaults[vaultID]?.pushedEntries ?? 0) > 0, "the first pass did not publish: nothing is tested")
         #expect(first.takeOutUnfinished == [vaultID], "the hold was silent")
+        // The first pass sent this device's changes: the notice says only that changes made there may wait (Z273).
+        #expect(first.takeOutUnfinishedSentNothing.isEmpty, "a vault that published is said to have sent nothing")
+        let notices = SyncSummary(first).notices
+        #expect(notices.contains(.takeOutUnfinished(changesWait: false)))
+        #expect(!notices.contains(.takeOutUnfinished(changesWait: true)), "changes this sync sent are said to wait")
+        #expect(SyncNotice.takeOutUnfinished(changesWait: false).text.contains("may wait too"))
         #expect(
             try await sync.state.pendingDeletions(vaultID: personal).count == 1,
             "the deletion went out after a take-out that did not finish")
@@ -293,6 +370,31 @@ extension AdversarialSharedVaultTests {
         #expect(try await sync.state.pendingDeletions(vaultID: personal).isEmpty, "the deletion never went out")
         try await owner.session.sync()
         #expect((try? await owner.session.item(id: added.id)) != nil)
+    }
+
+    /// Threat: none but a stale entry of `takeOutsOwed` beside an index being rebuilt; the review of round 25 (Z275,
+    /// finding 3, by mutation). The rebuilding guard of the take-out clears the owed entry, and that is load-bearing:
+    /// `sharedEngineDidRun` asks whether the vault is owed before whether its index is being rebuilt, so without the
+    /// clear no pass ever ended the rebuild, every take-out returned at the guard, and the vault stayed owed for the
+    /// session: its first pass published nothing (Z270) and every sync held every deletion (`takeOutUnfinished`). With
+    /// it, the rebuild ends in the first sync, and the vault publishes and settles.
+    @Test("a vault owed while its index is rebuilt is not owed for good: it publishes and settles")
+    func owedWhileRebuildingIsNotWedged() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 31_300)
+        let member = members[0]
+        _ = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, member])
+        await member.session.rebuildIndexWhileOwedForTest(vaultID)
+        let added = try await member.session.save(Self.bank(in: vaultID))
+
+        let first = try await member.session.syncAll()
+        #expect(first.takeOutUnfinished.isEmpty, "the stale owed entry held every deletion")
+        let second = try await member.session.syncAll()
+        #expect(second.takeOutUnfinished.isEmpty, "the vault stayed owed")
+        #expect(await member.session.judgementIsSettled(vaultID), "the rebuild never ended")
+        try await owner.session.sync()
+        #expect((try? await owner.session.item(id: added.id)) != nil, "the vault never published")
     }
 
     /// Threat: none needed; the review of round 24 (Z272, finding 4). An unlocked sync whose device key is held but

@@ -82,7 +82,7 @@ extension AdversarialAccountTests {
         await state.failNextPendingDeletionWrite()
         let blocked = try await restored.session.syncAll()
         #expect(blocked.deviceMigrationIncomplete)
-        // Unlocked: said as waiting for the move, not for an unlock (review of round 25, Z271).
+        // Unlocked: said as waiting for the move, not for an unlock (found merging round 24 into PR #22, Z271).
         #expect(blocked.movePendingWhileUnlocked)
         #expect(blocked.combined.segmentsWritten == 0)
         try await other.session.sync()

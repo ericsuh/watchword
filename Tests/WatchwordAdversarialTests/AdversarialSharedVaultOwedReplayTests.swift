@@ -80,7 +80,9 @@ extension AdversarialSharedVaultTests {
             await window.readsWhileOut > 0, "no take-out asked for the registry while it was out: nothing is tested")
         #expect(first.vaults[vaultID]?.pushedEntries == 0, "an owed vault published in its replay")
         #expect(first.takeOutUnfinished == [vaultID], "the vault that published nothing was not named")
-        #expect(SyncSummary(first).notices.contains(.takeOutUnfinished))
+        // Neither pass published there, so the notice says its changes wait (Z273, merged so at round 26).
+        #expect(first.takeOutUnfinishedSentNothing == [vaultID])
+        #expect(SyncSummary(first).notices.contains(.takeOutUnfinished(changesWait: true)))
         #expect(
             try await setting.sync.state.pendingDeletions(vaultID: setting.personal).count == 1,
             "a deletion went out while the vault was owed")

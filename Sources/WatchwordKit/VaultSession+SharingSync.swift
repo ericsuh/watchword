@@ -1651,6 +1651,13 @@ extension VaultSession {
         // published it yet, and which the carry writes as this device's (review of round 13, M2). Taken out, it would
         // sit in the quarantine where nothing carries it.
         let restored = state?.restoredUnpublished ?? [:]
+        // Unsettled, and saved so, before the first row is taken out (review of round 25, Z274): a take-out that throws
+        // after that leaves rows out of the vault that only a replay rebuilds, and `takeOutsOwed`, which asks for one,
+        // is in memory. With the judged head kept, a relaunch after the basis came back to it found nothing to take
+        // out and asked for no replay (Z269's case, across a relaunch); an unsettled head is taken out and replayed
+        // after any relaunch, as `requestReplay` writes its request down (S41). The replay after a take-out that
+        // finishes settles it again (`sharedEngineDidRun`).
+        var unsettled = false
         for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
             for row in try await store.records(in: vaultID, kind: kind) where restored[row.key]?.device != row.deviceID
             {
@@ -1663,6 +1670,12 @@ extension VaultSession {
                     sharing.vaults[vaultID]?.ownTakenOut.insert(
                         VersionKey(recordID: row.recordID, kind: kind.rawValue, version: row.version))
                     sharing.vaults[vaultID]?.indexChanged = true
+                }
+                if !unsettled {
+                    sharing.vaults[vaultID]?.index.judgedHead = nil
+                    sharing.vaults[vaultID]?.indexChanged = true
+                    try await saveSharedVault(vaultID)
+                    unsettled = true
                 }
                 try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
                 // The engine's store, not the session's writer: this is not a deletion to publish.
