@@ -305,9 +305,12 @@ extension VaultSession {
                     vaultID, base: syncSettings.configuration, account: record, ownDevices: ownDevices,
                     ownIDCommits: ownIDCommits)
                 let requests = sharedReplayRequests(vaultID)
+                // Nothing published while the take-out is still owed, as in the first pass (Z270): one that returned at
+                // its first guard (no basis to judge against) leaves the vault owed and its replay runs (review of
+                // round 25, Z276).
                 let second = try await engine(vaultID).sync(
                     reconcile: true, deferringDeletions: true,
-                    publishing: shared.publishing && !carrying.contains(vaultID))
+                    publishing: shared.publishing && !carrying.contains(vaultID) && !takeOutsOwed.contains(vaultID))
                 await sharedEngineDidRun(vaultID, reconciled: true, report: second, requestsBefore: requests)
                 if second.deletionsDeferred > 0, !deferred.contains(vaultID) { deferred.append(vaultID) }
                 if second.transportUnavailable || second.ownStreamConflict != nil || second.ownStreamExhausted
