@@ -200,6 +200,8 @@ struct WordingTests {
         let text = SyncNotice.takeOutUnfinished.text
         #expect(text.contains("could not finish checking a shared vault's changes"))
         #expect(text.contains("deletions made on this device wait"))
+        // Its own changes there wait too (Z270).
+        #expect(text.contains("and so do its changes in that vault"))
         #expect(text.contains("tries again at each sync"))
         #expect(text.contains("Nothing has been lost"))
         #expect(!text.contains("reached"), "says something has not reached the other devices")

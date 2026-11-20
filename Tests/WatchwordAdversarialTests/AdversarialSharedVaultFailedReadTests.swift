@@ -144,6 +144,8 @@ actor LoadFailingSyncState: SyncStateStore {
     enum ScriptedRead: Sendable {
         /// Reads the state.
         case read
+        /// Runs the step, then reads the state.
+        case readAfter(@Sendable () async -> Void)
         /// Answers that there is none, as a store that lost the row would.
         case none
         /// Runs the step, if any, and throws.
@@ -182,6 +184,9 @@ actor LoadFailingSyncState: SyncStateStore {
             if !script.isEmpty {
                 switch script.removeFirst() {
                 case .read:
+                    return try await base.loadState(vaultID: vaultID)
+                case .readAfter(let step):
+                    await step()
                     return try await base.loadState(vaultID: vaultID)
                 case .none:
                     return nil

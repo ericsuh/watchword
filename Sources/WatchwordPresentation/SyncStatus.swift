@@ -72,8 +72,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case publishingHeldForCarry([String], unnamed: Int)
     /// This device could not finish checking a shared vault's changes against who may write there now (its take-out
     /// of what no longer counts failed on local storage, `AccountSyncReport.takeOutUnfinished`, review of round 24,
-    /// Z268): deletions made on this device wait until it has. Not `deletionsHeldBack`, which says something moved has
-    /// not reached the other devices, untrue here. Tried again at each sync.
+    /// Z268): deletions made on this device wait until it has, and so does what it made in that vault (Z270). Not
+    /// `deletionsHeldBack`, which says something moved has not reached the other devices, untrue here. Tried again at
+    /// each sync.
     case takeOutUnfinished
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.
@@ -190,7 +191,8 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "been lost."
         case .takeOutUnfinished:
             return "This device could not finish checking a shared vault's changes. Until it has, deletions made on "
-                + "this device wait. It tries again at each sync. Nothing has been lost."
+                + "this device wait, and so do its changes in that vault. It tries again at each sync. Nothing has "
+                + "been lost."
         }
     }
 }
