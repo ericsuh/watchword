@@ -10,6 +10,12 @@ import WatchwordTestSupport
 @testable import WatchwordKit
 
 extension VaultSession {
+    /// For tests: a registration of this installation under way (`registrationInFlight`), as an unlock's is while a
+    /// sync reads the device's standing.
+    func setRegistrationInFlightForTest(_ inFlight: Bool) {
+        registrationInFlight = inFlight
+    }
+
     /// For tests: what a take-out leaves where it took `key`'s row out (into the quarantine, out of the store) and then
     /// threw, with the vault still owed, and the basis since come back to the one judged.
     func leavePartialTakeOut(of key: RecordKey, in vaultID: UUID) async throws {
@@ -287,5 +293,23 @@ extension AdversarialSharedVaultTests {
         #expect(try await sync.state.pendingDeletions(vaultID: personal).isEmpty, "the deletion never went out")
         try await owner.session.sync()
         #expect((try? await owner.session.item(id: added.id)) != nil)
+    }
+
+    /// Threat: none needed; the review of round 24 (Z272, finding 4). An unlocked sync whose device key is held but
+    /// that a registration under way keeps download-only (a same-ID registration begun while the sync read the
+    /// standing as active, Z253) is said to wait for the registration (`ownDeviceKeyWait == .registering`, Z264), not
+    /// for an unlock. No other test reached the branch: a restored store registers through `.absent`.
+    @Test("a held key with a registration under way says the sync waits for the registration")
+    func heldKeyWhileRegistering() async throws {
+        let vault = TestVault(
+            sync: SyncSettings(state: InMemorySyncStateStore(), transport: InMemorySyncTransport()), seed: 31_200)
+        try await vault.createAccount()
+        #expect(try await vault.session.syncAll().ownDeviceKeyWait == nil)
+        await vault.session.setRegistrationInFlightForTest(true)
+        let report = try await vault.session.syncAll()
+        #expect(report.ownDeviceKeyWait == .registering, "the registration under way was not said")
+        #expect(report.combined.deferredUntilUnlock, "a sync with a registration under way wrote")
+        await vault.session.setRegistrationInFlightForTest(false)
+        #expect(try await vault.session.syncAll().ownDeviceKeyWait == nil)
     }
 }
